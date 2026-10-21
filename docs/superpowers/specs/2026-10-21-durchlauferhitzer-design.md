@@ -37,7 +37,7 @@ matters.
 - HTTP/2, HTTP/3, WebSockets / `Upgrade`.
 - Regex or rewrite rules, wildcard hosts, load balancing across backends.
 - Config hot-reload (restart instead; zero-downtime restart is a later stage).
-- Directory listings, range requests, compression.
+- Directory listings, range requests, compression, response caching.
 - io_uring (rejected: bypasses seccomp; poor kernel security track record).
   The driver interface is completion-shaped so it could be added later.
 
@@ -313,9 +313,22 @@ project working and tested.
    hosts, routes, backends and limits only; a new `listen`, `user`, or
    static root needs a full restart (documented, and rejected with a clear
    error rather than half-applied).
-7. **Scaling** — N driver threads with `SO_REUSEPORT`, backend connection
-   pooling, conditional requests (ETag / Last-Modified), profiling.
-8. **Later, maybe** — HTTPS with a pure-Rust crypto provider, io_uring driver.
+7. **Scaling and efficiency** — N driver threads with `SO_REUSEPORT`,
+   backend connection pooling, conditional requests (ETag / Last-Modified),
+   `MSG_MORE` to coalesce response headers with file data, `splice` for
+   proxied bodies with a known `Content-Length`, the `tc netem` throughput
+   benchmarks, profiling.
+8. **Backend-directed file serving** — a backend response header (like
+   nginx's `X-Accel-Redirect`) asks the proxy to serve a file via
+   `sendfile`. Only honored on proxy routes that name an explicit root
+   (`internal_files: <dir>;`); the path goes through the same validation and
+   `openat2` jail as static routes; the header is never accepted from
+   clients and always stripped; backend status and headers such as
+   `Content-Type` / `Content-Disposition` are kept, its body discarded.
+   Useful when the files are on the proxy's machine (same host or shared
+   storage).
+9. **Later, maybe** — HTTPS with a pure-Rust crypto provider, io_uring driver,
+   file-descriptor passing from same-host backends (`SCM_RIGHTS`).
 
 ## Left to the builder
 
