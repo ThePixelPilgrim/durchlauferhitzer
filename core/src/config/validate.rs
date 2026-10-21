@@ -830,7 +830,9 @@ host a { path / { static /s; } }
 
     #[test]
     fn path_rejects_hostile_targets() {
-        for bad in ["/a/../", "/a//b", "/%2e", "/a b", "/\u{e4}"] {
+        for bad in [
+            "/a/../", "/a//b", "/%2e", "/a b", "/\u{e4}", "/a?b", "/p/..;/x", "/a%0a",
+        ] {
             assert_eq!(
                 err(&in_host(&format!("  path \"{bad}\" {{ static /s; }}"))),
                 (invalid("path", bad), 3, 3),

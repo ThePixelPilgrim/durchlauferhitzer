@@ -26,10 +26,17 @@ pub enum TargetError {
     NonAscii,
     ControlOrSpace,
     Fragment,
+    Semicolon,
+    EncodedControl,
+    QueryInPath,
 }
 
 /// Parses an origin-form request target (`/path?query`), splitting at the
 /// first `?`.
+///
+/// Accepted paths may still percent-decode to non-ASCII bytes (`%80`-`%FF`,
+/// e.g. UTF-8 file names); the raw path, not the decoded one, is what gets
+/// logged.
 pub fn parse_target(raw: &[u8]) -> Result<Target, TargetError> {
     let (path, query) = match raw.iter().position(|&b| b == b'?') {
         Some(i) => (raw.get(..i).unwrap_or_default(), raw.get(i + 1..)),
@@ -37,7 +44,7 @@ pub fn parse_target(raw: &[u8]) -> Result<Target, TargetError> {
     };
     check_path(path)?;
     if let Some(query) = query {
-        check_bytes(query)?;
+        check_bytes(query, false)?;
     }
     Ok(Target {
         path: to_string(path),
@@ -47,7 +54,11 @@ pub fn parse_target(raw: &[u8]) -> Result<Target, TargetError> {
 
 /// Validates a path (no query part), e.g. a configured `path` block argument.
 pub fn validate_path(path: &str) -> Result<(), TargetError> {
-    check_path(path.as_bytes())
+    check_path(path.as_bytes())?;
+    if path.contains('?') {
+        return Err(TargetError::QueryInPath);
+    }
+    Ok(())
 }
 
 /// Checked bytes are ASCII, so this never loses data.
@@ -61,7 +72,7 @@ fn check_path(path: &[u8]) -> Result<(), TargetError> {
         Some(b'/') => {}
         Some(_) => return Err(TargetError::NotOriginForm),
     }
-    check_bytes(path)?;
+    check_bytes(path, true)?;
     // Skip the part before the leading slash; a trailing slash leaves a
     // final empty segment, which is fine.
     let mut segments = path.split(|&b| b == b'/').skip(1).peekable();
@@ -86,8 +97,9 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-/// Byte-class and percent-escape rules shared by path and query.
-fn check_bytes(bytes: &[u8]) -> Result<(), TargetError> {
+/// Byte-class and well-formed-escape rules for path and query. Only the path
+/// additionally rejects `;` and escapes that decode to dangerous bytes.
+fn check_bytes(bytes: &[u8], is_path: bool) -> Result<(), TargetError> {
     let mut iter = bytes.iter();
     while let Some(&b) = iter.next() {
         match b {
@@ -95,13 +107,18 @@ fn check_bytes(bytes: &[u8]) -> Result<(), TargetError> {
             0x00..=0x20 | 0x7F => return Err(TargetError::ControlOrSpace),
             b'\\' => return Err(TargetError::Backslash),
             b'#' => return Err(TargetError::Fragment),
+            b';' if is_path => return Err(TargetError::Semicolon),
             b'%' => {
                 let hi = iter.next().and_then(|&h| hex_value(h));
                 let lo = iter.next().and_then(|&l| hex_value(l));
                 let (Some(hi), Some(lo)) = (hi, lo) else {
                     return Err(TargetError::BadPercentEncoding);
                 };
+                if !is_path {
+                    continue;
+                }
                 match hi * 16 + lo {
+                    0x01..=0x1F | 0x7F => return Err(TargetError::EncodedControl),
                     0x2E => return Err(TargetError::EncodedDot),
                     0x2F => return Err(TargetError::EncodedSlash),
                     0x5C => return Err(TargetError::EncodedBackslash),
@@ -153,6 +170,14 @@ mod tests {
             (b"/a?q=a b", TargetError::ControlOrSpace),
             (b"/a?q=a\\b", TargetError::Backslash),
             (b"/a?q=%zz", TargetError::BadPercentEncoding),
+            (b"/public/..;/admin", TargetError::Semicolon),
+            (b"/a;b", TargetError::Semicolon),
+            (b"/a%0a", TargetError::EncodedControl),
+            (b"/a%1B", TargetError::EncodedControl),
+            (b"/a%1b", TargetError::EncodedControl),
+            (b"/a%01", TargetError::EncodedControl),
+            (b"/a%7f", TargetError::EncodedControl),
+            (b"/a%7F", TargetError::EncodedControl),
         ];
         for (raw, want) in rows {
             assert_eq!(
@@ -204,13 +229,28 @@ mod tests {
         // Encoded percent is decoded once downstream, so it is harmless.
         assert!(parse_target(b"/%252e%252e/").is_ok());
         assert!(parse_target(b"/a?q=../..//").is_ok());
+        // The query only gets byte-class and well-formed-escape rules.
+        for ok in [
+            &b"/a?next=%2Fhome"[..],
+            b"/a?x=%2e%00%5C",
+            b"/a?x=1;y=2",
+            b"/%C3%A4",
+            b"/%80%ff",
+        ] {
+            assert!(
+                parse_target(ok).is_ok(),
+                "{:?}",
+                String::from_utf8_lossy(ok)
+            );
+        }
     }
 
     #[test]
     fn validate_path_checks_path_only() {
         assert_eq!(validate_path("/a/../"), Err(TargetError::DotSegment));
         assert_eq!(validate_path("x"), Err(TargetError::NotOriginForm));
-        assert_eq!(validate_path("/a?b"), Ok(()));
+        assert_eq!(validate_path("/a?b"), Err(TargetError::QueryInPath));
+        assert_eq!(validate_path("/a;b"), Err(TargetError::Semicolon));
     }
 
     fn decode(path: &str) -> Vec<u8> {
@@ -233,7 +273,8 @@ mod tests {
     fn check_accepted(raw: &[u8]) {
         if let Ok(t) = parse_target(raw) {
             let d = decode(&t.path);
-            assert!(!d.contains(&0) && !d.contains(&b'\\'), "{raw:?}");
+            assert!(!d.contains(&b'\\') && !d.contains(&b';'), "{raw:?}");
+            assert!(d.iter().all(|&c| c > 0x1F && c != 0x7F), "{raw:?}");
             assert!(!d.windows(2).any(|w| w == b"//"), "{raw:?}");
             for seg in d.split(|&c| c == b'/') {
                 assert!(seg != b"." && seg != b"..", "{raw:?}");
@@ -253,13 +294,35 @@ mod tests {
         fn accepted_paths_from_hostile_alphabet(
             raw in proptest::collection::vec(
                 proptest::sample::select(
-                    vec![b'/', b'.', b'%', b'2', b'e', b'E', b'f', b'5', b'c', b'0', b'a', b'?']
+                    vec![b'/', b'.', b'%', b'2', b'e', b'E', b'f', b'F', b'5', b'c', b'C',
+                         b'0', b'a', b'?', b';']
                 ),
                 0..24,
             )
         ) {
             let mut v = vec![b'/'];
             v.extend(raw);
+            check_accepted(&v);
+        }
+
+        #[test]
+        fn accepted_paths_from_mixed_fragments(
+            parts in proptest::collection::vec(
+                prop_oneof![
+                    proptest::sample::select(vec![
+                        "/", ".", "..", "a", "b.c", "%2e", "%2E", "%2f", "%5c", "%00", "%25",
+                        "%0a", "%7f", "%C3%A4", "%41", ";", "?q=1",
+                    ])
+                    .prop_map(str::to_string),
+                    "[ -~]{0,3}",
+                ],
+                0..10,
+            )
+        ) {
+            let mut v = b"/".to_vec();
+            for p in parts {
+                v.extend(p.bytes());
+            }
             check_accepted(&v);
         }
     }
