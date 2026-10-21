@@ -67,6 +67,8 @@ The superpowers skills are vendored as project skills in `.claude/skills/`
 - Whenever a Markdown file is written and pushed, post its public GitHub URL
   in the chat, so the owner can open it in a browser:
   `https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/<branch>/<path>`
+- After every push, state in the chat the SHA(s) of the commit(s) that were
+  committed and pushed.
 
 ## Development
 
