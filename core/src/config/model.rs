@@ -1,0 +1,145 @@
+//! The validated configuration model.
+
+use std::fmt;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use super::lexer::Pos;
+use super::syntax::SyntaxErrorKind;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Config {
+    pub listen: Vec<SocketAddr>,
+    pub user: Option<String>,
+    pub limits: Limits,
+    pub hosts: Vec<VirtualHost>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub max_connections: u32,
+    pub max_connections_per_ip: u32,
+    pub max_request_line: usize,
+    pub max_head: usize,
+    pub max_headers: usize,
+    pub header_timeout: Duration,
+    pub keepalive_timeout: Duration,
+    pub send_idle_timeout: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_connections: 1024,
+            max_connections_per_ip: 64,
+            max_request_line: 8 * 1024,
+            max_head: 16 * 1024,
+            max_headers: 100,
+            header_timeout: Duration::from_secs(10),
+            keepalive_timeout: Duration::from_secs(60),
+            send_idle_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualHost {
+    /// Lowercase host names, IPv4 literals or bracketed IPv6 literals.
+    pub names: Vec<String>,
+    pub routes: Vec<Route>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub prefix: String,
+    pub action: RouteAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RouteAction {
+    Static { root: PathBuf },
+    Proxy(ProxyRoute),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyRoute {
+    pub backend: BackendAddr,
+    pub strip_prefix: Option<String>,
+    pub max_request_body: BodyLimit,
+    pub max_response_body: BodyLimit,
+}
+
+/// A backend host and port; resolved later, by the driver.
+/// IPv6 literals are stored without brackets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendAddr {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyLimit {
+    Bytes(u64),
+    Unlimited,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigErrorKind {
+    Syntax(SyntaxErrorKind),
+    UnknownKey(String),
+    DuplicateKey(String),
+    MissingKey(&'static str),
+    InvalidValue { key: String, value: String },
+    WrongValueCount(String),
+    DuplicateHost(String),
+    DuplicatePath(String),
+    RouteNeedsOneAction,
+    StripPrefixOnStatic,
+    StripPrefixNotPrefix,
+    BodyLimitOnStatic,
+    MissingBodyLimit(&'static str),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigError {
+    pub kind: ConfigErrorKind,
+    pub pos: Pos,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}: ", self.pos.line, self.pos.column)?;
+        match &self.kind {
+            ConfigErrorKind::Syntax(kind) => write!(f, "syntax error ({kind:?})"),
+            ConfigErrorKind::UnknownKey(key) => write!(f, "unknown key `{key}`"),
+            ConfigErrorKind::DuplicateKey(key) => write!(f, "duplicate key `{key}`"),
+            ConfigErrorKind::MissingKey(key) => write!(f, "missing key `{key}`"),
+            ConfigErrorKind::InvalidValue { key, value } => {
+                write!(f, "invalid value `{value}` for `{key}`")
+            }
+            ConfigErrorKind::WrongValueCount(key) => {
+                write!(f, "wrong number of values for `{key}`")
+            }
+            ConfigErrorKind::DuplicateHost(name) => write!(f, "duplicate host `{name}`"),
+            ConfigErrorKind::DuplicatePath(path) => write!(f, "duplicate path `{path}`"),
+            ConfigErrorKind::RouteNeedsOneAction => {
+                write!(f, "path needs exactly one of `static` or `proxy`")
+            }
+            ConfigErrorKind::StripPrefixOnStatic => {
+                write!(f, "`strip_prefix` is only allowed on proxy routes")
+            }
+            ConfigErrorKind::StripPrefixNotPrefix => {
+                write!(f, "`strip_prefix` is not a prefix of the path")
+            }
+            ConfigErrorKind::BodyLimitOnStatic => {
+                write!(f, "body limits are only allowed on proxy routes")
+            }
+            ConfigErrorKind::MissingBodyLimit(key) => {
+                write!(f, "proxy route is missing `{key}`")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
