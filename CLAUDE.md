@@ -21,6 +21,9 @@
   or `cmake` build scripts, no `*-sys` crates other than `libc`, no
   OpenSSL, `ring`, or `aws-lc-rs`. If TLS crypto is ever needed, use a
   pure-Rust provider (e.g. `rustls` with a RustCrypto-based provider).
+- Scope: the shipped product. Test-only tooling (e.g. `cargo-fuzz` /
+  libFuzzer) may contain C/C++, as long as none of it reaches the binary.
+  An automated check (CI) verifies the product's dependency tree.
 - Before adding a dependency, check its full transitive tree
   (`cargo tree`) for build scripts or bundled C sources; reject it if any
   are found.
