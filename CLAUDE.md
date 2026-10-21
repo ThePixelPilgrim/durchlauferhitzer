@@ -61,3 +61,11 @@ The superpowers skills are vendored as project skills in `.claude/skills/`
 - Whenever a Markdown file is written and pushed, post its public GitHub URL
   in the chat, so the owner can open it in a browser:
   `https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/<branch>/<path>`
+
+## Development
+
+- Strict red/green TDD: write the failing test, run it and see it fail, then
+  implement.
+- Before every commit run `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` and `scripts/check-product-deps.sh`.
