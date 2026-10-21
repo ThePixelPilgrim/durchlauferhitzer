@@ -148,7 +148,7 @@ reject.
   request is not read until the response is done). Pipelined bytes are
   buffered within limits.
 - **Limits and timeouts:** request line, header section size, header count,
-  request body size, concurrent connections, header-read timeout, keep-alive
+  concurrent connections, header-read timeout, keep-alive
   idle timeout, backend connect timeout, backend response timeout, body idle
   timeout, send idle timeout (client stops reading the response), and
   connections per client IP. All have conservative defaults and can be
@@ -162,9 +162,28 @@ reject.
   keeps a single host from filling `max_connections`. Minimum transfer rates
   are not in scope.
 
+### Streaming and flow control
+
+- No body is ever held whole. Each connection has fixed-size buffers; a
+  50 GB transfer uses the same memory as a 5 KB one. Timeouts measure
+  stalls, not total duration.
+- Backpressure with hysteresis: stop reading a side when its buffer is
+  full; resume only when it has drained below the low watermark (half).
+  This avoids tiny reads/writes and frequent short pauses (which push the
+  upstream TCP connection back into slow start).
+- Write in large pieces with `TCP_NODELAY` set; never set `SO_RCVBUF` /
+  `SO_SNDBUF` (keeps kernel autotuning).
+- Responses stream as soon as their headers are validated; chunked framing
+  is validated chunk by chunk in flight.
+- Simulation tests assert bounded memory, intact bytes, watermark
+  behavior, and write sizes with bodies far larger than the buffers. TCP
+  congestion behavior itself is measured in stage 7 over loopback with
+  `tc netem` (delay, loss), including recovery after pauses.
+
 ### Static routes
 
-- Methods GET and HEAD; others → 405 with `Allow`.
+- Methods GET and HEAD; others → 405 with `Allow`. A request with a body
+  → 413.
 - Directory → its `index.html` if it exists, else 404. No listings.
 - Symlinks anywhere in the path → 404. Dotfiles (any segment starting with
   `.`) → 404.
@@ -189,6 +208,9 @@ reject.
   504. After response headers were sent, failures close the client
   connection.
 - Backend addresses are `host:port`, resolved once at startup.
+- Every proxy route must set `max_body` (a size or `unlimited`); there is no
+  default. A body exceeding it → 413 (before forwarding when
+  `Content-Length` says so, otherwise the connection is cut once exceeded).
 
 ## Configuration
 
@@ -219,15 +241,17 @@ host example.com www.example.com {
   path /api/ {
     proxy: 127.0.0.1:3000;
     strip_prefix: /api;
+    max_body: 10MiB;
   }
 }
 ```
 
 - Unknown keys, duplicate keys, duplicate hosts or paths within a host, a
   `path` with both or neither of `static`/`proxy`, `strip_prefix` on a static
-  route, or `strip_prefix` that is not a prefix of its `path` → startup
+  route, `strip_prefix` that is not a prefix of its `path`, a proxy route
+  without `max_body`, or `max_body` on a static route → startup
   error naming the line and column.
-- Durations accept `ms`/`s`/`m`; sizes accept plain bytes and `KiB`/`MiB`.
+- Durations accept `ms`/`s`/`m`; sizes accept plain bytes and `KiB`/`MiB`/`GiB`.
 
 ## Logging
 
