@@ -15,24 +15,14 @@ pub enum TokenKind {
     Word(String),
     /// A double-quoted string, holding its unescaped contents.
     Quoted(String),
-    Colon,
     Semicolon,
     OpenBrace,
     CloseBrace,
 }
 
-/// Whether a token directly follows the previous one, or whitespace, a
-/// comment or the start of input precedes it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Spacing {
-    Joined,
-    Separated,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
-    pub spacing: Spacing,
     pub pos: Pos,
 }
 
@@ -76,7 +66,7 @@ fn is_forbidden_control(c: char) -> bool {
 }
 
 fn is_delimiter(c: char) -> bool {
-    matches!(c, ':' | ';' | '{' | '}' | '#' | '"')
+    matches!(c, ';' | '{' | '}' | '#' | '"')
 }
 
 /// Reads a quoted string; the cursor is on the opening quote.
@@ -141,7 +131,6 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, LexError> {
         pos: Pos { line: 1, column: 1 },
     };
     let mut tokens = Vec::new();
-    let mut spacing = Spacing::Separated;
     while let Some(c) = cur.peek() {
         let pos = cur.pos;
         if is_forbidden_control(c) {
@@ -157,16 +146,13 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, LexError> {
                 }
                 cur.bump();
             }
-            spacing = Spacing::Separated;
             continue;
         }
         if c.is_whitespace() {
             cur.bump();
-            spacing = Spacing::Separated;
             continue;
         }
         let kind = match c {
-            ':' => TokenKind::Colon,
             ';' => TokenKind::Semicolon,
             '{' => TokenKind::OpenBrace,
             '}' => TokenKind::CloseBrace,
@@ -174,10 +160,8 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, LexError> {
                 let text = read_quoted(&mut cur, pos)?;
                 tokens.push(Token {
                     kind: TokenKind::Quoted(text),
-                    spacing,
                     pos,
                 });
-                spacing = Spacing::Joined;
                 continue;
             }
             _ => {
@@ -194,23 +178,20 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, LexError> {
                 }
                 tokens.push(Token {
                     kind: TokenKind::Word(word),
-                    spacing,
                     pos,
                 });
-                spacing = Spacing::Joined;
                 continue;
             }
         };
         cur.bump();
-        tokens.push(Token { kind, spacing, pos });
-        spacing = Spacing::Joined;
+        tokens.push(Token { kind, pos });
     }
     Ok(tokens)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::TokenKind::{CloseBrace, Colon, OpenBrace, Semicolon};
+    use super::TokenKind::{CloseBrace, OpenBrace, Semicolon};
     use super::*;
 
     fn kinds(tokens: &[Token]) -> Vec<TokenKind> {
@@ -223,23 +204,13 @@ mod tests {
 
     #[test]
     fn tokenizes_setting_with_positions() {
-        let t = tokenize("listen: 127.0.0.1:8080;").unwrap();
-        // ":" inside a word is still a separator token
+        let t = tokenize("listen 127.0.0.1:8080 [::1]:80;").unwrap();
         assert_eq!(
             kinds(&t),
-            vec![
-                w("listen"),
-                Colon,
-                w("127.0.0.1"),
-                Colon,
-                w("8080"),
-                Semicolon
-            ]
+            vec![w("listen"), w("127.0.0.1:8080"), w("[::1]:80"), Semicolon]
         );
         assert_eq!(t[0].pos, Pos { line: 1, column: 1 });
-        assert_eq!(t[2].pos, Pos { line: 1, column: 9 });
-        assert_eq!(t[2].spacing, Spacing::Separated);
-        assert_eq!(t[3].spacing, Spacing::Joined);
+        assert_eq!(t[1].pos, Pos { line: 1, column: 8 });
     }
 
     #[test]
@@ -274,7 +245,6 @@ mod tests {
     fn hash_inside_word_comment_ends_at_newline() {
         let t = tokenize("a#b\nc").unwrap();
         assert_eq!(kinds(&t), vec![w("a"), w("c")]);
-        assert_eq!(t[1].spacing, Spacing::Separated);
     }
 
     fn q(s: &str) -> TokenKind {
@@ -283,8 +253,8 @@ mod tests {
 
     #[test]
     fn quoted_string_keeps_special_characters() {
-        let t = tokenize(r#"a: "x#y; {z}";"#).unwrap();
-        assert_eq!(kinds(&t), vec![w("a"), Colon, q("x#y; {z}"), Semicolon]);
+        let t = tokenize(r#"a "x#y; {z}";"#).unwrap();
+        assert_eq!(kinds(&t), vec![w("a"), q("x#y; {z}"), Semicolon]);
     }
 
     #[test]
@@ -324,7 +294,6 @@ mod tests {
     fn quote_ends_word() {
         let t = tokenize(r#"ab"c""#).unwrap();
         assert_eq!(kinds(&t), vec![w("ab"), q("c")]);
-        assert_eq!(t[1].spacing, Spacing::Joined);
     }
 
     #[test]
