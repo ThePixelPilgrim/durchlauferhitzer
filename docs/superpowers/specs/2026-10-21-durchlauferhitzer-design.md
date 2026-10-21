@@ -1,7 +1,7 @@
 # durchlauferhitzer — Design
 
 Date: 2026-10-21
-Status: awaiting approval
+Status: approved
 
 ## Intent
 
@@ -37,7 +37,8 @@ matters.
 - HTTP/2, HTTP/3, WebSockets / `Upgrade`.
 - Regex or rewrite rules, wildcard hosts, load balancing across backends.
 - Config hot-reload (restart instead; zero-downtime restart is a later stage).
-- Directory listings, range requests, compression, response caching.
+- Directory listings, range requests, compression.
+- Response caching (last stage, see timeline).
 - io_uring (rejected: bypasses seccomp; poor kernel security track record).
   The driver interface is completion-shaped so it could be added later.
 
@@ -329,6 +330,8 @@ project working and tested.
    storage).
 9. **Later, maybe** — HTTPS with a pure-Rust crypto provider, io_uring driver,
    file-descriptor passing from same-host backends (`SCM_RIGHTS`).
+10. **Caching, after everything else** — a small Varnish-style response
+    cache in front of proxy routes, with far fewer features than Varnish.
 
 ## Left to the builder
 
