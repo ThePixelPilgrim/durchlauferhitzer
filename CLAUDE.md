@@ -18,6 +18,12 @@
   (`subagent-driven-development`), for every model. The only exception: a
   change so small that doing it inline is cheaper than dispatching an
   implementer and reviewer.
+- Commit and push after every step that changes the repository (each
+  implementer commit, each fix round, each doc or plan edit), unless told
+  otherwise. Implementer subagents push their own commits. A plan's
+  red/green pair (failing test, then the code that makes it pass) lands as
+  one commit, so the pushed branch never carries a deliberately failing
+  test.
 - Work one plan task at a time (or two tightly linked tasks, if that is
   cheaper), then stop and report before starting the next.
 
