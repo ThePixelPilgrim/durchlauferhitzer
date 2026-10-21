@@ -13,6 +13,8 @@ pub struct Pos {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Word(String),
+    /// A double-quoted string, holding its unescaped contents.
+    Quoted(String),
     Colon,
     Semicolon,
     OpenBrace,
@@ -37,6 +39,8 @@ pub struct Token {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LexErrorKind {
     UnexpectedChar(char),
+    UnterminatedString,
+    BadEscape(char),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +76,55 @@ fn is_forbidden_control(c: char) -> bool {
 }
 
 fn is_delimiter(c: char) -> bool {
-    matches!(c, ':' | ';' | '{' | '}' | '#')
+    matches!(c, ':' | ';' | '{' | '}' | '#' | '"')
+}
+
+/// Reads a quoted string; the cursor is on the opening quote.
+fn read_quoted(cur: &mut Cursor<'_>, open: Pos) -> Result<String, LexError> {
+    let unterminated = LexError {
+        kind: LexErrorKind::UnterminatedString,
+        pos: open,
+    };
+    cur.bump();
+    let mut out = String::new();
+    loop {
+        let at = cur.pos;
+        let Some(n) = cur.peek() else {
+            return Err(unterminated);
+        };
+        if n == '\n' {
+            return Err(unterminated);
+        }
+        if is_forbidden_control(n) {
+            return Err(error_at(n, at));
+        }
+        cur.bump();
+        match n {
+            '"' => return Ok(out),
+            '\\' => {
+                let Some(e) = cur.peek() else {
+                    return Err(unterminated);
+                };
+                if e == '\n' {
+                    return Err(unterminated);
+                }
+                if is_forbidden_control(e) {
+                    return Err(error_at(e, cur.pos));
+                }
+                cur.bump();
+                match e {
+                    '"' | '\\' => out.push(e),
+                    other => {
+                        return Err(LexError {
+                            kind: LexErrorKind::BadEscape(other),
+                            pos: at,
+                        });
+                    }
+                }
+            }
+            other => out.push(other),
+        }
+    }
 }
 
 fn error_at(c: char, pos: Pos) -> LexError {
@@ -118,6 +170,16 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, LexError> {
             ';' => TokenKind::Semicolon,
             '{' => TokenKind::OpenBrace,
             '}' => TokenKind::CloseBrace,
+            '"' => {
+                let text = read_quoted(&mut cur, pos)?;
+                tokens.push(Token {
+                    kind: TokenKind::Quoted(text),
+                    spacing,
+                    pos,
+                });
+                spacing = Spacing::Joined;
+                continue;
+            }
             _ => {
                 let mut word = String::new();
                 while let Some(n) = cur.peek() {
@@ -213,5 +275,62 @@ mod tests {
         let t = tokenize("a#b\nc").unwrap();
         assert_eq!(kinds(&t), vec![w("a"), w("c")]);
         assert_eq!(t[1].spacing, Spacing::Separated);
+    }
+
+    fn q(s: &str) -> TokenKind {
+        TokenKind::Quoted(s.to_string())
+    }
+
+    #[test]
+    fn quoted_string_keeps_special_characters() {
+        let t = tokenize(r#"a: "x#y; {z}";"#).unwrap();
+        assert_eq!(kinds(&t), vec![w("a"), Colon, q("x#y; {z}"), Semicolon]);
+    }
+
+    #[test]
+    fn quoted_string_escapes() {
+        let t = tokenize(r#""a\"b\\c""#).unwrap();
+        assert_eq!(kinds(&t), vec![q("a\"b\\c")]);
+    }
+
+    #[test]
+    fn unterminated_string_reports_opening_quote() {
+        let e = tokenize("a \"bc\nd\"").unwrap_err();
+        assert_eq!(
+            e,
+            LexError {
+                kind: LexErrorKind::UnterminatedString,
+                pos: Pos { line: 1, column: 3 }
+            }
+        );
+        let e = tokenize("a \"bc").unwrap_err();
+        assert_eq!(e.kind, LexErrorKind::UnterminatedString);
+        assert_eq!(e.pos, Pos { line: 1, column: 3 });
+    }
+
+    #[test]
+    fn bad_escape_reports_backslash() {
+        let e = tokenize(r#""a\nb""#).unwrap_err();
+        assert_eq!(
+            e,
+            LexError {
+                kind: LexErrorKind::BadEscape('n'),
+                pos: Pos { line: 1, column: 3 }
+            }
+        );
+    }
+
+    #[test]
+    fn quote_ends_word() {
+        let t = tokenize(r#"ab"c""#).unwrap();
+        assert_eq!(kinds(&t), vec![w("ab"), q("c")]);
+        assert_eq!(t[1].spacing, Spacing::Joined);
+    }
+
+    #[test]
+    fn control_character_in_string_is_rejected() {
+        let e = tokenize("\"a\u{0}b\"").unwrap_err();
+        assert_eq!(e.kind, LexErrorKind::UnexpectedChar('\u{0}'));
+        assert_eq!(e.pos, Pos { line: 1, column: 3 });
     }
 }
