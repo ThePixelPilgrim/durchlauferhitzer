@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use durchlauferhitzer_core::{Interest, Log};
-use durchlauferhitzer_sim::{Sim, SimConnState};
+use durchlauferhitzer_sim::{Sim, SimConnState, Window};
 
 const CONFIG: &str = "listen 127.0.0.1:8080; host a.test { path / { static /srv; } }";
 const SMALL_BUFFERS: &str = "listen 127.0.0.1:8080; \
@@ -56,10 +56,15 @@ fn client_eof_closes_silently() {
 fn receive_buffer_applies_backpressure() {
     let mut sim = Sim::new(SMALL_BUFFERS);
     let c = sim.connect(peer(1));
+    // The client does not read the response, so the core keeps responding
+    // and stops reading: the 66-byte buffer holds the request and pipelined
+    // bytes, the rest waits at the client.
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(c, b"GET / HTTP/1.1\r\nHost: a.test\r\n\r\n");
     sim.send(c, &[b'x'; 100]);
     sim.run_until_idle();
-    assert_eq!(sim.queued_to_server(c), 34, "{}", sim.trace());
-    assert_eq!(sim.interest(c), Interest::None, "{}", sim.trace());
+    assert_eq!(sim.queued_to_server(c), 132 - 66, "{}", sim.trace());
+    assert_eq!(sim.interest(c), Interest::Write, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
 }
 

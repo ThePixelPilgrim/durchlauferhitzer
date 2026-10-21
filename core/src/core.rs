@@ -57,8 +57,14 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use crate::config::Config;
-use crate::conn::{Conn, ConnState, SEND_CAPACITY};
-use crate::log::Log;
+use crate::conn::{Conn, ConnState, SEND_CAPACITY, UnreadBody};
+use crate::http::request::{
+    BodyFraming, HeadLimits, HttpError, Method, ParseStatus, Persistence, RequestHead, parse_head,
+};
+use crate::http::response::{BodyMode, render_fixed};
+use crate::http::status::Status;
+use crate::log::{Log, RejectReason, RequestSummary};
+use crate::routing::Router;
 use crate::time::Instant;
 
 /// Opaque connection id, allocated by the driver and never reused.
@@ -130,6 +136,8 @@ pub enum Action {
 #[derive(Debug)]
 pub struct Core {
     config: Config,
+    router: Router,
+    head_limits: HeadLimits,
     conns: BTreeMap<ConnId, Conn>,
 }
 
@@ -137,6 +145,8 @@ impl Core {
     /// A core serving `config`, with no connections.
     pub fn new(config: Config) -> Core {
         Core {
+            router: Router::new(&config.hosts),
+            head_limits: HeadLimits::from(&config.limits),
             config,
             conns: BTreeMap::new(),
         }
@@ -164,15 +174,19 @@ impl Core {
                     actions.push(Action::Close { conn });
                 }
             }
-            Event::Sent { conn, len } => {
-                if let Some(c) = self.conns.get_mut(&conn) {
-                    let len = len.min(c.send.len());
-                    c.send.drain(..len);
-                }
-            }
+            Event::Sent { conn, len } => self.sent(conn, len, actions),
             Event::Failed { conn, error: _ } => {
                 if let Some(c) = self.conns.remove(&conn) {
-                    actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
+                    match c.state {
+                        // A reset while discarding input after our response is
+                        // the expected end of a lingering close, not news.
+                        ConnState::Lingering => {}
+                        ConnState::ReadingHead { .. }
+                        | ConnState::Idle
+                        | ConnState::Responding { .. } => {
+                            actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
+                        }
+                    }
                     actions.push(Action::Close { conn });
                 }
             }
@@ -186,10 +200,7 @@ impl Core {
         }
         let capacity = self.new_recv_capacity();
         self.conns.insert(conn, Conn::new(peer, capacity));
-        actions.push(Action::SetInterest {
-            conn,
-            interest: Interest::Read,
-        });
+        self.sync_interest(conn, actions);
     }
 
     fn received(&mut self, conn: ConnId, len: usize, actions: &mut Vec<Action>) {
@@ -197,19 +208,140 @@ impl Core {
             return;
         };
         let capacity = c.recv.len();
+        // A length beyond the spare space is a driver bug: clamp.
         match c.state {
-            ConnState::ReadingHead { buffered } => {
-                // A length beyond the spare space is a driver bug: clamp.
+            ConnState::ReadingHead { buffered, scanned } => {
                 let added = len.min(capacity.saturating_sub(buffered));
-                let buffered = buffered.saturating_add(added);
-                c.state = ConnState::ReadingHead { buffered };
-                if added > 0 && buffered == capacity {
-                    actions.push(Action::SetInterest {
-                        conn,
-                        interest: Interest::None,
-                    });
+                if added == 0 {
+                    return;
                 }
+                c.state = ConnState::ReadingHead {
+                    buffered: buffered.saturating_add(added),
+                    scanned,
+                };
             }
+            ConnState::Idle => {
+                let added = len.min(capacity);
+                if added == 0 {
+                    return;
+                }
+                c.state = ConnState::ReadingHead {
+                    buffered: added,
+                    scanned: 0,
+                };
+            }
+            // Input after our response: discarded, the buffer is reused.
+            ConnState::Lingering => return,
+            // Not reading: nothing was offered, so nothing can have arrived.
+            ConnState::Responding { .. } => return,
+        }
+        self.try_parse(conn, actions);
+        self.sync_interest(conn, actions);
+    }
+
+    fn sent(&mut self, conn: ConnId, len: usize, actions: &mut Vec<Action>) {
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        let len = len.min(c.send.len());
+        c.send.drain(..len);
+        if let ConnState::Responding {
+            persistence,
+            unread_body,
+            buffered,
+        } = c.state
+        {
+            if c.send.is_empty() {
+                c.state = match (persistence, unread_body) {
+                    (Persistence::KeepAlive, UnreadBody::None) => {
+                        if buffered > 0 {
+                            ConnState::ReadingHead {
+                                buffered,
+                                scanned: 0,
+                            }
+                        } else {
+                            ConnState::Idle
+                        }
+                    }
+                    (Persistence::Close, UnreadBody::None | UnreadBody::Pending)
+                    | (Persistence::KeepAlive, UnreadBody::Pending) => {
+                        actions.push(Action::ShutdownWrite { conn });
+                        ConnState::Lingering
+                    }
+                };
+            }
+        }
+        self.try_parse(conn, actions);
+        self.sync_interest(conn, actions);
+    }
+
+    /// In `ReadingHead`, parse the buffered bytes if anything new can come of
+    /// it: an LF beyond `scanned`, or a full buffer (so a limit fires).
+    fn try_parse(&mut self, conn: ConnId, actions: &mut Vec<Action>) {
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        let ConnState::ReadingHead { buffered, scanned } = c.state else {
+            return;
+        };
+        let capacity = c.recv.len();
+        let filled = c.recv.get(..buffered).unwrap_or_default();
+        let new_lf = filled.get(scanned..).unwrap_or_default().contains(&b'\n');
+        c.state = ConnState::ReadingHead {
+            buffered,
+            scanned: buffered,
+        };
+        let full = buffered >= capacity;
+        if !new_lf && !full {
+            return;
+        }
+        let result = match parse_head(filled, &self.head_limits) {
+            // A full buffer that holds no complete head can never hold one:
+            // the head would exceed `max_head`.
+            Ok(ParseStatus::Incomplete) if full => Err(HttpError::HeadTooLarge),
+            other => other,
+        };
+        match result {
+            Ok(ParseStatus::Incomplete) => {}
+            Ok(ParseStatus::Complete { head, consumed }) => {
+                // Bytes after the head belong to the next request: move them
+                // to the front.
+                let leftover = buffered.saturating_sub(consumed);
+                if consumed <= buffered {
+                    c.recv.copy_within(consumed..buffered, 0);
+                }
+                respond(c, &self.router, conn, head, leftover, actions);
+            }
+            Err(error) => {
+                render_fixed(
+                    error.status(),
+                    Persistence::Close,
+                    BodyMode::Full,
+                    &mut c.send,
+                );
+                actions.push(Action::Log(Log::Rejected {
+                    conn,
+                    peer: c.peer,
+                    reason: RejectReason::Http(error),
+                }));
+                c.state = ConnState::Responding {
+                    persistence: Persistence::Close,
+                    unread_body: UnreadBody::None,
+                    buffered: 0,
+                };
+            }
+        }
+    }
+
+    /// Tell the driver if the interest the connection needs has changed.
+    fn sync_interest(&mut self, conn: ConnId, actions: &mut Vec<Action>) {
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        let interest = c.wanted_interest();
+        if interest != c.interest {
+            c.interest = interest;
+            actions.push(Action::SetInterest { conn, interest });
         }
     }
 
@@ -255,6 +387,53 @@ impl Core {
     }
 }
 
+/// Answer a complete request head on `c`, which then responds. `leftover`
+/// bytes at the front of `c.recv` wait for the next request.
+fn respond(
+    c: &mut Conn,
+    router: &Router,
+    conn: ConnId,
+    head: RequestHead,
+    leftover: usize,
+    actions: &mut Vec<Action>,
+) {
+    // No handler exists yet in this stage: a matched route is answered 501
+    // and the connection closed.
+    let (status, persistence) = match router.route(head.host.as_deref(), &head.target.path) {
+        Ok(_) => (Status::NotImplemented, Persistence::Close),
+        Err(_) => (Status::NotFound, head.persistence),
+    };
+    let unread_body = match head.body {
+        BodyFraming::None => UnreadBody::None,
+        BodyFraming::Length(_) | BodyFraming::Chunked => UnreadBody::Pending,
+    };
+    // An unread body leaves the stream unframed: it cannot be reused.
+    let persistence = match unread_body {
+        UnreadBody::None => persistence,
+        UnreadBody::Pending => Persistence::Close,
+    };
+    let body = match head.method {
+        Method::Head => BodyMode::HeadOnly,
+        Method::Get | Method::Other(_) => BodyMode::Full,
+    };
+    render_fixed(status, persistence, body, &mut c.send);
+    actions.push(Action::Log(Log::Response {
+        conn,
+        peer: c.peer,
+        status,
+        request: Some(RequestSummary {
+            method: head.method,
+            host: head.host,
+            path: head.target.path,
+        }),
+    }));
+    c.state = ConnState::Responding {
+        persistence,
+        unread_body,
+        buffered: leftover,
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,12 +477,21 @@ mod tests {
         assert_eq!(core.recv_buffer(conn).len(), 10);
         actions.clear();
         core.handle(now, Event::Received { conn, len: 1000 }, &mut actions);
+        // Clamped to the 10 spare bytes: the full buffer of zeros is an
+        // over-long request line, answered at once.
         assert_eq!(
             actions,
-            [Action::SetInterest {
-                conn,
-                interest: Interest::None
-            }]
+            [
+                Action::Log(Log::Rejected {
+                    conn,
+                    peer: PEER,
+                    reason: RejectReason::Http(HttpError::RequestLineTooLong),
+                }),
+                Action::SetInterest {
+                    conn,
+                    interest: Interest::Write
+                }
+            ]
         );
         assert!(core.recv_buffer(conn).is_empty());
         actions.clear();

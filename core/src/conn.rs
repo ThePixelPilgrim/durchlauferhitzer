@@ -2,15 +2,41 @@
 
 use std::net::IpAddr;
 
+use crate::core::Interest;
+use crate::http::request::Persistence;
+
 /// Capacity of each connection's send buffer.
 pub(crate) const SEND_CAPACITY: usize = 1024;
 
+/// Whether the request's body is still unread on the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnreadBody {
+    None,
+    /// The request announced a body the core does not read; the connection
+    /// cannot be reused and closes after the response.
+    Pending,
+}
+
 /// Where a connection is in its lifecycle. Each variant carries only the data
-/// valid in that state; later tasks add variants and fields.
+/// valid in that state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnState {
-    /// Reading the request head; `buffered` bytes of `Conn::recv` are filled.
-    ReadingHead { buffered: usize },
+    /// Reading the request head; `buffered` bytes of `Conn::recv` are filled
+    /// and the first `scanned` of them have been searched for an LF.
+    ReadingHead { buffered: usize, scanned: usize },
+    /// Keep-alive between requests, nothing buffered.
+    Idle,
+    /// A response is being written. The first `buffered` bytes of
+    /// `Conn::recv` are pipelined input waiting for the next request; the
+    /// core does not read meanwhile.
+    Responding {
+        persistence: Persistence,
+        unread_body: UnreadBody,
+        buffered: usize,
+    },
+    /// The sending side is shut down; input is read and discarded until the
+    /// peer closes.
+    Lingering,
 }
 
 /// One open connection. Dropping it frees both buffers.
@@ -18,6 +44,8 @@ pub(crate) enum ConnState {
 pub(crate) struct Conn {
     pub(crate) peer: IpAddr,
     pub(crate) state: ConnState,
+    /// The interest last sent to the driver.
+    pub(crate) interest: Interest,
     /// Fixed-size receive buffer, allocated once on accept.
     pub(crate) recv: Box<[u8]>,
     /// Bytes waiting to be written, at most `SEND_CAPACITY`.
@@ -28,7 +56,11 @@ impl Conn {
     pub(crate) fn new(peer: IpAddr, recv_capacity: usize) -> Conn {
         Conn {
             peer,
-            state: ConnState::ReadingHead { buffered: 0 },
+            state: ConnState::ReadingHead {
+                buffered: 0,
+                scanned: 0,
+            },
+            interest: Interest::None,
             recv: vec![0; recv_capacity].into_boxed_slice(),
             send: Vec::with_capacity(SEND_CAPACITY),
         }
@@ -37,9 +69,31 @@ impl Conn {
     /// Spare space the driver may read into; empty when not reading or full.
     pub(crate) fn recv_spare(&mut self) -> &mut [u8] {
         match self.state {
-            ConnState::ReadingHead { buffered } => {
+            ConnState::ReadingHead { buffered, .. } => {
                 self.recv.get_mut(buffered..).unwrap_or_default()
             }
+            ConnState::Idle | ConnState::Lingering => &mut self.recv,
+            ConnState::Responding { .. } => &mut [],
+        }
+    }
+
+    /// The interest the connection's state calls for.
+    pub(crate) fn wanted_interest(&self) -> Interest {
+        if !self.send.is_empty() {
+            return Interest::Write;
+        }
+        match self.state {
+            ConnState::ReadingHead { buffered, .. } => {
+                if buffered >= self.recv.len() {
+                    Interest::None
+                } else {
+                    Interest::Read
+                }
+            }
+            ConnState::Idle | ConnState::Lingering => Interest::Read,
+            // A response in progress always has bytes to send; reaching this
+            // arm means nothing is left to do but wait.
+            ConnState::Responding { .. } => Interest::None,
         }
     }
 }
