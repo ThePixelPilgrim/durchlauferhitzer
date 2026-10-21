@@ -46,3 +46,9 @@
 The superpowers skills are vendored as project skills in `.claude/skills/`
 (see `.claude/skills/SUPERPOWERS-SOURCE.md`). Where a skill refers to
 `superpowers:<name>`, use the project skill `<name>`.
+
+## Reporting (mandatory)
+
+- Whenever a Markdown file is written and pushed, post its public GitHub URL
+  in the chat, so the owner can open it in a browser:
+  `https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/<branch>/<path>`
