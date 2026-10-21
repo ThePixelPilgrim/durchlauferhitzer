@@ -1,7 +1,7 @@
 # durchlauferhitzer — Design
 
 Date: 2026-10-21
-Status: draft, awaiting approval
+Status: awaiting approval
 
 ## Intent
 
@@ -56,7 +56,9 @@ These would make the project a failure even if everything "works":
 ## Hard constraints (from the owner)
 
 - Rust only; glibc is the only C allowed. No `cc`/`cmake` build scripts, no
-  `*-sys` crates except `libc`, no `ring`/`aws-lc-rs`/OpenSSL.
+  `*-sys` crates except `libc`, no `ring`/`aws-lc-rs`/OpenSSL. This binds
+  the shipped binary; test tooling (e.g. `cargo-fuzz`) may contain C. CI
+  fails if the product's dependency tree contains anything but `libc`.
 - Minimal external crates in the shipped product. Planned total: `libc`
   (driver only). Test-only tooling may use established crates freely
   (e.g. property testing, fuzzing, seeded randomness); the simulation
@@ -238,8 +240,14 @@ once output catches up. Tests assert on `Log` actions directly.
 ## Process
 
 - `durchlauferhitzer <config-path>`; `--check` validates the config and exits.
-- Starts as root only if it needs a port below 1024; binds, then switches to
-  `user` (refuses to keep running as root if `user` is unset).
+- **Platform:** Linux ≥ 5.14, x86_64 and aarch64, glibc. `openat2` is
+  required (startup error without it). Landlock is used when available;
+  if not, a clear warning is logged at startup and the server runs.
+- **systemd is optional.** If systemd passes listening sockets (socket
+  activation, `LISTEN_FDS`), they are used and the process never needs
+  root. Otherwise it binds itself: starts as root only if it needs a port
+  below 1024, binds, then switches to `user` (refuses to keep running as
+  root if `user` is unset).
 - SIGTERM: stop accepting, finish in-flight requests up to a deadline, exit.
 
 ## Timeline
@@ -258,13 +266,21 @@ project working and tested.
    handling, `strip_prefix`, body streaming with backpressure, 502/504,
    misbehaving backends.
 4. **epoll driver + binary** — the real driver, readahead pool, `eventfd`,
-   `sendfile`, `openat2`, logging output, CLI, privilege drop, SIGTERM drain.
+   `sendfile`, `openat2`, logging output, CLI, privilege drop, systemd
+   socket activation, SIGTERM drain.
    A few smoke tests over real loopback sockets. First runnable release.
 5. **Containment** — Landlock (restrict file access to static roots),
    seccomp (allow-list of syscalls), long randomized simulation runs.
-6. **Zero-downtime restart** — on a signal, exec the new binary with the
-   listening sockets inherited; new process validates config (exits on error,
-   old keeps serving), starts accepting; old stops accepting, drains, exits.
+6. **Zero-downtime restart** — with systemd: socket activation; on
+   restart the old process drains while new connections wait in the
+   kernel's accept queue, then the new process starts fresh. Without
+   systemd: on a signal, exec the new binary with the listening sockets
+   inherited; the new process validates config (exits on error, old keeps
+   serving), starts accepting; old stops accepting, drains, exits. Because
+   the new process inherits the old sandbox, such a restart can change
+   hosts, routes, backends and limits only; a new `listen`, `user`, or
+   static root needs a full restart (documented, and rejected with a clear
+   error rather than half-applied).
 7. **Scaling** — N driver threads with `SO_REUSEPORT`, backend connection
    pooling, conditional requests (ETag / Last-Modified), profiling.
 8. **Later, maybe** — HTTPS with a pure-Rust crypto provider, io_uring driver.
