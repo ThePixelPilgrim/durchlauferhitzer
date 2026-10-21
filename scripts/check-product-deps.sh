@@ -5,6 +5,10 @@ set -euo pipefail
 
 ALLOWED=(libc)
 
+# Capture first so a failing `cargo tree` aborts the script (set -e does not
+# see failures inside process substitution).
+tree=$(cargo tree -p "${PRODUCT_PACKAGE:-durchlauferhitzer-core}" -e normal,build --prefix none --format '{p}')
+
 bad=()
 while read -r name _; do
     [[ -z "$name" ]] && continue
@@ -14,7 +18,7 @@ while read -r name _; do
         [[ "$name" == "$a" ]] && allowed=yes
     done
     [[ "$allowed" == yes ]] || bad+=("$name")
-done < <(cargo tree -p durchlauferhitzer-core -e normal,build --prefix none --format '{p}')
+done <<<"$tree"
 
 if ((${#bad[@]} > 0)); then
     echo "Disallowed packages in the product dependency tree:" >&2

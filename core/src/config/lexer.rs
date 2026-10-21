@@ -72,7 +72,7 @@ fn is_forbidden_control(c: char) -> bool {
 }
 
 fn is_delimiter(c: char) -> bool {
-    matches!(c, ':' | ';' | '{' | '}')
+    matches!(c, ':' | ';' | '{' | '}' | '#')
 }
 
 fn error_at(c: char, pos: Pos) -> LexError {
@@ -200,5 +200,18 @@ mod tests {
                 pos: Pos { line: 1, column: 2 }
             }
         );
+    }
+
+    #[test]
+    fn hash_inside_word_starts_comment() {
+        let t = tokenize("a#b").unwrap();
+        assert_eq!(kinds(&t), vec![w("a")]);
+    }
+
+    #[test]
+    fn hash_inside_word_comment_ends_at_newline() {
+        let t = tokenize("a#b\nc").unwrap();
+        assert_eq!(kinds(&t), vec![w("a"), w("c")]);
+        assert_eq!(t[1].spacing, Spacing::Separated);
     }
 }
