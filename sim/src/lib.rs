@@ -36,6 +36,9 @@ pub enum Window {
     Unlimited,
     Bytes(usize),
     Stalled,
+    /// Accept at most this many more bytes in total, then stall (the budget
+    /// shrinks with every `Sent`).
+    Budget(usize),
 }
 
 /// Connection state as the simulated network sees it.
@@ -264,10 +267,14 @@ impl Sim {
             Window::Unlimited => usize::MAX,
             Window::Bytes(n) => n,
             Window::Stalled => 0,
+            Window::Budget(n) => n,
         };
         let n = pending.len().min(window);
         if n == 0 {
             return false;
+        }
+        if let Window::Budget(left) = c.window {
+            c.window = Window::Budget(left - n);
         }
         c.received.extend_from_slice(&pending[..n]);
         self.deliver(Event::Sent { conn, len: n });

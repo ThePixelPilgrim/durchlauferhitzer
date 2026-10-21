@@ -49,6 +49,29 @@
 //!   After `TimerFired`, every deadline at or before `now` has been handled:
 //!   `next_deadline` is `None` or later than `now`.
 //!
+//! # Deadlines
+//!
+//! Every connection state carries one deadline, set on entry:
+//!
+//! - reading a request head: `header_timeout`, a *total* deadline from
+//!   accept or from the first byte of the next request; trickling bytes do
+//!   not extend it. On expiry the core answers 408 if any bytes arrived and
+//!   closes silently otherwise;
+//! - idle between keep-alive requests: `keepalive_timeout`, then a silent
+//!   close;
+//! - writing a response: `send_idle_timeout`, reset whenever the socket
+//!   accepts bytes; on expiry the connection is closed without further
+//!   writes;
+//! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
+//!   not extended by input.
+//!
+//! # Connection limits
+//!
+//! A connection accepted while `max_connections` connections, or
+//! `max_connections_per_ip` from the same peer, are open is answered 503 and
+//! closed (with a lingering close). Refused connections do not count toward
+//! either limit.
+//!
 //! The core tolerates driver mistakes without panicking: events for unknown
 //! connections are ignored, a duplicate `Accepted` is ignored, and a
 //! `Received`/`Sent` length larger than the space offered is clamped.
@@ -57,13 +80,13 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use crate::config::Config;
-use crate::conn::{Conn, ConnState, SEND_CAPACITY, UnreadBody};
+use crate::conn::{Conn, ConnState, Counted, LINGER_TIMEOUT, SEND_CAPACITY, UnreadBody};
 use crate::http::request::{
     BodyFraming, HeadLimits, HttpError, Method, ParseStatus, Persistence, RequestHead, parse_head,
 };
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::status::Status;
-use crate::log::{Log, RejectReason, RequestSummary};
+use crate::log::{LimitKind, Log, RejectReason, RequestSummary, TimeoutKind};
 use crate::routing::Router;
 use crate::time::Instant;
 
@@ -139,6 +162,10 @@ pub struct Core {
     router: Router,
     head_limits: HeadLimits,
     conns: BTreeMap<ConnId, Conn>,
+    /// Open connections that count toward the limits.
+    counted: u32,
+    /// Counted connections per peer address; entries are removed at zero.
+    counted_per_ip: BTreeMap<IpAddr, u32>,
 }
 
 impl Core {
@@ -149,6 +176,8 @@ impl Core {
             head_limits: HeadLimits::from(&config.limits),
             config,
             conns: BTreeMap::new(),
+            counted: 0,
+            counted_per_ip: BTreeMap::new(),
         }
     }
 
@@ -164,25 +193,23 @@ impl Core {
 
     /// Process one event at time `now`, appending the resulting actions.
     pub fn handle(&mut self, now: Instant, event: Event, actions: &mut Vec<Action>) {
-        // `now` is unused until deadlines arrive in a later task.
-        let _ = now;
         match event {
-            Event::Accepted { conn, peer } => self.accepted(conn, peer, actions),
-            Event::Received { conn, len } => self.received(conn, len, actions),
+            Event::Accepted { conn, peer } => self.accepted(now, conn, peer, actions),
+            Event::Received { conn, len } => self.received(now, conn, len, actions),
             Event::ReadClosed { conn } => {
-                if self.conns.remove(&conn).is_some() {
+                if self.forget(conn).is_some() {
                     actions.push(Action::Close { conn });
                 }
             }
-            Event::Sent { conn, len } => self.sent(conn, len, actions),
+            Event::Sent { conn, len } => self.sent(now, conn, len, actions),
             Event::Failed { conn, error: _ } => {
-                if let Some(c) = self.conns.remove(&conn) {
+                if let Some(c) = self.forget(conn) {
                     match c.state {
                         // A reset while discarding input after our response is
                         // the expected end of a lingering close, not news.
-                        ConnState::Lingering => {}
+                        ConnState::Lingering { .. } => {}
                         ConnState::ReadingHead { .. }
-                        | ConnState::Idle
+                        | ConnState::Idle { .. }
                         | ConnState::Responding { .. } => {
                             actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
                         }
@@ -190,37 +217,104 @@ impl Core {
                     actions.push(Action::Close { conn });
                 }
             }
-            Event::TimerFired => {}
+            Event::TimerFired => self.timer_fired(now, actions),
         }
     }
 
-    fn accepted(&mut self, conn: ConnId, peer: IpAddr, actions: &mut Vec<Action>) {
+    /// Remove `conn` from the map and release its share of the limits.
+    fn forget(&mut self, conn: ConnId) -> Option<Conn> {
+        let c = self.conns.remove(&conn)?;
+        match c.counted {
+            Counted::Yes => {
+                self.counted = self.counted.saturating_sub(1);
+                if let Some(n) = self.counted_per_ip.get_mut(&c.peer) {
+                    *n = n.saturating_sub(1);
+                    if *n == 0 {
+                        self.counted_per_ip.remove(&c.peer);
+                    }
+                }
+            }
+            Counted::No => {}
+        }
+        Some(c)
+    }
+
+    fn accepted(&mut self, now: Instant, conn: ConnId, peer: IpAddr, actions: &mut Vec<Action>) {
         if self.conns.contains_key(&conn) {
             return;
         }
+        let limits = &self.config.limits;
+        let per_ip = self.counted_per_ip.get(&peer).copied().unwrap_or(0);
+        let refusal = if self.counted >= limits.max_connections {
+            Some(LimitKind::Connections)
+        } else if per_ip >= limits.max_connections_per_ip {
+            Some(LimitKind::ConnectionsPerIp)
+        } else {
+            None
+        };
         let capacity = self.new_recv_capacity();
-        self.conns.insert(conn, Conn::new(peer, capacity));
+        let c = match refusal {
+            None => {
+                self.counted = self.counted.saturating_add(1);
+                self.counted_per_ip.insert(peer, per_ip.saturating_add(1));
+                let state = ConnState::ReadingHead {
+                    buffered: 0,
+                    scanned: 0,
+                    deadline: now.saturating_add(limits.header_timeout),
+                };
+                Conn::new(peer, Counted::Yes, state, capacity)
+            }
+            Some(kind) => {
+                let state = ConnState::Responding {
+                    persistence: Persistence::Close,
+                    unread_body: UnreadBody::None,
+                    buffered: 0,
+                    deadline: now.saturating_add(limits.send_idle_timeout),
+                };
+                let mut c = Conn::new(peer, Counted::No, state, capacity);
+                render_fixed(
+                    Status::ServiceUnavailable,
+                    Persistence::Close,
+                    BodyMode::Full,
+                    &mut c.send,
+                );
+                actions.push(Action::Log(Log::Rejected {
+                    conn,
+                    peer,
+                    reason: RejectReason::Limit(kind),
+                }));
+                c
+            }
+        };
+        self.conns.insert(conn, c);
         self.sync_interest(conn, actions);
     }
 
-    fn received(&mut self, conn: ConnId, len: usize, actions: &mut Vec<Action>) {
+    fn received(&mut self, now: Instant, conn: ConnId, len: usize, actions: &mut Vec<Action>) {
+        let header_timeout = self.config.limits.header_timeout;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
         let capacity = c.recv.len();
         // A length beyond the spare space is a driver bug: clamp.
         match c.state {
-            ConnState::ReadingHead { buffered, scanned } => {
+            ConnState::ReadingHead {
+                buffered,
+                scanned,
+                deadline,
+            } => {
                 let added = len.min(capacity.saturating_sub(buffered));
                 if added == 0 {
                     return;
                 }
+                // The header deadline is total: new bytes do not extend it.
                 c.state = ConnState::ReadingHead {
                     buffered: buffered.saturating_add(added),
                     scanned,
+                    deadline,
                 };
             }
-            ConnState::Idle => {
+            ConnState::Idle { .. } => {
                 let added = len.min(capacity);
                 if added == 0 {
                     return;
@@ -228,18 +322,21 @@ impl Core {
                 c.state = ConnState::ReadingHead {
                     buffered: added,
                     scanned: 0,
+                    deadline: now.saturating_add(header_timeout),
                 };
             }
-            // Input after our response: discarded, the buffer is reused.
-            ConnState::Lingering => return,
+            // Input after our response: discarded, the buffer is reused. It
+            // does not extend the linger deadline.
+            ConnState::Lingering { .. } => return,
             // Not reading: nothing was offered, so nothing can have arrived.
             ConnState::Responding { .. } => return,
         }
-        self.try_parse(conn, actions);
+        self.try_parse(now, conn, actions);
         self.sync_interest(conn, actions);
     }
 
-    fn sent(&mut self, conn: ConnId, len: usize, actions: &mut Vec<Action>) {
+    fn sent(&mut self, now: Instant, conn: ConnId, len: usize, actions: &mut Vec<Action>) {
+        let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -249,39 +346,133 @@ impl Core {
             persistence,
             unread_body,
             buffered,
+            deadline,
         } = c.state
         {
-            if c.send.is_empty() {
-                c.state = match (persistence, unread_body) {
+            c.state = if !c.send.is_empty() {
+                // Progress resets the send idle deadline.
+                let deadline = if len > 0 {
+                    now.saturating_add(limits.send_idle_timeout)
+                } else {
+                    deadline
+                };
+                ConnState::Responding {
+                    persistence,
+                    unread_body,
+                    buffered,
+                    deadline,
+                }
+            } else {
+                match (persistence, unread_body) {
                     (Persistence::KeepAlive, UnreadBody::None) => {
                         if buffered > 0 {
                             ConnState::ReadingHead {
                                 buffered,
                                 scanned: 0,
+                                deadline: now.saturating_add(limits.header_timeout),
                             }
                         } else {
-                            ConnState::Idle
+                            ConnState::Idle {
+                                deadline: now.saturating_add(limits.keepalive_timeout),
+                            }
                         }
                     }
                     (Persistence::Close, UnreadBody::None | UnreadBody::Pending)
                     | (Persistence::KeepAlive, UnreadBody::Pending) => {
                         actions.push(Action::ShutdownWrite { conn });
-                        ConnState::Lingering
+                        ConnState::Lingering {
+                            deadline: now.saturating_add(LINGER_TIMEOUT),
+                        }
                     }
-                };
+                }
+            };
+        }
+        self.try_parse(now, conn, actions);
+        self.sync_interest(conn, actions);
+    }
+
+    /// Handle every connection whose deadline is at or before `now`, in
+    /// `ConnId` order, until none is left.
+    fn timer_fired(&mut self, now: Instant, actions: &mut Vec<Action>) {
+        // Each pass closes a connection or moves it from reading a head to
+        // responding (which can only expire once more), so this terminates.
+        loop {
+            let expired: Vec<ConnId> = self
+                .conns
+                .iter()
+                .filter(|(_, c)| c.state.deadline() <= now)
+                .map(|(id, _)| *id)
+                .collect();
+            if expired.is_empty() {
+                return;
+            }
+            for conn in expired {
+                self.expire(now, conn, actions);
             }
         }
-        self.try_parse(conn, actions);
-        self.sync_interest(conn, actions);
+    }
+
+    /// `conn`'s deadline has passed.
+    fn expire(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
+        let send_idle_timeout = self.config.limits.send_idle_timeout;
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        match c.state {
+            // Part of a head arrived, too slowly: answer 408.
+            ConnState::ReadingHead { buffered, .. } if buffered > 0 => {
+                render_fixed(
+                    Status::RequestTimeout,
+                    Persistence::Close,
+                    BodyMode::Full,
+                    &mut c.send,
+                );
+                actions.push(Action::Log(Log::Rejected {
+                    conn,
+                    peer: c.peer,
+                    reason: RejectReason::Timeout(TimeoutKind::Header),
+                }));
+                c.state = ConnState::Responding {
+                    persistence: Persistence::Close,
+                    unread_body: UnreadBody::None,
+                    buffered: 0,
+                    deadline: now.saturating_add(send_idle_timeout),
+                };
+                self.sync_interest(conn, actions);
+            }
+            // Nothing arrived, or nothing is left to say: close silently.
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Lingering { .. } => {
+                self.forget(conn);
+                actions.push(Action::Close { conn });
+            }
+            // The client stopped reading: close without further writes.
+            ConnState::Responding { .. } => {
+                actions.push(Action::Log(Log::Rejected {
+                    conn,
+                    peer: c.peer,
+                    reason: RejectReason::Timeout(TimeoutKind::Send),
+                }));
+                self.forget(conn);
+                actions.push(Action::Close { conn });
+            }
+        }
     }
 
     /// In `ReadingHead`, parse the buffered bytes if anything new can come of
     /// it: an LF beyond `scanned`, or a full buffer (so a limit fires).
-    fn try_parse(&mut self, conn: ConnId, actions: &mut Vec<Action>) {
+    fn try_parse(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
+        let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        let ConnState::ReadingHead { buffered, scanned } = c.state else {
+        let ConnState::ReadingHead {
+            buffered,
+            scanned,
+            deadline,
+        } = c.state
+        else {
             return;
         };
         let capacity = c.recv.len();
@@ -290,6 +481,7 @@ impl Core {
         c.state = ConnState::ReadingHead {
             buffered,
             scanned: buffered,
+            deadline,
         };
         let full = buffered >= capacity;
         if !new_lf && !full {
@@ -310,7 +502,15 @@ impl Core {
                 if consumed <= buffered {
                     c.recv.copy_within(consumed..buffered, 0);
                 }
-                respond(c, &self.router, conn, head, leftover, actions);
+                respond(
+                    c,
+                    &self.router,
+                    conn,
+                    head,
+                    leftover,
+                    send_deadline,
+                    actions,
+                );
             }
             Err(error) => {
                 render_fixed(
@@ -328,6 +528,7 @@ impl Core {
                     persistence: Persistence::Close,
                     unread_body: UnreadBody::None,
                     buffered: 0,
+                    deadline: send_deadline,
                 };
             }
         }
@@ -381,20 +582,22 @@ impl Core {
     }
 
     /// The earliest instant at which the core wants [`Event::TimerFired`],
-    /// or `None` if it has no deadline. Always `None` for now.
+    /// or `None` if it has no connections (every connection has a deadline).
     pub fn next_deadline(&self) -> Option<Instant> {
-        None
+        self.conns.values().map(|c| c.state.deadline()).min()
     }
 }
 
-/// Answer a complete request head on `c`, which then responds. `leftover`
-/// bytes at the front of `c.recv` wait for the next request.
+/// Answer a complete request head on `c`, which then responds until
+/// `send_deadline` (unless the socket makes progress). `leftover` bytes at
+/// the front of `c.recv` wait for the next request.
 fn respond(
     c: &mut Conn,
     router: &Router,
     conn: ConnId,
     head: RequestHead,
     leftover: usize,
+    send_deadline: Instant,
     actions: &mut Vec<Action>,
 ) {
     // No handler exists yet in this stage: a matched route is answered 501
@@ -431,6 +634,7 @@ fn respond(
         persistence,
         unread_body,
         buffered: leftover,
+        deadline: send_deadline,
     };
 }
 
@@ -534,6 +738,42 @@ mod tests {
         assert!(actions.is_empty());
         assert!(core.recv_buffer(other).is_empty());
         assert!(core.send_buffer(other).is_empty());
+        // Only conn 1 remains, waiting for its head (default 10 s).
+        assert_eq!(
+            core.next_deadline(),
+            Some(now.saturating_add(std::time::Duration::from_secs(10)))
+        );
+    }
+
+    #[test]
+    fn limit_counts_return_to_zero_on_every_close_path() {
+        let mut core = core();
+        let mut actions = Vec::new();
+        let now = Instant::from_nanos(0);
+        let other = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+        for (id, peer) in [(1, PEER), (2, PEER), (3, other)] {
+            let conn = ConnId(id);
+            core.handle(now, Event::Accepted { conn, peer }, &mut actions);
+        }
+        assert_eq!(core.counted, 3);
+        assert_eq!(core.counted_per_ip.get(&PEER), Some(&2));
+        core.handle(now, Event::ReadClosed { conn: ConnId(1) }, &mut actions);
+        let error = ConnError::Reset;
+        core.handle(
+            now,
+            Event::Failed {
+                conn: ConnId(2),
+                error,
+            },
+            &mut actions,
+        );
+        assert_eq!(core.counted_per_ip.get(&PEER), None);
+        // conn 3 sent nothing: it times out silently at the header deadline.
+        let later = now.saturating_add(std::time::Duration::from_secs(10));
+        core.handle(later, Event::TimerFired, &mut actions);
+        assert_eq!(core.counted, 0);
+        assert!(core.counted_per_ip.is_empty());
+        assert!(core.conns.is_empty());
         assert_eq!(core.next_deadline(), None);
     }
 
