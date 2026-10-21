@@ -327,6 +327,17 @@ impl Sim {
         self.conn(conn).state
     }
 
+    /// Every connection id the sim has handed out, in order.
+    pub fn conn_ids(&self) -> Vec<ConnId> {
+        self.conns.keys().copied().collect()
+    }
+
+    /// Whether the core still holds state for `conn` (it reports buffer
+    /// capacity only for connections it knows).
+    pub fn core_knows(&self, conn: ConnId) -> bool {
+        self.core.send_capacity(conn) > 0 || self.core.recv_capacity(conn) > 0
+    }
+
     /// Every log entry the core has emitted, in order.
     pub fn logs(&self) -> &[Log] {
         &self.logs

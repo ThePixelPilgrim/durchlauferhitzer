@@ -11,3 +11,6 @@ workspace = true
 
 [dependencies]
 durchlauferhitzer-core = { path = "../core" }
+
+[dev-dependencies]
+fastrand = { version = "2.5.0", default-features = false }
