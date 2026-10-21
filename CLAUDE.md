@@ -12,6 +12,15 @@
   execution is not allowed; use subagent-driven execution with Opus/Sonnet
   implementers.
 
+## Execution (mandatory)
+
+- Implementation plans are executed subagent-driven
+  (`subagent-driven-development`), for every model. The only exception: a
+  change so small that doing it inline is cheaper than dispatching an
+  implementer and reviewer.
+- Work one plan task at a time (or two tightly linked tasks, if that is
+  cheaper), then stop and report before starting the next.
+
 ## Rust only (mandatory)
 
 - No C code in this project, ever — neither in the repo nor in the
