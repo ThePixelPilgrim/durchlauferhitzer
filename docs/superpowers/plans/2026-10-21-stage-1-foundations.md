@@ -150,13 +150,31 @@ Rules: `"` starts a string that ends at the next unescaped `"`. Inside, `\"` →
 
 ---
 
+### Task 1c: Drop the colon token and spacing (amendment)
+
+The grammar changed after Tasks 1/1b: settings are `key value…;` with no colon, and `:` is an ordinary word character (no splitting and re-gluing). This task removes what that made obsolete.
+
+**Files:**
+- Modify: `core/src/config/lexer.rs`
+
+**Interfaces:**
+- Produces (final lexer API): `pub enum TokenKind { Word(String), Quoted(String), Semicolon, OpenBrace, CloseBrace }`, `pub struct Token { pub kind: TokenKind, pub pos: Pos }`, `LexErrorKind`, `LexError`, `Pos`, `tokenize` unchanged. `TokenKind::Colon`, `Spacing` and `Token::spacing` are removed.
+
+- [ ] **Step 1: Change the tests first** — `tokenizes_setting_with_positions` becomes `tokenize("listen 127.0.0.1:8080 [::1]:80;")` → `[w("listen"), w("127.0.0.1:8080"), w("[::1]:80"), Semicolon]` with `t[1].pos == Pos { line: 1, column: 8 }`; `quoted_string_keeps_special_characters` input becomes `r#"a "x#y; {z}";"#` → `[w("a"), Quoted("x#y; {z}"), Semicolon]`; `quote_ends_word` keeps `[w("ab"), Quoted("c")]` without spacing assertions; `hash_inside_word_comment_ends_at_newline` drops its spacing assertion; delete every other `Spacing` assertion.
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p durchlauferhitzer-core config::lexer` → FAIL (colon still split / spacing field present).
+- [ ] **Step 3: Implement** — remove `Colon`, `Spacing`, `Token::spacing`; `:` is no longer a delimiter.
+- [ ] **Step 4: Run all checks** — `cargo test -p durchlauferhitzer-core config::lexer && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check && scripts/check-product-deps.sh` → PASS.
+- [ ] **Step 5: Commit** — `"Simplify config lexer: colon is an ordinary character"`
+
+---
+
 ### Task 2: Config syntax tree
 
 **Files:**
 - Create: `core/src/config/syntax.rs`
 
 **Interfaces:**
-- Consumes: `tokenize`, `Token`, `TokenKind`, `Spacing`, `Pos` (Task 1)
+- Consumes: `tokenize`, `Token`, `TokenKind`, `Pos` (Tasks 1, 1b, 1c)
 - Produces:
   - `pub struct Setting { pub key: String, pub values: Vec<String>, pub pos: Pos }`
   - `pub struct Block { pub name: String, pub args: Vec<String>, pub items: Vec<Item>, pub pos: Pos }`
@@ -165,9 +183,9 @@ Rules: `"` starts a string that ends at the next unescaped `"`. Inside, `\"` →
   - `pub struct SyntaxError { pub kind: SyntaxErrorKind, pub pos: Pos }`
   - `pub fn parse(text: &str) -> Result<Vec<Item>, SyntaxError>`
 
-Grammar from the spec. A setting is `Word Colon value+ Semicolon`; a value is a run of `Word`/`Colon` tokens joined with `Spacing::Joined` (so `127.0.0.1:8080` and `[::1]:8080` are single values). A `Quoted` token is a complete value (or block arg) on its own; a `Quoted` token `Joined` to a neighbouring `Word`/`Colon`/`Quoted` → `UnexpectedToken`. Block names and setting keys must be `Word`s. A block is `Word Word* OpenBrace Item* CloseBrace`. `EmptyValue` for `key: ;`. `UnclosedBlock` reports the block's opening position. Nesting depth is capped at 8 (`UnexpectedToken` beyond) so hostile configs cannot recurse deeply.
+Grammar from the spec. A setting is `Word value+ Semicolon`; a block is `Word arg* OpenBrace Item* CloseBrace`; a value or arg is one `Word` or `Quoted` token. Keys and block names must be `Word`s. Which form an item is gets decided by the first `Semicolon` or `OpenBrace` after its name. `EmptyValue` for `key;`. `UnclosedBlock` reports the block's opening position. Nesting depth is capped at 8 (`UnexpectedToken` beyond) so hostile configs cannot recurse deeply.
 
-- [ ] **Step 1: Write the failing tests** in `syntax.rs`: `parses_nested_blocks` (the spec's example config: 3 top-level items; `host` block args `["example.com", "www.example.com"]`; its second `path` block has args `["/api/"]` and settings `proxy` = `["127.0.0.1:3000"]`, `strip_prefix` = `["/api"]`); `joins_adjacent_value_tokens` (`listen: [::1]:8080 127.0.0.1:80;` → values `["[::1]:8080", "127.0.0.1:80"]`); `reports_unclosed_block_at_its_start` (`"a {\n b: c;\n"` → `UnclosedBlock` at 1:1); `rejects_missing_semicolon` (`"a: b }"` → `UnexpectedToken` at 1:6); `rejects_empty_value`; `rejects_nesting_deeper_than_8`.
+- [ ] **Step 1: Write the failing tests** in `syntax.rs`: `parses_nested_blocks` (the spec's example config: 3 top-level items; `host` block args `["example.com", "www.example.com"]`; its second `path` block has args `["/api/"]` and settings `proxy` = `["127.0.0.1:3000"]`, `strip_prefix` = `["/api"]`); `multiple_values` (`listen [::1]:8080 127.0.0.1:80;` → values `["[::1]:8080", "127.0.0.1:80"]`); `quoted_values` (`a "x y" z;` → values `["x y", "z"]`); `rejects_quoted_key` (`"a" b;` → `UnexpectedToken` at 1:1); `reports_unclosed_block_at_its_start` (`"a {\n b c;\n"` → `UnclosedBlock` at 1:1); `rejects_missing_semicolon` (`"a { b c }"` → `UnexpectedToken` at 1:9); `rejects_empty_value`; `rejects_nesting_deeper_than_8`.
 - [ ] **Step 2: Run to verify they fail** — `cargo test -p durchlauferhitzer-core config::syntax` → FAIL.
 - [ ] **Step 3: Implement `parse`** as a recursive-descent parser with an explicit depth counter.
 - [ ] **Step 4: Run to verify they pass** — same command → PASS; clippy clean.
@@ -364,10 +382,10 @@ The sim pumps until no progress: for each connection with `Interest::Read` and q
 - [ ] **Step 1: Write the failing tests** in `sim/tests/routing.rs` using this config:
 
 ```
-listen: 127.0.0.1:8080;
+listen 127.0.0.1:8080;
 host example.test www.example.test {
-  path / { static: /srv/www; }
-  path /api/ { proxy: 127.0.0.1:3000; strip_prefix: /api; max_request_body: 1MiB; max_response_body: unlimited; }
+  path / { static /srv/www; }
+  path /api/ { proxy 127.0.0.1:3000; strip_prefix /api; max_request_body 1MiB; max_response_body unlimited; }
 }
 ```
 
@@ -396,7 +414,7 @@ host example.test www.example.test {
 
 Behavior: header deadline expiry with `bytes_seen > 0` → 408 + close (`Rejected { reason: Timeout(Header) }`); with `bytes_seen == 0` → silent `Close`. `Idle` expiry → silent `Close`. Send idle expiry → `Close` without further writes (`Rejected { reason: Timeout(Send) }`). On `Accepted` when open connections ≥ `max_connections` or this IP's open connections ≥ `max_connections_per_ip`: answer 503 with close and linger (`Rejected { reason: Limit(..) }`); these refused connections do not count toward either limit. Counts drop when a connection is closed.
 
-- [ ] **Step 1: Write the failing tests** (config with `limits { header_timeout: 10s; keepalive_timeout: 60s; send_idle_timeout: 30s; max_connections: 4; max_connections_per_ip: 2; }`):
+- [ ] **Step 1: Write the failing tests** (config with `limits { header_timeout 10s; keepalive_timeout 60s; send_idle_timeout 30s; max_connections 4; max_connections_per_ip 2; }`):
   - `trickling_head_times_out_at_total_deadline` → send one byte every 2 s; at 10 s total → 408 + close (trickling does not extend it)
   - `silent_idle_connection_is_closed_without_response` → connect, advance 10 s → `Closed`, nothing received
   - `keepalive_idle_closes_after_60s` (59 s still `Open`, 60 s `Closed`)

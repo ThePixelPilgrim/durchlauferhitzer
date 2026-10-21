@@ -197,7 +197,7 @@ reject.
 
 - Any method token is forwarded. One fresh backend connection per request,
   `Connection: close` to the backend (pooling is later).
-- `strip_prefix: X;` removes `X` from the start of the path if present; an
+- `strip_prefix X;` removes `X` from the start of the path if present; an
   empty result becomes `/`; the query string is unchanged.
 - Strip hop-by-hop headers in both directions (`Connection` and the headers
   it lists, `Keep-Alive`, `Proxy-*`, `TE`, `Trailer`, `Upgrade`), and append
@@ -221,36 +221,42 @@ reject.
 
 ## Configuration
 
-Hand-rolled parser. Grammar:
+Hand-rolled parser. SCSS-like in spirit (nested blocks, `;`-terminated
+settings), not in syntax: wherever plain SCSS syntax would need clever
+disambiguation, the grammar is simpler instead. Every character has one
+meaning everywhere; no token is split and re-glued.
 
 ```
 file      = { item }
 item      = setting | block
-setting   = key ":" value { value } ";"
+setting   = key value { value } ";"
 block     = name { arg } "{" { item } "}"
+word      = run of non-whitespace excluding ";" "{" "}" "#" '"'
+string    = '"' { char | '\"' | '\\' } '"'   (one line)
 comment   = "#" to end of line
-tokens    = runs of non-whitespace excluding ":" ";" "{" "}" "#" '"'
-string    = '"' { char | '\"' | '\\' } '"'   (one line; a complete value)
 ```
+
+`key`, `name` are words; `value`, `arg` are words or strings. `:` is an
+ordinary character, so `127.0.0.1:8080` and `[::1]:8080` are plain words.
 
 Example:
 
 ```scss
-listen: 127.0.0.1:8080;
-user: www-data;            # drop privileges to this user after binding
+listen 127.0.0.1:8080;
+user www-data;            # drop privileges to this user after binding
 
 limits {
-  max_connections: 1024;
-  header_timeout: 10s;
+  max_connections 1024;
+  header_timeout 10s;
 }
 
 host example.com www.example.com {
-  path / { static: /srv/www; }
+  path / { static /srv/www; }
   path /api/ {
-    proxy: 127.0.0.1:3000;
-    strip_prefix: /api;
-    max_request_body: 10MiB;
-    max_response_body: unlimited;
+    proxy 127.0.0.1:3000;
+    strip_prefix /api;
+    max_request_body 10MiB;
+    max_response_body unlimited;
   }
 }
 ```
@@ -323,7 +329,7 @@ project working and tested.
 8. **Backend-directed file serving** — a backend response header (like
    nginx's `X-Accel-Redirect`) asks the proxy to serve a file via
    `sendfile`. Only honored on proxy routes that name an explicit root
-   (`internal_files: <dir>;`); the path goes through the same validation and
+   (`internal_files <dir>;`); the path goes through the same validation and
    `openat2` jail as static routes; the header is never accepted from
    clients and always stripped; backend status and headers such as
    `Content-Type` / `Content-Disposition` are kept, its body discarded.
