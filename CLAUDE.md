@@ -27,8 +27,11 @@
 
 ## Minimal dependencies (mandatory)
 
-- Use external crates as little as possible, to shrink the supply-chain
-  attack surface. Default to the Rust standard library and hand-rolled
+- This applies to the shipped product (`[dependencies]` of anything that
+  ends up in the binary). Test-only tooling (`[dev-dependencies]`, fuzz
+  targets, test harness crates) may use established helper crates freely.
+- Use external crates as little as possible in the product, to shrink the
+  supply-chain attack surface. Default to the Rust standard library and hand-rolled
   code; a new dependency needs a concrete reason the std library cannot
   reasonably cover.
 - Every dependency that is added must be justified in its commit message,

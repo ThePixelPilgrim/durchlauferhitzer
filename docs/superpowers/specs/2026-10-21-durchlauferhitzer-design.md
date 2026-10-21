@@ -57,8 +57,10 @@ These would make the project a failure even if everything "works":
 
 - Rust only; glibc is the only C allowed. No `cc`/`cmake` build scripts, no
   `*-sys` crates except `libc`, no `ring`/`aws-lc-rs`/OpenSSL.
-- Minimal external crates. Planned total: `libc` (driver only). Test
-  helpers (PRNG, simulation) are hand-rolled.
+- Minimal external crates in the shipped product. Planned total: `libc`
+  (driver only). Test-only tooling may use established crates freely
+  (e.g. property testing, fuzzing, seeded randomness); the simulation
+  harness itself is ours, since it drives our sans-IO core.
 - Strict red/green TDD: every behavior starts as a failing test.
 - Everything runs on a simulated network/clock/file system in tests, with
   fault injection (drops, resets, stalls, byte-by-byte delivery, slow disk,
@@ -107,7 +109,7 @@ These would make the project a failure even if everything "works":
 - **Simulation driver** (tests): virtual network with per-connection fault
   scripts, virtual clock advanced explicitly, in-memory file system (with
   symlinks, files that change or vanish, slow reads). Records every event and
-  action so failures print the exact transition sequence. A hand-rolled
+  action so failures print the exact transition sequence. A
   seeded PRNG drives randomized fault schedules; the seed is printed on
   failure for replay.
 - **epoll driver** (production): non-blocking sockets on `epoll`; timers via
