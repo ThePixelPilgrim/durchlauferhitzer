@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::http::target::validate_path;
+
 use super::lexer::Pos;
 use super::model::{
     BackendAddr, BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, ProxyRoute, Route,
@@ -262,7 +264,7 @@ struct Slot<T> {
 
 fn parse_route(block: &Block) -> Result<Route, ConfigError> {
     let prefix = match block.args.as_slice() {
-        [arg] if arg.starts_with('/') => arg.clone(),
+        [arg] if validate_path(arg).is_ok() => arg.clone(),
         [arg] => return Err(invalid_value("path", arg, block.pos)),
         _ => {
             return fail(
@@ -824,6 +826,18 @@ host a { path / { static /s; } }
             err(&in_host("  path x { static /s; }")),
             (invalid("path", "x"), 3, 3)
         );
+    }
+
+    #[test]
+    fn path_rejects_hostile_targets() {
+        for bad in ["/a/../", "/a//b", "/%2e", "/a b", "/\u{e4}"] {
+            assert_eq!(
+                err(&in_host(&format!("  path \"{bad}\" {{ static /s; }}"))),
+                (invalid("path", bad), 3, 3),
+                "{bad}"
+            );
+        }
+        ok(&in_host("  path /api/ { static /s; }"));
     }
 
     #[test]
