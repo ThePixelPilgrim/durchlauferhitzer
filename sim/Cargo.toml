@@ -1,0 +1,13 @@
+[package]
+name = "durchlauferhitzer-sim"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Test-only simulation driver for the durchlauferhitzer core."
+
+[lints]
+workspace = true
+
+[dependencies]
+durchlauferhitzer-core = { path = "../core" }
