@@ -395,3 +395,47 @@ fn unread_body_linger_ends_on_client_eof() {
     sim.run_until_idle();
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
 }
+
+#[test]
+fn refused_connections_beyond_the_refused_cap_are_closed_at_once() {
+    let mut sim = Sim::new(CONFIG);
+    for i in 1..=4 {
+        sim.connect(peer(i));
+    }
+    // max_connections (4) refused connections may linger at once.
+    for i in 5..=8 {
+        let c = sim.connect(peer(i));
+        assert_refused(&mut sim, c, peer(i), LimitKind::Connections);
+    }
+    let over = sim.connect(peer(9));
+    assert_eq!(sim.state(over), SimConnState::Closed, "{}", sim.trace());
+    sim.run_until_idle();
+    assert!(sim.take_received(over).is_empty(), "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: over,
+            peer: peer(9),
+            reason: RejectReason::Limit(LimitKind::Connections),
+        }),
+        "{}",
+        sim.trace()
+    );
+    // Once the lingering ones are gone, refusals get their 503 again.
+    sim.advance(secs(2));
+    let next = sim.connect(peer(10));
+    assert_refused(&mut sim, next, peer(10), LimitKind::Connections);
+}
+
+#[test]
+fn ipv4_mapped_peer_shares_the_ipv4_slot() {
+    let mut sim = Sim::new(CONFIG);
+    let v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let mapped = IpAddr::V6(Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped());
+    let a = sim.connect(mapped);
+    let b = sim.connect(v4);
+    assert_served(&mut sim, a);
+    assert_served(&mut sim, b);
+    let c = sim.connect(mapped);
+    assert_refused(&mut sim, c, mapped, LimitKind::ConnectionsPerIp);
+}

@@ -75,9 +75,11 @@ struct SimConn {
     window: Window,
     interest: Interest,
     state: SimConnState,
-    /// Buffer capacities the core reported right after `Accepted`; they must
-    /// not change while the connection is open.
-    recv_capacity: usize,
+    /// Send buffer capacity the core reported right after `Accepted`; it
+    /// must not change while the connection is open. (The receive capacity
+    /// may change with the connection's state, e.g. on entering a lingering
+    /// close, so it is checked against the core's current report instead.)
+    /// 0 until recorded.
     send_capacity: usize,
 }
 
@@ -133,16 +135,12 @@ impl Sim {
                 window: Window::Unlimited,
                 interest: Interest::None,
                 state: SimConnState::Open,
-                recv_capacity: 0,
                 send_capacity: 0,
             },
         );
         self.deliver(Event::Accepted { conn, peer });
-        let recv_capacity = self.core.recv_capacity(conn);
         let send_capacity = self.core.send_capacity(conn);
-        let c = self.conn_mut(conn);
-        c.recv_capacity = recv_capacity;
-        c.send_capacity = send_capacity;
+        self.conn_mut(conn).send_capacity = send_capacity;
         conn
     }
 
@@ -419,25 +417,30 @@ impl Sim {
     }
 
     fn check_buffers(&mut self) {
-        let open: Vec<(ConnId, usize, usize)> = self
+        let open: Vec<(ConnId, usize, Interest)> = self
             .conns
             .iter()
-            .filter(|(_, c)| c.state != SimConnState::Closed && c.recv_capacity > 0)
-            .map(|(id, c)| (*id, c.recv_capacity, c.send_capacity))
+            .filter(|(_, c)| c.state != SimConnState::Closed && c.send_capacity > 0)
+            .map(|(id, c)| (*id, c.send_capacity, c.interest))
             .collect();
-        for (conn, recv_cap, send_cap) in open {
-            if self.core.recv_capacity(conn) != recv_cap
-                || self.core.send_capacity(conn) != send_cap
-            {
+        for (conn, send_cap, interest) in open {
+            if self.core.send_capacity(conn) != send_cap {
                 self.violation(&format!(
-                    "conn={} buffer capacities changed while open",
+                    "conn={} send buffer capacity changed while open",
                     conn.0
                 ));
             }
+            let recv_cap = self.core.recv_capacity(conn);
             let recv = self.core.recv_buffer(conn).len();
             if recv > recv_cap {
                 self.violation(&format!(
                     "conn={} recv_buffer {recv} bytes exceeds capacity {recv_cap}",
+                    conn.0
+                ));
+            }
+            if interest == Interest::Read && recv == 0 {
+                self.violation(&format!(
+                    "conn={} wants to read but recv_buffer is empty",
                     conn.0
                 ));
             }

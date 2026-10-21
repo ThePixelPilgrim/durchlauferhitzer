@@ -15,11 +15,17 @@ pub(crate) const SEND_CAPACITY: usize = 1024;
 /// socket is closed. Fixed on entry into `Lingering`; input does not extend it.
 pub(crate) const LINGER_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Size of the one scratch buffer the core shares among all lingering
+/// connections: they discard their input into it, so none keeps its own
+/// receive buffer.
+pub(crate) const LINGER_SCRATCH: usize = 4096;
+
 /// Whether a connection counts toward the connection limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Counted {
     Yes,
-    /// Refused with 503: kept only to deliver the answer and linger.
+    /// Refused with 503: kept only to deliver the answer and linger. It has
+    /// no receive buffer of its own.
     No,
 }
 
@@ -82,7 +88,8 @@ pub(crate) struct Conn {
     pub(crate) state: ConnState,
     /// The interest last sent to the driver.
     pub(crate) interest: Interest,
-    /// Fixed-size receive buffer, allocated once on accept.
+    /// Fixed-size receive buffer, allocated once on accept (empty for a
+    /// refused connection) and dropped on entry into `Lingering`.
     pub(crate) recv: Box<[u8]>,
     /// Bytes waiting to be written, at most `SEND_CAPACITY`.
     pub(crate) send: Vec<u8>,
@@ -105,14 +112,16 @@ impl Conn {
         }
     }
 
-    /// Spare space the driver may read into; empty when not reading or full.
+    /// Spare space of the connection's own buffer the driver may read into;
+    /// empty when not reading or full. A lingering connection has no buffer
+    /// of its own: it reads into the core's shared scratch buffer instead.
     pub(crate) fn recv_spare(&mut self) -> &mut [u8] {
         match self.state {
             ConnState::ReadingHead { buffered, .. } => {
                 self.recv.get_mut(buffered..).unwrap_or_default()
             }
-            ConnState::Idle { .. } | ConnState::Lingering { .. } => &mut self.recv,
-            ConnState::Responding { .. } => &mut [],
+            ConnState::Idle { .. } => &mut self.recv,
+            ConnState::Responding { .. } | ConnState::Lingering { .. } => &mut [],
         }
     }
 

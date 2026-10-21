@@ -70,7 +70,20 @@
 //! A connection accepted while `max_connections` connections, or
 //! `max_connections_per_ip` from the same peer, are open is answered 503 and
 //! closed (with a lingering close). Refused connections do not count toward
-//! either limit.
+//! either limit. Peers are counted by their canonical address, so an
+//! IPv4-mapped IPv6 peer shares the slot of its IPv4 address.
+//!
+//! Resource policy: memory stays bounded by the limits even under a flood of
+//! refused connections.
+//!
+//! - A refused connection gets no receive buffer, only the send buffer that
+//!   holds its 503.
+//! - At most `max_connections` refused connections are kept at once; beyond
+//!   that a new one is logged as rejected and closed at once, with nothing
+//!   written.
+//! - A connection entering the lingering close drops its own receive buffer;
+//!   all lingering connections discard their input into one shared scratch
+//!   buffer of [`LINGER_SCRATCH`] bytes, whose contents are never inspected.
 //!
 //! The core tolerates driver mistakes without panicking: events for unknown
 //! connections are ignored, a duplicate `Accepted` is ignored, and a
@@ -80,7 +93,9 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use crate::config::Config;
-use crate::conn::{Conn, ConnState, Counted, LINGER_TIMEOUT, SEND_CAPACITY, UnreadBody};
+use crate::conn::{
+    Conn, ConnState, Counted, LINGER_SCRATCH, LINGER_TIMEOUT, SEND_CAPACITY, UnreadBody,
+};
 use crate::http::request::{
     BodyFraming, HeadLimits, HttpError, Method, ParseStatus, Persistence, RequestHead, parse_head,
 };
@@ -164,8 +179,13 @@ pub struct Core {
     conns: BTreeMap<ConnId, Conn>,
     /// Open connections that count toward the limits.
     counted: u32,
-    /// Counted connections per peer address; entries are removed at zero.
+    /// Counted connections per canonical peer address; entries are removed
+    /// at zero.
     counted_per_ip: BTreeMap<IpAddr, u32>,
+    /// Refused connections not yet closed; at most `max_connections`.
+    refused: u32,
+    /// Where every lingering connection discards its input.
+    scratch: Box<[u8]>,
 }
 
 impl Core {
@@ -178,6 +198,8 @@ impl Core {
             conns: BTreeMap::new(),
             counted: 0,
             counted_per_ip: BTreeMap::new(),
+            refused: 0,
+            scratch: vec![0; LINGER_SCRATCH].into_boxed_slice(),
         }
     }
 
@@ -227,14 +249,15 @@ impl Core {
         match c.counted {
             Counted::Yes => {
                 self.counted = self.counted.saturating_sub(1);
-                if let Some(n) = self.counted_per_ip.get_mut(&c.peer) {
+                let peer = c.peer.to_canonical();
+                if let Some(n) = self.counted_per_ip.get_mut(&peer) {
                     *n = n.saturating_sub(1);
                     if *n == 0 {
-                        self.counted_per_ip.remove(&c.peer);
+                        self.counted_per_ip.remove(&peer);
                     }
                 }
             }
-            Counted::No => {}
+            Counted::No => self.refused = self.refused.saturating_sub(1),
         }
         Some(c)
     }
@@ -244,7 +267,8 @@ impl Core {
             return;
         }
         let limits = &self.config.limits;
-        let per_ip = self.counted_per_ip.get(&peer).copied().unwrap_or(0);
+        let canonical = peer.to_canonical();
+        let per_ip = self.counted_per_ip.get(&canonical).copied().unwrap_or(0);
         let refusal = if self.counted >= limits.max_connections {
             Some(LimitKind::Connections)
         } else if per_ip >= limits.max_connections_per_ip {
@@ -256,7 +280,8 @@ impl Core {
         let c = match refusal {
             None => {
                 self.counted = self.counted.saturating_add(1);
-                self.counted_per_ip.insert(peer, per_ip.saturating_add(1));
+                self.counted_per_ip
+                    .insert(canonical, per_ip.saturating_add(1));
                 let state = ConnState::ReadingHead {
                     buffered: 0,
                     scanned: 0,
@@ -265,24 +290,33 @@ impl Core {
                 Conn::new(peer, Counted::Yes, state, capacity)
             }
             Some(kind) => {
+                actions.push(Action::Log(Log::Rejected {
+                    conn,
+                    peer,
+                    reason: RejectReason::Limit(kind),
+                }));
+                // Too many refusals in flight: do not even answer.
+                if self.refused >= limits.max_connections {
+                    actions.push(Action::Close { conn });
+                    return;
+                }
+                self.refused = self.refused.saturating_add(1);
                 let state = ConnState::Responding {
                     persistence: Persistence::Close,
                     unread_body: UnreadBody::None,
                     buffered: 0,
                     deadline: now.saturating_add(limits.send_idle_timeout),
                 };
-                let mut c = Conn::new(peer, Counted::No, state, capacity);
+                // Refused connections never read while responding and then
+                // linger into the shared scratch buffer: no buffer of their
+                // own.
+                let mut c = Conn::new(peer, Counted::No, state, 0);
                 render_fixed(
                     Status::ServiceUnavailable,
                     Persistence::Close,
                     BodyMode::Full,
                     &mut c.send,
                 );
-                actions.push(Action::Log(Log::Rejected {
-                    conn,
-                    peer,
-                    reason: RejectReason::Limit(kind),
-                }));
                 c
             }
         };
@@ -380,6 +414,8 @@ impl Core {
                     (Persistence::Close, UnreadBody::None | UnreadBody::Pending)
                     | (Persistence::KeepAlive, UnreadBody::Pending) => {
                         actions.push(Action::ShutdownWrite { conn });
+                        // Lingering input goes to the shared scratch buffer.
+                        c.recv = Box::default();
                         ConnState::Lingering {
                             deadline: now.saturating_add(LINGER_TIMEOUT),
                         }
@@ -553,7 +589,13 @@ impl Core {
     /// [`Event::Received`] for `conn` as the very next `handle` call.
     pub fn recv_buffer(&mut self, conn: ConnId) -> &mut [u8] {
         match self.conns.get_mut(&conn) {
-            Some(c) => c.recv_spare(),
+            Some(c) => match c.state {
+                // Discarded input; the contents are never looked at.
+                ConnState::Lingering { .. } => &mut self.scratch,
+                ConnState::ReadingHead { .. }
+                | ConnState::Idle { .. }
+                | ConnState::Responding { .. } => c.recv_spare(),
+            },
             None => &mut [],
         }
     }
@@ -567,11 +609,19 @@ impl Core {
         }
     }
 
-    /// Total capacity of `conn`'s receive buffer; 0 for unknown connections.
-    /// For drivers' invariant checks (the simulation), not for I/O.
+    /// The most [`Core::recv_buffer`] can currently hand out for `conn`:
+    /// its own buffer's capacity, or the shared scratch buffer's while it
+    /// lingers; 0 for unknown connections. It can change with the
+    /// connection's state. For drivers' invariant checks (the simulation),
+    /// not for I/O.
     #[doc(hidden)]
     pub fn recv_capacity(&self, conn: ConnId) -> usize {
-        self.conns.get(&conn).map_or(0, |c| c.recv.len())
+        self.conns.get(&conn).map_or(0, |c| match c.state {
+            ConnState::Lingering { .. } => self.scratch.len(),
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. } => c.recv.len(),
+        })
     }
 
     /// Capacity of `conn`'s send buffer; 0 for unknown connections.
@@ -745,36 +795,175 @@ mod tests {
         );
     }
 
+    fn secs(n: u64) -> Instant {
+        Instant::from_nanos(0).saturating_add(std::time::Duration::from_secs(n))
+    }
+
+    fn accept(core: &mut Core, now: Instant, id: u64, peer: IpAddr) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let conn = ConnId(id);
+        core.handle(now, Event::Accepted { conn, peer }, &mut actions);
+        actions
+    }
+
     #[test]
     fn limit_counts_return_to_zero_on_every_close_path() {
         let mut core = core();
         let mut actions = Vec::new();
-        let now = Instant::from_nanos(0);
+        let now = secs(0);
         let other = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
-        for (id, peer) in [(1, PEER), (2, PEER), (3, other)] {
-            let conn = ConnId(id);
-            core.handle(now, Event::Accepted { conn, peer }, &mut actions);
+        for (id, peer) in [(1, PEER), (2, PEER), (3, other), (4, other), (5, other)] {
+            accept(&mut core, now, id, peer);
         }
-        assert_eq!(core.counted, 3);
+        assert_eq!(core.counted, 5);
         assert_eq!(core.counted_per_ip.get(&PEER), Some(&2));
+        // conns 4 and 5: a full buffer of zeros is answered 400 at once.
+        for id in [4, 5] {
+            let conn = ConnId(id);
+            core.handle(now, Event::Received { conn, len: 10 }, &mut actions);
+        }
+        // conn 5's answer is written: it lingers (deadline 2 s); conn 4's is
+        // never taken (send deadline 30 s).
+        let conn = ConnId(5);
+        core.handle(now, Event::Sent { conn, len: 999 }, &mut actions);
         core.handle(now, Event::ReadClosed { conn: ConnId(1) }, &mut actions);
         let error = ConnError::Reset;
-        core.handle(
-            now,
-            Event::Failed {
-                conn: ConnId(2),
-                error,
-            },
-            &mut actions,
-        );
+        let conn = ConnId(2);
+        core.handle(now, Event::Failed { conn, error }, &mut actions);
+        assert_eq!(core.counted, 3);
         assert_eq!(core.counted_per_ip.get(&PEER), None);
+        // Lingering expiry.
+        core.handle(secs(2), Event::TimerFired, &mut actions);
+        assert_eq!(core.counted, 2);
         // conn 3 sent nothing: it times out silently at the header deadline.
-        let later = now.saturating_add(std::time::Duration::from_secs(10));
-        core.handle(later, Event::TimerFired, &mut actions);
+        core.handle(secs(10), Event::TimerFired, &mut actions);
+        assert_eq!(core.counted, 1);
+        // Send idle expiry.
+        core.handle(secs(30), Event::TimerFired, &mut actions);
         assert_eq!(core.counted, 0);
         assert!(core.counted_per_ip.is_empty());
         assert!(core.conns.is_empty());
         assert_eq!(core.next_deadline(), None);
+    }
+
+    /// One counted connection allowed, so at most one refused one. The long
+    /// header timeout keeps the counted connection open throughout.
+    const CAPPED: &str = "listen 127.0.0.1:8080; \
+        limits { max_connections 1; header_timeout 60m; } \
+        host a.test { path / { static /srv; } }";
+
+    fn capped() -> Core {
+        Core::new(crate::config::load(CAPPED).unwrap())
+    }
+
+    fn refused(conn: ConnId) -> Action {
+        Action::Log(Log::Rejected {
+            conn,
+            peer: PEER,
+            reason: RejectReason::Limit(LimitKind::Connections),
+        })
+    }
+
+    #[test]
+    fn refused_connection_has_no_receive_buffer() {
+        let mut core = capped();
+        accept(&mut core, secs(0), 1, PEER);
+        accept(&mut core, secs(0), 2, PEER);
+        let conn = ConnId(2);
+        assert!(!core.send_buffer(conn).is_empty(), "a 503 is waiting");
+        assert_eq!(core.recv_capacity(conn), 0);
+        assert!(core.recv_buffer(conn).is_empty());
+        assert_eq!(core.send_capacity(conn), SEND_CAPACITY);
+    }
+
+    #[test]
+    fn lingering_connections_share_a_scratch_buffer() {
+        let mut core = capped();
+        let mut actions = Vec::new();
+        let now = secs(0);
+        accept(&mut core, now, 1, PEER);
+        accept(&mut core, now, 2, PEER);
+        // conn 1 (counted): no Host header, answered 400, then lingers.
+        let c1 = ConnId(1);
+        let request = b"GET / HTTP/1.1\r\n\r\n";
+        let spare = core.recv_buffer(c1);
+        assert!(spare.len() > 4096);
+        if let Some(dst) = spare.get_mut(..request.len()) {
+            dst.copy_from_slice(request);
+        }
+        let len = request.len();
+        core.handle(now, Event::Received { conn: c1, len }, &mut actions);
+        for id in [1, 2] {
+            let conn = ConnId(id);
+            core.handle(now, Event::Sent { conn, len: 999 }, &mut actions);
+            assert!(actions.contains(&Action::ShutdownWrite { conn }));
+            assert_eq!(core.recv_capacity(conn), 4096);
+            assert_eq!(core.recv_buffer(conn).len(), 4096);
+            assert_eq!(core.conns.get(&conn).map(|c| c.recv.len()), Some(0));
+            actions.clear();
+            core.handle(now, Event::Received { conn, len: 4096 }, &mut actions);
+            assert!(actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn refused_connections_beyond_the_cap_are_closed_at_once() {
+        let mut core = capped();
+        let now = secs(0);
+        accept(&mut core, now, 1, PEER);
+        let second = accept(&mut core, now, 2, PEER);
+        assert!(!second.contains(&Action::Close { conn: ConnId(2) }));
+        let conn = ConnId(3);
+        assert_eq!(
+            accept(&mut core, now, 3, PEER),
+            [refused(conn), Action::Close { conn }]
+        );
+        assert!(!core.conns.contains_key(&conn));
+        assert!(core.send_buffer(conn).is_empty());
+        assert_eq!(core.recv_capacity(conn), 0);
+    }
+
+    #[test]
+    fn refused_cap_is_released_on_every_close_path() {
+        let mut core = capped();
+        let mut actions = Vec::new();
+        accept(&mut core, secs(0), 1, PEER);
+        let mut id = 2;
+        // Each closing path, applied to a refused connection accepted at `t`,
+        // frees the single refused slot for the next round.
+        for path in 0..4 {
+            let t = secs(100 * path);
+            let conn = ConnId(id);
+            id += 1;
+            let accepted = accept(&mut core, t, conn.0, PEER);
+            assert!(!accepted.contains(&Action::Close { conn }), "path {path}");
+            let over = ConnId(id);
+            id += 1;
+            assert_eq!(
+                accept(&mut core, t, over.0, PEER),
+                [refused(over), Action::Close { conn: over }],
+                "path {path}"
+            );
+            actions.clear();
+            match path {
+                0 => core.handle(t, Event::ReadClosed { conn }, &mut actions),
+                1 => {
+                    let error = ConnError::Reset;
+                    core.handle(t, Event::Failed { conn, error }, &mut actions);
+                }
+                2 => {
+                    core.handle(t, Event::Sent { conn, len: 999 }, &mut actions);
+                    let linger_end = t.saturating_add(LINGER_TIMEOUT);
+                    core.handle(linger_end, Event::TimerFired, &mut actions);
+                }
+                _ => {
+                    let stalled = t.saturating_add(std::time::Duration::from_secs(30));
+                    core.handle(stalled, Event::TimerFired, &mut actions);
+                }
+            }
+            assert!(actions.contains(&Action::Close { conn }), "path {path}");
+            assert_eq!(core.conns.len(), 1, "path {path}");
+        }
     }
 
     #[test]
