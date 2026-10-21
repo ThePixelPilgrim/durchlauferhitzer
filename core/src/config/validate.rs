@@ -138,6 +138,56 @@ fn parse_listen(setting: &Setting) -> Result<Vec<SocketAddr>, ConfigError> {
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LimitKey {
+    MaxConnections,
+    MaxConnectionsPerIp,
+    MaxRequestLine,
+    MaxHead,
+    MaxHeaders,
+    HeaderTimeout,
+    KeepaliveTimeout,
+    SendIdleTimeout,
+}
+
+impl LimitKey {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "max_connections" => Some(Self::MaxConnections),
+            "max_connections_per_ip" => Some(Self::MaxConnectionsPerIp),
+            "max_request_line" => Some(Self::MaxRequestLine),
+            "max_head" => Some(Self::MaxHead),
+            "max_headers" => Some(Self::MaxHeaders),
+            "header_timeout" => Some(Self::HeaderTimeout),
+            "keepalive_timeout" => Some(Self::KeepaliveTimeout),
+            "send_idle_timeout" => Some(Self::SendIdleTimeout),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RouteKey {
+    Static,
+    Proxy,
+    StripPrefix,
+    MaxRequestBody,
+    MaxResponseBody,
+}
+
+impl RouteKey {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "static" => Some(Self::Static),
+            "proxy" => Some(Self::Proxy),
+            "strip_prefix" => Some(Self::StripPrefix),
+            "max_request_body" => Some(Self::MaxRequestBody),
+            "max_response_body" => Some(Self::MaxResponseBody),
+            _ => None,
+        }
+    }
+}
+
 fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
     if !block.args.is_empty() {
         return fail(
@@ -154,26 +204,16 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
             Item::Setting(setting) => setting,
             Item::Block(inner) => return unknown_key(&inner.name, inner.pos),
         };
-        let key = setting.key.as_str();
-        let known = [
-            "max_connections",
-            "max_connections_per_ip",
-            "max_request_line",
-            "max_head",
-            "max_headers",
-            "header_timeout",
-            "keepalive_timeout",
-            "send_idle_timeout",
-        ];
-        if !known.contains(&key) {
-            return unknown_key(key, setting.pos);
+        let name = setting.key.as_str();
+        let Some(key) = LimitKey::from_name(name) else {
+            return unknown_key(name, setting.pos);
+        };
+        if seen.contains(&name) {
+            return duplicate_key(name, setting.pos);
         }
-        if seen.contains(&key) {
-            return duplicate_key(key, setting.pos);
-        }
-        seen.push(key);
+        seen.push(name);
         let value = one_value(setting)?;
-        let bad = || invalid_value(key, value, setting.pos);
+        let bad = || invalid_value(name, value, setting.pos);
         let size = || {
             parse_size(value)
                 .filter(|n| *n != 0)
@@ -181,23 +221,28 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
         };
         let duration = || parse_duration(value).filter(|d: &Duration| !d.is_zero());
         match key {
-            "max_connections" => limits.max_connections = parse_count(value).ok_or_else(bad)?,
-            "max_connections_per_ip" => {
+            LimitKey::MaxConnections => {
+                limits.max_connections = parse_count(value).ok_or_else(bad)?;
+            }
+            LimitKey::MaxConnectionsPerIp => {
                 limits.max_connections_per_ip = parse_count(value).ok_or_else(bad)?;
             }
-            "max_request_line" => {
+            LimitKey::MaxRequestLine => {
                 limits.max_request_line = size().ok_or_else(bad)?;
                 request_line = Some(setting);
             }
-            "max_head" => {
+            LimitKey::MaxHead => {
                 limits.max_head = size().ok_or_else(bad)?;
                 head = Some(setting);
             }
-            "max_headers" => limits.max_headers = parse_count(value).ok_or_else(bad)?,
-            "header_timeout" => limits.header_timeout = duration().ok_or_else(bad)?,
-            "keepalive_timeout" => limits.keepalive_timeout = duration().ok_or_else(bad)?,
-            "send_idle_timeout" => limits.send_idle_timeout = duration().ok_or_else(bad)?,
-            _ => return unknown_key(key, setting.pos),
+            LimitKey::MaxHeaders => limits.max_headers = parse_count(value).ok_or_else(bad)?,
+            LimitKey::HeaderTimeout => limits.header_timeout = duration().ok_or_else(bad)?,
+            LimitKey::KeepaliveTimeout => {
+                limits.keepalive_timeout = duration().ok_or_else(bad)?;
+            }
+            LimitKey::SendIdleTimeout => {
+                limits.send_idle_timeout = duration().ok_or_else(bad)?;
+            }
         }
     }
     if limits.max_request_line > limits.max_head {
@@ -236,26 +281,25 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             Item::Setting(setting) => setting,
             Item::Block(inner) => return unknown_key(&inner.name, inner.pos),
         };
-        let key = setting.key.as_str();
+        let name = setting.key.as_str();
         let pos = setting.pos;
-        match key {
-            "static" | "proxy" | "strip_prefix" | "max_request_body" | "max_response_body" => {}
-            _ => return unknown_key(key, pos),
-        }
+        let Some(key) = RouteKey::from_name(name) else {
+            return unknown_key(name, pos);
+        };
         let taken = match key {
-            "static" => static_root.is_some(),
-            "proxy" => backend.is_some(),
-            "strip_prefix" => strip.is_some(),
-            "max_request_body" => max_request.is_some(),
-            _ => max_response.is_some(),
+            RouteKey::Static => static_root.is_some(),
+            RouteKey::Proxy => backend.is_some(),
+            RouteKey::StripPrefix => strip.is_some(),
+            RouteKey::MaxRequestBody => max_request.is_some(),
+            RouteKey::MaxResponseBody => max_response.is_some(),
         };
         if taken {
-            return duplicate_key(key, pos);
+            return duplicate_key(name, pos);
         }
         let value = one_value(setting)?;
-        let bad = || invalid_value(key, value, pos);
+        let bad = || invalid_value(name, value, pos);
         match key {
-            "static" => {
+            RouteKey::Static => {
                 if !valid_root(value) {
                     return Err(bad());
                 }
@@ -264,25 +308,28 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
                     value: PathBuf::from(value),
                 });
             }
-            "proxy" => {
+            RouteKey::Proxy => {
                 backend = Some(Slot {
                     pos,
                     value: parse_backend(value).ok_or_else(bad)?,
                 });
             }
-            "strip_prefix" => {
+            RouteKey::StripPrefix => {
+                if value.is_empty() {
+                    return Err(bad());
+                }
                 strip = Some(Slot {
                     pos,
                     value: value.to_string(),
                 });
             }
-            "max_request_body" => {
+            RouteKey::MaxRequestBody => {
                 max_request = Some(Slot {
                     pos,
                     value: parse_body_limit(value).ok_or_else(bad)?,
                 });
             }
-            _ => {
+            RouteKey::MaxResponseBody => {
                 max_response = Some(Slot {
                     pos,
                     value: parse_body_limit(value).ok_or_else(bad)?,
@@ -811,6 +858,39 @@ host a { path / { static /s; } }
         assert_eq!(
             err(&in_host("  path / {\n    static /a;\n    static /b;\n  }")),
             (ConfigErrorKind::DuplicateKey("static".to_string()), 5, 5)
+        );
+    }
+
+    #[test]
+    fn route_rejects_duplicate_proxy_and_option_keys() {
+        for key in [
+            "proxy",
+            "strip_prefix",
+            "max_request_body",
+            "max_response_body",
+        ] {
+            let value = match key {
+                "proxy" => "127.0.0.1:1",
+                "strip_prefix" => "/",
+                _ => "1",
+            };
+            assert_eq!(
+                err(&in_host(&format!(
+                    "  path / {{\n    {key} {value};\n    {key} {value};\n  }}"
+                ))),
+                (ConfigErrorKind::DuplicateKey(key.to_string()), 5, 5),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_strip_prefix_is_rejected() {
+        assert_eq!(
+            err(&proxy_path(
+                "    strip_prefix \"\";\n    max_request_body 1;\n    max_response_body 1;"
+            )),
+            (invalid("strip_prefix", ""), 5, 5)
         );
     }
 
