@@ -115,8 +115,15 @@ pub fn parse_head(buf: &[u8], limits: &HeadLimits) -> Result<ParseStatus, HttpEr
     loop {
         let rest = buf.get(pos..).unwrap_or_default();
         let Some(lf) = rest.iter().position(|&b| b == b'\n') else {
-            if request_line.is_none() && rest.len() >= limits.max_request_line.saturating_add(2) {
-                return Err(HttpError::RequestLineTooLong);
+            if request_line.is_none() {
+                // The request line decides between RequestLineTooLong and
+                // HeadTooLarge once its LF arrives, so until then only the
+                // request-line limit may fire (this keeps prefixes consistent
+                // for any limits, including max_head <= max_request_line).
+                if rest.len() >= limits.max_request_line.saturating_add(2) {
+                    return Err(HttpError::RequestLineTooLong);
+                }
+                return Ok(ParseStatus::Incomplete);
             }
             if buf.len() > limits.max_head {
                 return Err(HttpError::HeadTooLarge);
@@ -290,7 +297,11 @@ fn check_host(headers: &[Header], version: Version) -> Result<Option<String>, Ht
 }
 
 fn is_port(bytes: &[u8]) -> bool {
-    (1..=5).contains(&bytes.len()) && bytes.iter().all(u8::is_ascii_digit)
+    (1..=5).contains(&bytes.len())
+        && bytes.iter().all(u8::is_ascii_digit)
+        && to_string(bytes)
+            .parse::<u32>()
+            .is_ok_and(|p| (1..=65535).contains(&p))
 }
 
 /// Validates a `Host` value and returns it lowercased.
@@ -657,6 +668,75 @@ mod tests {
     }
 
     #[test]
+    fn request_line_limit_wins_when_head_limit_is_not_larger() {
+        for (r, h) in [(16, 16), (16, 17), (16, 19), (16, 8)] {
+            let l = HeadLimits {
+                max_request_line: r,
+                max_head: h,
+                max_headers: 4,
+            };
+            let mut full = b"GET /".to_vec();
+            full.resize(r + 5, b'a');
+            full.extend_from_slice(b"\r\n\r\n");
+            let expected = parse_head(&full, &l);
+            assert_eq!(expected, Err(HttpError::RequestLineTooLong), "R={r} H={h}");
+            for n in 0..full.len() {
+                match parse_head(full.get(..n).unwrap_or_default(), &l) {
+                    Ok(ParseStatus::Incomplete) => {}
+                    other => assert_eq!(other, expected, "R={r} H={h} prefix {n}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn host_port_range() {
+        let h = |v: &str| {
+            parse(format!("GET / HTTP/1.1\r\nHost: {v}\r\n\r\n").as_bytes())
+                .map(|s| matches!(s, ParseStatus::Complete { .. }))
+        };
+        assert_eq!(h("a:0"), Err(HttpError::BadHost));
+        assert_eq!(h("a:00"), Err(HttpError::BadHost));
+        assert_eq!(h("a:65536"), Err(HttpError::BadHost));
+        assert_eq!(h("a:99999"), Err(HttpError::BadHost));
+        assert_eq!(h("[::1]:0"), Err(HttpError::BadHost));
+        assert_eq!(h("a:65535"), Ok(true));
+        assert_eq!(h("a:080"), Ok(true));
+    }
+
+    #[test]
+    fn pins_edge_cases() {
+        use HttpError::*;
+        const L: &str = "GET / HTTP/1.1\r\nHost: a\r\n";
+        let with = |tail: &[u8]| {
+            let mut v = L.as_bytes().to_vec();
+            v.extend_from_slice(tail);
+            v
+        };
+        assert_eq!(parse(&with(b"\r\r\n")), Err(BadHeaderName));
+        assert_eq!(parse(&with(b"\r")), Ok(ParseStatus::Incomplete));
+        assert_eq!(parse(&with(b"X\t: a\r\n\r\n")), Err(BadHeaderName));
+        assert_eq!(parse(&with(b"X\0: a\r\n\r\n")), Err(BadHeaderName));
+        assert_eq!(parse(&with(b"X: a\x7fb\r\n\r\n")), Err(BadHeaderValue));
+        assert_eq!(
+            head_of(&with(b"Transfer-Encoding: chunked \r\n\r\n")).body,
+            BodyFraming::Chunked
+        );
+        assert_eq!(
+            parse(&with(b"Transfer-Encoding: chunked,\r\n\r\n")),
+            Err(UnsupportedTransferEncoding)
+        );
+        assert_eq!(
+            head_of(&with(b"Content-Length:  5\r\n\r\n")).body,
+            BodyFraming::Length(5)
+        );
+        assert_eq!(
+            parse(&with(b"content-length: 5\r\nContent-Length: 5\r\n\r\n")),
+            Err(DuplicateContentLength)
+        );
+    }
+
+    #[test]
     fn connection_close_and_http10_persistence() {
         let p = |input: &[u8]| head_of(input).persistence;
         assert_eq!(
@@ -757,6 +837,14 @@ mod tests {
         }
 
         #[test]
+        fn never_panics_after_valid_request_line(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
+            let mut input = b"GET / HTTP/1.1\r\n".to_vec();
+            input.extend_from_slice(&bytes);
+            let _ = parse(&input);
+            let _ = parse_head(&input, &tight());
+        }
+
+        #[test]
         fn prefix_never_contradicts_full(
             pieces in proptest::collection::vec(
                 prop_oneof![
@@ -785,10 +873,15 @@ mod tests {
                 ],
                 0..24,
             ),
-            small in any::<bool>(),
+            which in 0..4usize,
         ) {
             let input: Vec<u8> = pieces.concat();
-            let limits = if small { tight() } else { defaults() };
+            let limits = match which {
+                0 => defaults(),
+                1 => tight(),
+                2 => HeadLimits { max_request_line: 20, max_head: 20, max_headers: 3 },
+                _ => HeadLimits { max_request_line: 20, max_head: 22, max_headers: 3 },
+            };
             let full = parse_head(&input, &limits);
             for n in 0..=input.len() {
                 let prefix = input.get(..n).unwrap_or_default();
