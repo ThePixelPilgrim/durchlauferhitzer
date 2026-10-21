@@ -29,23 +29,35 @@
 //!   `send_buffer` is only valid until the next `handle` call (the borrow
 //!   checker enforces this).
 //! - After [`Action::Close`] the core forgets the connection; the driver
-//!   closes the socket and delivers no further events for that id (stray
-//!   ones are ignored). The core emits no further actions for it.
+//!   closes the socket and delivers no further events for that id. The core
+//!   emits no further actions for it. Stray I/O events for a forgotten id are
+//!   ignored, but an `Accepted` for it creates a *new* connection: the core
+//!   cannot tell reuse from a fresh id, so never reusing ids is the driver's
+//!   obligation.
+//! - Readiness is level-triggered: while interest is [`Interest::Read`], the
+//!   driver keeps reading into `recv_buffer` until it is empty (zero spare)
+//!   or the socket would block; while interest is [`Interest::Write`], it
+//!   keeps writing from `send_buffer` until it is empty or the socket would
+//!   block. An edge-triggered driver must loop to `EAGAIN`.
+//! - A read into `recv_buffer(c)` is reported by `Received { conn: c, .. }`
+//!   before any other `handle` call (or not at all, if nothing was read).
 //! - An **empty** `recv_buffer` means "do not read now" (unknown connection,
 //!   not in a reading state, or buffer full). An empty `send_buffer` means
 //!   "nothing to write". Neither is an error.
 //! - The driver arms timers from [`Core::next_deadline`] after every `handle`
 //!   call and delivers [`Event::TimerFired`] once that instant has passed.
+//!   After `TimerFired`, every deadline at or before `now` has been handled:
+//!   `next_deadline` is `None` or later than `now`.
 //!
 //! The core tolerates driver mistakes without panicking: events for unknown
 //! connections are ignored, a duplicate `Accepted` is ignored, and a
 //! `Received`/`Sent` length larger than the space offered is clamped.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use crate::config::Config;
-use crate::conn::{Conn, ConnState};
+use crate::conn::{Conn, ConnState, SEND_CAPACITY};
 use crate::log::Log;
 use crate::time::Instant;
 
@@ -71,7 +83,9 @@ pub enum Event {
     Accepted { conn: ConnId, peer: IpAddr },
     /// The driver wrote `len` bytes into the slice returned by the last
     /// [`Core::recv_buffer`] call for `conn`, starting at its first byte.
-    /// `len` is never 0 (end of stream is [`Event::ReadClosed`]).
+    /// `len` is never 0 (end of stream is [`Event::ReadClosed`]). It must be
+    /// the very next `handle` call after that read: no other event may come
+    /// in between, or the core may have moved or reused that space.
     Received { conn: ConnId, len: usize },
     /// The peer closed its sending side (a read returned end of stream).
     ReadClosed { conn: ConnId },
@@ -81,6 +95,8 @@ pub enum Event {
     /// what the core's resulting actions ask for (`Close`).
     Failed { conn: ConnId, error: ConnError },
     /// The instant last returned by [`Core::next_deadline`] has passed.
+    /// After handling it, every deadline at or before `now` has been
+    /// handled: `next_deadline` returns `None` or an instant after `now`.
     TimerFired,
 }
 
@@ -114,7 +130,7 @@ pub enum Action {
 #[derive(Debug)]
 pub struct Core {
     config: Config,
-    conns: HashMap<ConnId, Conn>,
+    conns: BTreeMap<ConnId, Conn>,
 }
 
 impl Core {
@@ -122,14 +138,14 @@ impl Core {
     pub fn new(config: Config) -> Core {
         Core {
             config,
-            conns: HashMap::new(),
+            conns: BTreeMap::new(),
         }
     }
 
     /// Capacity of each connection's receive buffer: room for the largest
     /// allowed head, and for `max_request_line + 2` bytes so the parser can
     /// always reach a verdict on an over-long request line.
-    fn recv_capacity(&self) -> usize {
+    fn new_recv_capacity(&self) -> usize {
         let limits = &self.config.limits;
         limits
             .max_head
@@ -168,7 +184,7 @@ impl Core {
         if self.conns.contains_key(&conn) {
             return;
         }
-        let capacity = self.recv_capacity();
+        let capacity = self.new_recv_capacity();
         self.conns.insert(conn, Conn::new(peer, capacity));
         actions.push(Action::SetInterest {
             conn,
@@ -199,6 +215,9 @@ impl Core {
 
     /// Writable spare space for `conn`'s next read. Empty when the connection
     /// is unknown, not reading, or its buffer is full.
+    ///
+    /// If the driver writes any bytes into it, it reports them with
+    /// [`Event::Received`] for `conn` as the very next `handle` call.
     pub fn recv_buffer(&mut self, conn: ConnId) -> &mut [u8] {
         match self.conns.get_mut(&conn) {
             Some(c) => c.recv_spare(),
@@ -213,6 +232,20 @@ impl Core {
             Some(c) => &c.send,
             None => &[],
         }
+    }
+
+    /// Total capacity of `conn`'s receive buffer; 0 for unknown connections.
+    /// For drivers' invariant checks (the simulation), not for I/O.
+    #[doc(hidden)]
+    pub fn recv_capacity(&self, conn: ConnId) -> usize {
+        self.conns.get(&conn).map_or(0, |c| c.recv.len())
+    }
+
+    /// Capacity of `conn`'s send buffer; 0 for unknown connections.
+    /// For drivers' invariant checks (the simulation), not for I/O.
+    #[doc(hidden)]
+    pub fn send_capacity(&self, conn: ConnId) -> usize {
+        self.conns.get(&conn).map_or(0, |_| SEND_CAPACITY)
     }
 
     /// The earliest instant at which the core wants [`Event::TimerFired`],
@@ -236,6 +269,24 @@ mod tests {
     }
 
     const PEER: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    #[test]
+    fn capacities_are_reported_per_connection() {
+        let mut core = core();
+        let mut actions = Vec::new();
+        let conn = ConnId(1);
+        let now = Instant::from_nanos(0);
+        assert_eq!(core.recv_capacity(conn), 0);
+        assert_eq!(core.send_capacity(conn), 0);
+        core.handle(now, Event::Accepted { conn, peer: PEER }, &mut actions);
+        assert_eq!(core.recv_capacity(conn), 10);
+        assert_eq!(core.send_capacity(conn), 1024);
+        core.handle(now, Event::Received { conn, len: 4 }, &mut actions);
+        assert_eq!(core.recv_capacity(conn), 10);
+        core.handle(now, Event::ReadClosed { conn }, &mut actions);
+        assert_eq!(core.recv_capacity(conn), 0);
+        assert_eq!(core.send_capacity(conn), 0);
+    }
 
     #[test]
     fn oversized_received_is_clamped() {

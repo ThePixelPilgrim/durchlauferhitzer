@@ -26,8 +26,9 @@ use std::time::Duration;
 use durchlauferhitzer_core::config::load;
 use durchlauferhitzer_core::{Action, ConnError, ConnId, Core, Event, Instant, Interest, Log};
 
-/// Capacity of the core's send buffer (mirrors the core's constant).
-const SEND_CAPACITY: usize = 1024;
+/// Default bound on pump steps in one `run_until_idle` before the sim
+/// declares a livelock.
+const STEP_LIMIT: usize = 1_000_000;
 
 /// How many bytes the simulated client accepts per `Sent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,10 @@ struct SimConn {
     window: Window,
     interest: Interest,
     state: SimConnState,
+    /// Buffer capacities the core reported right after `Accepted`; they must
+    /// not change while the connection is open.
+    recv_capacity: usize,
+    send_capacity: usize,
 }
 
 /// The simulated network, clock and client population.
@@ -79,11 +84,14 @@ pub struct Sim {
     core: Core,
     now: Instant,
     next_id: u64,
-    recv_capacity: usize,
     conns: BTreeMap<ConnId, SimConn>,
     logs: Vec<Log>,
     trace: String,
     actions: Vec<Action>,
+    /// Set while bytes written into a connection's `recv_buffer` have not yet
+    /// been reported with `Received`.
+    pending_read: Option<ConnId>,
+    step_limit: usize,
 }
 
 impl Sim {
@@ -94,19 +102,16 @@ impl Sim {
             Ok(c) => c,
             Err(e) => panic!("invalid sim config: {e:?}"),
         };
-        let limits = &config.limits;
-        let recv_capacity = limits
-            .max_head
-            .max(limits.max_request_line.saturating_add(2));
         Sim {
             core: Core::new(config),
             now: Instant::from_nanos(0),
             next_id: 1,
-            recv_capacity,
             conns: BTreeMap::new(),
             logs: Vec::new(),
             trace: String::new(),
             actions: Vec::new(),
+            pending_read: None,
+            step_limit: STEP_LIMIT,
         }
     }
 
@@ -125,9 +130,16 @@ impl Sim {
                 window: Window::Unlimited,
                 interest: Interest::None,
                 state: SimConnState::Open,
+                recv_capacity: 0,
+                send_capacity: 0,
             },
         );
         self.deliver(Event::Accepted { conn, peer });
+        let recv_capacity = self.core.recv_capacity(conn);
+        let send_capacity = self.core.send_capacity(conn);
+        let c = self.conn_mut(conn);
+        c.recv_capacity = recv_capacity;
+        c.send_capacity = send_capacity;
         conn
     }
 
@@ -174,16 +186,25 @@ impl Sim {
 
     /// Pump queued bytes both ways until no connection makes progress.
     pub fn run_until_idle(&mut self) {
-        while self.pump_once() {}
+        let mut steps: usize = 0;
+        while self.pump_once() {
+            steps += 1;
+            if steps > self.step_limit {
+                self.violation(&format!(
+                    "run_until_idle exceeded {} steps",
+                    self.step_limit
+                ));
+            }
+        }
         let stuck = self.conns.iter().find(|(id, c)| {
             c.state != SimConnState::Closed
-                && c.interest == Interest::Read
+                && c.interest != Interest::Write
                 && !self.core.send_buffer(**id).is_empty()
         });
-        if let Some((conn, _)) = stuck {
+        if let Some((conn, c)) = stuck {
             self.violation(&format!(
-                "conn={} has pending send bytes but interest stays Read",
-                conn.0
+                "conn={} has pending send bytes but interest stays {:?}",
+                conn.0, c.interest
             ));
         }
     }
@@ -209,16 +230,7 @@ impl Sim {
     fn pump_read(&mut self, conn: ConnId) -> bool {
         let c = self.conns.get_mut(&conn).unwrap();
         if !c.to_server.is_empty() {
-            let spare = self.core.recv_buffer(conn);
-            let n = spare.len().min(c.read_chunk).min(c.to_server.len());
-            if n == 0 {
-                return false;
-            }
-            for (dst, src) in spare.iter_mut().zip(c.to_server.drain(..n)) {
-                *dst = src;
-            }
-            self.deliver(Event::Received { conn, len: n });
-            return true;
+            return self.deliver_read(conn);
         }
         if c.eof == Eof::Queued {
             c.eof = Eof::Delivered;
@@ -226,6 +238,23 @@ impl Sim {
             return true;
         }
         false
+    }
+
+    /// The only path that writes into `recv_buffer`: copies as many queued
+    /// client bytes as allowed and reports them with `Received` right away.
+    fn deliver_read(&mut self, conn: ConnId) -> bool {
+        let c = self.conns.get_mut(&conn).unwrap();
+        let spare = self.core.recv_buffer(conn);
+        let n = spare.len().min(c.read_chunk).min(c.to_server.len());
+        if n == 0 {
+            return false;
+        }
+        for (dst, src) in spare.iter_mut().zip(c.to_server.drain(..n)) {
+            *dst = src;
+        }
+        self.pending_read = Some(conn);
+        self.deliver(Event::Received { conn, len: n });
+        true
     }
 
     fn pump_write(&mut self, conn: ConnId) -> bool {
@@ -254,13 +283,16 @@ impl Sim {
             }
             self.now = self.now.max(deadline);
             self.deliver(Event::TimerFired);
-            self.run_until_idle();
-            if self.core.next_deadline() == Some(deadline) {
-                self.violation(&format!(
-                    "deadline t={}ns did not move after TimerFired",
-                    deadline.as_nanos()
-                ));
+            if let Some(next) = self.core.next_deadline() {
+                if next <= self.now {
+                    self.violation(&format!(
+                        "after TimerFired at t={}ns next_deadline is t={}ns, not later",
+                        self.now.as_nanos(),
+                        next.as_nanos()
+                    ));
+                }
             }
+            self.run_until_idle();
         }
         self.now = target;
     }
@@ -325,6 +357,23 @@ impl Sim {
     /// Hand one event to the core and apply the resulting actions.
     fn deliver(&mut self, event: Event) {
         self.line(&event_text(&event));
+        if let Some(pending) = self.pending_read.take() {
+            let matches = match &event {
+                Event::Received { conn, .. } => *conn == pending,
+                Event::Accepted { .. }
+                | Event::ReadClosed { .. }
+                | Event::Sent { .. }
+                | Event::Failed { .. }
+                | Event::TimerFired => false,
+            };
+            if !matches {
+                self.violation(&format!(
+                    "read into recv_buffer of conn={} not reported by its Received \
+                     before the next event",
+                    pending.0
+                ));
+            }
+        }
         let mut actions = std::mem::take(&mut self.actions);
         actions.clear();
         self.core.handle(self.now, event, &mut actions);
@@ -363,19 +412,32 @@ impl Sim {
     }
 
     fn check_buffers(&mut self) {
-        let ids: Vec<ConnId> = self.conns.keys().copied().collect();
-        for conn in ids {
-            let recv = self.core.recv_buffer(conn).len();
-            if recv > self.recv_capacity {
+        let open: Vec<(ConnId, usize, usize)> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| c.state != SimConnState::Closed && c.recv_capacity > 0)
+            .map(|(id, c)| (*id, c.recv_capacity, c.send_capacity))
+            .collect();
+        for (conn, recv_cap, send_cap) in open {
+            if self.core.recv_capacity(conn) != recv_cap
+                || self.core.send_capacity(conn) != send_cap
+            {
                 self.violation(&format!(
-                    "conn={} recv_buffer {recv} bytes exceeds capacity {}",
-                    conn.0, self.recv_capacity
+                    "conn={} buffer capacities changed while open",
+                    conn.0
+                ));
+            }
+            let recv = self.core.recv_buffer(conn).len();
+            if recv > recv_cap {
+                self.violation(&format!(
+                    "conn={} recv_buffer {recv} bytes exceeds capacity {recv_cap}",
+                    conn.0
                 ));
             }
             let send = self.core.send_buffer(conn).len();
-            if send > SEND_CAPACITY {
+            if send > send_cap {
                 self.violation(&format!(
-                    "conn={} send_buffer {send} bytes exceeds capacity {SEND_CAPACITY}",
+                    "conn={} send_buffer {send} bytes exceeds capacity {send_cap}",
                     conn.0
                 ));
             }
@@ -408,5 +470,35 @@ fn action_text(action: &Action) -> String {
         Action::ShutdownWrite { conn } => format!("conn={} -> ShutdownWrite", conn.0),
         Action::Close { conn } => format!("conn={} -> Close", conn.0),
         Action::Log(log) => format!("conn={} -> Log {log:?}", log_conn(log).0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    const CONFIG: &str = "listen 127.0.0.1:8080; host a.test { path / { static /srv; } }";
+
+    #[test]
+    #[should_panic(expected = "read into recv_buffer of conn=1 not reported")]
+    fn unreported_read_is_a_violation() {
+        let mut sim = Sim::new(CONFIG);
+        let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        // Simulate a driver bug: bytes written into conn 1's receive buffer,
+        // then a different event handled before the matching `Received`.
+        sim.pending_read = Some(c);
+        sim.deliver(Event::TimerFired);
+    }
+
+    #[test]
+    #[should_panic(expected = "run_until_idle exceeded 5 steps")]
+    fn runaway_pump_is_a_violation() {
+        let mut sim = Sim::new(CONFIG);
+        sim.step_limit = 5;
+        let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        sim.set_read_chunk(c, 1);
+        sim.send(c, b"0123456789");
+        sim.run_until_idle();
     }
 }
