@@ -348,14 +348,16 @@ Connection: close\r\n          <- only for Persistence::Close
 
 ---
 
-### Task 8: Core API, connection state machine and simulation harness
+### Task 8a: Core interface and simulation harness
+
+Split from the original Task 8 so the driver↔core interface and the simulation are reviewed before request handling builds on them. No HTTP parsing yet; no deadlines (Task 9).
 
 **Files:**
-- Create: `core/src/time.rs`, `core/src/core.rs`, `core/src/conn.rs`, `core/src/log.rs`, `sim/Cargo.toml`, `sim/src/lib.rs`, `sim/tests/routing.rs`
+- Create: `core/src/time.rs`, `core/src/core.rs`, `core/src/conn.rs`, `core/src/log.rs`, `sim/Cargo.toml`, `sim/src/lib.rs`, `sim/tests/connections.rs`
 - Modify: `Cargo.toml` (add `sim` member), `core/src/lib.rs`
 
 **Interfaces:**
-- Consumes: `load`, `Config` (3), `parse_head` (5), `Router` (6), `render_fixed`, `Status` (7)
+- Consumes: `load`, `Config`, `Limits` (3); `Method`, `HttpError` (5); `RouteMiss` (6); `Status` (7)
 - Produces (core, re-exported at crate root):
   - `pub struct Instant(u64)` — nanoseconds on an arbitrary monotonic epoch; `Instant::from_nanos(u64)`, `fn saturating_add(self, Duration) -> Instant`, `Ord`
   - `pub struct ConnId(pub u64)` — allocated by the driver, never reused
@@ -363,21 +365,50 @@ Connection: close\r\n          <- only for Persistence::Close
   - `pub enum Event { Accepted { conn: ConnId, peer: IpAddr }, Received { conn: ConnId, len: usize }, ReadClosed { conn: ConnId }, Sent { conn: ConnId, len: usize }, Failed { conn: ConnId, error: ConnError }, TimerFired }`
   - `pub enum Interest { None, Read, Write }`
   - `pub enum Action { SetInterest { conn: ConnId, interest: Interest }, ShutdownWrite { conn: ConnId }, Close { conn: ConnId }, Log(Log) }`
-  - `pub enum Log { Response { conn: ConnId, peer: IpAddr, status: Status, request: Option<RequestSummary> }, Rejected { conn: ConnId, peer: IpAddr, reason: RejectReason }, Reset { conn: ConnId, peer: IpAddr } }`, `pub struct RequestSummary { pub method: Method, pub host: Option<String>, pub path: String }`, `pub enum RejectReason { Http(HttpError), Route(RouteMiss), Timeout(TimeoutKind), Limit(LimitKind) }`, `pub enum TimeoutKind { Header, Send }`, `pub enum LimitKind { Connections, ConnectionsPerIp }` (the latter two are used in Task 9)
+  - `pub enum Log { Response { conn: ConnId, peer: IpAddr, status: Status, request: Option<RequestSummary> }, Rejected { conn: ConnId, peer: IpAddr, reason: RejectReason }, Reset { conn: ConnId, peer: IpAddr } }`, `pub struct RequestSummary { pub method: Method, pub host: Option<String>, pub path: String }`, `pub enum RejectReason { Http(HttpError), Route(RouteMiss), Timeout(TimeoutKind), Limit(LimitKind) }`, `pub enum TimeoutKind { Header, Send }`, `pub enum LimitKind { Connections, ConnectionsPerIp }`
   - `pub struct Core` with
     - `pub fn new(config: Config) -> Core`
     - `pub fn handle(&mut self, now: Instant, event: Event, actions: &mut Vec<Action>)`
     - `pub fn recv_buffer(&mut self, conn: ConnId) -> &mut [u8]` — writable spare space; empty when the connection is unknown or not reading
     - `pub fn send_buffer(&self, conn: ConnId) -> &[u8]` — bytes waiting to be written; empty when none
-    - `pub fn next_deadline(&self) -> Option<Instant>`
+    - `pub fn next_deadline(&self) -> Option<Instant>` — always `None` in this task
 - Produces (sim):
-  - `pub struct Sim` with `pub fn new(config: &str) -> Sim`, `pub fn connect(&mut self, peer: IpAddr) -> ConnId`, `pub fn send(&mut self, conn: ConnId, bytes: &[u8])`, `pub fn send_eof(&mut self, conn: ConnId)`, `pub fn reset(&mut self, conn: ConnId)`, `pub fn set_read_chunk(&mut self, conn: ConnId, max: usize)` (max bytes delivered per `Received`), `pub fn set_client_window(&mut self, conn: ConnId, window: Window)`, `pub fn run_until_idle(&mut self)`, `pub fn advance(&mut self, by: Duration)`, `pub fn take_received(&mut self, conn: ConnId) -> Vec<u8>`, `pub fn state(&self, conn: ConnId) -> SimConnState`, `pub fn logs(&self) -> &[Log]`, `pub fn trace(&self) -> &str`
+  - `pub struct Sim` with `pub fn new(config: &str) -> Sim`, `pub fn connect(&mut self, peer: IpAddr) -> ConnId`, `pub fn send(&mut self, conn: ConnId, bytes: &[u8])`, `pub fn send_eof(&mut self, conn: ConnId)`, `pub fn reset(&mut self, conn: ConnId)`, `pub fn set_read_chunk(&mut self, conn: ConnId, max: usize)` (max bytes delivered per `Received`), `pub fn set_client_window(&mut self, conn: ConnId, window: Window)`, `pub fn run_until_idle(&mut self)`, `pub fn advance(&mut self, by: Duration)`, `pub fn now(&self) -> Instant`, `pub fn take_received(&mut self, conn: ConnId) -> Vec<u8>`, `pub fn queued_to_server(&self, conn: ConnId) -> usize`, `pub fn interest(&self, conn: ConnId) -> Interest`, `pub fn state(&self, conn: ConnId) -> SimConnState`, `pub fn logs(&self) -> &[Log]`, `pub fn trace(&self) -> &str`
   - `pub enum Window { Unlimited, Bytes(usize), Stalled }` — how many bytes the simulated client accepts per `Sent`
   - `pub enum SimConnState { Open, WriteShutdown, Closed }`
 
-Connection states (`conn.rs`), each variant carrying only its own data: `ReadingHead { deadline: Instant, bytes_seen: usize }`, `Idle { deadline: Instant }` (keep-alive, nothing buffered), `Responding { persistence: Persistence, unread_body: UnreadBody, deadline: Instant }` (`enum UnreadBody { None, Pending }`), `Lingering { deadline: Instant }`. Transitions: accept → `ReadingHead` (deadline = now + `header_timeout`, total); complete head → route → render → `Responding` (send idle deadline = now + `send_idle_timeout`, reset on every `Sent` with len > 0); response fully sent → if `Close` or body unread → `ShutdownWrite`, `Lingering` (deadline = now + 2 s constant `LINGER_TIMEOUT`); else buffered bytes present → `ReadingHead` and parse immediately; else `Idle` (deadline = now + `keepalive_timeout`). First byte in `Idle` → `ReadingHead` with a fresh header deadline. `Lingering` discards input until `ReadClosed` or deadline → `Close`. `Failed`/`ReadClosed` outside `Lingering` → `Close` (+ `Log::Reset` for `Failed`). Matched routes answer `501 Not Implemented` with `Persistence::Close` in this stage. A request with `BodyFraming` other than `None` marks `UnreadBody::Pending` (forces close). `HEAD` gets `BodyMode::HeadOnly`. Receive buffer capacity = `max_head`, send buffer capacity = 1 KiB (fixed responses only); both allocated on accept, freed on close.
+Core behaviour in this task: `Accepted` allocates the receive buffer (capacity `max(max_head, max_request_line + 2)` — see the Task 5 ruling; the parser may need `max_request_line + 2` bytes for a verdict) and a send buffer of 1 KiB, creates `ConnState::ReadingHead { buffered: usize }` (`conn.rs`; Tasks 8b and 9 add variants and fields), and emits `SetInterest(Read)`. `Received` adds to `buffered`; when the buffer is full it emits `SetInterest(None)` (backpressure). `ReadClosed` → `Close`, no log. `Failed` → `Close` + `Log::Reset`. Events for unknown connections are ignored. `TimerFired` does nothing. Both buffers are freed on close.
 
-The sim pumps until no progress: for each connection with `Interest::Read` and queued client bytes, copy `min(recv_buffer.len(), read_chunk, queued)` and emit `Received`; with queued EOF and nothing left, emit `ReadClosed`; for `Interest::Write`, move `min(send_buffer.len(), window)` into the client's received bytes and emit `Sent`. `advance` fires `TimerFired` at each `next_deadline()` in order up to the target time, pumping after each. The sim panics (test failure, with `trace()` in the message) on invariant violations: action for an unknown or closed connection, `Received` length larger than offered, `send_buffer` non-empty while interest is `Read` for longer than one pump, any buffer larger than its configured capacity.
+The sim pumps until no progress: for each connection with `Interest::Read` and queued client bytes, copy `min(recv_buffer.len(), read_chunk, queued)` and emit `Received`; with queued EOF and nothing left, emit `ReadClosed`; for `Interest::Write`, move `min(send_buffer.len(), window)` into the client's received bytes and emit `Sent`. `advance` fires `TimerFired` at each `next_deadline()` in order up to the target time, pumping after each, then sets the clock to the target. The sim records every event and action in `trace()` and panics (test failure, with `trace()` in the message) on invariant violations: an action for an unknown or closed connection, a second `Close`, any action after `Close`, `recv_buffer`/`send_buffer` longer than their capacities, `send_buffer` non-empty while interest stays `Read` after a pump.
+
+- [ ] **Step 1: Write the failing tests** in `sim/tests/connections.rs` (minimal valid config: `listen 127.0.0.1:8080; host a.test { path / { static /srv; } }`):
+  - `accepted_connection_reads` → `state == Open`, `interest == Interest::Read`, no logs
+  - `client_reset_closes_and_logs` → `reset` → `Closed`, `logs() == [Log::Reset { conn, peer }]`
+  - `client_eof_closes_silently` → `send_eof` → `Closed`, no logs
+  - `receive_buffer_applies_backpressure` → with `limits { max_request_line 64; max_head 64; }`, send 100 bytes: exactly 66 are delivered (`queued_to_server == 34`), `interest == Interest::None`, still `Open`
+  - `read_chunk_limits_each_delivery` → `set_read_chunk(c, 1)`, send 10 bytes → `trace()` shows 10 `Received` events of length 1
+  - `connections_are_independent` → reset one of two connections; the other stays `Open` and reading
+  - `advance_moves_the_clock` → `advance(5s)` → `now()` is 5 s later
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p durchlauferhitzer-sim` → FAIL.
+- [ ] **Step 3: Implement** `time.rs`, `log.rs`, `conn.rs`, `core.rs`, then the `Sim`.
+- [ ] **Step 4: Run to verify they pass** — `cargo test --workspace` → PASS; clippy clean; `scripts/check-product-deps.sh` passes (sim's crates do not appear in core's tree).
+- [ ] **Step 5: Commit** — `"Add core interface and simulation harness"`
+
+---
+
+### Task 8b: Request handling
+
+**Files:**
+- Modify: `core/src/core.rs`, `core/src/conn.rs`
+- Create: `sim/tests/routing.rs`
+
+**Interfaces:**
+- Consumes: Task 8a's `Core`, `Sim`, `Log`; `parse_head`, `HeadLimits` (5); `Router` (6); `render_fixed`, `Status`, `BodyMode` (7)
+- Produces: no new public API (behaviour only).
+
+Connection states (`conn.rs`), each variant carrying only its own data: `ReadingHead { buffered: usize, scanned: usize }`, `Idle` (keep-alive, nothing buffered), `Responding { persistence: Persistence, unread_body: UnreadBody }` (`enum UnreadBody { None, Pending }`), `Lingering`. Transitions: complete head → route → render → `Responding`; response fully sent → if `Close` or body unread → `ShutdownWrite`, `Lingering`; else buffered bytes present → `ReadingHead` and parse immediately; else `Idle`. First byte in `Idle` → `ReadingHead`. `Lingering` reads and discards input until `ReadClosed` → `Close`. `Failed`/`ReadClosed` outside `Lingering` → `Close` (+ `Log::Reset` for `Failed`). Matched routes answer `501 Not Implemented` with `Persistence::Close` in this stage. A request with `BodyFraming` other than `None` marks `UnreadBody::Pending` (forces close). `HEAD` gets `BodyMode::HeadOnly`. Parse errors answer `err.status()` with `Persistence::Close`; route misses answer 404 keeping the request's persistence. Interest is `Write` while `send_buffer` is non-empty, `Read` otherwise (and `None` when the receive buffer is full). Bytes after a complete head stay buffered for the next request (move them to the front of the buffer).
+
+To avoid re-scanning cost (Task 5 note: `parse_head` rescans from byte 0), `ReadingHead.scanned` remembers how far the buffer has been searched for a new LF; `parse_head` is called again only when a `Received` adds an LF beyond `scanned`, or when the buffer is full (so a limit error can fire).
 
 - [ ] **Step 1: Write the failing tests** in `sim/tests/routing.rs` using this config:
 
@@ -389,16 +420,18 @@ host example.test www.example.test {
 }
 ```
 
-  - `unknown_host_gets_404_and_keeps_connection` → received == `render_fixed(NotFound, KeepAlive, Full)`, `state == Open`, `Log::Response { status: NotFound, .. }`
+  - `unknown_host_gets_404_and_keeps_connection` → received == `render_fixed(NotFound, KeepAlive, Full)`, `state == Open`, `Log::Response { status: NotFound, .. }` with the request summary
   - `matched_route_gets_501_and_closes` → `GET /api/x` with `Host: example.test` → 501 bytes with `Connection: close`, then `WriteShutdown`; after `send_eof` + `run_until_idle` → `Closed`
   - `malformed_request_gets_400_and_closes` → `b"GET / HTTP/1.1\nHost: a\n\n"` → 400 with close, `Log::Rejected { reason: Http(BareLf), .. }`
   - `head_request_gets_no_body`
   - `keep_alive_serves_sequential_requests` → two requests one after the other on the same connection → two 404s, still `Open`
-  - `client_reset_closes_and_logs` → `reset` → `Closed`, `Log::Reset`
-- [ ] **Step 2: Run to verify they fail** — `cargo test -p durchlauferhitzer-sim` → FAIL (types missing).
-- [ ] **Step 3: Implement** `time.rs`, `log.rs`, `conn.rs`, `core.rs`, then the `Sim`.
-- [ ] **Step 4: Run to verify they pass** — `cargo test --workspace` → PASS; clippy clean; `scripts/check-product-deps.sh` passes (sim dev-only crates do not appear in core's tree).
-- [ ] **Step 5: Commit** — `"Add core state machine and simulation harness"`
+  - `pipelined_requests_answered_in_order` → two requests in one `send` → two 404s in order
+  - `unread_body_closes_after_response` → `GET /nowhere` with `Content-Length: 10` → 404 with `Connection: close`, `WriteShutdown`, further bytes discarded, `Closed` after `send_eof`
+  - `slow_client_window_still_gets_whole_response` → `Window::Bytes(3)` → full 404 bytes arrive intact
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p durchlauferhitzer-sim --test routing` → FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run to verify they pass** — `cargo test --workspace` → PASS; clippy clean.
+- [ ] **Step 5: Commit** — `"Handle requests: parse, route, answer"`
 
 ---
 
@@ -409,10 +442,10 @@ host example.test www.example.test {
 - Create: `sim/tests/limits.rs`
 
 **Interfaces:**
-- Consumes: everything from Task 8; `Limits` fields `header_timeout`, `keepalive_timeout`, `send_idle_timeout`, `max_connections`, `max_connections_per_ip`
+- Consumes: everything from Tasks 8a/8b; `Limits` fields `header_timeout`, `keepalive_timeout`, `send_idle_timeout`, `max_connections`, `max_connections_per_ip`
 - Produces: no new public API (behavior only).
 
-Behavior: header deadline expiry with `bytes_seen > 0` → 408 + close (`Rejected { reason: Timeout(Header) }`); with `bytes_seen == 0` → silent `Close`. `Idle` expiry → silent `Close`. Send idle expiry → `Close` without further writes (`Rejected { reason: Timeout(Send) }`). On `Accepted` when open connections ≥ `max_connections` or this IP's open connections ≥ `max_connections_per_ip`: answer 503 with close and linger (`Rejected { reason: Limit(..) }`); these refused connections do not count toward either limit. Counts drop when a connection is closed.
+This task adds the deadlines: `ReadingHead` gets a total header deadline (now + `header_timeout`, set when the first byte of a request arrives or at accept), `Idle` a keep-alive deadline (now + `keepalive_timeout`), `Responding` a send idle deadline (now + `send_idle_timeout`, reset on every `Sent` with len > 0), `Lingering` a deadline of now + 2 s (constant `LINGER_TIMEOUT`); `next_deadline` returns the earliest. Behavior: header deadline expiry with `bytes_seen > 0` → 408 + close (`Rejected { reason: Timeout(Header) }`); with `bytes_seen == 0` → silent `Close`. `Idle` expiry → silent `Close`. Send idle expiry → `Close` without further writes (`Rejected { reason: Timeout(Send) }`). On `Accepted` when open connections ≥ `max_connections` or this IP's open connections ≥ `max_connections_per_ip`: answer 503 with close and linger (`Rejected { reason: Limit(..) }`); these refused connections do not count toward either limit. Counts drop when a connection is closed.
 
 - [ ] **Step 1: Write the failing tests** (config with `limits { header_timeout 10s; keepalive_timeout 60s; send_idle_timeout 30s; max_connections 4; max_connections_per_ip 2; }`):
   - `trickling_head_times_out_at_total_deadline` → send one byte every 2 s; at 10 s total → 408 + close (trickling does not extend it)
@@ -436,7 +469,7 @@ Behavior: header deadline expiry with `bytes_seen > 0` → 408 + close (`Rejecte
 - Modify: `sim/Cargo.toml` (dev-dependency `fastrand`), `sim/src/lib.rs` if a helper is missing
 
 **Interfaces:**
-- Consumes: `Sim` API (Task 8)
+- Consumes: `Sim` API (Task 8a)
 - Produces: no new public API.
 
 - [ ] **Step 1: Write the tests**
