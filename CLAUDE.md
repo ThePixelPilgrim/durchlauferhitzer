@@ -25,6 +25,16 @@
   (`cargo tree`) for build scripts or bundled C sources; reject it if any
   are found.
 
+## Minimal dependencies (mandatory)
+
+- Use external crates as little as possible, to shrink the supply-chain
+  attack surface. Default to the Rust standard library and hand-rolled
+  code; a new dependency needs a concrete reason the std library cannot
+  reasonably cover.
+- Every dependency that is added must be justified in its commit message,
+  pinned via `Cargo.lock` (committed), and kept as small as possible
+  (disable default features, prefer crates with few transitive deps).
+
 ## Skills
 
 The superpowers skills are vendored as project skills in `.claude/skills/`
