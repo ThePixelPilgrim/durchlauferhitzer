@@ -208,9 +208,15 @@ reject.
   504. After response headers were sent, failures close the client
   connection.
 - Backend addresses are `host:port`, resolved once at startup.
-- Every proxy route must set `max_body` (a size or `unlimited`); there is no
-  default. A body exceeding it → 413 (before forwarding when
-  `Content-Length` says so, otherwise the connection is cut once exceeded).
+- Every proxy route must set both `max_request_body` and
+  `max_response_body` (each a size or `unlimited`); there are no defaults.
+- Request body over the limit → 413 before forwarding when
+  `Content-Length` says so; otherwise (chunked) both connections are cut
+  once the limit is passed.
+- Response body over the limit → 502 before any response bytes reach the
+  client when the backend's `Content-Length` says so; otherwise both
+  connections are cut once the limit is passed (the client sees an
+  incomplete response, never a silently truncated "complete" one).
 
 ## Configuration
 
@@ -241,7 +247,8 @@ host example.com www.example.com {
   path /api/ {
     proxy: 127.0.0.1:3000;
     strip_prefix: /api;
-    max_body: 10MiB;
+    max_request_body: 10MiB;
+    max_response_body: unlimited;
   }
 }
 ```
@@ -249,7 +256,8 @@ host example.com www.example.com {
 - Unknown keys, duplicate keys, duplicate hosts or paths within a host, a
   `path` with both or neither of `static`/`proxy`, `strip_prefix` on a static
   route, `strip_prefix` that is not a prefix of its `path`, a proxy route
-  without `max_body`, or `max_body` on a static route → startup
+  missing `max_request_body` or `max_response_body`, or either of them on a
+  static route → startup
   error naming the line and column.
 - Durations accept `ms`/`s`/`m`; sizes accept plain bytes and `KiB`/`MiB`/`GiB`.
 
