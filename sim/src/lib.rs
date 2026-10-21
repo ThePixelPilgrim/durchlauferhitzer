@@ -271,6 +271,9 @@ impl Sim {
         if n == 0 {
             return false;
         }
+        if c.state == SimConnState::WriteShutdown {
+            self.violation(&format!("conn={} writes after ShutdownWrite", conn.0));
+        }
         if let Window::Budget(left) = c.window {
             c.window = Window::Budget(left - n);
         }
