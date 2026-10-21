@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Project-local port of the superpowers SessionStart hook: injects using-superpowers.
+set -euo pipefail
+skill_md="${CLAUDE_PROJECT_DIR:-.}/.claude/skills/using-superpowers/SKILL.md"
+content="$(<"$skill_md")"
+s="${content//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
+ctx="<EXTREMELY_IMPORTANT>\nYou have superpowers.\n\n**Below is the full content of your 'using-superpowers' skill - your introduction to using skills. For all other skills, use the 'Skill' tool:**\n\n${s}\n</EXTREMELY_IMPORTANT>"
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$ctx"
