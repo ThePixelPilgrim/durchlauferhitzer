@@ -129,6 +129,27 @@ fn rejects_control_characters() {
 
 ---
 
+### Task 1b: Quoted strings in the lexer (amendment)
+
+**Files:**
+- Modify: `core/src/config/lexer.rs`
+
+**Interfaces:**
+- Consumes: Task 1's lexer.
+- Produces:
+  - new variant `TokenKind::Quoted(String)` (the unescaped contents)
+  - new variants `LexErrorKind::UnterminatedString`, `LexErrorKind::BadEscape(char)`
+
+Rules: `"` starts a string that ends at the next unescaped `"`. Inside, `\"` → `"` and `\\` → `\`; any other character after `\` → `BadEscape(c)` at the backslash's position. A newline or end of input before the closing quote → `UnterminatedString` at the opening quote's position. Control characters inside a string → `UnexpectedChar` as elsewhere. `#`, `:`, `;`, `{`, `}` and spaces inside a string are ordinary characters. A `"` also ends a preceding word (it is a delimiter like `#`). `Spacing` applies to `Quoted` tokens as to any other.
+
+- [ ] **Step 1: Write the failing tests** — `quoted_string_keeps_special_characters` (`r#"a: "x#y; {z}";"#` → `[w("a"), Colon, Quoted("x#y; {z}"), Semicolon]`); `quoted_string_escapes` (`r#""a\"b\\c""#` → `Quoted("a\"b\\c")` i.e. contents `a"b\c`); `unterminated_string_reports_opening_quote` (`"a \"bc\nd\""` → `UnterminatedString` at 1:3); `bad_escape_reports_backslash` (`r#""a\nb""#` → `BadEscape('n')` at 1:3); `quote_ends_word` (`r#"ab"c""#` → `[w("ab"), Quoted("c")]` with the quoted token `Joined`).
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p durchlauferhitzer-core config::lexer` → FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run all checks** — `cargo test -p durchlauferhitzer-core config::lexer && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check && scripts/check-product-deps.sh` → PASS.
+- [ ] **Step 5: Commit** — `"Add quoted strings to the config lexer"`
+
+---
+
 ### Task 2: Config syntax tree
 
 **Files:**
@@ -144,7 +165,7 @@ fn rejects_control_characters() {
   - `pub struct SyntaxError { pub kind: SyntaxErrorKind, pub pos: Pos }`
   - `pub fn parse(text: &str) -> Result<Vec<Item>, SyntaxError>`
 
-Grammar from the spec. A setting is `Word Colon value+ Semicolon`; a value is a run of `Word`/`Colon` tokens joined with `Spacing::Joined` (so `127.0.0.1:8080` and `[::1]:8080` are single values). A block is `Word Word* OpenBrace Item* CloseBrace`. `EmptyValue` for `key: ;`. `UnclosedBlock` reports the block's opening position. Nesting depth is capped at 8 (`UnexpectedToken` beyond) so hostile configs cannot recurse deeply.
+Grammar from the spec. A setting is `Word Colon value+ Semicolon`; a value is a run of `Word`/`Colon` tokens joined with `Spacing::Joined` (so `127.0.0.1:8080` and `[::1]:8080` are single values). A `Quoted` token is a complete value (or block arg) on its own; a `Quoted` token `Joined` to a neighbouring `Word`/`Colon`/`Quoted` → `UnexpectedToken`. Block names and setting keys must be `Word`s. A block is `Word Word* OpenBrace Item* CloseBrace`. `EmptyValue` for `key: ;`. `UnclosedBlock` reports the block's opening position. Nesting depth is capped at 8 (`UnexpectedToken` beyond) so hostile configs cannot recurse deeply.
 
 - [ ] **Step 1: Write the failing tests** in `syntax.rs`: `parses_nested_blocks` (the spec's example config: 3 top-level items; `host` block args `["example.com", "www.example.com"]`; its second `path` block has args `["/api/"]` and settings `proxy` = `["127.0.0.1:3000"]`, `strip_prefix` = `["/api"]`); `joins_adjacent_value_tokens` (`listen: [::1]:8080 127.0.0.1:80;` → values `["[::1]:8080", "127.0.0.1:80"]`); `reports_unclosed_block_at_its_start` (`"a {\n b: c;\n"` → `UnclosedBlock` at 1:1); `rejects_missing_semicolon` (`"a: b }"` → `UnexpectedToken` at 1:6); `rejects_empty_value`; `rejects_nesting_deeper_than_8`.
 - [ ] **Step 2: Run to verify they fail** — `cargo test -p durchlauferhitzer-core config::syntax` → FAIL.

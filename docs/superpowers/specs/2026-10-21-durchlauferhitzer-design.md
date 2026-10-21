@@ -229,7 +229,8 @@ item      = setting | block
 setting   = key ":" value { value } ";"
 block     = name { arg } "{" { item } "}"
 comment   = "#" to end of line
-tokens    = runs of non-whitespace excluding ":" ";" "{" "}" "#"
+tokens    = runs of non-whitespace excluding ":" ";" "{" "}" "#" '"'
+string    = '"' { char | '\"' | '\\' } '"'   (one line; a complete value)
 ```
 
 Example:
