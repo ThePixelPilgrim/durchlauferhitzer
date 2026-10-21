@@ -1,0 +1,276 @@
+# durchlauferhitzer — Design
+
+Date: 2026-10-21
+Status: draft, awaiting approval
+
+## Intent
+
+A barebones, security-first HTTP server for Linux that serves static files
+and forwards requests to backends (a minimal reverse proxy), routed by
+virtual host and path prefix. "Barebones" is the feature: little code, almost
+no dependencies, strict parsing, every case handled explicitly.
+
+It will not face the internet until its owner trusts it. Trust comes from
+strict red/green TDD against a fully simulated environment (network, clock,
+file system) in which clients and backends can misbehave in every way that
+matters.
+
+## Goals
+
+- Virtual hosts selected by the `Host` header.
+- Per-host path-prefix routes, each either serving static files or proxying
+  to one backend.
+- Optional `strip_prefix` on proxy routes (plain string compare, no regex).
+- A small hand-rolled config format with SCSS-like nested blocks.
+- A sans-IO core: all protocol logic is deterministic state machines that
+  never touch a real socket, clock, or file. The same core runs under the
+  simulation in tests and under an `epoll` driver in production.
+- Pervasive enums with exhaustive matching, so the compiler points at every
+  place a new state, event, or error must be handled.
+- Performance work comes later, but nothing wasteful now: no needless copies,
+  no unbounded buffers, no busy-waiting.
+
+## Non-goals (for now)
+
+- HTTPS / TLS of any kind (later stage; would need a pure-Rust crypto provider).
+- Forward-proxy mode (absolute-form request targets, `CONNECT`).
+- HTTP/2, HTTP/3, WebSockets / `Upgrade`.
+- Regex or rewrite rules, wildcard hosts, load balancing across backends.
+- Config hot-reload (restart instead; zero-downtime restart is a later stage).
+- Directory listings, range requests, compression.
+- io_uring (rejected: bypasses seccomp; poor kernel security track record).
+  The driver interface is completion-shaped so it could be added later.
+
+## Anti-goals
+
+These would make the project a failure even if everything "works":
+
+- Any C code in the repo or the dependency tree (glibc is the sole exception).
+- A dependency tree that grows for convenience.
+- Being usable as an open proxy: the destination of a proxied request is
+  only ever a backend named in the config.
+- Escaping a static root by any means (`..`, percent-encoding, symlinks).
+- Request smuggling: any ambiguity in message framing is a hard rejection.
+- A slow client, slow disk, or slow backend stalling other connections.
+
+## Hard constraints (from the owner)
+
+- Rust only; glibc is the only C allowed. No `cc`/`cmake` build scripts, no
+  `*-sys` crates except `libc`, no `ring`/`aws-lc-rs`/OpenSSL.
+- Minimal external crates. Planned total: `libc` (driver only). Test
+  helpers (PRNG, simulation) are hand-rolled.
+- Strict red/green TDD: every behavior starts as a failing test.
+- Everything runs on a simulated network/clock/file system in tests, with
+  fault injection (drops, resets, stalls, byte-by-byte delivery, slow disk,
+  files changing or vanishing).
+- Async event loop: `epoll` for sockets, `sendfile` for static files.
+- Core is explicit state machines (not `async`/`await`).
+- Exhaustive enum handling, enforced by lints.
+- `strip_prefix` is the option name.
+
+## Architecture
+
+```
+          ┌──────────────── core (no I/O, no unsafe, no deps) ───────────────┐
+ Events → │ config · HTTP/1.1 parser · routing · connection state machines   │ → Actions
+          └──────────────────────────────────────────────────────────────────┘
+                 ▲                                              ▲
+       simulation driver (tests)                     epoll driver (production)
+       virtual net · clock · fs                      sockets · eventfd · readahead pool
+```
+
+### The core
+
+- Input: `Event` enum, e.g. client accepted, bytes received, peer closed,
+  write completed, backend connected / failed, file opened / chunk ready /
+  file error, timer fired. Every event carries the current monotonic time.
+- Output: `Action` enum, e.g. write bytes, `sendfile` a file range, open a
+  backend connection, open a file, `readahead` a chunk, close, set the next
+  deadline, emit a log entry.
+- Per-connection state is an enum whose variants carry only data valid in
+  that state (e.g. only a forwarding state owns a backend handle). Each
+  transition consumes the old state and returns the new one plus actions.
+- Connections and files are referred to by opaque ids allocated by the
+  driver; the core never holds OS handles.
+- Single-threaded, no locks. Config is immutable after load.
+
+### Lints (core and everywhere unless noted)
+
+- `#![forbid(unsafe_code)]` in the core; the driver confines `unsafe` to a
+  small, documented `libc` wrapper module.
+- Deny: `clippy::wildcard_enum_match_arm`, `clippy::unwrap_used`,
+  `clippy::expect_used`, `clippy::panic`, `clippy::indexing_slicing`.
+  Untrusted input yields error enums, never panics.
+
+### Drivers
+
+- **Simulation driver** (tests): virtual network with per-connection fault
+  scripts, virtual clock advanced explicitly, in-memory file system (with
+  symlinks, files that change or vanish, slow reads). Records every event and
+  action so failures print the exact transition sequence. A hand-rolled
+  seeded PRNG drives randomized fault schedules; the seed is printed on
+  failure for replay.
+- **epoll driver** (production): non-blocking sockets on `epoll`; timers via
+  the `epoll_wait` timeout from the core's next deadline; monotonic clock.
+  Static files: a small thread pool runs `readahead` for the next chunk
+  (the only place that may block on disk) and reports completion through an
+  `eventfd`; the loop then does a non-blocking `sendfile` of that chunk, and
+  parks the connection on `EPOLLOUT` if the client is slow. A slow client
+  costs a parked connection, never a thread. Files are opened with
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` relative to the static
+  root.
+- All threading and multiplexing lives in the driver. Multi-core later =
+  N driver threads, each with its own `epoll` and core, sharing the port via
+  `SO_REUSEPORT`.
+
+## HTTP behavior
+
+HTTP/1.1 and 1.0, origin-form targets only. Strict by default: when in doubt,
+reject.
+
+- **Framing:** CRLF line endings only; no obs-fold; header names are tokens.
+  Reject (400): both `Content-Length` and `Transfer-Encoding`; multiple or
+  non-numeric `Content-Length`; any `Transfer-Encoding` other than exactly
+  `chunked`; malformed chunk framing.
+- **Targets:** absolute-form, authority-form, asterisk-form → 400. Reject
+  (400) paths containing `.` or `..` segments, `//`, `%2F`, `%5C`, `%00`,
+  backslash, or non-ASCII bytes. After this check the raw path is canonical;
+  routing and forwarding use it as-is, static serving percent-decodes it.
+- **Host:** required for HTTP/1.1 (400 if missing or duplicated). Matched
+  case-insensitively, port ignored, exact names only. No matching host → 404.
+- **Routing:** longest matching `path` prefix wins, matched on segment
+  boundaries (`/api/` never matches `/apix`). No match → 404.
+- **Keep-alive** with clients; one request at a time per connection (the next
+  request is not read until the response is done). Pipelined bytes are
+  buffered within limits.
+- **Limits and timeouts:** request line, header section size, header count,
+  request body size, concurrent connections, header-read timeout, keep-alive
+  idle timeout, backend connect timeout, backend response timeout, body idle
+  timeout, send idle timeout (client stops reading the response), and
+  connections per client IP. All have conservative defaults and can be
+  overridden in the `limits` block. Exceeding one gives the matching status
+  (400/408/413/431/503) and closes the connection.
+- **Slow clients (design call):** the header-read timeout is a *total*
+  deadline for the whole request head, not an idle timeout, so trickling
+  bytes does not extend it. Body transfer in either direction uses idle
+  timeouts. A client stalling a proxied response also releases the backend
+  connection when its send idle timeout fires. The per-IP connection cap
+  keeps a single host from filling `max_connections`. Minimum transfer rates
+  are not in scope.
+
+### Static routes
+
+- Methods GET and HEAD; others → 405 with `Allow`.
+- Directory → its `index.html` if it exists, else 404. No listings.
+- Symlinks anywhere in the path → 404. Dotfiles (any segment starting with
+  `.`) → 404.
+- `Content-Type` from a small built-in extension table, default
+  `application/octet-stream`; always send `X-Content-Type-Options: nosniff`.
+- A file that changes size or vanishes mid-transfer aborts that connection
+  cleanly (headers already sent) and logs it.
+
+### Proxy routes
+
+- Any method token is forwarded. One fresh backend connection per request,
+  `Connection: close` to the backend (pooling is later).
+- `strip_prefix: X;` removes `X` from the start of the path if present; an
+  empty result becomes `/`; the query string is unchanged.
+- Strip hop-by-hop headers in both directions (`Connection` and the headers
+  it lists, `Keep-Alive`, `Proxy-*`, `TE`, `Trailer`, `Upgrade`), and append
+  `X-Forwarded-For` and set `X-Forwarded-Proto: http`. `Host` is forwarded
+  unchanged.
+- Bodies stream in both directions with bounded buffers and backpressure;
+  framing of both request and response is parsed strictly.
+- Backend connect failure or reset before response headers → 502; timeout →
+  504. After response headers were sent, failures close the client
+  connection.
+- Backend addresses are `host:port`, resolved once at startup.
+
+## Configuration
+
+Hand-rolled parser. Grammar:
+
+```
+file      = { item }
+item      = setting | block
+setting   = key ":" value { value } ";"
+block     = name { arg } "{" { item } "}"
+comment   = "#" to end of line
+tokens    = runs of non-whitespace excluding ":" ";" "{" "}" "#"
+```
+
+Example:
+
+```scss
+listen: 127.0.0.1:8080;
+user: www-data;            # drop privileges to this user after binding
+
+limits {
+  max_connections: 1024;
+  header_timeout: 10s;
+}
+
+host example.com www.example.com {
+  path / { static: /srv/www; }
+  path /api/ {
+    proxy: 127.0.0.1:3000;
+    strip_prefix: /api;
+  }
+}
+```
+
+- Unknown keys, duplicate keys, duplicate hosts or paths within a host, a
+  `path` with both or neither of `static`/`proxy`, `strip_prefix` on a static
+  route, or `strip_prefix` that is not a prefix of its `path` → startup
+  error naming the line and column.
+- Durations accept `ms`/`s`/`m`; sizes accept plain bytes and `KiB`/`MiB`.
+
+## Logging
+
+The core emits `Log` actions as enum variants (one per kind: request served,
+client error, backend failure, file aborted, limit hit, …). The driver
+writes each as one `key=value` line to stderr. Logging never blocks: if
+stderr is backed up, entries are dropped and counted, and the count is logged
+once output catches up. Tests assert on `Log` actions directly.
+
+## Process
+
+- `durchlauferhitzer <config-path>`; `--check` validates the config and exits.
+- Starts as root only if it needs a port below 1024; binds, then switches to
+  `user` (refuses to keep running as root if `user` is unset).
+- SIGTERM: stop accepting, finish in-flight requests up to a deadline, exit.
+
+## Timeline
+
+Each stage is a separately planned and reviewed chunk that leaves the
+project working and tested.
+
+1. **Foundations** — workspace, lints, config parser + validation, core
+   `Event`/`Action`/state enums, simulation harness (net + clock), strict
+   HTTP/1.1 request parsing, vhost + path routing answering 404/400/4xx with
+   fixed responses, limits and timeouts. No real I/O yet.
+2. **Static files** — simulated file system, path decoding and validation,
+   open/readahead/sendfile actions, index.html, content types, HEAD,
+   mid-transfer failures.
+3. **Reverse proxy** — backend connections in the simulation, header
+   handling, `strip_prefix`, body streaming with backpressure, 502/504,
+   misbehaving backends.
+4. **epoll driver + binary** — the real driver, readahead pool, `eventfd`,
+   `sendfile`, `openat2`, logging output, CLI, privilege drop, SIGTERM drain.
+   A few smoke tests over real loopback sockets. First runnable release.
+5. **Containment** — Landlock (restrict file access to static roots),
+   seccomp (allow-list of syscalls), long randomized simulation runs.
+6. **Zero-downtime restart** — on a signal, exec the new binary with the
+   listening sockets inherited; new process validates config (exits on error,
+   old keeps serving), starts accepting; old stops accepting, drains, exits.
+7. **Scaling** — N driver threads with `SO_REUSEPORT`, backend connection
+   pooling, conditional requests (ETag / Last-Modified), profiling.
+8. **Later, maybe** — HTTPS with a pure-Rust crypto provider, io_uring driver.
+
+## Left to the builder
+
+- Exact default values for limits and timeouts (conservative, documented).
+- Module layout within crates, names of enum variants, buffer strategy.
+- Edge-triggered vs level-triggered `epoll`, readahead chunk size, pool size.
+- Exact content-type table (common web types).
+- `Expect: 100-continue` handling, as long as it is explicit and tested.
