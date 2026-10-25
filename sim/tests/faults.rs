@@ -17,9 +17,10 @@ use std::time::Duration;
 
 use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
 use durchlauferhitzer_core::http::response::{
-    BodyMode, render_file_head, render_fixed, render_redirect,
+    BodyMode, redirect_len, render_file_head, render_fixed, render_redirect,
 };
 use durchlauferhitzer_core::http::status::Status;
+use durchlauferhitzer_core::http::target::TargetError;
 use durchlauferhitzer_core::{
     ConnId, FileError, FileStamp, LimitKind, Log, RejectReason, RequestSummary, TimeoutKind,
 };
@@ -47,8 +48,31 @@ limits {
 host example.test {
   path / { static /srv/www; }
   path /g { static /srv/www; on_file_change allow_growth; }
+  path /.well-known { static /srv/www; }
   path /api/ { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body unlimited; }
 }";
+
+/// Like `RANDOM_CONFIG`, but request lines long enough for directory
+/// redirects that no longer fit the send buffer (answered 414).
+const LONG_RANDOM_CONFIG: &str = "listen 127.0.0.1:8080;
+limits {
+  max_request_line 2KiB;
+  max_head 2200;
+  header_timeout 10s;
+  keepalive_timeout 60s;
+  send_idle_timeout 30s;
+  max_connections 6;
+  max_connections_per_ip 3;
+}
+host example.test {
+  path / { static /srv/www; }
+  path /g { static /srv/www; on_file_change allow_growth; }
+  path /.well-known { static /srv/www; }
+  path /api/ { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body unlimited; }
+}";
+
+/// The send buffer's capacity (`SEND_CAPACITY` in the core).
+const SEND_CAPACITY: usize = 1024;
 
 /// Unknown host: 404, keep-alive.
 const VALID: &[u8] = b"GET /x HTTP/1.1\r\nHost: other.test\r\n\r\n";
@@ -374,7 +398,34 @@ const STATIC_PATHS: &[&str] = &[
     "priv/x.txt",
     "fifo",
     "a.txt/",
+    "grow.txt",
+    // Escapes the path may keep: decoded once by static serving.
+    "sp%20ace.txt",
+    "%C3%A4.txt",
+    // Escapes of unreserved characters (and an encoded dot): 400.
+    "%61.txt",
+    "d/%7Ee.txt",
+    "%2D",
+    "d/e%2Etxt",
 ];
+
+/// Queries a static request may carry (kept in a redirect's `Location`).
+const QUERIES: &[&str] = &["", "", "", "?", "?x=1", "?q=%61b%2F;c"];
+
+/// Lengths of the long queries of long seeds, around the point where a
+/// directory redirect stops fitting the send buffer.
+const LONG_QUERY_LENS: &[usize] = &[100, 300, 500, 700, 900];
+
+/// Every query the generator can produce.
+fn all_queries() -> Vec<String> {
+    let mut all: Vec<String> = QUERIES.iter().map(|q| (*q).to_owned()).collect();
+    all.extend(
+        LONG_QUERY_LENS
+            .iter()
+            .map(|&n| format!("?{}", "q".repeat(n))),
+    );
+    all
+}
 
 /// The static root both static routes serve.
 const ROOT: &str = "/srv/www";
@@ -382,17 +433,45 @@ const ROOT: &str = "/srv/www";
 const CHUNK: u64 = 256 * 1024;
 const MIB: u64 = 1024 * 1024;
 
-/// A static request: a path under `/` (abort on change) or `/g` (allow
-/// growth). Bodies only go to `/up/` paths, so the expected status of
-/// every logged request follows from its method and path alone.
-fn random_static_request(rng: &mut fastrand::Rng) -> Vec<u8> {
-    let rel = rng.choice(STATIC_PATHS).copied().unwrap_or_default();
-    let prefix = if rng.bool() { "/" } else { "/g/" };
+/// A static request: a path under `/` (abort on change), `/g` (allow
+/// growth) or `/.well-known` (abort), maybe with a query. Bodies only go to
+/// `up/` paths, so the expected status of every logged request follows
+/// from its method and path alone (and, for a redirect, the query).
+fn random_static_request(rng: &mut fastrand::Rng, long_dir: Option<&str>) -> Vec<u8> {
+    let host = "Host: example.test\r\n";
+    // Long seeds: the long directory, with or without its slash, and a
+    // query of any length.
+    if let Some(dir) = long_dir.filter(|_| rng.u8(0..3) == 0) {
+        let slash = if rng.u8(0..3) == 0 { "/" } else { "" };
+        // Mostly long queries, around the point where the redirect stops
+        // fitting the send buffer.
+        let query = match rng.u8(0..4) {
+            0 => rng.choice(QUERIES).copied().unwrap_or_default().to_owned(),
+            _ => format!(
+                "?{}",
+                "q".repeat(rng.choice(LONG_QUERY_LENS).copied().unwrap_or(0))
+            ),
+        };
+        let method = if rng.bool() { "GET" } else { "HEAD" };
+        return format!("{method} /{dir}{slash}{query} HTTP/1.1\r\n{host}\r\n").into_bytes();
+    }
+    let prefix = match rng.u8(0..5) {
+        0 | 1 => "/",
+        2 | 3 => "/g/",
+        _ => "/.well-known/",
+    };
+    // Bias `/g/` toward the growing file, so growth sent under
+    // `allow_growth` is common.
+    let rel = match prefix {
+        "/g/" if rng.u8(0..3) == 0 => "grow.txt",
+        _ => rng.choice(STATIC_PATHS).copied().unwrap_or_default(),
+    };
     let path = match (rel, prefix) {
-        ("", "/g/") if rng.bool() => "/g".to_owned(),
+        ("", "/g/" | "/.well-known/") if rng.bool() => prefix.trim_end_matches('/').to_owned(),
         _ => format!("{prefix}{rel}"),
     };
-    let host = "Host: example.test\r\n";
+    let query = rng.choice(QUERIES).copied().unwrap_or_default();
+    let path = format!("{path}{query}");
     match rng.u8(0..20) {
         0..10 => format!("GET {path} HTTP/1.1\r\n{host}\r\n").into_bytes(),
         10..15 => format!("HEAD {path} HTTP/1.1\r\n{host}\r\n").into_bytes(),
@@ -405,9 +484,9 @@ fn random_static_request(rng: &mut fastrand::Rng) -> Vec<u8> {
     }
 }
 
-fn random_request(rng: &mut fastrand::Rng) -> Vec<u8> {
+fn random_request(rng: &mut fastrand::Rng, long_dir: Option<&str>) -> Vec<u8> {
     if rng.u8(0..10) < 7 {
-        random_static_request(rng)
+        random_static_request(rng, long_dir)
     } else {
         rng.choice(REQUESTS).map(|r| r.to_vec()).unwrap_or_default()
     }
@@ -492,8 +571,55 @@ enum Expect<'t> {
 /// The test's model of the random file tree under `ROOT`.
 #[derive(Debug, Default)]
 struct Tree {
-    /// Keyed by the relative path, e.g. `d/e.txt`.
+    /// Keyed by the relative (decoded) path, e.g. `d/e.txt`.
     nodes: BTreeMap<String, Node>,
+    /// Long seeds: a directory with a name long enough that its redirect
+    /// may not fit the send buffer.
+    long_dir: Option<String>,
+}
+
+/// Percent-decodes one path segment (escapes are well-formed: the path
+/// passed the target checks).
+fn decode(segment: &str) -> String {
+    let b = segment.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        let hex = segment.get(i + 1..i + 3).unwrap_or("");
+        match (c, u8::from_str_radix(hex, 16)) {
+            (b'%', Ok(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether `path` spells an unreserved character as an escape.
+fn has_encoded_unreserved(path: &str) -> bool {
+    path.match_indices('%').any(|(i, _)| {
+        let hex = path.get(i + 1..i + 3).unwrap_or("");
+        u8::from_str_radix(hex, 16)
+            .is_ok_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
+    })
+}
+
+/// The change policy and route-relative part of a request path on
+/// `example.test`'s static routes.
+fn split_route(path: &str) -> (Policy, &str) {
+    for (prefix, policy) in [("/g", Policy::AllowGrowth), ("/.well-known", Policy::Abort)] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return (policy, rest);
+            }
+        }
+    }
+    (Policy::Abort, path)
 }
 
 fn content_type_of(name: &str) -> &'static str {
@@ -525,6 +651,52 @@ fn random_size(rng: &mut fastrand::Rng, big: bool) -> u64 {
     }
 }
 
+/// The contents of a file of `size` bytes, distinct per file and not
+/// periodic: a random block repeated (which keeps large files cheap), with
+/// each repetition's first four bytes mixed with its index, so every
+/// position of the stream is told apart.
+fn file_bytes(rng: &mut fastrand::Rng, size: u64) -> Vec<u8> {
+    const BLOCK: usize = 509;
+    let block: Vec<u8> = (0..BLOCK).map(|_| rng.u8(..)).collect();
+    let mut bytes = block.repeat(usize::try_from(size / BLOCK as u64 + 1).unwrap_or(0));
+    bytes.truncate(usize::try_from(size).unwrap_or(0));
+    for (index, chunk) in bytes.chunks_mut(BLOCK).enumerate() {
+        let mark = u32::try_from(index).unwrap_or(u32::MAX).to_le_bytes();
+        for (b, m) in chunk.iter_mut().zip(mark) {
+            *b ^= m;
+        }
+    }
+    bytes
+}
+
+/// A body shifted by any offset must not look like the original, or a
+/// response that skipped or repeated bytes could pass the byte-exact check.
+#[test]
+fn file_contents_are_not_periodic() {
+    let mut rng = fastrand::Rng::with_seed(7);
+    let bytes = file_bytes(&mut rng, MIB);
+    for shift in [
+        1,
+        2,
+        4,
+        508,
+        509,
+        510,
+        1018,
+        4096,
+        509 * 256,
+        509 * 512,
+        256 * 1024,
+    ] {
+        let a = bytes.get(..bytes.len() - shift).unwrap_or_default();
+        let b = bytes.get(shift..).unwrap_or_default();
+        // Not even a window of one chunk matches its shifted self.
+        let window = 64 * 1024;
+        let same = a.chunks(window).zip(b.chunks(window)).any(|(x, y)| x == y);
+        assert!(!same, "a window repeats after a shift of {shift} bytes");
+    }
+}
+
 fn random_fault(rng: &mut fastrand::Rng, size: u64) -> Fault {
     if size == 0 {
         return Fault::None;
@@ -534,9 +706,9 @@ fn random_fault(rng: &mut fastrand::Rng, size: u64) -> Fault {
         1 => {
             // `after` may equal the chunk count: the change is never seen.
             let after = rng.u64(0..=size.div_ceil(CHUNK));
-            let new_size = match rng.u8(0..3) {
-                0 => size + rng.u64(1..1000),
-                1 => size,
+            let new_size = match rng.u8(0..4) {
+                0 | 1 => size + rng.u64(1..1000),
+                2 => size,
                 _ => rng.u64(0..size),
             };
             // Far above the sim's own modification times.
@@ -567,12 +739,32 @@ impl Tree {
 
     fn add_file(&mut self, sim: &mut Sim, rng: &mut fastrand::Rng, path: &str, big: bool) {
         let size = random_size(rng, big);
-        // Distinct per file; repeating a block keeps large files cheap.
-        let block: Vec<u8> = (0..509).map(|_| rng.u8(..)).collect();
-        let mut bytes = block.repeat(usize::try_from(size / 509 + 1).unwrap_or(0));
-        bytes.truncate(usize::try_from(size).unwrap_or(0));
-        sim.add_file(ROOT, path, &bytes);
         let fault = random_fault(rng, size);
+        self.add_file_with(sim, rng, path, size, fault);
+    }
+
+    /// A file that always grows while it is sent, before its last chunk:
+    /// sent whole under `allow_growth`, aborted under `abort`.
+    fn add_growing_file(&mut self, sim: &mut Sim, rng: &mut fastrand::Rng, path: &str, big: bool) {
+        let size = random_size(rng, big).max(1);
+        let new = FileStamp {
+            size: size + rng.u64(1..1000),
+            modified_ns: 1_000_000 + rng.u64(0..1000),
+        };
+        let after = rng.u64(0..size.div_ceil(CHUNK));
+        self.add_file_with(sim, rng, path, size, Fault::Change { after, new });
+    }
+
+    fn add_file_with(
+        &mut self,
+        sim: &mut Sim,
+        rng: &mut fastrand::Rng,
+        path: &str,
+        size: u64,
+        fault: Fault,
+    ) {
+        let bytes = file_bytes(rng, size);
+        sim.add_file(ROOT, path, &bytes);
         match fault {
             Fault::None => {}
             Fault::Shrink(at) => sim.shrink_on_send(ROOT, path, at),
@@ -601,10 +793,21 @@ impl Tree {
     /// A random tree in `sim` and its model: files of random sizes and
     /// faults, directories with and without `index.html`, symlinks, a
     /// denied file, a denied directory, a special file and a dotfile.
-    fn random(sim: &mut Sim, rng: &mut fastrand::Rng, big: bool) -> Tree {
+    fn random(sim: &mut Sim, rng: &mut fastrand::Rng, big: bool, long: bool) -> Tree {
         let mut tree = Tree::default();
         tree.add_dir(sim, "d");
         tree.add_dir(sim, "f");
+        tree.add_growing_file(sim, rng, "grow.txt", big);
+        if long {
+            // Long enough that some redirects with long queries no longer
+            // fit the send buffer, short enough for `max_request_line`.
+            let dir = format!("l{}", "o".repeat(rng.usize(200..=900)));
+            tree.add_dir(sim, &dir);
+            if rng.bool() {
+                tree.add_file(sim, rng, &format!("{dir}/index.html"), false);
+            }
+            tree.long_dir = Some(dir);
+        }
         for path in [
             "index.html",
             "a.txt",
@@ -615,6 +818,8 @@ impl Tree {
             "f/x.bin",
             ".env",
             "d/.hidden",
+            "sp ace.txt",
+            "\u{e4}.txt",
         ] {
             if rng.u8(0..4) != 0 {
                 tree.add_file(sim, rng, path, big);
@@ -646,12 +851,13 @@ impl Tree {
     /// How a `GET` or `HEAD` without a body of `path` (a request path on
     /// `example.test`) must be answered.
     fn resolve(&self, path: &str) -> Expect<'_> {
-        let (policy, rel) = match path.strip_prefix("/g") {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => (Policy::AllowGrowth, rest),
-            Some(_) | None => (Policy::Abort, path),
-        };
+        let (policy, rel) = split_route(path);
         let slash = path.ends_with('/');
-        let segments: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+        let segments: Vec<String> = rel
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(decode)
+            .collect();
         if segments.iter().any(|s| s.starts_with('.')) {
             return Expect::NotFound;
         }
@@ -665,7 +871,7 @@ impl Tree {
             if !key.is_empty() {
                 key.push('/');
             }
-            key.push_str(segment);
+            key.push_str(&segment);
             node = match self.nodes.get(&key) {
                 Some(n) => n,
                 None => return Expect::NotFound,
@@ -699,7 +905,7 @@ impl Tree {
             Method::Get | Method::Head => {}
             Method::Other(_) => return Status::MethodNotAllowed,
         }
-        if path.starts_with("/up/") || path.starts_with("/g/up/") {
+        if split_route(path).1.starts_with("/up/") {
             return Status::ContentTooLarge;
         }
         match self.resolve(path) {
@@ -749,7 +955,20 @@ struct Coverage {
     /// Complete `GET` bodies of files that grew under `allow_growth`.
     grown: usize,
     head_ok: usize,
+    /// Directory redirects answered 414 because they would not fit the
+    /// send buffer.
+    redirect_414: usize,
+    /// Paths rejected for an encoded unreserved character.
+    encoded_unreserved: usize,
+    /// Responses on the `.well-known` route.
+    well_known: usize,
+    /// Directory redirects that kept a query.
+    redirect_query: usize,
 }
+
+/// `grown` must be well clear of zero, so a refactor cannot silently lose
+/// it.
+const MIN_GROWN: usize = 50;
 
 impl Coverage {
     fn check(&self) {
@@ -767,7 +986,19 @@ impl Coverage {
             ("multi-chunk 200 bodies", self.multi_chunk),
             ("grown files sent under allow_growth", self.grown),
             ("HEAD 200", self.head_ok),
+            ("414 instead of a redirect", self.redirect_414),
+            (
+                "400 for an encoded unreserved character",
+                self.encoded_unreserved,
+            ),
+            (".well-known responses", self.well_known),
+            ("redirects with a query", self.redirect_query),
         ];
+        assert!(
+            self.grown >= MIN_GROWN,
+            "only {} grown files sent under allow_growth (want {MIN_GROWN})",
+            self.grown
+        );
         for (status, n) in STATUSES.iter().zip(self.statuses) {
             assert!(n > 0, "no {} response in any seed", status.code());
         }
@@ -788,6 +1019,8 @@ struct Seen {
 /// One rendering a logged response may have been sent as.
 struct Rendering {
     persistence: Persistence,
+    /// A redirect whose `Location` kept a query.
+    with_query: bool,
     /// Length of the head (for a file response: where the body starts).
     head_len: usize,
     bytes: Vec<u8>,
@@ -815,11 +1048,40 @@ fn fixed_renderings(
             render_fixed(status, persistence, BodyMode::HeadOnly, &mut head);
             Rendering {
                 persistence,
+                with_query: false,
                 head_len: head.len(),
                 bytes,
             }
         })
         .collect()
+}
+
+/// A directory redirect of `path` with each query the generator can
+/// produce, in each persistence: the renderings that fit the send buffer
+/// (a `301`), and whether any would not (a `414` instead).
+fn redirect_renderings(path: &str, body: BodyMode) -> (Vec<Rendering>, bool) {
+    let mut fitting = Vec::new();
+    let mut overflow = false;
+    for query in all_queries() {
+        let location = format!("{path}/{query}");
+        for persistence in BOTH {
+            if redirect_len(location.len(), persistence, body) > SEND_CAPACITY {
+                overflow = true;
+                continue;
+            }
+            let mut bytes = Vec::new();
+            render_redirect(&location, persistence, body, &mut bytes);
+            let mut head = Vec::new();
+            render_redirect(&location, persistence, BodyMode::HeadOnly, &mut head);
+            fitting.push(Rendering {
+                persistence,
+                with_query: !query.is_empty(),
+                head_len: head.len(),
+                bytes,
+            });
+        }
+    }
+    (fitting, overflow)
 }
 
 const BOTH: [Persistence; 2] = [Persistence::KeepAlive, Persistence::Close];
@@ -864,8 +1126,13 @@ fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announced<'t>>, Str
         }));
     };
     let path = request.path.as_str();
+    if has_encoded_unreserved(path) {
+        return Err(format!("{path} answered, but it must be rejected (400)"));
+    }
     let expected = tree.expected_status(&request.method, path);
-    if status != expected {
+    // A redirect too long for the send buffer is answered 414 instead.
+    let redirect_too_long = expected == Status::MovedPermanently && status == Status::UriTooLong;
+    if status != expected && !redirect_too_long {
         return Err(format!(
             "{:?} {path} logged {} but the tree says {}",
             request.method,
@@ -887,6 +1154,7 @@ fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announced<'t>>, Str
                     }
                     Rendering {
                         persistence,
+                        with_query: false,
                         head_len,
                         bytes,
                     }
@@ -900,25 +1168,26 @@ fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announced<'t>>, Str
             }
         }
         (Status::MovedPermanently, _) => {
-            let location = format!("{path}/");
-            let renderings = BOTH
-                .iter()
-                .map(|&persistence| {
-                    let mut bytes = Vec::new();
-                    render_redirect(&location, persistence, body, &mut bytes);
-                    let mut head = Vec::new();
-                    render_redirect(&location, persistence, BodyMode::HeadOnly, &mut head);
-                    Rendering {
-                        persistence,
-                        head_len: head.len(),
-                        bytes,
-                    }
-                })
-                .collect();
+            let (renderings, _) = redirect_renderings(path, body);
+            if renderings.is_empty() {
+                return Err(format!("301 for {path}, which never fits the send buffer"));
+            }
             Announced {
                 status,
                 body,
                 renderings,
+                file: None,
+            }
+        }
+        (Status::UriTooLong, _) => {
+            let (_, overflow) = redirect_renderings(path, body);
+            if !overflow {
+                return Err(format!("414 for {path}, whose redirect always fits"));
+            }
+            Announced {
+                status,
+                body,
+                renderings: fixed_renderings(status, &BOTH, body),
                 file: None,
             }
         }
@@ -965,10 +1234,10 @@ fn random_disk_delay(rng: &mut fastrand::Rng) -> Duration {
 }
 
 /// Send a random prefix of `client`'s queued templates.
-fn send_piece(sim: &mut Sim, client: &mut Client, rng: &mut fastrand::Rng) {
+fn send_piece(sim: &mut Sim, client: &mut Client, rng: &mut fastrand::Rng, long_dir: Option<&str>) {
     if client.queue.is_empty() {
         for _ in 0..rng.usize(1..4) {
-            client.queue.push_back(random_request(rng));
+            client.queue.push_back(random_request(rng, long_dir));
         }
     }
     let total: usize = client.queue.iter().map(Vec::len).sum();
@@ -1082,6 +1351,9 @@ fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &mut Coverage
             }
             if a.status == Status::Ok && a.body == BodyMode::HeadOnly {
                 coverage.head_ok += 1;
+            }
+            if a.status == Status::MovedPermanently && r.with_query {
+                coverage.redirect_query += 1;
             }
             continue;
         }
@@ -1238,10 +1510,16 @@ fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &mut Coverage
 /// One random schedule. Panics (sim invariant or check) on failure.
 fn run_seed(seed: u64, coverage: &mut Coverage) {
     let mut rng = fastrand::Rng::with_seed(seed);
-    let mut sim = Sim::new(RANDOM_CONFIG);
+    // One seed in three allows long request lines (and long paths).
+    let long = rng.u8(0..3) == 0;
+    let mut sim = Sim::new(if long {
+        LONG_RANDOM_CONFIG
+    } else {
+        RANDOM_CONFIG
+    });
     // One seed in three serves files up to 1 MiB.
     let big = rng.u8(0..3) == 0;
-    let tree = Tree::random(&mut sim, &mut rng, big);
+    let tree = Tree::random(&mut sim, &mut rng, big, long);
     sim.set_disk_delay(random_disk_delay(&mut rng));
     let mut clients: Vec<Client> = Vec::new();
     let steps = rng.usize(5..80);
@@ -1275,7 +1553,7 @@ fn run_seed(seed: u64, coverage: &mut Coverage) {
             match op {
                 25..60 => {
                     if !client.eof {
-                        send_piece(&mut sim, client, &mut rng);
+                        send_piece(&mut sim, client, &mut rng, tree.long_dir.as_deref());
                     }
                 }
                 60..68 => sim.set_client_window(client.id, random_window(&mut rng, big)),
@@ -1329,6 +1607,26 @@ fn run_seed(seed: u64, coverage: &mut Coverage) {
         check_client(&sim, &tree, client, coverage);
     }
     for log in sim.logs() {
+        match log {
+            Log::Response {
+                status, request, ..
+            } => {
+                if *status == Status::UriTooLong {
+                    coverage.redirect_414 += 1;
+                }
+                if request
+                    .as_ref()
+                    .is_some_and(|r| r.path.starts_with("/.well-known"))
+                {
+                    coverage.well_known += 1;
+                }
+            }
+            Log::Rejected {
+                reason: RejectReason::Http(HttpError::BadTarget(TargetError::EncodedUnreserved)),
+                ..
+            } => coverage.encoded_unreserved += 1,
+            Log::Rejected { .. } | Log::Reset { .. } | Log::FileAborted { .. } => {}
+        }
         if let Log::Rejected { reason, .. } = log {
             match reason {
                 RejectReason::Http(_) => coverage.http += 1,
@@ -1383,7 +1681,8 @@ fn random_fault_schedules() {
             eprintln!(
                 "COVERAGE statuses={:?} http={} header={} send={} disk={} conns={} per_ip={} \
                  pipelined={} truncated={} changed={} first_chunk={} multi_chunk={} grown={} \
-                 head_ok={}",
+                 head_ok={} redirect_414={} encoded_unreserved={} well_known={} \
+                 redirect_query={}",
                 coverage.statuses,
                 coverage.http,
                 coverage.header_timeout,
@@ -1397,7 +1696,11 @@ fn random_fault_schedules() {
                 coverage.aborted_first_chunk,
                 coverage.multi_chunk,
                 coverage.grown,
-                coverage.head_ok
+                coverage.head_ok,
+                coverage.redirect_414,
+                coverage.encoded_unreserved,
+                coverage.well_known,
+                coverage.redirect_query
             );
             coverage.check();
         }
