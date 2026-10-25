@@ -44,21 +44,17 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        let ConnState::OpeningFile {
-            file: opening,
+        let Some(Opening {
             slash,
             step,
             body,
             persistence,
             buffered,
-            ..
-        } = c.state
+            mut request,
+        }) = take_opening(c, file)
         else {
             return;
         };
-        if opening != file {
-            return;
-        }
         let outcome = match (meta.kind, step, slash) {
             (FileKind::Regular, OpenStep::Requested, TrailingSlash::Absent)
             | (
@@ -82,24 +78,17 @@ impl Core {
                 TrailingSlash::Present | TrailingSlash::Absent,
             ) => Opened::NotServed(NotServed::NotFound),
         };
-        match outcome {
+        c.state = match outcome {
             Opened::Serve => {
                 let size = meta.stamp.size;
-                let request = c.static_request.take();
-                let on_change = request
-                    .as_ref()
-                    .map_or(OnFileChange::Abort, |r| r.on_change);
-                let name = request
-                    .as_ref()
-                    .and_then(|r| r.path.last())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
+                let on_change = request.on_change;
+                let name = request.path.last().map(Vec::as_slice).unwrap_or_default();
                 let content_type = content_type(name);
                 actions.push(Action::Log(Log::Response {
                     conn,
                     peer: c.peer,
                     status: Status::Ok,
-                    request: request.map(|r| r.summary),
+                    request: Some(request.summary),
                 }));
                 render_file_head(content_type, size, persistence, &mut c.send);
                 match body {
@@ -115,7 +104,7 @@ impl Core {
                             });
                             Chunk::Reading { end }
                         };
-                        c.state = ConnState::SendingFile {
+                        ConnState::SendingFile {
                             file,
                             size,
                             opened: meta.stamp,
@@ -125,18 +114,18 @@ impl Core {
                             persistence,
                             buffered,
                             deadline,
-                        };
+                        }
                     }
                     // HEAD: the head is all; nothing is read.
                     BodyMode::HeadOnly => {
                         self.files.release(file);
                         actions.push(Action::CloseFile { file });
-                        c.state = ConnState::Responding {
+                        ConnState::Responding {
                             persistence,
                             unread_body: UnreadBody::None,
                             buffered,
                             deadline,
-                        };
+                        }
                     }
                 }
             }
@@ -144,36 +133,22 @@ impl Core {
                 // One file per connection: the directory goes first.
                 self.files.release(file);
                 actions.push(Action::CloseFile { file });
-                match c.static_request.as_mut() {
-                    Some(request) => {
-                        request.path.push(INDEX.to_vec());
-                        let next = self.files.allocate(conn);
-                        actions.push(Action::OpenFile {
-                            file: next,
-                            root: request.root,
-                            path: request.path.clone(),
-                        });
-                        c.state = ConnState::OpeningFile {
-                            file: next,
-                            slash,
-                            step: OpenStep::Index,
-                            body,
-                            persistence,
-                            buffered,
-                            deadline,
-                        };
-                    }
-                    // Every open has its request; answer 404 should it not.
-                    None => not_served(
-                        c,
-                        conn,
-                        NotServed::NotFound,
-                        body,
-                        persistence,
-                        buffered,
-                        deadline,
-                        actions,
-                    ),
+                request.path.push(INDEX.to_vec());
+                let next = self.files.allocate(conn);
+                actions.push(Action::OpenFile {
+                    file: next,
+                    root: request.root,
+                    path: request.path.clone(),
+                });
+                ConnState::OpeningFile {
+                    file: next,
+                    slash,
+                    step: OpenStep::Index,
+                    body,
+                    persistence,
+                    buffered,
+                    deadline,
+                    request,
                 }
             }
             Opened::NotServed(reason) => {
@@ -183,14 +158,15 @@ impl Core {
                     c,
                     conn,
                     reason,
+                    request,
                     body,
                     persistence,
                     buffered,
                     deadline,
                     actions,
-                );
+                )
             }
-        }
+        };
         self.sync_interest(conn, actions);
     }
 
@@ -220,25 +196,27 @@ impl Core {
         if c.state.file() != Some(file) {
             return;
         }
-        if let ConnState::OpeningFile {
-            body,
-            persistence,
-            buffered,
-            ..
-        } = c.state
-        {
-            match error {
-                // Missing, symlinked, denied or otherwise unopenable: all
-                // look the same to the client.
-                FileError::NotFound
-                | FileError::Symlink
-                | FileError::PermissionDenied
-                | FileError::Other => {
+        match error {
+            // Missing, symlinked, denied or otherwise unopenable: all look
+            // the same to the client.
+            FileError::NotFound
+            | FileError::Symlink
+            | FileError::PermissionDenied
+            | FileError::Other => {
+                if let Some(Opening {
+                    body,
+                    persistence,
+                    buffered,
+                    request,
+                    ..
+                }) = take_opening(c, file)
+                {
                     self.files.release(file);
-                    not_served(
+                    c.state = not_served(
                         c,
                         conn,
                         NotServed::NotFound,
+                        request,
                         body,
                         persistence,
                         buffered,
@@ -248,9 +226,9 @@ impl Core {
                     self.sync_interest(conn, actions);
                     return;
                 }
-                // Not an answer an open can give: treat as a broken driver.
-                FileError::Truncated | FileError::Changed => {}
             }
+            // Not an answer an open can give: treat as a broken driver.
+            FileError::Truncated | FileError::Changed => {}
         }
         match c.state {
             ConnState::OpeningFile { .. } => {
@@ -430,8 +408,57 @@ enum NotServed {
     NotFound,
 }
 
-/// Close out `c`'s static request without a file: a 301 to the slash form
-/// of its path (query kept), or a 404. Logged once, with the raw path.
+/// The fields of a `ConnState::OpeningFile` taken out of a connection to
+/// answer its open (its deadline is replaced by the next state's).
+struct Opening {
+    slash: TrailingSlash,
+    step: OpenStep,
+    body: BodyMode,
+    persistence: Persistence,
+    buffered: usize,
+    request: StaticRequest,
+}
+
+/// If `c` is opening `file`, take that state out so its request can move
+/// on; the caller then sets `c`'s next state. Any other state stays.
+fn take_opening(c: &mut Conn, file: FileId) -> Option<Opening> {
+    // Holds the place only until the caller sets the next state.
+    let placeholder = ConnState::Lingering {
+        deadline: c.state.deadline(),
+    };
+    match std::mem::replace(&mut c.state, placeholder) {
+        ConnState::OpeningFile {
+            file: opening,
+            slash,
+            step,
+            body,
+            persistence,
+            buffered,
+            deadline: _,
+            request,
+        } if opening == file => Some(Opening {
+            slash,
+            step,
+            body,
+            persistence,
+            buffered,
+            request,
+        }),
+        other @ (ConnState::OpeningFile { .. }
+        | ConnState::ReadingHead { .. }
+        | ConnState::Idle { .. }
+        | ConnState::Responding { .. }
+        | ConnState::SendingFile { .. }
+        | ConnState::Lingering { .. }) => {
+            c.state = other;
+            None
+        }
+    }
+}
+
+/// Close out the static `request` on `c` without a file: a 301 to the
+/// slash form of its path (query kept), or a 404. Logged once, with the raw
+/// path. Returns the connection's next state.
 #[allow(
     clippy::too_many_arguments,
     reason = "the state fields of the connection being answered"
@@ -440,15 +467,15 @@ fn not_served(
     c: &mut Conn,
     conn: ConnId,
     reason: NotServed,
+    request: StaticRequest,
     body: BodyMode,
     persistence: Persistence,
     buffered: usize,
     deadline: Instant,
     actions: &mut Vec<Action>,
-) {
-    let request = c.static_request.take();
-    let status = match (reason, &request) {
-        (NotServed::Redirect, Some(request)) => {
+) -> ConnState {
+    let status = match reason {
+        NotServed::Redirect => {
             let mut location = format!("{}/", request.summary.path);
             if let Some(query) = &request.query {
                 location.push('?');
@@ -466,7 +493,7 @@ fn not_served(
                 Status::UriTooLong
             }
         }
-        (NotServed::Redirect, None) | (NotServed::NotFound, Some(_) | None) => {
+        NotServed::NotFound => {
             render_fixed(Status::NotFound, persistence, body, &mut c.send);
             Status::NotFound
         }
@@ -475,14 +502,14 @@ fn not_served(
         conn,
         peer: c.peer,
         status,
-        request: request.map(|r| r.summary),
+        request: Some(request.summary),
     }));
-    c.state = ConnState::Responding {
+    ConnState::Responding {
         persistence,
         unread_body: UnreadBody::None,
         buffered,
         deadline,
-    };
+    }
 }
 
 /// How a request on a matched route is answered.
@@ -581,18 +608,18 @@ pub(super) fn open_static(
         persistence: head.persistence,
         buffered: leftover,
         deadline: send_deadline,
-    };
-    c.static_request = Some(StaticRequest {
-        summary: RequestSummary {
-            method: head.method,
-            host: head.host,
-            path: head.target.path,
+        request: StaticRequest {
+            summary: RequestSummary {
+                method: head.method,
+                host: head.host,
+                path: head.target.path,
+            },
+            query: head.target.query,
+            root,
+            on_change,
+            path,
         },
-        query: head.target.query,
-        root,
-        on_change,
-        path,
-    });
+    };
 }
 
 #[cfg(test)]

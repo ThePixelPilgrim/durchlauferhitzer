@@ -53,8 +53,10 @@ pub(crate) enum OpenStep {
 }
 
 /// Where a connection is in its lifecycle. Each variant carries only the data
-/// valid in that state, including the instant at which it times out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// valid in that state, including the instant at which it times out. Not
+/// `Copy`: a state may own data (the request of a static open) that moves
+/// on to the next state or into the log.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ConnState {
     /// Reading the request head; `buffered` bytes of `Conn::recv` are filled
     /// and `parser` remembers how far it has judged them, so no byte is
@@ -81,8 +83,7 @@ pub(crate) enum ConnState {
     /// in flight, for the requested path or its directory's index (`step`).
     /// `slash` says whether the path ended in `/`; `body` is `HeadOnly` for
     /// HEAD; `persistence` and `buffered` as in `Responding`. `deadline` is
-    /// the send idle deadline. The request itself is in
-    /// `Conn::static_request`.
+    /// the send idle deadline. `request` is the request being answered.
     OpeningFile {
         file: FileId,
         slash: TrailingSlash,
@@ -91,6 +92,7 @@ pub(crate) enum ConnState {
         persistence: Persistence,
         buffered: usize,
         deadline: Instant,
+        request: StaticRequest,
     },
     /// A file response: the head is in `Conn::send`, then the open `file`'s
     /// bytes from `offset` up to `size` (its size at open) follow chunk by
@@ -153,7 +155,7 @@ impl ConnState {
 
 /// A request being answered from a static root, kept while its file is
 /// opened.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StaticRequest {
     /// Logged once the outcome of the open is known.
     pub(crate) summary: RequestSummary,
@@ -179,9 +181,6 @@ pub(crate) struct Conn {
     pub(crate) recv: Box<[u8]>,
     /// Bytes waiting to be written, at most `SEND_CAPACITY`.
     pub(crate) send: Vec<u8>,
-    /// The request being answered from a static root, while its file is
-    /// opened.
-    pub(crate) static_request: Option<StaticRequest>,
 }
 
 impl Conn {
@@ -198,7 +197,6 @@ impl Conn {
             interest: Interest::None,
             recv: vec![0; recv_capacity].into_boxed_slice(),
             send: Vec::with_capacity(SEND_CAPACITY),
-            static_request: None,
         }
     }
 

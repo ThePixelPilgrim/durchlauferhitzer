@@ -63,8 +63,17 @@ impl Core {
     }
 
     /// The disk answered an orphaned open: the slots it held are free.
+    ///
+    /// Invariant (checked in debug builds): every orphan came from a
+    /// counted connection and holds its slots. A refused connection only
+    /// ever answers 503 and lingers; it never reads a request, so it never
+    /// opens a file that could be orphaned.
     pub(super) fn release_orphan(&mut self, file: FileId) {
         if let Owner::Orphan(slots) = self.files.owner(file) {
+            debug_assert!(
+                matches!(slots, OrphanSlots::Held { .. }),
+                "orphaned open {file:?} came from a refused connection"
+            );
             self.files.release(file);
             match slots {
                 OrphanSlots::Held { peer } => self.release_slots(peer),

@@ -109,8 +109,9 @@ pub(crate) enum OrphanSlots {
     /// `max_connections` slot and the `max_connections_per_ip` slot of
     /// `peer` (canonical address).
     Held { peer: IpAddr },
-    /// Its connection did not count (cannot happen: refused connections
-    /// open no files); nothing to release.
+    /// Its connection did not count; nothing to release. Cannot happen:
+    /// refused connections open no files (`Core::release_orphan` checks
+    /// this in debug builds).
     None,
 }
 
