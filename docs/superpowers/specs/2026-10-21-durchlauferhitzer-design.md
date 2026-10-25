@@ -96,8 +96,9 @@ These would make the project a failure even if everything "works":
 - Per-connection state is an enum whose variants carry only data valid in
   that state (e.g. only a forwarding state owns a backend handle). Each
   transition consumes the old state and returns the new one plus actions.
-- Connections and files are referred to by opaque ids allocated by the
-  driver; the core never holds OS handles.
+- Connections and files are referred to by opaque ids: connection ids are
+  allocated by the driver, file ids by the core (sequentially, never
+  reused); the core never holds OS handles.
 - Single-threaded, no locks. Config is immutable after load.
 
 ### Lints (core and everywhere unless noted)
@@ -118,13 +119,17 @@ These would make the project a failure even if everything "works":
   failure for replay.
 - **epoll driver** (production): non-blocking sockets on `epoll`; timers via
   the `epoll_wait` timeout from the core's next deadline; monotonic clock.
-  Static files: a small thread pool runs `readahead` for the next chunk
-  (the only place that may block on disk) and reports completion through an
-  `eventfd`; the loop then does a non-blocking `sendfile` of that chunk, and
+  Static files: a small thread pool runs the opens (`openat2` + `fstat`)
+  and `readahead` for the next chunk (the places that may block on disk)
+  and reports completion through an `eventfd`; answers may arrive in any
+  order. The loop then does a non-blocking `sendfile` of that chunk, and
   parks the connection on `EPOLLOUT` if the client is slow. A slow client
   costs a parked connection, never a thread. Files are opened with
   `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` relative to the static
-  root.
+  root, `O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC` (so a FIFO cannot
+  hang a worker). Known limit: readahead is advisory, so `sendfile` can
+  still block on evicted pages (stage 7). The full file contract (errno
+  mapping, stamps, descriptor budget) is in the `core` module docs.
 - All threading and multiplexing lives in the driver. Multi-core later =
   N driver threads, each with its own `epoll` and core, sharing the port via
   `SO_REUSEPORT`.

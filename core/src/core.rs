@@ -53,6 +53,11 @@
 //!   end of file: the driver reports `FileFailed { error: Truncated }`.
 //! - A read into `recv_buffer(c)` is reported by `Received { conn: c, .. }`
 //!   before any other `handle` call (or not at all, if nothing was read).
+//!   Likewise a write from `send_buffer(c)` is reported by its `Sent`, and a
+//!   `sendfile` of the `send_file(c)` segment by its `FileSent` (or
+//!   `FileFailed`), as the very next `handle` call after that write: the
+//!   core may change the buffer or the segment in any call, so a count
+//!   reported later could describe bytes that are no longer there.
 //! - An **empty** `recv_buffer` means "do not read now" (unknown connection,
 //!   not in a reading state, or buffer full). An empty `send_buffer` means
 //!   "nothing to write". Neither is an error.
@@ -67,11 +72,43 @@
 //!   one. A [`RootId`] indexes [`Core::static_roots`]: the driver opens each
 //!   root once at startup.
 //! - `OpenFile { root, path }` names a path as relative segments (decoded
-//!   bytes, never `.`, `..`, empty, or containing `/` or NUL; no segments
-//!   means the root itself). The driver resolves it beneath the root,
-//!   without following symlinks anywhere in the path and without ever
-//!   leaving the root (`openat2` with `RESOLVE_BENEATH |
-//!   RESOLVE_NO_SYMLINKS`), and reports the metadata of the open descriptor.
+//!   bytes, never `.`, `..`, empty, or containing `/` or NUL). The driver
+//!   resolves it beneath the root, without following symlinks anywhere in
+//!   the path and without ever leaving the root (`openat2` with
+//!   `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), and reports the metadata
+//!   (`fstat`) of the open descriptor. An empty segment list means the root
+//!   itself: the driver opens `"."` beneath the root descriptor
+//!   (`openat2(root, "")` fails with `ENOENT`, which would make `GET /` a
+//!   404).
+//! - Open flags: `O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`, never
+//!   `O_CREAT`, `O_TRUNC` or a write mode. `O_NONBLOCK` is required: a FIFO
+//!   in a root opened without it blocks the opening worker until a writer
+//!   appears, before any `fstat` could tell it is not a regular file. The
+//!   `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH` resolve flags take the place of
+//!   `O_NOFOLLOW` for every component. `RESOLVE_NO_XDEV` is not set: mount
+//!   points beneath a root are the operator's choice. Hard links inside a
+//!   root cannot be detected and are the operator's responsibility.
+//! - Opens may block (a cold dentry or inode cache), like readahead, so
+//!   the driver runs `openat2` and `fstat` on its worker pool too, never on
+//!   the event loop. Answers for different files may arrive in any order.
+//! - Errors map to [`FileError`] as follows (all of them become a 404, so
+//!   the mapping only matters for logs):
+//!
+//!   | errno                                      | `FileError`        |
+//!   |--------------------------------------------|--------------------|
+//!   | `ENOENT`, `ENOTDIR`                        | `NotFound`         |
+//!   | `ELOOP`, `EXDEV` (refused by `RESOLVE_*`)  | `Symlink`          |
+//!   | `EACCES`, `EPERM`                          | `PermissionDenied` |
+//!   | anything else (`EIO`, `ENAMETOOLONG`, ...) | `Other`            |
+//!
+//!   `EMFILE`/`ENFILE` also map to `Other`; the driver logs them, since
+//!   they mean the descriptor budget below is wrong, not a missing file.
+//! - The stamp is `size = st_size` and `modified_ns = st_mtime` in
+//!   nanoseconds (`tv_sec * 10^9 + tv_nsec`); an mtime before 1970 clamps to
+//!   0, and an overflowing one saturates. The mtime granularity (often one
+//!   kernel tick) means a rewrite of the same size within one tick goes
+//!   unnoticed, and stamps are only compared at chunk boundaries, so a
+//!   change racing the last chunk's `sendfile` is never detected.
 //! - Every `OpenFile` is answered by exactly one `FileOpened` or
 //!   `FileFailed`, even after the connection that asked closed: the core
 //!   never closes a file whose open is unanswered. It answers a late
@@ -100,7 +137,21 @@
 //!   accepted (more than the segment is clamped). A `sendfile` that hits end
 //!   of file before the segment ends (the file shrank) is reported as
 //!   `FileFailed { error: Truncated }`, after a `FileSent` for any bytes it
-//!   did send.
+//!   did send. Other `sendfile` errors: `EAGAIN` means wait for writability
+//!   (not reported); `EPIPE`/`ECONNRESET` are the socket's, reported as
+//!   `Failed { conn, error: Reset }`; `EIO` and other file-side errors are
+//!   reported as `FileFailed { error: Other }`.
+//! - Known limit: `sendfile` itself may block on the disk. Readahead is
+//!   advisory, and pages can be evicted between `ChunkReady` and the
+//!   `sendfile`, which then reads them on the event loop. This is accepted
+//!   for now; mitigations (an `RWF_NOWAIT` probe, `mincore`) are stage-7
+//!   work.
+//! - Descriptor budget: open files are bounded by connections, since each
+//!   holds at most one file id and an orphaned open keeps its connection's
+//!   slot, so at most `max_connections` file descriptors are open or being
+//!   opened at once, orphans included. The driver checks at startup that
+//!   `RLIMIT_NOFILE` covers `max_connections` client sockets, as many
+//!   files, the static roots, its listeners and its eventfd.
 //! - Every `ChunkReady` stamp is checked against the stamp at open under
 //!   the route's `on_file_change`: `abort` (the default) fails the transfer
 //!   with `Changed` on any difference; `allow_growth` keeps sending exactly
