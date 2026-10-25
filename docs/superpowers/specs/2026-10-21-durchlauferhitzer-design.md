@@ -207,7 +207,8 @@ reject.
   double-buffered variant (two halves taking turns, overlapping read and
   send) can replace it in stage 7 if measurements show a gap. Leftover
   bytes of a pipelined next request after a body end are moved to the
-  front once, as for request heads.
+  front once, as for request heads; so is an incomplete chunked-framing
+  tail (at most 35 bytes of size line or CRLF, never body data).
 - Write in large pieces with `TCP_NODELAY` set; never set `SO_RCVBUF` /
   `SO_SNDBUF` (keeps kernel autotuning).
 - Responses stream as soon as their headers are validated; chunked framing

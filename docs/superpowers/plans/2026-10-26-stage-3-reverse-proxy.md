@@ -13,7 +13,7 @@
 ## Spec amendments (decided while planning; listed for the owner's review)
 
 1. **Ids and resolution.** Upstream connection ids are allocated by the core (like file ids). Backends are listed by `Core::backends()` (distinct `host:port` in config order, `BackendId` = index); the driver resolves each once at startup and connects by id.
-2. **Zero-copy body forwarding, fill-drain-refill.** Validated body bytes are written to the other side straight out of the receiving side's buffer. That buffer is read into only when it is completely empty (from offset 0, offering its full capacity); while it holds unsent bytes the core does not read that side. No compaction, so no body byte is ever copied. Leftover bytes of a pipelined next request after a body end are moved to the front once, as for heads. The strategy is internal (driver API unchanged), so stage 7 may swap in double buffering after measuring.
+2. **Zero-copy body forwarding, fill-drain-refill.** Validated body bytes are written to the other side straight out of the receiving side's buffer. That buffer is read into only when it is completely empty (from offset 0, offering its full capacity); while it holds unsent bytes the core does not read that side. No compaction, so no body byte is ever copied. Leftover bytes of a pipelined next request after a body end are moved to the front once, as for heads. A chunked body may also leave an incomplete framing tail (at most `MAX_UNCONSUMED` = 35 bytes of size line / CRLF, never body data); the buffer counts as drained when only that tail remains, and the tail is moved to the front before the next full-capacity read. Buffer capacities must exceed 35 bytes. The strategy is internal (driver API unchanged), so stage 7 may swap in double buffering after measuring.
 3. **Chunked framing is strict and forwarded verbatim** after validation: hex sizes without leading `+`, no chunk extensions, no non-empty trailers, CRLF only, size bounded by `u64`. A violation from the client → 400 (before the head is forwarded) or both connections cut (after); from the backend → 502 or cut.
 4. **`Expect: 100-continue`.** The core answers `100 Continue` itself once the request head passed all checks (route, limits), and strips `Expect` toward the backend. Any other `Expect` value → 417.
 5. **Backend interim responses.** `1xx` other than `101` are dropped; `101 Switching Protocols` (no Upgrade support) → 502.
@@ -28,7 +28,7 @@
 ## Global Constraints
 
 - Everything in the stage 1 and 2 Global Constraints still holds (zero product dependencies in core, no `unsafe`, denied clippy lints in core, no `_ =>` on enums, enums over bools, strict red/green TDD — failing test first and run before any implementation, bounded memory).
-- Body bytes never get copied by the core (only leftover pipelined bytes after a body end are moved once); every buffer has a fixed capacity derived from `Limits`.
+- Body bytes never get copied by the core (only leftover pipelined bytes after a body end, and chunked-framing tails of at most 35 bytes, are moved); every buffer has a fixed capacity derived from `Limits`.
 - Every upstream is closed exactly once on every path; the sim checks this.
 - Nothing from a backend reaches the client unvalidated: response heads are parsed strictly, bodies are framed strictly, and nothing after a framing error is written.
 - The decoded request path is never logged; logs keep the raw path.
@@ -37,7 +37,7 @@
 
 1. Request smuggling toward the backend — `Content-Length` + `Transfer-Encoding`, duplicate lengths, chunk-extension and trailer tricks, a pipelined second request hidden in a body: the backend must see exactly one well-framed request. Tests in Tasks 3, 4, 6.
 2. Response splitting / desync from a hostile backend — extra bytes after a `Content-Length` body, a second response, CR/LF in reason phrases or header values: never forwarded. Tests in Tasks 2, 7.
-3. A slow backend and a fast client (and the reverse) with bodies far larger than the buffers — memory stays bounded, bytes arrive intact, reading pauses while the buffer holds unsent bytes and resumes only when it is empty, with full-capacity reads. Tests in Tasks 6, 7.
+3. A slow backend and a fast client (and the reverse) with bodies far larger than the buffers — memory stays bounded, bytes arrive intact, reading pauses while the buffer holds unsent body bytes and resumes only when none remain (an incomplete chunked-framing tail of ≤ 35 bytes may remain and is moved to the front), with full-capacity reads. Tests in Tasks 6, 7.
 4. Failure after the response head was sent — the client sees a cut connection, never a short complete-looking body. Tests in Tasks 7, 8.
 5. Client gone while connect or response is pending — the upstream is closed at once and its late events are harmless. Tests in Tasks 5, 8.
 
