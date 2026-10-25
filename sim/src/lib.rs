@@ -39,7 +39,7 @@ use durchlauferhitzer_core::{
     Interest, Log, RootId,
 };
 
-use crate::fs::{Fs, Key};
+use crate::fs::{Fs, Key, SimFile};
 
 /// Default bound on pump steps in one `run_until_idle` before the sim
 /// declares a livelock.
@@ -119,11 +119,15 @@ enum Phase {
     /// `OpenFile` not yet answered.
     Opening,
     /// `FileOpened` delivered; the driver holds a descriptor. `ready` are
-    /// the ranges whose `ChunkReady` was delivered.
+    /// the ranges whose `ChunkReady` was delivered. `handle` is the file as
+    /// it was opened (`None` for a directory): reads and `sendfile` go
+    /// through it, like through a descriptor, whatever later happens to the
+    /// path.
     Open {
         size: u64,
         chunks: usize,
         ready: Vec<(u64, u64)>,
+        handle: Option<SimFile>,
     },
     /// Closed by `CloseFile`, or its open failed.
     Closed,
@@ -408,6 +412,7 @@ impl Sim {
                         size: meta.stamp.size,
                         chunks: 0,
                         ready: Vec::new(),
+                        handle: self.fs.file(&track.root, &track.key).cloned(),
                     };
                     Event::FileOpened { file, meta }
                 }
@@ -417,11 +422,17 @@ impl Sim {
                 }
             },
             DiskOp::Read { offset, len, .. } => {
-                let Phase::Open { chunks, ready, .. } = &mut track.phase else {
+                let Phase::Open {
+                    chunks,
+                    ready,
+                    handle,
+                    ..
+                } = &mut track.phase
+                else {
                     panic!("readahead completion for file={} not open", file.0);
                 };
-                let Some(f) = self.fs.file(&track.root, &track.key) else {
-                    panic!("file={} vanished from the sim file system", file.0);
+                let Some(f) = handle else {
+                    panic!("readahead of file={}, which is not a regular file", file.0);
                 };
                 let stamp = match f.change {
                     Some((after, new)) if *chunks >= after => new,
@@ -463,11 +474,14 @@ impl Sim {
             self.violation(&format!("conn={} sendfile after ShutdownWrite", conn.0));
         }
         let file = segment.file;
-        let Some(track) = self.files.get(&file) else {
-            self.violation(&format!("sendfile of unknown file={}", file.0));
-        };
-        let Some(f) = self.fs.file(&track.root, &track.key) else {
-            self.violation(&format!("sendfile of file={} that is not a file", file.0));
+        let Some(FileTrack {
+            phase: Phase::Open {
+                handle: Some(f), ..
+            },
+            ..
+        }) = self.files.get(&file)
+        else {
+            self.violation(&format!("sendfile of file={}, not an open file", file.0));
         };
         let eof = (f.bytes.len() as u64).min(f.shrink_at.unwrap_or(u64::MAX));
         let available = eof.saturating_sub(segment.offset).min(segment.len);
@@ -664,6 +678,13 @@ impl Sim {
         self.check_files();
     }
 
+    /// Queue a disk completion, ordered by due time (after any already
+    /// queued for the same instant).
+    fn queue_disk(&mut self, due: Instant, op: DiskOp) {
+        let at = self.disk.partition_point(|(d, _)| *d <= due);
+        self.disk.insert(at, (due, op));
+    }
+
     /// Perform a file action: start the disk operation or close the file.
     fn apply_file(&mut self, action: Action) {
         let due = self.now.saturating_add(self.disk_delay);
@@ -701,7 +722,7 @@ impl Sim {
                         phase: Phase::Opening,
                     },
                 );
-                self.disk.push_back((due, DiskOp::Open { file }));
+                self.queue_disk(due, DiskOp::Open { file });
             }
             Action::Readahead { file, offset, len } => {
                 let size = match self.files.get(&file).map(|t| &t.phase) {
@@ -717,8 +738,7 @@ impl Sim {
                         file.0
                     ));
                 }
-                self.disk
-                    .push_back((due, DiskOp::Read { file, offset, len }));
+                self.queue_disk(due, DiskOp::Read { file, offset, len });
             }
             Action::CloseFile { file } => {
                 match self.files.get_mut(&file).map(|t| &mut t.phase) {
@@ -946,6 +966,7 @@ mod tests {
             size,
             chunks: 0,
             ready: Vec::new(),
+            handle: None,
         }
     }
 
@@ -1033,6 +1054,21 @@ mod tests {
             root: RootId(0),
             path: Vec::new(),
         });
+    }
+
+    #[test]
+    fn disk_queue_is_ordered_by_due_time() {
+        let mut sim = Sim::new(CONFIG);
+        let at = |n| Instant::from_nanos(n);
+        for (due, file) in [(5, 1), (3, 2), (5, 3), (1, 4), (3, 5)] {
+            sim.queue_disk(at(due), DiskOp::Open { file: FileId(file) });
+        }
+        let order: Vec<(u64, u64)> = sim
+            .disk
+            .iter()
+            .map(|(due, op)| (due.as_nanos(), op.file().0))
+            .collect();
+        assert_eq!(order, [(1, 4), (3, 2), (3, 5), (5, 1), (5, 3)]);
     }
 
     #[test]

@@ -45,7 +45,12 @@
 //!   driver keeps reading into `recv_buffer` until it is empty (zero spare)
 //!   or the socket would block; while interest is [`Interest::Write`], it
 //!   keeps writing from `send_buffer` until it is empty or the socket would
-//!   block. An edge-triggered driver must loop to `EAGAIN`.
+//!   block, and once it is empty, from [`Core::send_file`] until the segment
+//!   is done or the socket would block. An edge-triggered driver must loop
+//!   to `EAGAIN`. `EAGAIN` is not reported (`Sent` and `FileSent` are never
+//!   0); a short count only means the socket is full. A `sendfile` that
+//!   returns 0 on a writable socket while the segment is unfinished has hit
+//!   end of file: the driver reports `FileFailed { error: Truncated }`.
 //! - A read into `recv_buffer(c)` is reported by `Received { conn: c, .. }`
 //!   before any other `handle` call (or not at all, if nothing was read).
 //! - An **empty** `recv_buffer` means "do not read now" (unknown connection,
@@ -68,16 +73,20 @@
 //!   leaving the root (`openat2` with `RESOLVE_BENEATH |
 //!   RESOLVE_NO_SYMLINKS`), and reports the metadata of the open descriptor.
 //! - Every `OpenFile` is answered by exactly one `FileOpened` or
-//!   `FileFailed`, and every `Readahead` by exactly one `ChunkReady` or
-//!   `FileFailed`, even after the connection that asked closed. The core
-//!   then answers a late `FileOpened` with `CloseFile` and ignores a late
-//!   `FileFailed`. `ChunkReady` carries the file's stamp at the time the
-//!   chunk was read.
+//!   `FileFailed`, even after the connection that asked closed: the core
+//!   never closes a file whose open is unanswered. It answers a late
+//!   `FileOpened` with `CloseFile` and ignores a late `FileFailed`.
 //! - A file is open from its `FileOpened` until the core's `CloseFile`; a
 //!   failed open leaves nothing to close. `CloseFile` comes exactly once per
-//!   opened file, also when its connection closes, and cancels any
-//!   `Readahead` in flight: after `CloseFile` the driver delivers no more
-//!   events for that file (the core ignores any that still arrive).
+//!   opened file, also when its connection closes.
+//! - While the file is open, every `Readahead` is answered by exactly one
+//!   `ChunkReady` or `FileFailed`; `ChunkReady` carries the file's stamp
+//!   (of the open descriptor) at the time the chunk was read. `CloseFile`
+//!   supersedes a `Readahead` still in flight: after `CloseFile` the driver
+//!   delivers no event for that file at all. It keeps the descriptor open
+//!   until an in-flight readahead worker has returned and then drops that
+//!   completion, so a reused descriptor number can never receive it. (The
+//!   core ignores events for closed files anyway.)
 //! - The driver writes `send_buffer` before `send_file`: `send_file` returns
 //!   a segment only while the send buffer is empty and that chunk's
 //!   `ChunkReady` has arrived. Interest is [`Interest::Write`] while either
@@ -127,6 +136,12 @@
 //! - A connection entering the lingering close drops its own receive buffer;
 //!   all lingering connections discard their input into one shared scratch
 //!   buffer of [`LINGER_SCRATCH`] bytes, whose contents are never inspected.
+//! - A connection that closes (or times out) while its `OpenFile` is
+//!   unanswered leaves an *orphaned open*. It keeps counting toward
+//!   `max_connections` until its `FileOpened` (answered with `CloseFile`) or
+//!   `FileFailed` arrives, so a hung disk cannot accumulate more open files
+//!   than connections; its `max_connections_per_ip` slot is released at
+//!   close.
 //!
 //! The core tolerates driver mistakes without panicking: events for unknown
 //! connections or files are ignored, a duplicate `Accepted` is ignored, a
@@ -143,7 +158,7 @@ use crate::conn::{
     Conn, ConnState, Counted, LINGER_SCRATCH, LINGER_TIMEOUT, SEND_CAPACITY, UnreadBody,
 };
 use crate::file::{
-    CHUNK_SIZE, Chunk, FileError, FileId, FileKind, FileMeta, FileSegment, FileStamp, FileTable,
+    Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileSegment, FileStamp, FileTable,
     Owner, RootId,
 };
 use crate::http::mime::content_type;
@@ -365,7 +380,17 @@ impl Core {
         }
         match c.counted {
             Counted::Yes => {
-                self.counted = self.counted.saturating_sub(1);
+                // An orphaned open keeps the slot until the disk answers.
+                match c.state {
+                    ConnState::OpeningFile { .. } => {}
+                    ConnState::ReadingHead { .. }
+                    | ConnState::Idle { .. }
+                    | ConnState::Responding { .. }
+                    | ConnState::SendingFile { .. }
+                    | ConnState::Lingering { .. } => {
+                        self.counted = self.counted.saturating_sub(1);
+                    }
+                }
                 let peer = c.peer.to_canonical();
                 if let Some(n) = self.counted_per_ip.get_mut(&peer) {
                     *n = n.saturating_sub(1);
@@ -377,6 +402,12 @@ impl Core {
             Counted::No => self.refused = self.refused.saturating_sub(1),
         }
         Some(c)
+    }
+
+    /// The disk answered an orphaned open: its connection slot is free.
+    fn release_orphan(&mut self, file: FileId) {
+        self.files.release(file);
+        self.counted = self.counted.saturating_sub(1);
     }
 
     fn accepted(&mut self, now: Instant, conn: ConnId, peer: IpAddr, actions: &mut Vec<Action>) {
@@ -561,7 +592,7 @@ impl Core {
         let conn = match self.files.owner(file) {
             Owner::Conn(conn) => conn,
             Owner::Orphan => {
-                self.files.release(file);
+                self.release_orphan(file);
                 actions.push(Action::CloseFile { file });
                 return;
             }
@@ -604,7 +635,7 @@ impl Core {
                 let chunk = if size == 0 {
                     Chunk::Done
                 } else {
-                    let end = size.min(CHUNK_SIZE);
+                    let end = size.min(FILE_CHUNK);
                     actions.push(Action::Readahead {
                         file,
                         offset: 0,
@@ -649,7 +680,7 @@ impl Core {
         let conn = match self.files.owner(file) {
             Owner::Conn(conn) => conn,
             Owner::Orphan => {
-                self.files.release(file);
+                self.release_orphan(file);
                 return;
             }
             Owner::Unknown => return,
@@ -661,9 +692,10 @@ impl Core {
             return;
         }
         if let Some(c) = self.forget(conn, actions) {
-            // A failed open leaves nothing open to close.
+            // A failed open leaves nothing open to close, and its answer is
+            // in: the slot `forget` kept for it is free.
             if let ConnState::OpeningFile { .. } = c.state {
-                self.files.release(file);
+                self.release_orphan(file);
             }
             actions.push(Action::Close { conn });
         }
@@ -742,7 +774,7 @@ impl Core {
         let chunk = if offset < end {
             Chunk::Ready { end, stamp }
         } else if end < size {
-            let next = size.min(end.saturating_add(CHUNK_SIZE));
+            let next = size.min(end.saturating_add(FILE_CHUNK));
             actions.push(Action::Readahead {
                 file,
                 offset: end,
@@ -1787,6 +1819,9 @@ mod tests {
             [Action::CloseFile { file }, Action::Close { conn }]
         );
         assert!(core.conns.is_empty());
+        assert_eq!(core.counted, 0);
+        assert!(core.counted_per_ip.is_empty());
+        assert_eq!(core.files.len(), 0);
     }
 
     #[test]
@@ -1881,5 +1916,77 @@ mod tests {
                 "{id}: {actions:?}"
             );
         }
+    }
+
+    /// An orphaned open keeps its connection slot until the disk answers;
+    /// the per-IP slot is released at close.
+    #[test]
+    fn orphaned_opens_count_until_the_disk_answers() {
+        let mut core = files_core();
+        let now = secs(0);
+        let mut actions = Vec::new();
+        // conn 1: closed by the peer, then the open succeeds.
+        request(&mut core, now, 1, GET_F);
+        core.handle(now, Event::ReadClosed { conn: ConnId(1) }, &mut actions);
+        // conn 2: reset, then the open fails.
+        request(&mut core, now, 2, GET_F);
+        let error = ConnError::Reset;
+        core.handle(
+            now,
+            Event::Failed {
+                conn: ConnId(2),
+                error,
+            },
+            &mut actions,
+        );
+        // conn 3: times out waiting on the disk, then the open succeeds.
+        request(&mut core, now, 3, GET_F);
+        core.handle(secs(30), Event::TimerFired, &mut actions);
+        assert!(core.conns.is_empty());
+        assert_eq!(core.counted, 3);
+        assert!(core.counted_per_ip.is_empty());
+        assert_eq!(core.next_deadline(), None);
+        let meta = regular(3);
+        actions.clear();
+        core.handle(
+            now,
+            Event::FileOpened {
+                file: FileId(1),
+                meta,
+            },
+            &mut actions,
+        );
+        assert_eq!(actions, [Action::CloseFile { file: FileId(1) }]);
+        assert_eq!(core.counted, 2);
+        let error = FileError::NotFound;
+        core.handle(
+            now,
+            Event::FileFailed {
+                file: FileId(2),
+                error,
+            },
+            &mut actions,
+        );
+        assert_eq!(core.counted, 1);
+        core.handle(
+            now,
+            Event::FileOpened {
+                file: FileId(3),
+                meta,
+            },
+            &mut actions,
+        );
+        assert_eq!(core.counted, 0);
+        assert_eq!(core.files.len(), 0);
+        // Repeated answers change nothing.
+        core.handle(
+            now,
+            Event::FileOpened {
+                file: FileId(3),
+                meta,
+            },
+            &mut actions,
+        );
+        assert_eq!(core.counted, 0);
     }
 }

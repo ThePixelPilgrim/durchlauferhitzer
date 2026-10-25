@@ -246,3 +246,142 @@ fn changed_stamp_is_reported_with_later_chunks() {
     );
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
 }
+
+const CAPPED: &str = "listen 127.0.0.1:8080;
+limits { max_connections 2; }
+host example.test { path / { static /srv/www; } }";
+
+/// Opens orphaned by a hung disk keep their connection slots, so they
+/// cannot pile up beyond `max_connections`.
+#[test]
+fn orphaned_opens_hold_connection_slots() {
+    let mut sim = Sim::new(CAPPED);
+    sim.add_file("/srv/www", "index.html", b"hello");
+    sim.set_disk_delay(Duration::from_secs(3600));
+    for _ in 0..2 {
+        let c = sim.connect(peer());
+        sim.send(c, &get("/index.html"));
+        sim.run_until_idle();
+        sim.reset(c);
+    }
+    let refused = sim.connect(peer());
+    sim.run_until_idle();
+    let received = sim.take_received(refused);
+    assert!(received.starts_with(b"HTTP/1.1 503 "), "{}", sim.trace());
+    sim.advance(Duration::from_secs(3600));
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 2), 1, "{}", sim.trace());
+    sim.set_disk_delay(Duration::ZERO);
+    let c = sim.connect(peer());
+    sim.send(c, &get("/index.html"));
+    sim.run_until_idle();
+    let mut expected = head("text/html; charset=utf-8", 5, Persistence::KeepAlive);
+    expected.extend_from_slice(b"hello");
+    assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
+}
+
+/// How often the trace closes `file`.
+fn close_files(trace: &str, file: u64) -> usize {
+    let needle = format!("file={file} -> CloseFile");
+    trace.lines().filter(|l| l.ends_with(&needle)).count()
+}
+
+/// The driver sends from the file it opened: replacing the path afterwards
+/// does not change the bytes sent.
+#[test]
+fn sendfile_reads_the_file_as_opened() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "f.txt", b"hello");
+    let c = sim.connect(peer());
+    sim.set_client_window(c, durchlauferhitzer_sim::Window::Stalled);
+    sim.send(c, &get("/f.txt"));
+    sim.run_until_idle();
+    sim.add_file("/srv/www", "f.txt", b"WORLD");
+    sim.set_client_window(c, durchlauferhitzer_sim::Window::Unlimited);
+    sim.run_until_idle();
+    let mut expected = head("text/plain; charset=utf-8", 5, Persistence::KeepAlive);
+    expected.extend_from_slice(b"hello");
+    assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
+}
+
+/// A connection reset while its file is being opened: the late
+/// `FileOpened` closes the file, exactly once.
+#[test]
+fn reset_during_open_closes_the_file_once() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "index.html", b"hello");
+    sim.set_disk_delay(Duration::from_millis(50));
+    let c = sim.connect(peer());
+    sim.send(c, &get("/index.html"));
+    sim.run_until_idle();
+    sim.reset(c);
+    assert_eq!(close_files(sim.trace(), 1), 0, "{}", sim.trace());
+    sim.advance(Duration::from_secs(1));
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+    assert!(!sim.trace().contains("Readahead"), "{}", sim.trace());
+}
+
+/// A connection reset while a readahead is in flight: the file is closed at
+/// once and the readahead's completion is never delivered.
+#[test]
+fn reset_during_readahead_closes_the_file_once() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "index.html", b"hello");
+    sim.set_disk_delay(Duration::from_millis(50));
+    let c = sim.connect(peer());
+    sim.send(c, &get("/index.html"));
+    sim.run_until_idle();
+    sim.advance(Duration::from_millis(50));
+    assert!(sim.trace().contains("-> Readahead"), "{}", sim.trace());
+    assert!(!sim.trace().contains("ChunkReady"), "{}", sim.trace());
+    sim.reset(c);
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    sim.advance(Duration::from_secs(1));
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert!(!sim.trace().contains("ChunkReady"), "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
+
+/// A connection reset while a segment is ready but the client is not
+/// reading: the file is closed exactly once.
+#[test]
+fn reset_with_a_ready_segment_closes_the_file_once() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "big.bin", &vec![b'b'; 100_000]);
+    let c = sim.connect(peer());
+    let head_len = head("application/octet-stream", 100_000, Persistence::KeepAlive).len();
+    sim.set_client_window(c, durchlauferhitzer_sim::Window::Budget(head_len + 10));
+    sim.send(c, &get("/big.bin"));
+    sim.run_until_idle();
+    assert_eq!(sim.take_received(c).len(), head_len + 10, "{}", sim.trace());
+    assert_eq!(sim.interest(c), Interest::Write, "{}", sim.trace());
+    sim.reset(c);
+    sim.run_until_idle();
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
+
+/// A second GET pipelined behind the first is answered after the first
+/// file response, from a second file.
+#[test]
+fn pipelined_get_after_a_file_response() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "a.txt", b"first");
+    sim.add_file("/srv/assets", "b.css", b"second!");
+    let c = sim.connect(peer());
+    let mut both = get("/a.txt");
+    both.extend_from_slice(&get("/assets/b.css"));
+    sim.send(c, &both);
+    sim.run_until_idle();
+    let mut expected = head("text/plain; charset=utf-8", 5, Persistence::KeepAlive);
+    expected.extend_from_slice(b"first");
+    expected.extend_from_slice(&head("text/css; charset=utf-8", 7, Persistence::KeepAlive));
+    expected.extend_from_slice(b"second!");
+    assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 2), 1, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}

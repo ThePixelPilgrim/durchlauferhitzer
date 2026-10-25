@@ -62,7 +62,7 @@ pub struct FileSegment {
 }
 
 /// How much of a file one `Readahead` covers.
-pub(crate) const CHUNK_SIZE: u64 = 256 * 1024;
+pub(crate) const FILE_CHUNK: u64 = 256 * 1024;
 
 /// Where a file being sent is between disk and socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +83,8 @@ enum FileUse {
     /// Being opened or open for this connection.
     Conn(ConnId),
     /// The `OpenFile` is unanswered but its connection is gone: a
-    /// `FileOpened` gets `CloseFile`, a `FileFailed` is dropped.
+    /// `FileOpened` gets `CloseFile`, a `FileFailed` is dropped. It holds
+    /// a `max_connections` slot until then.
     Orphan,
 }
 
@@ -111,7 +112,10 @@ impl FileTable {
         }
     }
 
-    /// A fresh id, owned by `conn`.
+    /// A fresh id, owned by `conn`. The `u64` cannot run out in practice
+    /// (a billion opens per second would take over 500 years); should it
+    /// ever, the saturated id would be reused, which the driver contract
+    /// forbids.
     pub(crate) fn allocate(&mut self, conn: ConnId) -> FileId {
         let file = FileId(self.next);
         self.next = self.next.saturating_add(1);
