@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated after commit `1db3e36` on branch `claude/magical-dijkstra-2eoh4y`.
+Last updated after commit `8ef0d15` on branch `claude/magical-dijkstra-2eoh4y`.
 A new session should read this file first, then `CLAUDE.md`.
 
 ## State
@@ -19,7 +19,9 @@ Key documents: spec `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.
 
 ## Decided before Task 4
 
-Obs-text in header values is rejected (FR-HTTP-05, FR-PROXY-13); `%3F` in paths → 400 (FR-HTTP-15a); response `Content-Length` passes through (FR-PROXY-12); a client stalling its body → 408 (FR-PROXY-26). Task 4 implements the first three (see the note in Task 4 of the stage 3 plan). Remaining open questions: the spec's "Open decisions (owner)" section.
+Obs-text in header values is rejected (FR-HTTP-05, FR-PROXY-13); `%3F` in paths → 400 (FR-HTTP-15a); response `Content-Length` passes through (FR-PROXY-12); a client stalling its body → 408 (FR-PROXY-26). Task 4 implements the first three (see the note in Task 4 of the stage 3 plan). Also decided since: half-close keeps the upstream (Task 8), `Expect` outside proxy routes (Task 6), shutdown modes / exit codes / `Date` (stage 4), interim cap 8 and empty reason kept (Task 7) — all in the spec.
+
+To start: `git checkout claude/magical-dijkstra-2eoh4y && git pull`, run the gate once, recreate the SDD workspace and its `progress.md` from the ledger snapshot below, then run Task 4 as described in "How a task is run". Remaining open questions: the spec's "Open decisions (owner)" section.
 
 ## Owner's way of working (mandatory, see CLAUDE.md)
 
