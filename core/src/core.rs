@@ -150,8 +150,11 @@
 //!   holds at most one file id and an orphaned open keeps its connection's
 //!   slot, so at most `max_connections` file descriptors are open or being
 //!   opened at once, orphans included. The driver checks at startup that
-//!   `RLIMIT_NOFILE` covers `max_connections` client sockets, as many
-//!   files, the static roots, its listeners and its eventfd.
+//!   `RLIMIT_NOFILE` covers `2 × max_connections` client sockets (refused
+//!   connections, at most `max_connections` of them, hold sockets too),
+//!   `max_connections` files (orphaned opens included, since they keep
+//!   their connection's slot), the static roots, its listeners and its
+//!   eventfd (and, from stage 3, the backend sockets).
 //! - Every `ChunkReady` stamp is checked against the stamp at open under
 //!   the route's `on_file_change`: `abort` (the default) fails the transfer
 //!   with `Changed` on any difference; `allow_growth` keeps sending exactly
