@@ -2535,4 +2535,55 @@ mod tests {
         );
         assert_eq!(core.counted, 0);
     }
+
+    /// A disk timeout orphans the open; its connection slot comes back
+    /// with the late answer, a `FileOpened` (closed at once) or a
+    /// `FileFailed` (nothing to close) alike.
+    #[test]
+    fn disk_timeout_orphan_slot_is_released_by_any_late_answer() {
+        let file = FileId(1);
+        let conn = ConnId(1);
+        let late_answers = [
+            Event::FileOpened {
+                file,
+                meta: regular(3),
+            },
+            Event::FileFailed {
+                file,
+                error: FileError::NotFound,
+            },
+        ];
+        for late in late_answers {
+            let mut core = files_core();
+            request(&mut core, secs(0), 1, GET_F);
+            let mut actions = Vec::new();
+            core.handle(secs(30), Event::TimerFired, &mut actions);
+            assert_eq!(
+                actions,
+                [
+                    Action::Log(Log::Rejected {
+                        conn,
+                        peer: PEER,
+                        reason: RejectReason::Timeout(TimeoutKind::Disk),
+                    }),
+                    Action::Close { conn }
+                ]
+            );
+            assert!(core.conns.is_empty());
+            assert_eq!(core.counted, 1, "{late:?}");
+            assert!(core.counted_per_ip.is_empty());
+            assert_eq!(core.files.len(), 1);
+            actions.clear();
+            let opened = matches!(late, Event::FileOpened { .. });
+            core.handle(secs(31), late, &mut actions);
+            if opened {
+                assert_eq!(actions, [Action::CloseFile { file }]);
+            } else {
+                assert!(actions.is_empty(), "{actions:?}");
+            }
+            assert_eq!(core.counted, 0);
+            assert_eq!(core.files.len(), 0);
+            assert_eq!(core.next_deadline(), None);
+        }
+    }
 }

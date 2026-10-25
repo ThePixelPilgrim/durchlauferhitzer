@@ -173,3 +173,51 @@ impl FileTable {
         self.owners.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OPENED: FileStamp = FileStamp {
+        size: 100,
+        modified_ns: 7,
+    };
+
+    fn stamp(size: u64, modified_ns: u64) -> FileStamp {
+        FileStamp { size, modified_ns }
+    }
+
+    #[test]
+    fn check_stamp_table() {
+        use FileError::{Changed, Truncated};
+        use OnFileChange::{Abort, AllowGrowth};
+        type Verdict = Result<(), FileError>;
+        // What changed; the stamp at the chunk; verdict under each policy.
+        let rows: [(&str, FileStamp, Verdict, Verdict); 6] = [
+            ("equal", OPENED, Ok(()), Ok(())),
+            ("larger", stamp(150, 7), Err(Changed), Ok(())),
+            ("larger, new mtime", stamp(150, 8), Err(Changed), Ok(())),
+            (
+                "same size, new mtime",
+                stamp(100, 8),
+                Err(Changed),
+                Err(Changed),
+            ),
+            ("smaller", stamp(50, 7), Err(Changed), Err(Truncated)),
+            (
+                "smaller, new mtime",
+                stamp(50, 8),
+                Err(Changed),
+                Err(Truncated),
+            ),
+        ];
+        for (what, now, abort, allow_growth) in rows {
+            assert_eq!(check_stamp(Abort, OPENED, now), abort, "abort: {what}");
+            assert_eq!(
+                check_stamp(AllowGrowth, OPENED, now),
+                allow_growth,
+                "allow_growth: {what}"
+            );
+        }
+    }
+}

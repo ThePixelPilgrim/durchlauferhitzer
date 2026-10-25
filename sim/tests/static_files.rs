@@ -1065,3 +1065,205 @@ fn well_known_route_serves_files() {
     assert_404(&mut sim, "/.well-known/x");
     assert_eq!(opens(sim.trace()), 0, "{}", sim.trace());
 }
+
+// ---------------------------------------------------------------------------
+// Deferred targeted tests
+
+/// Two connection slots; a `docs/` directory with an index.
+fn index_sim() -> Sim {
+    let mut sim = Sim::new(CAPPED);
+    sim.add_file("/srv/www", "docs/index.html", b"docs!");
+    sim
+}
+
+/// The directory open (file 1) is answered after 10 s; the index open
+/// (file 2) then takes `index_delay`. Returns the connection once the
+/// index open is in flight.
+fn index_open_in_flight(sim: &mut Sim, index_delay: Duration) -> ConnId {
+    sim.set_disk_delay(Duration::from_secs(10));
+    let c = sim.connect(peer());
+    sim.send(c, &get("/docs/"));
+    sim.run_until_idle();
+    sim.set_disk_delay(index_delay);
+    sim.advance(Duration::from_secs(10));
+    assert!(
+        sim.trace().contains("file=2 -> OpenFile"),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 2), 0, "{}", sim.trace());
+    c
+}
+
+/// Whether a new connection is accepted (not refused with 503); it is
+/// closed again either way.
+fn slot_free(sim: &mut Sim) -> bool {
+    let probe = sim.connect(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)));
+    sim.run_until_idle();
+    let refused = sim.take_received(probe).starts_with(b"HTTP/1.1 503 ");
+    sim.reset(probe);
+    sim.run_until_idle();
+    !refused
+}
+
+/// A reset while the `index.html` open is in flight orphans that open: it
+/// keeps its connection slot until the late `FileOpened`, which closes
+/// the file exactly once.
+#[test]
+fn reset_during_index_open_orphans_it() {
+    let mut sim = index_sim();
+    let c = index_open_in_flight(&mut sim, Duration::from_secs(20));
+    sim.reset(c);
+    sim.run_until_idle();
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    // One slot is the orphan's, one the probe's: a second probe is refused.
+    let holder = sim.connect(peer());
+    sim.run_until_idle();
+    assert!(!slot_free(&mut sim), "{}", sim.trace());
+    sim.reset(holder);
+    sim.advance(Duration::from_secs(20));
+    assert_eq!(close_files(sim.trace(), 2), 1, "{}", sim.trace());
+    // The orphan's slot is free: a holder and a probe both fit.
+    let _holder = sim.connect(peer());
+    assert!(slot_free(&mut sim), "{}", sim.trace());
+    sim.advance(Duration::from_secs(60));
+    assert_eq!(close_files(sim.trace(), 2), 1, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+    assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+}
+
+/// `send_idle_timeout` passing while the `index.html` open is in flight is
+/// a disk timeout; the orphan keeps its slot until the late `FileOpened`,
+/// which closes the file exactly once.
+#[test]
+fn disk_timeout_during_index_open_orphans_it() {
+    let mut sim = index_sim();
+    let c = index_open_in_flight(&mut sim, Duration::from_secs(45));
+    // The deadline was reset when the directory open completed (t=10 s).
+    sim.advance(Duration::from_secs(30));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Disk),
+        }],
+        "{}",
+        sim.trace()
+    );
+    let holder = sim.connect(peer());
+    sim.run_until_idle();
+    assert!(!slot_free(&mut sim), "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 2), 0, "{}", sim.trace());
+    sim.reset(holder);
+    // The index open was issued at t=10 s and completes at t=55 s.
+    sim.advance(Duration::from_secs(15));
+    assert_eq!(close_files(sim.trace(), 2), 1, "{}", sim.trace());
+    let _holder = sim.connect(peer());
+    assert!(slot_free(&mut sim), "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+    assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+}
+
+const WITH_PROXY: &str = "listen 127.0.0.1:8080;
+host example.test {
+  path / { static /srv/www; }
+  path /api/ { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body unlimited; }
+}";
+
+/// Every response to a HEAD is head only, also the proxy route's 501. A
+/// HEAD itself is never answered 405 (GET and HEAD are the allowed
+/// methods), so the 405 keeps its body and a HEAD of the same path gets
+/// the head of that path's answer.
+#[test]
+fn head_on_405_path_and_proxy_501_is_head_only() {
+    let mut sim = Sim::new(WITH_PROXY);
+    sim.add_file("/srv/www", "a.txt", b"hello");
+    let (c, received) = exchange(&mut sim, &head_req("/api/x"));
+    assert_eq!(
+        received,
+        fixed(
+            Status::NotImplemented,
+            Persistence::Close,
+            BodyMode::HeadOnly
+        ),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[response_log(
+            c,
+            Status::NotImplemented,
+            Method::Head,
+            "/api/x"
+        )],
+        "{}",
+        sim.trace()
+    );
+    // POST then HEAD of the same path on one connection.
+    let mut both = b"POST /a.txt HTTP/1.1\r\nHost: example.test\r\n\r\n".to_vec();
+    both.extend_from_slice(&head_req("/a.txt"));
+    let (c, received) = exchange(&mut sim, &both);
+    let mut expected = fixed(
+        Status::MethodNotAllowed,
+        Persistence::KeepAlive,
+        BodyMode::Full,
+    );
+    expected.extend_from_slice(&head(
+        "text/plain; charset=utf-8",
+        5,
+        Persistence::KeepAlive,
+    ));
+    assert_eq!(received, expected, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(opens(sim.trace()), 1, "{}", sim.trace());
+    assert!(!sim.trace().contains("Readahead"), "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
+
+/// Under `abort`, a change already reported with the first chunk cuts the
+/// connection before any body byte: the client sees at most the head.
+#[test]
+fn change_on_first_chunk_aborts_before_the_body() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "c.txt", b"hello");
+    let new = FileStamp {
+        size: 5,
+        modified_ns: 99,
+    };
+    sim.change_during_send("/srv/www", "c.txt", 0, new);
+    let (c, received) = exchange(&mut sim, &get("/c.txt"));
+    let full_head = head("text/plain; charset=utf-8", 5, Persistence::KeepAlive);
+    assert!(full_head.starts_with(&received), "{}", sim.trace());
+    assert!(!sim.trace().contains("FileSent"), "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[
+            response_log(c, Status::Ok, Method::Get, "/c.txt"),
+            aborted(c, FileError::Changed),
+        ],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+
+    // With a slow disk the head is out before the first chunk is read.
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "c.txt", b"hello");
+    sim.change_during_send("/srv/www", "c.txt", 0, new);
+    sim.set_disk_delay(Duration::from_millis(10));
+    let c = sim.connect(peer());
+    sim.send(c, &get("/c.txt"));
+    sim.run_until_idle();
+    sim.advance(Duration::from_secs(1));
+    assert_eq!(sim.take_received(c), full_head, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(sim.logs().last(), Some(&aborted(c, FileError::Changed)));
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
