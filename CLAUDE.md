@@ -1,5 +1,7 @@
 # durchlauferhitzer
 
+New session? Read `docs/superpowers/HANDOFF.md` first — it says where work stands and what is next.
+
 ## Model roles (mandatory)
 
 - **Fable never does implementation work itself.** When the session runs on
