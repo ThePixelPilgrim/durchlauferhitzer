@@ -207,11 +207,14 @@ reject.
   responses to HEAD carry no body either.
 - Waiting on the disk counts against `send_idle_timeout`.
 - A file that changes during a transfer: per static route,
-  `on_file_change abort | ignore;` (optional, default `abort`). `abort` cuts
-  the connection (after the headers were sent) on any change of size or
-  modification time since open, and logs it. `ignore` keeps sending exactly
-  the size seen at open as long as the file has not shrunk. A file that
-  shrank aborts under both settings.
+  `on_file_change abort | allow_growth;` (optional, default `abort`). The
+  values are the only legal combinations. `abort` cuts the connection (after
+  the headers were sent) on any change since open — growth, rewrite or
+  shrink — and logs it. `allow_growth` keeps sending exactly the size seen at
+  open when the file only got larger; a rewrite at the same size or a shrink
+  still aborts. No setting tolerates rewrites or shrinks. Caveat: a rewrite
+  that also makes the file larger looks like growth and is accepted under
+  `allow_growth`.
 
 ### Proxy routes
 
