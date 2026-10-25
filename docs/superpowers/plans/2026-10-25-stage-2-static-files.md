@@ -131,7 +131,7 @@ Sim invariants added: an action for an unknown or closed file; a second `CloseFi
 
 Rules (spec "Static routes" + amendments 2–5): methods other than GET/HEAD → 405 with `Allow`; a request body (any `BodyFraming` other than `None`) → 413 + close; `DotSegment` → 404; `FileFailed{NotFound|Symlink|PermissionDenied|Other}` → 404; `FileOpened{Other}` → `CloseFile` + 404; `FileOpened{Directory}` → `CloseFile`, then with `TrailingSlash::Absent` → 301 to raw path + `/` (+ `?query`), with `Present` → `OpenFile` of the same segments + `index.html` (its `Directory`/`Other` → 404); HEAD → head only (`Content-Length` = file size), no `Readahead`, `CloseFile` right after the head is queued; error responses to HEAD use `BodyMode::HeadOnly` (amendment 5, also for non-static responses); all responses logged once via `Log::Response` with the raw path.
 
-- [ ] **Step 1: Write the failing tests** — `post_gets_405_with_allow`, `body_gets_413_and_closes`, `missing_file_404`, `symlink_404`, `permission_denied_404`, `dotfile_404` (`/.env`, `/a/.git/config`), `fifo_or_device_404` (sim `add_special`), `directory_without_slash_redirects` (exact bytes incl. `Location: /docs/?x=1` for `/docs?x=1`), `directory_with_slash_serves_index`, `directory_without_index_404`, `head_on_large_file_sends_head_only` (Review Focus 5; no `Readahead` in trace, `open_files() == 0`), `head_error_response_has_no_body` (HEAD to an unknown host → 404 head only).
+- [ ] **Step 1: Write the failing tests** — `post_gets_405_with_allow`, `body_gets_413_and_closes`, `missing_file_404`, `symlink_404`, `permission_denied_404`, `dotfile_404` (`/.env`, `/a/.git/config`), `fifo_or_device_404` (sim `add_special`), `directory_without_slash_redirects` (exact bytes incl. `Location: /docs/?x=1` for `/docs?x=1`), `directory_with_slash_serves_index`, `directory_without_index_404`, `head_on_large_file_sends_head_only` (Review Focus 5; no `Readahead` in trace, `open_files() == 0`), `head_error_response_has_no_body` (HEAD to an unknown host → 404 head only). Also `well_known_route_serves_files` (with `path /.well-known { static /srv/well-known; }`: `/.well-known/acme-challenge/abc` served; `/.well-known/.secret` → 404; without the route `/.well-known/x` → 404).
 - [ ] **Step 2: Run to verify they fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run everything** (pre-commit checks) → PASS.
@@ -144,6 +144,7 @@ Rules (spec "Static routes" + amendments 2–5): methods other than GET/HEAD →
 **Files:**
 - Modify: `core/src/core.rs`, `core/src/conn.rs`, `core/src/log.rs`, `core/src/config/model.rs`, `core/src/config/validate/` (new static-route key `on_file_change`: one value, `abort` or `allow_growth`; only on static routes; default `abort`; model `pub enum OnFileChange { Abort, AllowGrowth }` in `RouteAction::Static { root, on_file_change }`)
 - Test: `sim/tests/static_files.rs`, config tests
+- Modify: `examples/durchlauferhitzer.conf` — document `on_file_change` on the static routes (the `example_config_loads` test keeps it valid)
 
 **Interfaces:**
 - Consumes: Tasks 2–3

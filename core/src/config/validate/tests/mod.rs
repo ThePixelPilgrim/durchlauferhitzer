@@ -298,3 +298,12 @@ fn display_names_line_and_column() {
         .map(|e| e.to_string());
     assert_eq!(e.as_deref(), Some("3:5: unknown key `lsiten`"));
 }
+
+/// The shipped example config must always load: it is documentation users
+/// copy from, so it may never drift from what the parser accepts.
+#[test]
+fn example_config_loads() {
+    let text = include_str!("../../../../../examples/durchlauferhitzer.conf");
+    let config = load(text).map_err(|e| e.to_string());
+    assert!(config.is_ok(), "examples/durchlauferhitzer.conf: {config:?}");
+}

@@ -200,6 +200,11 @@ reject.
 - Symlinks anywhere in the path, dotfiles (any decoded segment starting with
   `.`), missing files, permission denied and non-regular files → 404, so the
   response does not reveal which.
+- Dotfiles are only reachable through an explicit route whose prefix names
+  them, e.g. `path /.well-known { static /srv/well-known; }` (ACME
+  challenges, security.txt); dotfiles below that route are still 404.
+- `examples/durchlauferhitzer.conf` documents every config key; a test
+  keeps it loadable.
 - `Content-Type` from a small built-in extension table (see the stage 2
   plan), default `application/octet-stream`; always send
   `X-Content-Type-Options: nosniff`.
