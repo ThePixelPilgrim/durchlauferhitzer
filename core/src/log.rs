@@ -14,8 +14,10 @@ use crate::routing::RouteMiss;
 /// One log entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Log {
-    /// A response was sent. `request` is `None` when the request head could
-    /// not be parsed far enough to summarise it.
+    /// A response was queued for sending (emitted when it is queued, not when
+    /// the client has received it; a later send timeout or reset is logged
+    /// as its own entry). `request` is `None` when the request head could not
+    /// be parsed far enough to summarise it.
     Response {
         conn: ConnId,
         peer: IpAddr,

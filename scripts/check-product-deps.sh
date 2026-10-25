@@ -7,7 +7,7 @@ ALLOWED=(libc)
 
 # Capture first so a failing `cargo tree` aborts the script (set -e does not
 # see failures inside process substitution).
-tree=$(cargo tree -p "${PRODUCT_PACKAGE:-durchlauferhitzer-core}" -e normal,build --prefix none --format '{p}')
+tree=$(cargo tree --locked -p "${PRODUCT_PACKAGE:-durchlauferhitzer-core}" -e normal,build --prefix none --format '{p}')
 
 bad=()
 while read -r name _; do

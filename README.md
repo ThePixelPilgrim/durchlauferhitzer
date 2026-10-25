@@ -1,2 +1,2 @@
 # durchlauferhitzer
-Just another HTTP/HTTPS proxy with very little features
+Just another HTTP proxy with very little features. HTTPS is planned for a later stage.
