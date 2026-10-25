@@ -188,15 +188,27 @@ reject.
 
 ### Static routes
 
-- Methods GET and HEAD; others → 405 with `Allow`. A request with a body
-  → 413.
-- Directory → its `index.html` if it exists, else 404. No listings.
-- Symlinks anywhere in the path → 404. Dotfiles (any segment starting with
-  `.`) → 404.
-- `Content-Type` from a small built-in extension table, default
-  `application/octet-stream`; always send `X-Content-Type-Options: nosniff`.
-- A file that changes size or vanishes mid-transfer aborts that connection
-  cleanly (headers already sent) and logs it.
+- Static routes strip their own prefix (alias semantics): on
+  `path /assets { static /srv/assets; }`, `/assets/a.css` serves
+  `/srv/assets/a.css`. The remaining path is percent-decoded exactly once into
+  byte segments (non-UTF-8 names allowed).
+- Methods GET and HEAD; others → 405 with `Allow: GET, HEAD`. A request with
+  a body → 413.
+- Directory requested with a trailing `/` → its `index.html` if it exists,
+  else 404. Without the `/` → 301 to the same path plus `/` (query kept). No
+  listings.
+- Symlinks anywhere in the path, dotfiles (any decoded segment starting with
+  `.`), missing files, permission denied and non-regular files → 404, so the
+  response does not reveal which.
+- `Content-Type` from a small built-in extension table (see the stage 2
+  plan), default `application/octet-stream`; always send
+  `X-Content-Type-Options: nosniff`.
+- HEAD gets the head with the full `Content-Length` and no body; error
+  responses to HEAD carry no body either.
+- Waiting on the disk counts against `send_idle_timeout`.
+- A file that ends early (shrank) aborts that connection after the headers
+  were sent, and is logged; growth after open is ignored (exactly the size
+  seen at open is sent).
 
 ### Proxy routes
 
