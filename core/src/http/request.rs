@@ -12,6 +12,17 @@
 //! stateless form for a buffer parsed in one go.
 
 use crate::config::model::Limits;
+use crate::http::head_line::{
+    DeclaredFraming, FramingError, LineError, LineScanner, Position, check_line,
+    check_unterminated, declared_framing, head_lines, is_token, parse_headers, split_header,
+    to_string, trim_ows, values,
+};
+// The work counters are shared by both head parsers; tests elsewhere reach
+// them through this module.
+#[cfg(test)]
+pub(crate) use crate::http::head_line::work;
+#[cfg(not(test))]
+use crate::http::head_line::work;
 use crate::http::target::{Target, TargetError, parse_target};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +105,32 @@ pub enum HttpError {
     TransferEncodingInHttp10,
 }
 
+impl From<LineError> for HttpError {
+    fn from(e: LineError) -> Self {
+        match e {
+            LineError::HeadTooLarge => Self::HeadTooLarge,
+            LineError::TooManyHeaders => Self::TooManyHeaders,
+            LineError::BareLf => Self::BareLf,
+            LineError::BadHeaderName => Self::BadHeaderName,
+            LineError::BadHeaderValue => Self::BadHeaderValue,
+            LineError::ObsFold => Self::ObsFold,
+        }
+    }
+}
+
+impl From<FramingError> for HttpError {
+    fn from(e: FramingError) -> Self {
+        match e {
+            FramingError::ContentLengthWithTransferEncoding => {
+                Self::ContentLengthWithTransferEncoding
+            }
+            FramingError::BadContentLength => Self::BadContentLength,
+            FramingError::DuplicateContentLength => Self::DuplicateContentLength,
+            FramingError::UnsupportedTransferEncoding => Self::UnsupportedTransferEncoding,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeadLimits {
     pub max_request_line: usize,
@@ -109,62 +146,6 @@ impl From<&Limits> for HeadLimits {
             max_headers: limits.max_headers,
         }
     }
-}
-
-/// Test-only work counters for the head parser, per thread.
-///
-/// `scanned` counts bytes searched for an LF, `judged` the bytes of complete
-/// lines handed to line validation, and `built` the bytes of finished heads
-/// turned into a [`RequestHead`].
-#[cfg(test)]
-pub(crate) mod work {
-    use std::cell::Cell;
-
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-    pub(crate) struct Work {
-        pub(crate) scanned: usize,
-        pub(crate) judged: usize,
-        pub(crate) built: usize,
-    }
-
-    thread_local! {
-        static WORK: Cell<Work> = const {
-            Cell::new(Work { scanned: 0, judged: 0, built: 0 })
-        };
-    }
-
-    fn update(f: impl FnOnce(&mut Work)) {
-        WORK.with(|cell| {
-            let mut w = cell.get();
-            f(&mut w);
-            cell.set(w);
-        });
-    }
-
-    pub(crate) fn scanned(n: usize) {
-        update(|w| w.scanned = w.scanned.saturating_add(n));
-    }
-
-    pub(crate) fn judged(n: usize) {
-        update(|w| w.judged = w.judged.saturating_add(n));
-    }
-
-    pub(crate) fn built(n: usize) {
-        update(|w| w.built = w.built.saturating_add(n));
-    }
-
-    /// Returns the counts so far and resets them.
-    pub(crate) fn take() -> Work {
-        WORK.with(|cell| cell.replace(Work::default()))
-    }
-}
-
-/// No-op stand-ins outside tests.
-#[cfg(not(test))]
-mod work {
-    pub(crate) fn scanned(_: usize) {}
-    pub(crate) fn judged(_: usize) {}
-    pub(crate) fn built(_: usize) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,10 +192,7 @@ enum Stage {
 /// head needs a new parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeadParser {
-    /// Start of the first line not yet judged.
-    judged: usize,
-    /// `buf[judged..scanned]` is known to hold no LF.
-    scanned: usize,
+    lines: LineScanner,
     stage: Stage,
 }
 
@@ -228,8 +206,7 @@ impl HeadParser {
     /// A parser at the start of a head.
     pub const fn new() -> Self {
         Self {
-            judged: 0,
-            scanned: 0,
+            lines: LineScanner::new(),
             stage: Stage::RequestLine,
         }
     }
@@ -250,12 +227,7 @@ impl HeadParser {
     /// reported as soon as they are certain.
     pub fn advance(&mut self, buf: &[u8], limits: &HeadLimits) -> Result<ParseStatus, HttpError> {
         loop {
-            let unscanned = buf.get(self.scanned..).unwrap_or_default();
-            let found = unscanned.iter().position(|&b| b == b'\n');
-            work::scanned(found.map_or(unscanned.len(), |i| i + 1));
-            let Some(offset) = found else {
-                self.scanned = self.scanned.max(buf.len());
-                let rest = buf.get(self.judged..).unwrap_or_default();
+            let Some(line) = self.lines.next_line(buf) else {
                 return match self.stage {
                     // The request line decides between RequestLineTooLong
                     // and HeadTooLarge once its LF arrives, so until then
@@ -263,52 +235,33 @@ impl HeadParser {
                     // prefixes consistent for any limits, including
                     // max_head <= max_request_line).
                     Stage::RequestLine => {
-                        if rest.len() >= limits.max_request_line.saturating_add(2) {
+                        if self.lines.pending(buf) >= limits.max_request_line.saturating_add(2) {
                             Err(HttpError::RequestLineTooLong)
                         } else {
                             Ok(ParseStatus::Incomplete)
                         }
                     }
                     Stage::Headers { .. } => {
-                        if buf.len() > limits.max_head {
-                            Err(HttpError::HeadTooLarge)
-                        } else {
-                            Ok(ParseStatus::Incomplete)
-                        }
+                        check_unterminated(buf.len(), limits)?;
+                        Ok(ParseStatus::Incomplete)
                     }
                 };
             };
-            let lf = self.scanned.saturating_add(offset);
-            let end = lf.saturating_add(1);
-            let has_cr = lf > self.judged && buf.get(lf.saturating_sub(1)) == Some(&b'\r');
-            let line_end = if has_cr { lf.saturating_sub(1) } else { lf };
-            let line = buf.get(self.judged..line_end).unwrap_or_default();
 
-            match self.stage {
+            let position = match self.stage {
                 Stage::RequestLine => {
-                    if line.len() > limits.max_request_line {
+                    if line.bytes.len() > limits.max_request_line {
                         return Err(HttpError::RequestLineTooLong);
                     }
+                    Position::StartLine
                 }
-                Stage::Headers { .. } => {}
-            }
-            if end > limits.max_head {
-                return Err(HttpError::HeadTooLarge);
-            }
-            match self.stage {
-                Stage::Headers { count, .. } if !line.is_empty() && count >= limits.max_headers => {
-                    return Err(HttpError::TooManyHeaders);
-                }
-                Stage::RequestLine | Stage::Headers { .. } => {}
-            }
-            if !has_cr {
-                return Err(HttpError::BareLf);
-            }
+                Stage::Headers { count, .. } => Position::Header { count },
+            };
+            check_line(&line, position, limits)?;
 
-            work::judged(line.len());
             match self.stage {
                 Stage::RequestLine => {
-                    let (method, _, _) = parse_request_line(line)?;
+                    let (method, _, _) = parse_request_line(line.bytes)?;
                     let method = match method {
                         Method::Get => KnownMethod::Get,
                         Method::Head => KnownMethod::Head,
@@ -316,23 +269,22 @@ impl HeadParser {
                     };
                     self.stage = Stage::Headers { count: 0, method };
                 }
-                Stage::Headers { .. } if line.is_empty() => {
-                    let head = build_head(buf.get(..end).unwrap_or_default())?;
+                Stage::Headers { .. } if line.bytes.is_empty() => {
+                    let head = build_head(buf.get(..line.end).unwrap_or_default())?;
                     return Ok(ParseStatus::Complete {
                         head,
-                        consumed: end,
+                        consumed: line.end,
                     });
                 }
                 Stage::Headers { count, method } => {
-                    split_header(line)?;
+                    split_header(line.bytes)?;
                     self.stage = Stage::Headers {
                         count: count.saturating_add(1),
                         method,
                     };
                 }
             }
-            self.judged = end;
-            self.scanned = end;
+            self.lines.accept(&line);
         }
     }
 }
@@ -342,14 +294,9 @@ impl HeadParser {
 /// and applies the checks that need all headers.
 fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
     work::built(head.len());
-    let mut lines = head
-        .split(|&b| b == b'\n')
-        .map(|line| line.strip_suffix(b"\r").unwrap_or(line));
+    let mut lines = head_lines(head);
     let (method, target, version) = parse_request_line(lines.next().unwrap_or_default())?;
-    let mut headers = Vec::new();
-    for line in lines.take_while(|line| !line.is_empty()) {
-        headers.push(parse_header(line)?);
-    }
+    let headers = parse_headers(lines)?;
     let host = check_host(&headers, version)?;
     let body = check_framing(&headers, version)?;
     let persistence = persistence(&headers, version);
@@ -362,35 +309,6 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
         body,
         persistence,
     })
-}
-
-fn is_tchar(b: u8) -> bool {
-    b.is_ascii_alphanumeric()
-        || matches!(
-            b,
-            b'!' | b'#'
-                | b'$'
-                | b'%'
-                | b'&'
-                | b'\''
-                | b'*'
-                | b'+'
-                | b'-'
-                | b'.'
-                | b'^'
-                | b'_'
-                | b'`'
-                | b'|'
-                | b'~'
-        )
-}
-
-fn is_token(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && bytes.iter().all(|&b| is_tchar(b))
-}
-
-fn to_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn parse_request_line(line: &[u8]) -> Result<(Method, Target, Version), HttpError> {
@@ -420,63 +338,6 @@ fn parse_request_line(line: &[u8]) -> Result<(Method, Target, Version), HttpErro
     };
     let target = parse_target(target).map_err(HttpError::BadTarget)?;
     Ok((method, target, version))
-}
-
-fn is_ows(b: u8) -> bool {
-    b == b' ' || b == b'\t'
-}
-
-fn trim_ows(mut bytes: &[u8]) -> &[u8] {
-    while let [first, tail @ ..] = bytes {
-        if !is_ows(*first) {
-            break;
-        }
-        bytes = tail;
-    }
-    while let [head @ .., last] = bytes {
-        if !is_ows(*last) {
-            break;
-        }
-        bytes = head;
-    }
-    bytes
-}
-
-/// Validates a header line and splits it into name and raw value, without
-/// allocating.
-fn split_header(line: &[u8]) -> Result<(&[u8], &[u8]), HttpError> {
-    if line.first().is_some_and(|&b| is_ows(b)) {
-        return Err(HttpError::ObsFold);
-    }
-    let colon = line
-        .iter()
-        .position(|&b| b == b':')
-        .ok_or(HttpError::BadHeaderName)?;
-    let name = line.get(..colon).unwrap_or_default();
-    let value = line.get(colon + 1..).unwrap_or_default();
-    if !is_token(name) {
-        return Err(HttpError::BadHeaderName);
-    }
-    let valid_value = |&b: &u8| b == b'\t' || b == b' ' || (0x21..=0x7E).contains(&b) || b >= 0x80;
-    if !value.iter().all(valid_value) {
-        return Err(HttpError::BadHeaderValue);
-    }
-    Ok((name, value))
-}
-
-fn parse_header(line: &[u8]) -> Result<Header, HttpError> {
-    let (name, value) = split_header(line)?;
-    Ok(Header {
-        name: to_string(name).to_ascii_lowercase(),
-        value: trim_ows(value).to_vec(),
-    })
-}
-
-fn values<'a>(headers: &'a [Header], name: &'a str) -> impl Iterator<Item = &'a [u8]> {
-    headers
-        .iter()
-        .filter(move |h| h.name == name)
-        .map(|h| h.value.as_slice())
 }
 
 fn check_host(headers: &[Header], version: Version) -> Result<Option<String>, HttpError> {
@@ -542,35 +403,14 @@ fn validate_host(value: &[u8]) -> Result<String, HttpError> {
 }
 
 fn check_framing(headers: &[Header], version: Version) -> Result<BodyFraming, HttpError> {
-    let lengths: Vec<&[u8]> = values(headers, "content-length").collect();
-    let encodings: Vec<&[u8]> = values(headers, "transfer-encoding").collect();
-    if version == Version::Http10 && !encodings.is_empty() {
+    if version == Version::Http10 && values(headers, "transfer-encoding").next().is_some() {
         return Err(HttpError::TransferEncodingInHttp10);
     }
-    if !lengths.is_empty() && !encodings.is_empty() {
-        return Err(HttpError::ContentLengthWithTransferEncoding);
-    }
-    if let Some(&first) = lengths.first() {
-        if lengths.len() > 1 {
-            return Err(HttpError::DuplicateContentLength);
-        }
-        if first.is_empty() || !first.iter().all(u8::is_ascii_digit) {
-            return Err(HttpError::BadContentLength);
-        }
-        let n: u64 = to_string(first)
-            .parse()
-            .map_err(|_| HttpError::BadContentLength)?;
-        return Ok(if n == 0 {
-            BodyFraming::None
-        } else {
-            BodyFraming::Length(n)
-        });
-    }
-    match encodings.as_slice() {
-        [] => Ok(BodyFraming::None),
-        [one] if one.eq_ignore_ascii_case(b"chunked") => Ok(BodyFraming::Chunked),
-        _ => Err(HttpError::UnsupportedTransferEncoding),
-    }
+    Ok(match declared_framing(headers)? {
+        DeclaredFraming::Absent | DeclaredFraming::Length(0) => BodyFraming::None,
+        DeclaredFraming::Length(n) => BodyFraming::Length(n),
+        DeclaredFraming::Chunked => BodyFraming::Chunked,
+    })
 }
 
 fn persistence(headers: &[Header], version: Version) -> Persistence {

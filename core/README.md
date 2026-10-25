@@ -49,6 +49,8 @@ src/
     units.rs            durations and sizes
   http/               HTTP building blocks (pure functions, no state)
     request.rs          strict, resumable request-head parser
+    head_line.rs        line scanning, limits, header-line and framing
+                        rules shared by the head parsers
     target.rs           request-target validation (traversal, encodings)
     static_path.rs      decoding paths to file-system segments
     response.rs         rendering fixed responses, file heads, redirects
