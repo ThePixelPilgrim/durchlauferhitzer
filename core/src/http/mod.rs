@@ -1,5 +1,6 @@
 //! HTTP-level logic.
 
+pub mod chunked;
 mod head_line;
 pub mod mime;
 pub mod request;
