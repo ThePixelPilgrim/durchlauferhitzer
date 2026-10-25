@@ -97,7 +97,7 @@ use crate::conn::{
     Conn, ConnState, Counted, LINGER_SCRATCH, LINGER_TIMEOUT, SEND_CAPACITY, UnreadBody,
 };
 use crate::http::request::{
-    BodyFraming, HeadLimits, HttpError, Method, ParseStatus, Persistence, RequestHead, parse_head,
+    BodyFraming, HeadLimits, HeadParser, HttpError, Method, ParseStatus, Persistence, RequestHead,
 };
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::status::Status;
@@ -284,7 +284,7 @@ impl Core {
                     .insert(canonical, per_ip.saturating_add(1));
                 let state = ConnState::ReadingHead {
                     buffered: 0,
-                    scanned: 0,
+                    parser: HeadParser::new(),
                     deadline: now.saturating_add(limits.header_timeout),
                 };
                 Conn::new(peer, Counted::Yes, state, capacity)
@@ -334,7 +334,7 @@ impl Core {
         match c.state {
             ConnState::ReadingHead {
                 buffered,
-                scanned,
+                parser,
                 deadline,
             } => {
                 let added = len.min(capacity.saturating_sub(buffered));
@@ -344,7 +344,7 @@ impl Core {
                 // The header deadline is total: new bytes do not extend it.
                 c.state = ConnState::ReadingHead {
                     buffered: buffered.saturating_add(added),
-                    scanned,
+                    parser,
                     deadline,
                 };
             }
@@ -355,7 +355,7 @@ impl Core {
                 }
                 c.state = ConnState::ReadingHead {
                     buffered: added,
-                    scanned: 0,
+                    parser: HeadParser::new(),
                     deadline: now.saturating_add(header_timeout),
                 };
             }
@@ -402,7 +402,7 @@ impl Core {
                         if buffered > 0 {
                             ConnState::ReadingHead {
                                 buffered,
-                                scanned: 0,
+                                parser: HeadParser::new(),
                                 deadline: now.saturating_add(limits.header_timeout),
                             }
                         } else {
@@ -496,8 +496,8 @@ impl Core {
         }
     }
 
-    /// In `ReadingHead`, parse the buffered bytes if anything new can come of
-    /// it: an LF beyond `scanned`, or a full buffer (so a limit fires).
+    /// In `ReadingHead`, parse the buffered bytes. The parser resumes where
+    /// it stopped, so only newly arrived bytes are looked at.
     fn try_parse(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
         let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
         let Some(c) = self.conns.get_mut(&conn) else {
@@ -505,7 +505,7 @@ impl Core {
         };
         let ConnState::ReadingHead {
             buffered,
-            scanned,
+            mut parser,
             deadline,
         } = c.state
         else {
@@ -513,21 +513,21 @@ impl Core {
         };
         let capacity = c.recv.len();
         let filled = c.recv.get(..buffered).unwrap_or_default();
-        let new_lf = filled.get(scanned..).unwrap_or_default().contains(&b'\n');
-        c.state = ConnState::ReadingHead {
-            buffered,
-            scanned: buffered,
-            deadline,
-        };
         let full = buffered >= capacity;
-        if !new_lf && !full {
-            return;
-        }
-        let result = match parse_head(filled, &self.head_limits) {
+        let result = match parser.advance(filled, &self.head_limits) {
             // A full buffer that holds no complete head can never hold one:
             // the head would exceed `max_head`.
             Ok(ParseStatus::Incomplete) if full => Err(HttpError::HeadTooLarge),
-            other => other,
+            Ok(ParseStatus::Incomplete) => Ok(ParseStatus::Incomplete),
+            Ok(ParseStatus::Complete { head, consumed }) => {
+                Ok(ParseStatus::Complete { head, consumed })
+            }
+            Err(error) => Err(error),
+        };
+        c.state = ConnState::ReadingHead {
+            buffered,
+            parser,
+            deadline,
         };
         match result {
             Ok(ParseStatus::Incomplete) => {}
@@ -979,5 +979,67 @@ mod tests {
         actions.clear();
         core.handle(now, Event::ReadClosed { conn }, &mut actions);
         assert!(actions.is_empty());
+    }
+
+    /// A maximal head sent one line per read costs linear parser work: every
+    /// byte is searched for an LF once and judged once, and the finished head
+    /// is built once (regression test for rescanning the whole buffer on
+    /// every new line).
+    #[test]
+    fn head_sent_line_by_line_is_parsed_in_linear_work() {
+        use crate::http::request::work;
+        let mut core = Core::new(
+            crate::config::load("listen 127.0.0.1:8080; host a.test { path / { static /srv; } }")
+                .unwrap(),
+        );
+        let limits = core.config.limits.clone();
+        let mut lines: Vec<Vec<u8>> =
+            vec![b"GET / HTTP/1.1\r\n".to_vec(), b"Host: a.test\r\n".to_vec()];
+        let fixed: usize = lines.iter().map(Vec::len).sum();
+        let count = limits.max_headers - 1;
+        let width = (limits.max_head - fixed - 2) / count;
+        for i in 0..count {
+            let mut line = format!("X-Pad-{i:03}: ").into_bytes();
+            line.resize(width - 2, b'x');
+            line.extend_from_slice(b"\r\n");
+            lines.push(line);
+        }
+        lines.push(b"\r\n".to_vec());
+        let total: usize = lines.iter().map(Vec::len).sum();
+        assert!(total <= limits.max_head && total > limits.max_head - width);
+
+        let conn = ConnId(1);
+        let now = Instant::from_nanos(0);
+        let mut actions = Vec::new();
+        core.handle(now, Event::Accepted { conn, peer: PEER }, &mut actions);
+        work::take();
+        for line in &lines {
+            let spare = core.recv_buffer(conn);
+            spare.get_mut(..line.len()).unwrap().copy_from_slice(line);
+            core.handle(
+                now,
+                Event::Received {
+                    conn,
+                    len: line.len(),
+                },
+                &mut actions,
+            );
+        }
+        let used = work::take();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Log(Log::Response { .. }))),
+            "{actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::Log(Log::Rejected { .. }))),
+            "{actions:?}"
+        );
+        assert!(used.scanned <= total, "{used:?} for a {total}-byte head");
+        assert!(used.judged <= total, "{used:?} for a {total}-byte head");
+        assert!(used.built <= total, "{used:?} for a {total}-byte head");
     }
 }

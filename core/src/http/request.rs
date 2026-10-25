@@ -1,11 +1,15 @@
 //! Strict, incremental parser for the HTTP/1.x request head.
 //!
 //! This is the main request-smuggling attack surface, so the rule is "when in
-//! doubt, reject". The parser is stateless: callers pass every byte received
-//! so far and get `Incomplete` until the blank line arrives. A line is judged
-//! only once its terminating LF is present, and a judged line's verdict never
-//! changes with more bytes, so a prefix of an input yields `Incomplete` or the
-//! same error as the whole input.
+//! doubt, reject". Callers pass every byte received so far and get
+//! `Incomplete` until the blank line arrives. A line is judged only once its
+//! terminating LF is present, and a judged line's verdict never changes with
+//! more bytes, so a prefix of an input yields `Incomplete` or the same error
+//! as the whole input.
+//!
+//! [`HeadParser`] keeps its place between calls, so a head that arrives in
+//! many pieces costs work linear in its length; [`parse_head`] is the
+//! stateless form for a buffer parsed in one go.
 
 use crate::config::model::Limits;
 use crate::http::target::{Target, TargetError, parse_target};
@@ -97,6 +101,62 @@ impl From<&Limits> for HeadLimits {
     }
 }
 
+/// Test-only work counters for the head parser, per thread.
+///
+/// `scanned` counts bytes searched for an LF, `judged` the bytes of complete
+/// lines handed to line validation, and `built` the bytes of finished heads
+/// turned into a [`RequestHead`].
+#[cfg(test)]
+pub(crate) mod work {
+    use std::cell::Cell;
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub(crate) struct Work {
+        pub(crate) scanned: usize,
+        pub(crate) judged: usize,
+        pub(crate) built: usize,
+    }
+
+    thread_local! {
+        static WORK: Cell<Work> = const {
+            Cell::new(Work { scanned: 0, judged: 0, built: 0 })
+        };
+    }
+
+    fn update(f: impl FnOnce(&mut Work)) {
+        WORK.with(|cell| {
+            let mut w = cell.get();
+            f(&mut w);
+            cell.set(w);
+        });
+    }
+
+    pub(crate) fn scanned(n: usize) {
+        update(|w| w.scanned = w.scanned.saturating_add(n));
+    }
+
+    pub(crate) fn judged(n: usize) {
+        update(|w| w.judged = w.judged.saturating_add(n));
+    }
+
+    pub(crate) fn built(n: usize) {
+        update(|w| w.built = w.built.saturating_add(n));
+    }
+
+    /// Returns the counts so far and resets them.
+    pub(crate) fn take() -> Work {
+        WORK.with(|cell| cell.replace(Work::default()))
+    }
+}
+
+/// No-op stand-ins outside tests.
+#[cfg(not(test))]
+mod work {
+    pub(crate) fn scanned(_: usize) {}
+    pub(crate) fn judged(_: usize) {}
+    pub(crate) fn built(_: usize) {}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseStatus {
     Incomplete,
@@ -108,70 +168,173 @@ pub enum ParseStatus {
 /// Returns `Incomplete` until the blank line arrives; limit violations are
 /// reported as soon as they are certain. Lines are judged only once their LF
 /// is present, so a prefix never contradicts the full input.
+///
+/// This is the stateless form of [`HeadParser`]; callers that receive a head
+/// in pieces keep a `HeadParser` instead, so each byte is looked at a bounded
+/// number of times however the head is split.
 pub fn parse_head(buf: &[u8], limits: &HeadLimits) -> Result<ParseStatus, HttpError> {
-    let mut pos = 0;
-    let mut request_line: Option<(Method, Target, Version)> = None;
-    let mut headers: Vec<Header> = Vec::new();
-    loop {
-        let rest = buf.get(pos..).unwrap_or_default();
-        let Some(lf) = rest.iter().position(|&b| b == b'\n') else {
-            if request_line.is_none() {
-                // The request line decides between RequestLineTooLong and
-                // HeadTooLarge once its LF arrives, so until then only the
-                // request-line limit may fire (this keeps prefixes consistent
-                // for any limits, including max_head <= max_request_line).
-                if rest.len() >= limits.max_request_line.saturating_add(2) {
-                    return Err(HttpError::RequestLineTooLong);
+    HeadParser::new().advance(buf, limits)
+}
+
+/// Which line of the head the parser expects next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    RequestLine,
+    /// The request line is valid; `count` header lines are valid so far.
+    Headers {
+        count: usize,
+    },
+}
+
+/// Resumable state of the request-head parser.
+///
+/// Feed it every byte received so far with [`HeadParser::advance`], each call
+/// passing the previous bytes plus any new ones. It remembers how far it has
+/// searched for an LF and which lines it has already judged, so each byte is
+/// searched once and each complete line is validated once; the
+/// [`RequestHead`] is built in one final pass when the blank line arrives.
+/// The verdicts are exactly those of [`parse_head`] on the same bytes.
+///
+/// Once `advance` returned `Complete` or an error, the parser is spent: a new
+/// head needs a new parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadParser {
+    /// Start of the first line not yet judged.
+    judged: usize,
+    /// `buf[judged..scanned]` is known to hold no LF.
+    scanned: usize,
+    stage: Stage,
+}
+
+impl Default for HeadParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HeadParser {
+    /// A parser at the start of a head.
+    pub const fn new() -> Self {
+        Self {
+            judged: 0,
+            scanned: 0,
+            stage: Stage::RequestLine,
+        }
+    }
+
+    /// Continues parsing `buf`, all bytes of the head received so far.
+    ///
+    /// `buf` must start with the bytes passed on earlier calls. Returns
+    /// `Incomplete` until the blank line arrives; limit violations are
+    /// reported as soon as they are certain.
+    pub fn advance(&mut self, buf: &[u8], limits: &HeadLimits) -> Result<ParseStatus, HttpError> {
+        loop {
+            let unscanned = buf.get(self.scanned..).unwrap_or_default();
+            let found = unscanned.iter().position(|&b| b == b'\n');
+            work::scanned(found.map_or(unscanned.len(), |i| i + 1));
+            let Some(offset) = found else {
+                self.scanned = self.scanned.max(buf.len());
+                let rest = buf.get(self.judged..).unwrap_or_default();
+                return match self.stage {
+                    // The request line decides between RequestLineTooLong
+                    // and HeadTooLarge once its LF arrives, so until then
+                    // only the request-line limit may fire (this keeps
+                    // prefixes consistent for any limits, including
+                    // max_head <= max_request_line).
+                    Stage::RequestLine => {
+                        if rest.len() >= limits.max_request_line.saturating_add(2) {
+                            Err(HttpError::RequestLineTooLong)
+                        } else {
+                            Ok(ParseStatus::Incomplete)
+                        }
+                    }
+                    Stage::Headers { .. } => {
+                        if buf.len() > limits.max_head {
+                            Err(HttpError::HeadTooLarge)
+                        } else {
+                            Ok(ParseStatus::Incomplete)
+                        }
+                    }
+                };
+            };
+            let lf = self.scanned.saturating_add(offset);
+            let end = lf.saturating_add(1);
+            let has_cr = lf > self.judged && buf.get(lf.saturating_sub(1)) == Some(&b'\r');
+            let line_end = if has_cr { lf.saturating_sub(1) } else { lf };
+            let line = buf.get(self.judged..line_end).unwrap_or_default();
+
+            match self.stage {
+                Stage::RequestLine => {
+                    if line.len() > limits.max_request_line {
+                        return Err(HttpError::RequestLineTooLong);
+                    }
                 }
-                return Ok(ParseStatus::Incomplete);
+                Stage::Headers { .. } => {}
             }
-            if buf.len() > limits.max_head {
+            if end > limits.max_head {
                 return Err(HttpError::HeadTooLarge);
             }
-            return Ok(ParseStatus::Incomplete);
-        };
-        let end = pos + lf + 1;
-        let has_cr = lf > 0 && rest.get(lf - 1) == Some(&b'\r');
-        let line_len = if has_cr { lf - 1 } else { lf };
-        let line = rest.get(..line_len).unwrap_or_default();
+            match self.stage {
+                Stage::Headers { count } if !line.is_empty() && count >= limits.max_headers => {
+                    return Err(HttpError::TooManyHeaders);
+                }
+                Stage::RequestLine | Stage::Headers { .. } => {}
+            }
+            if !has_cr {
+                return Err(HttpError::BareLf);
+            }
 
-        if request_line.is_none() && line_len > limits.max_request_line {
-            return Err(HttpError::RequestLineTooLong);
+            work::judged(line.len());
+            match self.stage {
+                Stage::RequestLine => {
+                    parse_request_line(line)?;
+                    self.stage = Stage::Headers { count: 0 };
+                }
+                Stage::Headers { .. } if line.is_empty() => {
+                    let head = build_head(buf.get(..end).unwrap_or_default())?;
+                    return Ok(ParseStatus::Complete {
+                        head,
+                        consumed: end,
+                    });
+                }
+                Stage::Headers { count } => {
+                    split_header(line)?;
+                    self.stage = Stage::Headers {
+                        count: count.saturating_add(1),
+                    };
+                }
+            }
+            self.judged = end;
+            self.scanned = end;
         }
-        if end > limits.max_head {
-            return Err(HttpError::HeadTooLarge);
-        }
-        if request_line.is_some() && !line.is_empty() && headers.len() >= limits.max_headers {
-            return Err(HttpError::TooManyHeaders);
-        }
-        if !has_cr {
-            return Err(HttpError::BareLf);
-        }
-
-        if request_line.is_none() {
-            request_line = Some(parse_request_line(line)?);
-        } else if line.is_empty() {
-            let (method, target, version) = request_line.ok_or(HttpError::BadRequestLine)?;
-            let host = check_host(&headers, version)?;
-            let body = check_framing(&headers, version)?;
-            let persistence = persistence(&headers, version);
-            return Ok(ParseStatus::Complete {
-                head: RequestHead {
-                    method,
-                    target,
-                    version,
-                    host,
-                    headers,
-                    body,
-                    persistence,
-                },
-                consumed: end,
-            });
-        } else {
-            headers.push(parse_header(line)?);
-        }
-        pos = end;
     }
+}
+
+/// Builds the request head from `head`, a complete head (blank line
+/// included) whose lines [`HeadParser::advance`] has already judged valid,
+/// and applies the checks that need all headers.
+fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
+    work::built(head.len());
+    let mut lines = head
+        .split(|&b| b == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line));
+    let (method, target, version) = parse_request_line(lines.next().unwrap_or_default())?;
+    let mut headers = Vec::new();
+    for line in lines.take_while(|line| !line.is_empty()) {
+        headers.push(parse_header(line)?);
+    }
+    let host = check_host(&headers, version)?;
+    let body = check_framing(&headers, version)?;
+    let persistence = persistence(&headers, version);
+    Ok(RequestHead {
+        method,
+        target,
+        version,
+        host,
+        headers,
+        body,
+        persistence,
+    })
 }
 
 fn is_tchar(b: u8) -> bool {
@@ -252,7 +415,9 @@ fn trim_ows(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-fn parse_header(line: &[u8]) -> Result<Header, HttpError> {
+/// Validates a header line and splits it into name and raw value, without
+/// allocating.
+fn split_header(line: &[u8]) -> Result<(&[u8], &[u8]), HttpError> {
     if line.first().is_some_and(|&b| is_ows(b)) {
         return Err(HttpError::ObsFold);
     }
@@ -269,6 +434,11 @@ fn parse_header(line: &[u8]) -> Result<Header, HttpError> {
     if !value.iter().all(valid_value) {
         return Err(HttpError::BadHeaderValue);
     }
+    Ok((name, value))
+}
+
+fn parse_header(line: &[u8]) -> Result<Header, HttpError> {
+    let (name, value) = split_header(line)?;
     Ok(Header {
         name: to_string(name).to_ascii_lowercase(),
         value: trim_ows(value).to_vec(),
@@ -829,6 +999,49 @@ mod tests {
         );
     }
 
+    /// Feeds `input` to one `HeadParser` in pieces ending at each of `cuts`
+    /// (and finally the whole input); returns the first verdict and the
+    /// length of the prefix that produced it.
+    fn feed(
+        input: &[u8],
+        cuts: &[usize],
+        limits: &HeadLimits,
+    ) -> (Result<ParseStatus, HttpError>, usize) {
+        let mut parser = HeadParser::new();
+        let mut ends: Vec<usize> = cuts.iter().map(|&c| c.min(input.len())).collect();
+        ends.sort_unstable();
+        ends.push(input.len());
+        for end in ends {
+            let result = parser.advance(input.get(..end).unwrap_or_default(), limits);
+            if result != Ok(ParseStatus::Incomplete) {
+                return (result, end);
+            }
+        }
+        (Ok(ParseStatus::Incomplete), input.len())
+    }
+
+    #[test]
+    fn parser_fed_line_by_line_does_linear_work() {
+        let l = defaults();
+        let mut head = b"GET / HTTP/1.1\r\nHost: a\r\n".to_vec();
+        let mut cuts = vec![16, head.len()];
+        while head.len() + 40 + 2 <= l.max_head && cuts.len() < l.max_headers + 1 {
+            head.extend_from_slice(b"X-Filler: 0123456789012345678901234567\r\n");
+            cuts.push(head.len());
+        }
+        head.extend_from_slice(b"\r\n");
+        work::take();
+        let (result, _) = feed(&head, &cuts, &l);
+        let used = work::take();
+        assert_eq!(result, parse_head(&head, &l));
+        assert!(matches!(result, Ok(ParseStatus::Complete { .. })));
+        let n = head.len();
+        assert!(
+            used.scanned <= n && used.judged <= n && used.built <= n,
+            "{used:?} for {n} bytes"
+        );
+    }
+
     proptest! {
         #[test]
         fn never_panics_on_arbitrary_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
@@ -889,6 +1102,44 @@ mod tests {
                     Ok(ParseStatus::Incomplete) => {}
                     other => prop_assert_eq!(&other, &full, "prefix of {} bytes", n),
                 }
+            }
+        }
+
+        #[test]
+        fn incremental_parser_matches_stateless(
+            pieces in proptest::collection::vec(
+                prop_oneof![
+                    Just(b"GET / HTTP/1.1\r\n".to_vec()),
+                    Just(b"GET / HTTP/1.0\r\n".to_vec()),
+                    Just(b"Host: a\r\n".to_vec()),
+                    Just(b"Content-Length: 5\r\n".to_vec()),
+                    Just(b"Transfer-Encoding: chunked\r\n".to_vec()),
+                    Just(b"Connection: close\r\n".to_vec()),
+                    Just(b"X-Y: z".to_vec()),
+                    Just(b" ".to_vec()),
+                    Just(b"\r".to_vec()),
+                    Just(b"\n".to_vec()),
+                    Just(b"\r\n".to_vec()),
+                    Just(b"\0".to_vec()),
+                    proptest::collection::vec(any::<u8>(), 0..4),
+                ],
+                0..24,
+            ),
+            cuts in proptest::collection::vec(0..400usize, 0..12),
+            which in 0..4usize,
+        ) {
+            let input: Vec<u8> = pieces.concat();
+            let limits = match which {
+                0 => defaults(),
+                1 => tight(),
+                2 => HeadLimits { max_request_line: 20, max_head: 20, max_headers: 3 },
+                _ => HeadLimits { max_request_line: 20, max_head: 22, max_headers: 3 },
+            };
+            let (verdict, at) = feed(&input, &cuts, &limits);
+            prop_assert_eq!(&verdict, &parse_head(input.get(..at).unwrap_or_default(), &limits));
+            match &verdict {
+                Ok(ParseStatus::Incomplete) => {}
+                other => prop_assert_eq!(other, &parse_head(&input, &limits)),
             }
         }
     }

@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::core::Interest;
-use crate::http::request::Persistence;
+use crate::http::request::{HeadParser, Persistence};
 use crate::time::Instant;
 
 /// Capacity of each connection's send buffer.
@@ -43,12 +43,12 @@ pub(crate) enum UnreadBody {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnState {
     /// Reading the request head; `buffered` bytes of `Conn::recv` are filled
-    /// and the first `scanned` of them have been searched for an LF.
-    /// `deadline` is the total header deadline, set on entry; arriving bytes
-    /// do not extend it.
+    /// and `parser` remembers how far it has judged them, so no byte is
+    /// parsed again when more arrive. `deadline` is the total header
+    /// deadline, set on entry; arriving bytes do not extend it.
     ReadingHead {
         buffered: usize,
-        scanned: usize,
+        parser: HeadParser,
         deadline: Instant,
     },
     /// Keep-alive between requests, nothing buffered.

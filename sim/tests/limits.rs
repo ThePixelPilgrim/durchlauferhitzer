@@ -439,3 +439,36 @@ fn ipv4_mapped_peer_shares_the_ipv4_slot() {
     let c = sim.connect(mapped);
     assert_refused(&mut sim, c, mapped, LimitKind::ConnectionsPerIp);
 }
+
+/// A head of nearly `max_head` bytes arriving one header line per read is
+/// parsed correctly; the parser resumes rather than starting over on each
+/// read.
+#[test]
+fn large_head_sent_line_by_line_is_answered() {
+    let mut sim = Sim::new(CONFIG);
+    let c = sim.connect(peer(1));
+    let mut head = b"GET /x HTTP/1.1\r\nHost: other.test\r\n".to_vec();
+    let line_len = 160;
+    // 16 KiB default max_head, 100 headers max: 98 padding lines fit.
+    for i in 0..98 {
+        let mut line = format!("X-Pad-{i:03}: ").into_bytes();
+        line.resize(line_len - 2, b'p');
+        line.extend_from_slice(b"\r\n");
+        head.extend_from_slice(&line);
+    }
+    head.extend_from_slice(b"\r\n");
+    assert!(head.len() <= 16 * 1024);
+    sim.set_read_chunk(c, line_len);
+    sim.send(c, &head);
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        fixed(Status::NotFound, Persistence::KeepAlive),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.logs().last(), Some(&not_found_response(c, peer(1))));
+    // The connection is reusable for a normal request afterwards.
+    sim.set_read_chunk(c, 4096);
+    assert_served(&mut sim, c);
+}
