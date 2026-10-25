@@ -1,6 +1,6 @@
-//! Line scanning and header-line rules shared by the head parsers (the
-//! request-head parser in [`super::request`] and the backend response-head
-//! parser).
+//! Line scanning and header-line rules shared by the request-head parser
+//! ([`super::request`]) and the backend response-head parser
+//! ([`super::response_head`]).
 //!
 //! Both parsers judge a head line by line: a line is looked at only once its
 //! LF is present, the limits are applied before any syntax check, and a
