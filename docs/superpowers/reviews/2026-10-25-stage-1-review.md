@@ -266,3 +266,7 @@ All other rulings look right to me. Some have consequences worth carrying forwar
 - M2: `--locked` in CI.
 
 Then schedule I1 (resumable head parsing, to remove the 49x rescan amplification) as a hard prerequisite for stage 4; doing it now is cheaper.
+
+## Task 11 amendment (after the final review)
+
+Owner decision: route prefixes are segment lists and `strip_prefix;` is a flag (commit `bc0fd99`, review clean). Ruling: `strip_prefix;` on route `/` is accepted as a no-op. Deferred: one shared path→segments helper (3 copies today); overlapping `listen` binds such as `0.0.0.0:80` + `127.0.0.1:80` only fail at bind time (stage 4).

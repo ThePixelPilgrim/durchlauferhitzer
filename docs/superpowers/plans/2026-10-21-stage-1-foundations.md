@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md` — read it before any task.
 
+> **Note:** Task 11 (at the end) supersedes earlier task text on `EmptyValue`, `StripPrefixNotPrefix`, string route prefixes and `strip_prefix <value>`. The spec is the current reference.
+
 ## Global Constraints
 
 - `durchlauferhitzer-core` has zero `[dependencies]` and no build script. CI fails otherwise.

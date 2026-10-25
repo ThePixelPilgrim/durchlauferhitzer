@@ -205,7 +205,8 @@ reject.
 - `strip_prefix;` (a flag, no value) removes the route's own segments from
   the request path: on route `/api`, `/api/x` → `/x`, `/api/x/` → `/x/`,
   `/api` and `/api/` → `/`. The query string is unchanged. Partial stripping
-  is not supported (could return later as a segment count).
+  is not supported (could return later as a segment count). On route `/` the flag
+  is accepted and has no effect.
 - Strip hop-by-hop headers in both directions (`Connection` and the headers
   it lists, `Keep-Alive`, `Proxy-*`, `TE`, `Trailer`, `Upgrade`), and append
   `X-Forwarded-For` and set `X-Forwarded-Proto: http`. `Host` is forwarded
