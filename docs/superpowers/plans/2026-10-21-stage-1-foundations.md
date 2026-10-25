@@ -482,3 +482,29 @@ This task adds the deadlines: `ReadingHead` gets a total header deadline (now + 
 - [ ] **Step 3: Fix any failures found** in `core/src/*.rs`.
 - [ ] **Step 4: Run everything** — `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && scripts/check-product-deps.sh` → all PASS.
 - [ ] **Step 5: Commit** — `"Add fault-injection and randomized simulation tests"`
+
+---
+
+### Task 11: Segment-based route prefixes and `strip_prefix` flag (amendment after the final review)
+
+Owner decision after the final review: route prefixes are lists of segments, and `strip_prefix` becomes a flag that strips the route's own prefix. Also folds in two cheap deferred items (listen/`max_head` validation, splitting `validate.rs`). Spec sections updated: "Goals", "Routing", "Proxy routes", "Configuration" (grammar now allows value-less settings).
+
+**Files:**
+- Modify: `core/src/config/syntax.rs`, `core/src/config/validate.rs` (+ move its tests to `core/src/config/validate/tests.rs` or split into submodules), `core/src/config/model.rs`, `core/src/routing.rs`, plus any core/sim tests that use `strip_prefix /api` or the old `/api/`-does-not-match-`/api` rule
+
+**Interfaces:**
+- Produces:
+  - `Setting.values` may be empty (a flag). `SyntaxErrorKind::EmptyValue` is removed; value-count rules move to validation (`WrongValueCount(key)`).
+  - `pub struct Route { pub segments: Vec<String>, pub action: RouteAction }` — `/` is `[]`, `/api/v1` and `/api/v1/` are `["api", "v1"]`
+  - `pub enum StripPrefix { Keep, Strip }`; `ProxyRoute.strip_prefix: StripPrefix`
+  - `ConfigErrorKind::StripPrefixNotPrefix` is removed
+  - `pub fn strip_segments(path: &str, count: usize) -> String` in `routing.rs` — removes the first `count` segments of a validated path; empty result → `/`; a trailing `/` on the input is kept when segments remain (`/api/x/`, 1 → `/x/`; `/api/`, 1 → `/`; `/api`, 1 → `/`)
+  - `Router::route` unchanged in signature; matching is segment-wise, most segments wins
+
+Rules: `strip_prefix;` takes no value (`WrongValueCount("strip_prefix")` otherwise) and is only allowed on proxy routes (`StripPrefixOnStatic`). Every other setting needs exactly its documented value count (`WrongValueCount(key)`). Two `path` blocks in one host with equal segments → `DuplicatePath`. `listen`: duplicate addresses or port 0 → `InvalidValue`. `max_head` > 1 MiB → `InvalidValue`.
+
+- [ ] **Step 1: Write the failing tests** — syntax: `flag_setting_has_no_values` (`a;` → `Setting { values: [] }`); config: `strip_prefix_is_a_flag` (`strip_prefix;` → `StripPrefix::Strip`; absent → `Keep`; `strip_prefix /api;` → `WrongValueCount`), `missing_value_is_rejected` (`listen;`, `static;`, `max_request_body;` → `WrongValueCount`), `paths_with_equal_segments_are_duplicates` (`/api` and `/api/` → `DuplicatePath`), `segments_are_stored` (`/` → `[]`, `/api/v1/` → `["api","v1"]`), `listen_rejects_duplicates_and_port_zero`, `max_head_upper_bound` (1MiB ok, 1MiB+1 rejected); routing: `route_matches_whole_segments` (route `/api` and route `/api/` both match `/api`, `/api/`, `/api/x`; neither matches `/apix`), `most_segments_wins`, `strip_segments_cases` (the cases above plus `/a/b/c`, 2 → `/c`).
+- [ ] **Step 2: Run to verify they fail.**
+- [ ] **Step 3: Implement**, update affected existing tests, and split `validate.rs` so no file exceeds ~600 lines.
+- [ ] **Step 4: Run everything** — `cargo fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && scripts/check-product-deps.sh` → PASS (incl. the 500-seed simulation).
+- [ ] **Step 5: Commit** — `"Segment-based route prefixes; strip_prefix becomes a flag"`

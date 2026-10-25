@@ -20,7 +20,8 @@ matters.
 - Virtual hosts selected by the `Host` header.
 - Per-host path-prefix routes, each either serving static files or proxying
   to one backend.
-- Optional `strip_prefix` on proxy routes (plain string compare, no regex).
+- Optional `strip_prefix;` flag on proxy routes: the backend sees the path
+  with the route's own prefix removed (segment-wise, no regex).
 - A small hand-rolled config format with SCSS-like nested blocks.
 - A sans-IO core: all protocol logic is deterministic state machines that
   never touch a real socket, clock, or file. The same core runs under the
@@ -143,8 +144,12 @@ reject.
   routing and forwarding use it as-is, static serving percent-decodes it.
 - **Host:** required for HTTP/1.1 (400 if missing or duplicated). Matched
   case-insensitively, port ignored, exact names only. No matching host → 404.
-- **Routing:** longest matching `path` prefix wins, matched on segment
-  boundaries (`/api/` never matches `/apix`). No match → 404.
+- **Routing:** route prefixes are lists of path segments (`/api/v1` is
+  `["api", "v1"]`; a trailing `/` in config is insignificant, so `path /api`
+  and `path /api/` are the same route). A route matches when the request
+  path's segments start with the route's segments, so `/api` matches `/api`,
+  `/api/` and `/api/x` but never `/apix`. The route with the most segments
+  wins. No match → 404.
 - **Keep-alive** with clients; one request at a time per connection (the next
   request is not read until the response is done). Pipelined bytes are
   buffered within limits.
@@ -197,8 +202,10 @@ reject.
 
 - Any method token is forwarded. One fresh backend connection per request,
   `Connection: close` to the backend (pooling is later).
-- `strip_prefix X;` removes `X` from the start of the path if present; an
-  empty result becomes `/`; the query string is unchanged.
+- `strip_prefix;` (a flag, no value) removes the route's own segments from
+  the request path: on route `/api`, `/api/x` → `/x`, `/api/x/` → `/x/`,
+  `/api` and `/api/` → `/`. The query string is unchanged. Partial stripping
+  is not supported (could return later as a segment count).
 - Strip hop-by-hop headers in both directions (`Connection` and the headers
   it lists, `Keep-Alive`, `Proxy-*`, `TE`, `Trailer`, `Upgrade`), and append
   `X-Forwarded-For` and set `X-Forwarded-Proto: http`. `Host` is forwarded
@@ -229,7 +236,7 @@ meaning everywhere; no token is split and re-glued.
 ```
 file      = { item }
 item      = setting | block
-setting   = key value { value } ";"
+setting   = key { value } ";"         (no value = a flag)
 block     = name { arg } "{" { item } "}"
 word      = run of non-whitespace excluding ";" "{" "}" "#" '"'
 string    = '"' { char | '\"' | '\\' } '"'   (one line)
@@ -254,7 +261,7 @@ host example.com www.example.com {
   path / { static /srv/www; }
   path /api/ {
     proxy 127.0.0.1:3000;
-    strip_prefix /api;
+    strip_prefix;
     max_request_body 10MiB;
     max_response_body unlimited;
   }
@@ -263,9 +270,10 @@ host example.com www.example.com {
 
 - Unknown keys, duplicate keys, duplicate hosts or paths within a host, a
   `path` with both or neither of `static`/`proxy`, `strip_prefix` on a static
-  route, `strip_prefix` that is not a prefix of its `path` ending at a
-  segment boundary (it must start with `/`, must not end with `/`, and be
-  followed in `path` by `/` or nothing), a proxy route
+  route, a value on `strip_prefix` (it is a flag), a missing value on any
+  other setting, two `path` blocks in one host that name the same segments
+  (e.g. `/api` and `/api/`), duplicate or port-0 `listen` addresses,
+  `max_head` above 1 MiB, a proxy route
   missing `max_request_body` or `max_response_body`, or either of them on a
   static route → startup
   error naming the line and column.
