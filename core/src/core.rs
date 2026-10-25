@@ -114,6 +114,10 @@
 //!   cut body, never a complete-looking short one. A failed open is
 //!   answered 404; `Truncated` or `Changed` in answer to `OpenFile` is a
 //!   driver bug and closes the connection.
+//! - A directory requested without its trailing `/` is answered 301 to the
+//!   path plus `/` (query kept), unless that response would not fit the
+//!   send buffer: then 414. The send buffer never holds more than its
+//!   capacity.
 //!
 //! # Deadlines
 //!
@@ -186,7 +190,9 @@ use crate::http::mime::content_type;
 use crate::http::request::{
     BodyFraming, HeadLimits, HeadParser, HttpError, Method, ParseStatus, Persistence, RequestHead,
 };
-use crate::http::response::{BodyMode, render_file_head, render_fixed, render_redirect};
+use crate::http::response::{
+    BodyMode, redirect_len, render_file_head, render_fixed, render_redirect,
+};
 use crate::http::static_path::{TrailingSlash, relative_segments, trailing_slash};
 use crate::http::status::Status;
 use crate::log::{LimitKind, Log, RejectReason, RequestSummary, TimeoutKind};
@@ -1150,6 +1156,14 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
+        // Every render into the send buffer is bounded (fixed responses and
+        // file heads by construction, see `every_rendered_head_fits_the_send_buffer`;
+        // redirects by an explicit check), and this runs after every one.
+        debug_assert!(
+            c.send.len() <= SEND_CAPACITY,
+            "send buffer holds {} bytes, beyond its capacity",
+            c.send.len()
+        );
         let interest = c.wanted_interest();
         if interest != c.interest {
             c.interest = interest;
@@ -1331,8 +1345,17 @@ fn not_served(
                 location.push('?');
                 location.push_str(query);
             }
-            render_redirect(&location, persistence, body, &mut c.send);
-            Status::MovedPermanently
+            // The send buffer never grows beyond its capacity: a redirect
+            // too long for it (path and query are bounded only by
+            // `max_request_line`) is answered 414 instead.
+            let len = redirect_len(location.len(), persistence, body);
+            if c.send.len().saturating_add(len) <= SEND_CAPACITY {
+                render_redirect(&location, persistence, body, &mut c.send);
+                Status::MovedPermanently
+            } else {
+                render_fixed(Status::UriTooLong, persistence, body, &mut c.send);
+                Status::UriTooLong
+            }
         }
         (NotServed::Redirect, None) | (NotServed::NotFound, Some(_) | None) => {
             render_fixed(Status::NotFound, persistence, body, &mut c.send);
@@ -1514,6 +1537,43 @@ mod tests {
     }
 
     const PEER: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    /// The send buffer bound: every fixed response and every file head,
+    /// in every persistence and body mode, at its largest (longest content
+    /// type, largest length), fits `SEND_CAPACITY` on its own. (Redirects
+    /// are checked before they are rendered.)
+    #[test]
+    fn every_rendered_head_fits_the_send_buffer() {
+        use crate::http::status::Status as S;
+        let statuses = [
+            S::Ok,
+            S::MovedPermanently,
+            S::BadRequest,
+            S::NotFound,
+            S::MethodNotAllowed,
+            S::RequestTimeout,
+            S::ContentTooLarge,
+            S::UriTooLong,
+            S::RequestHeaderFieldsTooLarge,
+            S::NotImplemented,
+            S::ServiceUnavailable,
+            S::HttpVersionNotSupported,
+        ];
+        for persistence in [Persistence::KeepAlive, Persistence::Close] {
+            for body in [BodyMode::Full, BodyMode::HeadOnly] {
+                for status in statuses {
+                    let mut out = Vec::new();
+                    render_fixed(status, persistence, body, &mut out);
+                    assert!(out.len() <= SEND_CAPACITY, "{status:?}");
+                }
+            }
+            let mut out = Vec::new();
+            // Far longer than any content type in the table.
+            let content_type = "x".repeat(200);
+            render_file_head(&content_type, u64::MAX, persistence, &mut out);
+            assert!(out.len() <= SEND_CAPACITY);
+        }
+    }
 
     #[test]
     fn capacities_are_reported_per_connection() {

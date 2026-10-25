@@ -50,29 +50,58 @@ pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, ou
 /// Body of every redirect.
 const REDIRECT_BODY: &str = "301 Moved Permanently\n";
 
+/// The redirect head up to the `Location` value.
+const REDIRECT_START: &str = "HTTP/1.1 301 Moved Permanently\r\nLocation: ";
+
+/// The redirect head after the `Location` value, up to the optional
+/// `Connection` line (`22` is `REDIRECT_BODY.len()`, checked by a test).
+const REDIRECT_REST: &str = "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 22\r\nX-Content-Type-Options: nosniff\r\n";
+
+const CONNECTION_CLOSE: &str = "Connection: close\r\n";
+
 /// Appends a `301 Moved Permanently` response pointing at `location` (a
 /// validated ASCII path, plus `?query`) to `out` (existing bytes are kept).
 /// The body is fixed; `Content-Length` describes it also for `HeadOnly`.
+/// It appends exactly [`redirect_len`] bytes.
 pub fn render_redirect(
     location: &str,
     persistence: Persistence,
     body: BodyMode,
     out: &mut Vec<u8>,
 ) {
-    let mut head = format!(
-        "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\n",
-        REDIRECT_BODY.len()
-    );
+    out.extend_from_slice(REDIRECT_START.as_bytes());
+    out.extend_from_slice(location.as_bytes());
+    out.extend_from_slice(REDIRECT_REST.as_bytes());
     match persistence {
-        Persistence::Close => head.push_str("Connection: close\r\n"),
+        Persistence::Close => out.extend_from_slice(CONNECTION_CLOSE.as_bytes()),
         Persistence::KeepAlive => {}
     }
-    head.push_str("\r\n");
-    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(b"\r\n");
     match body {
         BodyMode::Full => out.extend_from_slice(REDIRECT_BODY.as_bytes()),
         BodyMode::HeadOnly => {}
     }
+}
+
+/// How many bytes [`render_redirect`] appends for a `Location` of
+/// `location_len` bytes, so a caller can check that it fits before
+/// rendering it.
+pub fn redirect_len(location_len: usize, persistence: Persistence, body: BodyMode) -> usize {
+    let connection = match persistence {
+        Persistence::Close => CONNECTION_CLOSE.len(),
+        Persistence::KeepAlive => 0,
+    };
+    let body = match body {
+        BodyMode::Full => REDIRECT_BODY.len(),
+        BodyMode::HeadOnly => 0,
+    };
+    REDIRECT_START
+        .len()
+        .saturating_add(location_len)
+        .saturating_add(REDIRECT_REST.len())
+        .saturating_add(connection)
+        .saturating_add(2)
+        .saturating_add(body)
 }
 
 /// Appends the head of a `200 OK` response whose body is `len` bytes of a
@@ -218,6 +247,24 @@ mod tests {
             out,
             b"xHTTP/1.1 301 Moved Permanently\r\nLocation: /docs/?x=1\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 22\r\nX-Content-Type-Options: nosniff\r\n\r\n301 Moved Permanently\n"
         );
+    }
+
+    #[test]
+    fn redirect_len_is_the_rendered_length() {
+        assert!(REDIRECT_REST.contains(&format!("Content-Length: {}\r\n", REDIRECT_BODY.len())));
+        for location in ["/", "/a/", "/docs/?x=1", &"/b".repeat(700)] {
+            for persistence in [Persistence::KeepAlive, Persistence::Close] {
+                for body in [BodyMode::Full, BodyMode::HeadOnly] {
+                    let mut out = b"prefix".to_vec();
+                    render_redirect(location, persistence, body, &mut out);
+                    assert_eq!(
+                        out.len() - 6,
+                        redirect_len(location.len(), persistence, body),
+                        "{location} {persistence:?} {body:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

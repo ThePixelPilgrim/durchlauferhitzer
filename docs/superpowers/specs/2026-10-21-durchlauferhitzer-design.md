@@ -196,7 +196,10 @@ reject.
   a body → 413.
 - Directory requested with a trailing `/` → its `index.html` if it exists,
   else 404. Without the `/` → 301 to the same path plus `/` (query kept). No
-  listings.
+  listings. A redirect that would not fit the fixed per-connection send
+  buffer (path and query are bounded only by `max_request_line`) → 414
+  instead, with the same persistence and HEAD rules; the send buffer never
+  grows beyond its capacity.
 - Symlinks anywhere in the path, dotfiles (any decoded segment starting with
   `.`), missing files, permission denied and non-regular files → 404, so the
   response does not reveal which.

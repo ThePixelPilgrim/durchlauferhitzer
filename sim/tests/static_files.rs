@@ -1267,3 +1267,74 @@ fn change_on_first_chunk_aborts_before_the_body() {
     assert_eq!(sim.logs().last(), Some(&aborted(c, FileError::Changed)));
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
 }
+
+// ---------------------------------------------------------------------------
+// Final-review fixes
+
+/// Request lines long enough for a `301` that does not fit the 1 KiB send
+/// buffer.
+const LONG_LINES: &str = "listen 127.0.0.1:8080;
+limits { max_request_line 16KiB; max_head 32KiB; }
+host example.test { path / { static /srv/www; } }";
+
+/// C1: a redirect whose `Location` would overflow the send buffer is
+/// answered `414` instead, with the same persistence and body rules.
+#[test]
+fn redirect_too_large_for_the_send_buffer_is_414() {
+    let mut sim = Sim::new(LONG_LINES);
+    let dir = "a".repeat(600);
+    sim.add_dir("/srv/www", &dir);
+    let path = format!("/{dir}");
+    let target = format!("{path}?{}", "q".repeat(3000));
+    let (c, received) = exchange(&mut sim, &get(&target));
+    assert_eq!(
+        received,
+        fixed(Status::UriTooLong, Persistence::KeepAlive, BodyMode::Full),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[response_log(c, Status::UriTooLong, Method::Get, &path)],
+        "{}",
+        sim.trace()
+    );
+    let (_, received) = exchange(&mut sim, &head_req(&target));
+    assert_eq!(
+        received,
+        fixed(
+            Status::UriTooLong,
+            Persistence::KeepAlive,
+            BodyMode::HeadOnly
+        ),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
+
+/// C1 boundary: a redirect of exactly the send buffer's capacity is sent;
+/// one byte more is a `414`.
+#[test]
+fn redirect_that_just_fits_is_301() {
+    let mut sim = Sim::new(LONG_LINES);
+    let dir = "a".repeat(600);
+    sim.add_dir("/srv/www", &dir);
+    let path = format!("/{dir}");
+    let base = redirect(&format!("{path}/?"), Persistence::KeepAlive, BodyMode::Full).len();
+    let fits = 1024 - base;
+    let location = format!("{path}/?{}", "q".repeat(fits));
+    let (c, received) = exchange(&mut sim, &get(&format!("{path}?{}", "q".repeat(fits))));
+    let expected = redirect(&location, Persistence::KeepAlive, BodyMode::Full);
+    assert_eq!(expected.len(), 1024);
+    assert_eq!(received, expected, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    let (_, received) = exchange(&mut sim, &get(&format!("{path}?{}", "q".repeat(fits + 1))));
+    assert_eq!(
+        received,
+        fixed(Status::UriTooLong, Persistence::KeepAlive, BodyMode::Full),
+        "{}",
+        sim.trace()
+    );
+}
