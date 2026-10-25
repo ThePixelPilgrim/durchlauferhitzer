@@ -278,6 +278,22 @@ reject.
   connections are cut once the limit is passed (the client sees an
   incomplete response, never a silently truncated "complete" one).
 
+- **Stage 3 decisions** (details in the stage 3 plan's "Spec amendments"):
+  upstream ids are core-allocated and backends are resolved by the driver at
+  startup; body bytes are forwarded without copying, straight from the
+  receiving side's buffer; chunked framing is strict (no extensions, no
+  non-empty trailers) and forwarded verbatim after validation; the core
+  answers `Expect: 100-continue` itself (other `Expect` → 417); backend `1xx`
+  are dropped and `101` → 502; close-delimited backend responses are
+  forwarded with `Connection: close`; HEAD/204/304 never carry a body;
+  `X-Forwarded-For` is appended to, `X-Forwarded-Proto` replaced,
+  `Content-Length` normalised, `Connection: close` sent to the backend; the
+  client stays keep-alive only if it asked, its body was fully read and the
+  response was not close-delimited; new limits `backend_connect_timeout`
+  (5s), `backend_response_timeout` (60s), `body_idle_timeout` (30s); before
+  the response head was sent failures are 502 (or 504 for the two backend
+  timeouts), afterwards both connections are cut.
+
 ## Configuration
 
 Hand-rolled parser. SCSS-like in spirit (nested blocks, `;`-terminated
