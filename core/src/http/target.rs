@@ -195,8 +195,8 @@ mod tests {
             (b"/a%01", TargetError::EncodedControl),
             (b"/a%7f", TargetError::EncodedControl),
             (b"/a%7F", TargetError::EncodedControl),
-            // Unreserved characters have exactly one spelling in a path,
-            // so routing on the raw path is routing on the canonical one.
+            // Unreserved characters have exactly one spelling in a path
+            // (defence in depth: routing compares decoded segments).
             (b"/%61ssets/a.css", TargetError::EncodedUnreserved),
             (b"/%41", TargetError::EncodedUnreserved),
             (b"/a%7a", TargetError::EncodedUnreserved),
@@ -318,8 +318,10 @@ mod tests {
 
     fn check_accepted(raw: &[u8]) {
         if let Ok(t) = parse_target(raw) {
-            // The raw path is canonical: no escape decodes to an
-            // unreserved character.
+            // No escape decodes to an unreserved character, so those have
+            // one spelling. (The raw path is not canonical: reserved
+            // characters and hex case still allow several spellings, so
+            // routing compares decoded segments.)
             let p = t.path.as_bytes();
             for (i, _) in p.iter().enumerate().filter(|&(_, &c)| c == b'%') {
                 let hex = t.path.get(i + 1..i + 3).unwrap_or("");
