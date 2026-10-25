@@ -171,8 +171,11 @@ reject.
   bytes does not extend it. Body transfer in either direction uses idle
   timeouts. A client stalling a proxied response also releases the backend
   connection when its send idle timeout fires. The per-IP connection cap
-  keeps a single host from filling `max_connections`. Minimum transfer rates
-  are not in scope.
+  keeps a single host from filling `max_connections`. A file open still in
+  flight when its connection closes (an orphaned open) keeps both its
+  global and its per-IP slot until the disk answers, so the cap also holds
+  against a host looping request-then-reset at a hung disk. Minimum
+  transfer rates are not in scope.
 
 ### Streaming and flow control
 

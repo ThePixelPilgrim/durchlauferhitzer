@@ -162,10 +162,13 @@
 //!   buffer of [`LINGER_SCRATCH`] bytes, whose contents are never inspected.
 //! - A connection that closes (or times out) while its `OpenFile` is
 //!   unanswered leaves an *orphaned open*. It keeps counting toward
-//!   `max_connections` until its `FileOpened` (answered with `CloseFile`) or
-//!   `FileFailed` arrives, so a hung disk cannot accumulate more open files
-//!   than connections; its `max_connections_per_ip` slot is released at
-//!   close.
+//!   both `max_connections` and its peer's `max_connections_per_ip` until
+//!   its `FileOpened` (answered with `CloseFile`) or `FileFailed` arrives,
+//!   so a hung disk cannot accumulate more open files than connections, and
+//!   one peer looping request-then-reset against it is capped at
+//!   `max_connections_per_ip` orphans instead of taking every global slot.
+//!   (A driver cannot cancel an open blocked in the kernel, so the core
+//!   waits for the answer rather than lying about it.)
 //!
 //! The core tolerates driver mistakes without panicking: events for unknown
 //! connections or files are ignored, a duplicate `Accepted` is ignored, a
@@ -184,7 +187,7 @@ use crate::conn::{
 };
 use crate::file::{
     Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileSegment, FileStamp, FileTable,
-    Owner, RootId, check_stamp,
+    OrphanSlots, Owner, RootId, check_stamp,
 };
 use crate::http::mime::content_type;
 use crate::http::request::{
@@ -394,8 +397,15 @@ impl Core {
     /// its file: an open file is closed, an open in flight is orphaned.
     fn forget(&mut self, conn: ConnId, actions: &mut Vec<Action>) -> Option<Conn> {
         let c = self.conns.remove(&conn)?;
+        let peer = c.peer.to_canonical();
         match c.state {
-            ConnState::OpeningFile { file, .. } => self.files.orphan(file),
+            ConnState::OpeningFile { file, .. } => {
+                let slots = match c.counted {
+                    Counted::Yes => OrphanSlots::Held { peer },
+                    Counted::No => OrphanSlots::None,
+                };
+                self.files.orphan(file, slots);
+            }
             ConnState::SendingFile { file, .. } => {
                 self.files.release(file);
                 actions.push(Action::CloseFile { file });
@@ -406,35 +416,41 @@ impl Core {
             | ConnState::Lingering { .. } => {}
         }
         match c.counted {
-            Counted::Yes => {
-                // An orphaned open keeps the slot until the disk answers.
-                match c.state {
-                    ConnState::OpeningFile { .. } => {}
-                    ConnState::ReadingHead { .. }
-                    | ConnState::Idle { .. }
-                    | ConnState::Responding { .. }
-                    | ConnState::SendingFile { .. }
-                    | ConnState::Lingering { .. } => {
-                        self.counted = self.counted.saturating_sub(1);
-                    }
-                }
-                let peer = c.peer.to_canonical();
-                if let Some(n) = self.counted_per_ip.get_mut(&peer) {
-                    *n = n.saturating_sub(1);
-                    if *n == 0 {
-                        self.counted_per_ip.remove(&peer);
-                    }
-                }
-            }
+            Counted::Yes => match c.state {
+                // An orphaned open keeps both slots until the disk answers.
+                ConnState::OpeningFile { .. } => {}
+                ConnState::ReadingHead { .. }
+                | ConnState::Idle { .. }
+                | ConnState::Responding { .. }
+                | ConnState::SendingFile { .. }
+                | ConnState::Lingering { .. } => self.release_slots(peer),
+            },
             Counted::No => self.refused = self.refused.saturating_sub(1),
         }
         Some(c)
     }
 
-    /// The disk answered an orphaned open: its connection slot is free.
-    fn release_orphan(&mut self, file: FileId) {
-        self.files.release(file);
+    /// A counted connection from `peer` (canonical) is gone: free its
+    /// global and per-IP slots.
+    fn release_slots(&mut self, peer: IpAddr) {
         self.counted = self.counted.saturating_sub(1);
+        if let Some(n) = self.counted_per_ip.get_mut(&peer) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.counted_per_ip.remove(&peer);
+            }
+        }
+    }
+
+    /// The disk answered an orphaned open: the slots it held are free.
+    fn release_orphan(&mut self, file: FileId) {
+        if let Owner::Orphan(slots) = self.files.owner(file) {
+            self.files.release(file);
+            match slots {
+                OrphanSlots::Held { peer } => self.release_slots(peer),
+                OrphanSlots::None => {}
+            }
+        }
     }
 
     fn accepted(&mut self, now: Instant, conn: ConnId, peer: IpAddr, actions: &mut Vec<Action>) {
@@ -618,7 +634,7 @@ impl Core {
     ) {
         let conn = match self.files.owner(file) {
             Owner::Conn(conn) => conn,
-            Owner::Orphan => {
+            Owner::Orphan(_) => {
                 self.release_orphan(file);
                 actions.push(Action::CloseFile { file });
                 return;
@@ -792,7 +808,7 @@ impl Core {
     ) {
         let conn = match self.files.owner(file) {
             Owner::Conn(conn) => conn,
-            Owner::Orphan => {
+            Owner::Orphan(_) => {
                 self.release_orphan(file);
                 return;
             }
@@ -2550,7 +2566,9 @@ mod tests {
         core.handle(secs(30), Event::TimerFired, &mut actions);
         assert!(core.conns.is_empty());
         assert_eq!(core.counted, 3);
-        assert!(core.counted_per_ip.is_empty());
+        // The per-IP slots are held too, so one peer cannot take every
+        // global slot with orphans.
+        assert_eq!(core.counted_per_ip.get(&PEER), Some(&3));
         assert_eq!(core.next_deadline(), None);
         let meta = regular(3);
         actions.clear();
@@ -2564,6 +2582,7 @@ mod tests {
         );
         assert_eq!(actions, [Action::CloseFile { file: FileId(1) }]);
         assert_eq!(core.counted, 2);
+        assert_eq!(core.counted_per_ip.get(&PEER), Some(&2));
         let error = FileError::NotFound;
         core.handle(
             now,
@@ -2574,6 +2593,7 @@ mod tests {
             &mut actions,
         );
         assert_eq!(core.counted, 1);
+        assert_eq!(core.counted_per_ip.get(&PEER), Some(&1));
         core.handle(
             now,
             Event::FileOpened {
@@ -2583,6 +2603,7 @@ mod tests {
             &mut actions,
         );
         assert_eq!(core.counted, 0);
+        assert!(core.counted_per_ip.is_empty());
         assert_eq!(core.files.len(), 0);
         // Repeated answers change nothing.
         core.handle(
@@ -2631,7 +2652,7 @@ mod tests {
             );
             assert!(core.conns.is_empty());
             assert_eq!(core.counted, 1, "{late:?}");
-            assert!(core.counted_per_ip.is_empty());
+            assert_eq!(core.counted_per_ip.get(&PEER), Some(&1), "{late:?}");
             assert_eq!(core.files.len(), 1);
             actions.clear();
             let opened = matches!(late, Event::FileOpened { .. });
@@ -2642,6 +2663,7 @@ mod tests {
                 assert!(actions.is_empty(), "{actions:?}");
             }
             assert_eq!(core.counted, 0);
+            assert!(core.counted_per_ip.is_empty(), "opened: {opened}");
             assert_eq!(core.files.len(), 0);
             assert_eq!(core.next_deadline(), None);
         }

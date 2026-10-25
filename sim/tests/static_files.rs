@@ -12,7 +12,8 @@ use durchlauferhitzer_core::http::response::{
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::http::target::TargetError;
 use durchlauferhitzer_core::{
-    ConnId, FileError, FileStamp, Interest, Log, RejectReason, RequestSummary, TimeoutKind,
+    ConnId, FileError, FileStamp, Interest, LimitKind, Log, RejectReason, RequestSummary,
+    TimeoutKind,
 };
 use durchlauferhitzer_sim::{Sim, SimConnState};
 
@@ -1368,4 +1369,60 @@ fn encoded_unreserved_character_in_the_path_is_400() {
         );
     }
     assert_eq!(opens(sim.trace()), 0, "{}", sim.trace());
+}
+
+const PER_IP_CAPPED: &str = "listen 127.0.0.1:8080;
+limits { max_connections 10; max_connections_per_ip 2; }
+host example.test { path / { static /srv/www; } }";
+
+/// I2: an orphaned open keeps its peer's per-IP slot as well as its global
+/// one until the disk answers, so one IP looping GET+reset against a hung
+/// disk is capped at `max_connections_per_ip` orphans and cannot take every
+/// global slot.
+#[test]
+fn orphaned_opens_hold_their_per_ip_slots() {
+    let mut sim = Sim::new(PER_IP_CAPPED);
+    sim.add_file("/srv/www", "index.html", b"hello");
+    sim.set_disk_delay(Duration::from_secs(3600));
+    for _ in 0..2 {
+        let c = sim.connect(peer());
+        sim.send(c, &get("/index.html"));
+        sim.run_until_idle();
+        sim.reset(c);
+    }
+    sim.set_disk_delay(Duration::ZERO);
+    let refused = sim.connect(peer());
+    sim.run_until_idle();
+    assert!(
+        sim.take_received(refused).starts_with(b"HTTP/1.1 503 "),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: refused,
+            peer: peer(),
+            reason: RejectReason::Limit(LimitKind::ConnectionsPerIp),
+        }),
+        "{}",
+        sim.trace()
+    );
+    // Another peer is still served.
+    let other = sim.connect(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)));
+    sim.send(other, &get("/index.html"));
+    sim.run_until_idle();
+    let mut expected = head("text/html; charset=utf-8", 5, Persistence::KeepAlive);
+    expected.extend_from_slice(b"hello");
+    assert_eq!(sim.take_received(other), expected, "{}", sim.trace());
+    // Once the disk answers both orphans, both slots are back.
+    sim.advance(Duration::from_secs(3600));
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 2), 1, "{}", sim.trace());
+    for _ in 0..2 {
+        let c = sim.connect(peer());
+        sim.send(c, &get("/index.html"));
+        sim.run_until_idle();
+        assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
+    }
 }

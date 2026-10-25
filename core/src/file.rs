@@ -3,6 +3,7 @@
 //! `sendfile`s on its behalf (see the contract in the `core` module).
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use crate::config::OnFileChange;
 use crate::core::ConnId;
@@ -101,6 +102,18 @@ pub(crate) fn check_stamp(
     }
 }
 
+/// The connection-limit slots an orphaned open still holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrphanSlots {
+    /// Its connection counted toward the limits: the orphan keeps both the
+    /// `max_connections` slot and the `max_connections_per_ip` slot of
+    /// `peer` (canonical address).
+    Held { peer: IpAddr },
+    /// Its connection did not count (cannot happen: refused connections
+    /// open no files); nothing to release.
+    None,
+}
+
 /// Who a file id the core handed out belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileUse {
@@ -108,8 +121,8 @@ enum FileUse {
     Conn(ConnId),
     /// The `OpenFile` is unanswered but its connection is gone: a
     /// `FileOpened` gets `CloseFile`, a `FileFailed` is dropped. It holds
-    /// a `max_connections` slot until then.
-    Orphan,
+    /// its connection's limit slots until then.
+    Orphan(OrphanSlots),
 }
 
 /// The core's file ids: allocation and ownership.
@@ -123,7 +136,7 @@ pub(crate) struct FileTable {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Owner {
     Conn(ConnId),
-    Orphan,
+    Orphan(OrphanSlots),
     /// Never handed out, or already closed: the event is ignored.
     Unknown,
 }
@@ -150,15 +163,16 @@ impl FileTable {
     pub(crate) fn owner(&self, file: FileId) -> Owner {
         match self.owners.get(&file) {
             Some(FileUse::Conn(conn)) => Owner::Conn(*conn),
-            Some(FileUse::Orphan) => Owner::Orphan,
+            Some(FileUse::Orphan(slots)) => Owner::Orphan(*slots),
             None => Owner::Unknown,
         }
     }
 
-    /// The connection is gone while the open is in flight.
-    pub(crate) fn orphan(&mut self, file: FileId) {
+    /// The connection is gone while the open is in flight; the orphan
+    /// keeps `slots` until the disk answers.
+    pub(crate) fn orphan(&mut self, file: FileId, slots: OrphanSlots) {
         if let Some(owner) = self.owners.get_mut(&file) {
-            *owner = FileUse::Orphan;
+            *owner = FileUse::Orphan(slots);
         }
     }
 
