@@ -1426,3 +1426,66 @@ fn orphaned_opens_hold_their_per_ip_slots() {
         assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     }
 }
+
+/// Amendment 5 for late parse errors: an error found after the request
+/// line (the method is known) answers a HEAD request head-only; an error
+/// in the request line itself keeps its body.
+#[test]
+fn head_with_a_late_parse_error_is_head_only() {
+    let mut sim = Sim::new(CONFIG);
+    let late: [(&[u8], Status); 4] = [
+        (b"HEAD / HTTP/1.1\r\n\r\n", Status::BadRequest),
+        (
+            b"HEAD / HTTP/1.1\r\nHost: example.test\r\nContent-Length: x\r\n\r\n",
+            Status::BadRequest,
+        ),
+        (
+            b"HEAD / HTTP/1.1\r\nHost: example.test\r\nHost: example.test\r\n\r\n",
+            Status::BadRequest,
+        ),
+        (
+            b"HEAD / HTTP/1.1\r\nBad Name: 1\r\n\r\n",
+            Status::BadRequest,
+        ),
+    ];
+    for (request, status) in late {
+        let (c, received) = exchange(&mut sim, request);
+        assert_eq!(
+            received,
+            fixed(status, Persistence::Close, BodyMode::HeadOnly),
+            "{:?}\n{}",
+            String::from_utf8_lossy(request),
+            sim.trace()
+        );
+        assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    }
+    // A GET with the same error keeps its body.
+    let (_, received) = exchange(&mut sim, b"GET / HTTP/1.1\r\n\r\n");
+    assert_eq!(
+        received,
+        fixed(Status::BadRequest, Persistence::Close, BodyMode::Full),
+        "{}",
+        sim.trace()
+    );
+    let early: [(&[u8], Status); 3] = [
+        (b"HEAD /a b HTTP/1.1\r\n\r\n", Status::BadRequest),
+        (
+            b"HEAD /%2e HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            Status::BadRequest,
+        ),
+        (
+            b"HEAD / HTTP/1.2\r\nHost: example.test\r\n\r\n",
+            Status::HttpVersionNotSupported,
+        ),
+    ];
+    for (request, status) in early {
+        let (_, received) = exchange(&mut sim, request);
+        assert_eq!(
+            received,
+            fixed(status, Persistence::Close, BodyMode::Full),
+            "{:?}\n{}",
+            String::from_utf8_lossy(request),
+            sim.trace()
+        );
+    }
+}

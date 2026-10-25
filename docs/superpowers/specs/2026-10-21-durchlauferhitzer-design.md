@@ -221,7 +221,10 @@ reject.
   plan), default `application/octet-stream`; always send
   `X-Content-Type-Options: nosniff`.
 - HEAD gets the head with the full `Content-Length` and no body; error
-  responses to HEAD carry no body either.
+  responses to HEAD carry no body either. That includes parse errors found
+  after a valid request line (missing `Host`, bad header or framing): the
+  method is known by then. An error in the request line itself is answered
+  with a body, since no method was accepted.
 - Waiting on the disk counts against `send_idle_timeout`.
 - A file that changes during a transfer: per static route,
   `on_file_change abort | allow_growth;` (optional, default `abort`). The

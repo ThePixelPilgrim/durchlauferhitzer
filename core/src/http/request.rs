@@ -21,6 +21,16 @@ pub enum Method {
     Other(String),
 }
 
+/// What a [`HeadParser`] knows of the request's method: nothing until the
+/// request line has been judged valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownMethod {
+    Unknown,
+    Get,
+    Head,
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Version {
     Http10,
@@ -180,9 +190,11 @@ pub fn parse_head(buf: &[u8], limits: &HeadLimits) -> Result<ParseStatus, HttpEr
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     RequestLine,
-    /// The request line is valid; `count` header lines are valid so far.
+    /// The request line is valid and named `method`; `count` header lines
+    /// are valid so far.
     Headers {
         count: usize,
+        method: KnownMethod,
     },
 }
 
@@ -219,6 +231,15 @@ impl HeadParser {
             judged: 0,
             scanned: 0,
             stage: Stage::RequestLine,
+        }
+    }
+
+    /// The request's method once the request line was judged valid (also
+    /// after a later error), [`KnownMethod::Unknown`] before that.
+    pub fn method(&self) -> KnownMethod {
+        match self.stage {
+            Stage::RequestLine => KnownMethod::Unknown,
+            Stage::Headers { method, .. } => method,
         }
     }
 
@@ -275,7 +296,7 @@ impl HeadParser {
                 return Err(HttpError::HeadTooLarge);
             }
             match self.stage {
-                Stage::Headers { count } if !line.is_empty() && count >= limits.max_headers => {
+                Stage::Headers { count, .. } if !line.is_empty() && count >= limits.max_headers => {
                     return Err(HttpError::TooManyHeaders);
                 }
                 Stage::RequestLine | Stage::Headers { .. } => {}
@@ -287,8 +308,13 @@ impl HeadParser {
             work::judged(line.len());
             match self.stage {
                 Stage::RequestLine => {
-                    parse_request_line(line)?;
-                    self.stage = Stage::Headers { count: 0 };
+                    let (method, _, _) = parse_request_line(line)?;
+                    let method = match method {
+                        Method::Get => KnownMethod::Get,
+                        Method::Head => KnownMethod::Head,
+                        Method::Other(_) => KnownMethod::Other,
+                    };
+                    self.stage = Stage::Headers { count: 0, method };
                 }
                 Stage::Headers { .. } if line.is_empty() => {
                     let head = build_head(buf.get(..end).unwrap_or_default())?;
@@ -297,10 +323,11 @@ impl HeadParser {
                         consumed: end,
                     });
                 }
-                Stage::Headers { count } => {
+                Stage::Headers { count, method } => {
                     split_header(line)?;
                     self.stage = Stage::Headers {
                         count: count.saturating_add(1),
+                        method,
                     };
                 }
             }
@@ -1018,6 +1045,82 @@ mod tests {
             }
         }
         (Ok(ParseStatus::Incomplete), input.len())
+    }
+
+    /// The parser remembers the method once the request line is judged
+    /// valid, so an error found later can still be answered head-only for
+    /// HEAD; an error in the request line itself leaves it unknown.
+    #[test]
+    fn parser_knows_the_method_after_the_request_line() {
+        let l = defaults();
+        let rows: &[(&[u8], HttpError, KnownMethod)] = &[
+            (
+                b"HEAD / HTTP/1.1\r\n\r\n",
+                HttpError::MissingHost,
+                KnownMethod::Head,
+            ),
+            (
+                b"GET / HTTP/1.1\r\n\r\n",
+                HttpError::MissingHost,
+                KnownMethod::Get,
+            ),
+            (
+                b"PUT / HTTP/1.1\r\n\r\n",
+                HttpError::MissingHost,
+                KnownMethod::Other,
+            ),
+            (
+                b"HEAD / HTTP/1.1\r\nHost: a\r\nContent-Length: x\r\n\r\n",
+                HttpError::BadContentLength,
+                KnownMethod::Head,
+            ),
+            (
+                b"HEAD / HTTP/1.1\r\nBad Name: 1\r\n",
+                HttpError::BadHeaderName,
+                KnownMethod::Head,
+            ),
+            (
+                b"HEAD / HTTP/1.1\r\nA: 1\n",
+                HttpError::BareLf,
+                KnownMethod::Head,
+            ),
+            (
+                b"HEAD /a b HTTP/1.1\r\n",
+                HttpError::BadRequestLine,
+                KnownMethod::Unknown,
+            ),
+            (
+                b"HEAD /%2e HTTP/1.1\r\n",
+                HttpError::BadTarget(TargetError::EncodedDot),
+                KnownMethod::Unknown,
+            ),
+            (
+                b"HEAD / HTTP/1.2\r\n",
+                HttpError::UnsupportedVersion,
+                KnownMethod::Unknown,
+            ),
+            (
+                b"HEAD / HTTP/1.1\n",
+                HttpError::BareLf,
+                KnownMethod::Unknown,
+            ),
+        ];
+        for (input, error, method) in rows {
+            let mut parser = HeadParser::new();
+            assert_eq!(parser.method(), KnownMethod::Unknown);
+            assert_eq!(
+                parser.advance(input, &l),
+                Err(*error),
+                "{:?}",
+                String::from_utf8_lossy(input)
+            );
+            assert_eq!(
+                parser.method(),
+                *method,
+                "{:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
     }
 
     #[test]

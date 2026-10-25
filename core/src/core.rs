@@ -191,7 +191,8 @@ use crate::file::{
 };
 use crate::http::mime::content_type;
 use crate::http::request::{
-    BodyFraming, HeadLimits, HeadParser, HttpError, Method, ParseStatus, Persistence, RequestHead,
+    BodyFraming, HeadLimits, HeadParser, HttpError, KnownMethod, Method, ParseStatus, Persistence,
+    RequestHead,
 };
 use crate::http::response::{
     BodyMode, redirect_len, render_file_head, render_fixed, render_redirect,
@@ -1146,12 +1147,14 @@ impl Core {
                 );
             }
             Err(error) => {
-                render_fixed(
-                    error.status(),
-                    Persistence::Close,
-                    BodyMode::Full,
-                    &mut c.send,
-                );
+                // Once the request line is valid the method is known: a HEAD
+                // request's error is head-only too. An error in the request
+                // line itself keeps its body.
+                let body = match parser.method() {
+                    KnownMethod::Head => BodyMode::HeadOnly,
+                    KnownMethod::Unknown | KnownMethod::Get | KnownMethod::Other => BodyMode::Full,
+                };
+                render_fixed(error.status(), Persistence::Close, body, &mut c.send);
                 actions.push(Action::Log(Log::Rejected {
                     conn,
                     peer: c.peer,
