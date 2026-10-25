@@ -375,8 +375,9 @@ Core-generated responses:
   answered with a body, since no method was accepted. *(since stage 2;
   supersedes the stage 2 Task 3 ruling "parse errors keep a body")*
 - **FR-HTTP-22** [done] Core-generated responses carry no `Server` header.
-  A `Date` header is not sent yet (the core has no wall clock) — open
-  decision for stage 4.
+- **FR-HTTP-22a** [stage 4] Core-generated responses carry a `Date` header;
+  the driver supplies the wall-clock time with each event (the core stays
+  free of clocks).
 
 ### FR-ROUTE — Hosts, segments, decoded matching
 
@@ -522,7 +523,8 @@ Response head toward the client:
   backend's reason; `Connection: close` is added when the client
   connection will close; backend `Date`, `Server` and `Content-Length`
   pass through exactly as received (owner decision: easier debugging; the
-  value is already validated as digits only). (The parser only admits printable ASCII/HTAB reasons,
+  value is already validated as digits only). An empty backend reason
+  phrase stays empty. (The parser only admits printable ASCII/HTAB reasons,
   FR-PROXY-15; the renderer still substitutes the standard reason for any
   other byte, as defence in depth.)
 - **FR-PROXY-13** [stage 3] Header values containing obs-text (bytes ≥
@@ -549,7 +551,10 @@ Backend response parsing:
 - **FR-PROXY-18** Interim responses: a 1xx other than 101 is dropped and
   the next head is parsed afresh, with the limits applied anew [done in the
   parser; forwarding stage 3]; `101 Switching Protocols` → 502 [done in the
-  parser]; more than 8 consecutive interim heads → 502 [stage 3, Task 7].
+  parser]; more than 8 consecutive interim heads → 502 [stage 3, Task 7]. (The cap
+  of 8 is an owner-confirmed constant: real backends send at most a
+  `100` and a `103`; a longer stream of 1xx heads would otherwise run
+  until `backend_response_timeout`.)
 
 Bodies:
 
@@ -587,6 +592,11 @@ Bodies:
   `100 Continue` itself once the request head passed all checks (route,
   limits) and strips `Expect` toward the backend; any other `Expect` value
   → 417.
+- **FR-PROXY-25a** [stage 3] Outside proxy routes (static routes, route
+  misses) `Expect: 100-continue` is never answered with `100 Continue`: the
+  normal final response (413, 404, …) is sent at once. Any other `Expect`
+  value → 417 everywhere. HTTP/1.0 requests ignore `Expect` (it does not
+  exist in HTTP/1.0).
 
 Failures, persistence, timeouts:
 
@@ -597,7 +607,9 @@ Failures, persistence, timeouts:
   `backend_connect_timeout` or `backend_response_timeout` → 504. After the
   response head was queued: any failure (backend reset or EOF mid-body,
   framing error, limit, timeout) cuts both connections. The client
-  resetting, closing or timing out closes the upstream at once. Fault
+  resetting or timing out closes the upstream at once. A client that only
+  closes its sending side after a complete request (half-close) keeps its
+  upstream: the response is delivered, then both close. Fault
   determines the status class: a client that stalls its request body
   (body idle timeout before the response head) → 408, not 502; 5xx only
   when the server or backend is at fault.
@@ -712,8 +724,25 @@ Failures, persistence, timeouts:
 - **FR-PROC-04** [stage 4] At startup the driver resolves the backends,
   opens every static root, checks `openat2` support and the descriptor
   budget (NFR-RES-05), and fails with a clear error otherwise.
-- **FR-PROC-05** [stage 4] SIGTERM: stop accepting, finish in-flight
-  requests up to a deadline, exit.
+- **FR-PROC-05** [stage 4] Shutdown has two speeds and two targets (owner
+  decision):
+  - *Graceful* (SIGTERM): stop accepting work, let in-flight requests
+    finish, keep-alive connections are closed after their current
+    response, then exit. Bounded by `limits { shutdown_timeout 30s; }`;
+    when it expires the fast path runs.
+  - *Fast* (a second SIGTERM, or SIGINT): close every connection, upstream
+    and file at once and exit.
+  - *Target shutdown*: work arriving during the drain is rejected — the
+    listening sockets are closed, and a request that arrives on an
+    already-open connection gets 503 with `Connection: close`.
+  - *Target restart* (the restart signal of FR-PROC-07): work arriving
+    during the drain is queued — the listening sockets are handed to the
+    new process, so new connections wait in the kernel's accept queue
+    until it accepts them; the old process only drains what it already
+    holds.
+- **FR-PROC-05a** [stage 4] Exit codes: 0 success (including `--check` on a
+  valid config), 1 invalid config, 2 startup failure (e.g. a port in use,
+  a missing static root).
 - **FR-PROC-06** [stage 5] Containment: Landlock restricts file access to
   the static roots (a clear warning at startup if unavailable, and the
   server runs); seccomp allow-lists the syscalls.
@@ -1051,7 +1080,17 @@ project working and tested.
    `Content-Type` / `Content-Disposition` are kept, its body discarded.
    Useful when the files are on the proxy's machine (same host or shared
    storage).
-9. **Later, maybe** — HTTPS with a pure-Rust crypto provider, io_uring
+9. **Later, maybe** — *Hung-disk handling (recorded for a better future
+   solution):* today a hung `openat2` keeps its connection slot until the
+   disk answers (FR-CONN-11), which bounds the damage at `max_connections`
+   but lets one dead mount occupy slots. A driver-side timeout that answers
+   `FileFailed` early was rejected: the syscall cannot be cancelled, so
+   worker threads would pile up instead of slots. Candidates: a per-root
+   health breaker (after N slow or hung opens, mark the root unhealthy and
+   answer its requests 503 at once, without opening, until a probe open
+   succeeds); cancellable opens via io_uring `OPENAT` with linked timeouts
+   (conflicts with the seccomp decision, revisit with the io_uring
+   driver). HTTPS with a pure-Rust crypto provider, io_uring
    driver, file-descriptor passing from same-host backends (`SCM_RIGHTS`).
 10. **Caching, after everything else** — a small Varnish-style response
     cache in front of proxy routes, with far fewer features than Varnish.
@@ -1070,18 +1109,7 @@ project working and tested.
 Each blocks or shapes the requirement named; until decided, the
 recommendation (if any) is not implemented.
 
-1. FR-PROXY-26 — a client half-close (EOF after a complete request) closes
-   the upstream at once; HTTP allows half-close. Keep?
-2. FR-PROXY-25 — `Expect` on static routes, route misses and HTTP/1.0
-   requests has no rule yet (ignored today).
-3. FR-HTTP-22 — send `Date` from stage 4 (driver supplies wall-clock
-   time)?
-4. FR-PROC-05 — the SIGTERM drain deadline: value and whether it is a
-   `limits` key; also exit codes for `--check` and startup errors.
-5. FR-CFG-21 — upper bounds for `max_connections`, `max_request_line` and
+1. FR-CFG-21 — upper bounds for `max_connections`, `max_request_line` and
    the other limits (each connection's receive buffer is allocated eagerly).
-6. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
+2. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
     lengths, IPv6 spellings).
-7. FR-PROXY-18 — confirm the interim-head cap of 8.
-8. FR-PROXY-12 — an empty backend reason: keep it empty or substitute the
-    standard reason?

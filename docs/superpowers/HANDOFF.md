@@ -61,6 +61,6 @@ Task 3: complete (a5dfa89..c7973d4). Rulings: hex case-insensitive, ≤16 signif
 ## Carry-forwards from earlier stages
 
 - Stage 3: send backends a normalised `Content-Length`; empty stripped path → `/` (`strip_segments` already does it).
-- Stage 4 (epoll driver): driver-side open timeout answering `FileFailed`; open-file limit for 2 × max_connections sockets + files + roots; follow the file contract in `core/src/core/mod.rs` docs exactly.
+- Stage 4 (epoll driver): open-file limit for 2 × max_connections sockets + files + roots; follow the file contract in `core/src/core/mod.rs` docs exactly.
 - Stage 5: IPv6 per-IP grouping by prefix; refused-slot pool fairness.
 - Stage 7: double buffering vs fill-drain-refill measured with `tc netem`; body buffer size; parse/route allocation nits.

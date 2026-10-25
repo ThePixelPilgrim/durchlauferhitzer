@@ -198,6 +198,8 @@ Sim invariants added: during a body phase, a read is never offered into a buffer
 
 Rules: `Content-Length` and chunked request bodies stream client → backend zero-copy from the client's receive buffer (chunked validated by Task 3 and forwarded verbatim); `max_request_body` per spec (413 before forwarding when `Content-Length` exceeds it; cut both connections once a chunked body passes it); backpressure per amendment 2 (no client reads while its buffer holds unsent body bytes; read again, with full capacity, once it is empty); `Expect: 100-continue` per amendment 4; a backend that answers before the body is complete → forward the response, stop forwarding the body, close the client after the response (unread body); bytes after the body end stay for the next request (pipelining), never reach the backend.
 
+Also (owner decisions): FR-PROXY-25a — outside proxy routes `Expect: 100-continue` gets the normal final response at once, other `Expect` values → 417 everywhere, HTTP/1.0 ignores `Expect`; FR-PROXY-26 — a stalled client request body → 408.
+
 - [ ] **Step 1: Write the failing tests** — `post_with_content_length_body`, `chunked_upload_forwarded_verbatim`, `upload_larger_than_buffer_with_slow_backend` (Review Focus 3: 5 MiB, backend window `Bytes(512)`, bounded memory, intact bytes, trace shows no client read while body bytes are unsent and every body read offered the full capacity), `content_length_over_limit_is_413_before_connect`, `chunked_over_limit_cuts_both`, `expect_100_continue_answered_and_stripped`, `other_expect_is_417`, `early_backend_response_closes_client`, `pipelined_request_after_body_is_not_forwarded` (Review Focus 1), `chunk_extension_from_client_is_400`.
 - [ ] **Step 2: Run to verify they fail.**
 - [ ] **Step 3: Implement.**
@@ -229,6 +231,8 @@ Rules: chunked responses validated (Task 3) and forwarded verbatim; close-delimi
 - Test: `sim/tests/proxy.rs`, config tests
 
 Rules: amendments 10 and 11; every proxy state carries a deadline; body idle timeout applies in both directions; client reset/EOF/timeout closes the upstream at once; upstream reset/EOF mid-body cuts the client; 504s and 502s logged with `BackendFailure`.
+
+Also (owner decision): FR-PROXY-26 — a client half-close after a complete request keeps the upstream; the response is delivered, then both close (test `client_half_close_still_gets_response`).
 
 - [ ] **Step 1: Write the failing tests** — `connect_timeout_is_504`, `response_timeout_is_504` (backend reads the request, never answers), `request_body_idle_timeout_cuts`, `response_body_idle_timeout_cuts`, `client_reset_mid_response_closes_upstream`, `backend_reset_mid_body_cuts_client`, `client_send_timeout_closes_upstream`, config: the three keys with defaults and validation, example config still loads.
 - [ ] **Step 2: Run to verify they fail.**
