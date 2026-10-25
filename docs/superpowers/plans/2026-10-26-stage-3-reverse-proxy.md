@@ -146,6 +146,8 @@ Rules: spec amendment 3. Validator state survives arbitrary splits of the input 
   - `pub fn backend_request_len(..) -> usize` / `client_response_len(..) -> usize` (or a capacity check) so callers know a head fits before rendering
   - `pub fn is_hop_by_hop(name: &str, connection_tokens: &[&str]) -> bool`
 
+Owner decisions (spec FR-HTTP-05, FR-HTTP-15a, FR-PROXY-12, FR-PROXY-13): header values with obs-text are rejected in BOTH parsers (request → 400, response → 502) — change the shared rule in `http/head_line.rs` and update the stage-1 request tests that accepted obs-text; `%3F` in the path → 400 (`target.rs`); the response `Content-Length` passes through as received.
+
 - [ ] **Step 1: Write the failing tests** — exact bytes for: simple GET with strip; query kept; `Connection: keep-alive, X-Secret` removes `X-Secret`; `TE`, `Upgrade`, `Proxy-Authorization`, `Expect` removed; `X-Forwarded-For` appended to an existing value and set when absent (IPv4, IPv6 canonical, v4-mapped canonicalised); `X-Forwarded-Proto: https` from the client replaced by `http`; `Content-Length: 007` → `7`; chunked request keeps `Transfer-Encoding: chunked`; response with a hop-by-hop header removed and `Connection: close` added for `Close`; bad reason → standard reason; lengths match rendered bytes.
 - [ ] **Step 2: Run to verify they fail.**
 - [ ] **Step 3: Implement.**

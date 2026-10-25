@@ -295,9 +295,11 @@ Request head:
 - **FR-HTTP-04** [done] A header line is `name ":" OWS value OWS CRLF`;
   the name is a token (whitespace before the colon → 400); a line starting
   with SP or HTAB (obs-fold) → 400.
-- **FR-HTTP-05** [done] Header values consist of HTAB, SP, VCHAR and
-  obs-text (bytes ≥ 0x80); CR, LF, NUL and other control bytes → 400.
-  (Forwarding obs-text: FR-PROXY-13.)
+- **FR-HTTP-05** [stage 3] Header values consist of HTAB, SP and VCHAR
+  only. CR, LF, NUL, other control bytes and obs-text (bytes ≥ 0x80) →
+  400. (Owner decision: obs-text is rejected rather than forwarded, to make
+  the ecosystem safer; previously accepted per RFC 9110. Backend side:
+  FR-PROXY-13.)
 - **FR-HTTP-06** [done] Head limits: a request line longer than
   `max_request_line` → 414; more than `max_headers` header lines → 431; a
   head longer than `max_head` → 431. Each verdict is given as soon as it is
@@ -340,6 +342,9 @@ Request target:
   either hex case. *Static serving decodes the path; decoded controls would
   allow log injection and odd file names.*
 - **FR-HTTP-15** [done] The path rejects (400) `;`, raw or as `%3B`.
+- **FR-HTTP-15a** [stage 3] The path rejects (400) `%3F` (encoded `?`): a
+  backend that decodes before splitting off the query would see a
+  different path and query than the router did.
   *(since stage 2; blocks the Tomcat-style `..;/` bypass when the raw path
   is forwarded)*
 - **FR-HTTP-16** [done] The path rejects (400) an escape that decodes to an
@@ -348,7 +353,7 @@ Request target:
   same; allowing both spellings would let a request route past a more
   specific route. Kept as defence in depth next to FR-ROUTE-05.*
 - **FR-HTTP-17** [done] Other escapes (reserved and other characters such
-  as `%20`, `%25`, `%3F`, `%40`, `%C3%A4`) may be sent raw or escaped, in
+  as `%20`, `%25`, `%40`, `%C3%A4`) may be sent raw or escaped, in
   either hex case. A path is percent-decoded at most once (static serving);
   `%25` never leads to a second decode.
 - **FR-HTTP-18** [done] The query is subject only to FR-HTTP-12; it may
@@ -515,14 +520,14 @@ Response head toward the client:
 - **FR-PROXY-12** [stage 3] The same hop-by-hop headers are removed; the
   status line is re-rendered as `HTTP/1.1 <code> <reason>` with the
   backend's reason; `Connection: close` is added when the client
-  connection will close; backend `Date` and `Server` pass through
-  unchanged. (The parser only admits printable ASCII/HTAB reasons,
+  connection will close; backend `Date`, `Server` and `Content-Length`
+  pass through exactly as received (owner decision: easier debugging; the
+  value is already validated as digits only). (The parser only admits printable ASCII/HTAB reasons,
   FR-PROXY-15; the renderer still substitutes the standard reason for any
   other byte, as defence in depth.)
-- **FR-PROXY-13** [open] Header values containing obs-text (bytes ≥ 0x80)
-  are forwarded unchanged in both directions (recommended: RFC-conformant,
-  and values are already free of CR/LF/NUL/CTL) — to be confirmed by the
-  owner before stage 3 Task 4.
+- **FR-PROXY-13** [stage 3] Header values containing obs-text (bytes ≥
+  0x80) are never forwarded: from a client → 400 (FR-HTTP-05); from a
+  backend → 502 (FR-PROXY-26). Owner decision.
 
 Backend response parsing:
 
@@ -592,7 +597,10 @@ Failures, persistence, timeouts:
   `backend_connect_timeout` or `backend_response_timeout` → 504. After the
   response head was queued: any failure (backend reset or EOF mid-body,
   framing error, limit, timeout) cuts both connections. The client
-  resetting, closing or timing out closes the upstream at once.
+  resetting, closing or timing out closes the upstream at once. Fault
+  determines the status class: a client that stalls its request body
+  (body idle timeout before the response head) → 408, not 502; 5xx only
+  when the server or backend is at fault.
 - **FR-PROXY-27** [stage 3] A backend that answers before the request body
   is complete: the response is forwarded, body forwarding stops, and the
   client closes after the response (its body is unread).
@@ -1062,27 +1070,18 @@ project working and tested.
 Each blocks or shapes the requirement named; until decided, the
 recommendation (if any) is not implemented.
 
-1. FR-PROXY-13 — forward obs-text header values unchanged (recommended) or
-   reject/strip them. Before stage 3 Task 4.
-2. FR-HTTP-17 — `%3F` (encoded `?`) stays accepted in paths and is
-   forwarded raw; a backend that decodes before splitting the query would
-   see a different path. Reject like `%3B`?
-3. FR-PROXY-12 — normalise the response `Content-Length` toward the client
-   (as FR-PROXY-10 does toward the backend), or pass it through?
-4. FR-PROXY-26 — a client that stalls its request body before the response
-   head: 502 per the failure matrix, or 408?
-5. FR-PROXY-26 — a client half-close (EOF after a complete request) closes
+1. FR-PROXY-26 — a client half-close (EOF after a complete request) closes
    the upstream at once; HTTP allows half-close. Keep?
-6. FR-PROXY-25 — `Expect` on static routes, route misses and HTTP/1.0
+2. FR-PROXY-25 — `Expect` on static routes, route misses and HTTP/1.0
    requests has no rule yet (ignored today).
-7. FR-HTTP-22 — send `Date` from stage 4 (driver supplies wall-clock
+3. FR-HTTP-22 — send `Date` from stage 4 (driver supplies wall-clock
    time)?
-8. FR-PROC-05 — the SIGTERM drain deadline: value and whether it is a
+4. FR-PROC-05 — the SIGTERM drain deadline: value and whether it is a
    `limits` key; also exit codes for `--check` and startup errors.
-9. FR-CFG-21 — upper bounds for `max_connections`, `max_request_line` and
+5. FR-CFG-21 — upper bounds for `max_connections`, `max_request_line` and
    the other limits (each connection's receive buffer is allocated eagerly).
-10. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
+6. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
     lengths, IPv6 spellings).
-11. FR-PROXY-18 — confirm the interim-head cap of 8.
-12. FR-PROXY-12 — an empty backend reason: keep it empty or substitute the
+7. FR-PROXY-18 — confirm the interim-head cap of 8.
+8. FR-PROXY-12 — an empty backend reason: keep it empty or substitute the
     standard reason?

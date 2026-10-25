@@ -17,9 +17,9 @@ Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…, consoli
 
 Key documents: spec `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md` (binding), crate READMEs `core/README.md`, `sim/README.md`, example config `examples/durchlauferhitzer.conf` (a test keeps it loadable).
 
-## Open decision before Task 4
+## Decided before Task 4
 
-From the Task 2 review: header values may contain obs-text (bytes ≥ 0x80), which RFC 9110 allows and both parsers accept. Task 4 forwards header values (backend → client and client → backend). Decide with the owner whether to forward them unchanged or reject/strip them. Recommendation to offer: forward unchanged (RFC-conformant; values are already free of CR/LF/NUL/CTL, so no splitting risk), and say so in the spec.
+Obs-text in header values is rejected (FR-HTTP-05, FR-PROXY-13); `%3F` in paths → 400 (FR-HTTP-15a); response `Content-Length` passes through (FR-PROXY-12); a client stalling its body → 408 (FR-PROXY-26). Task 4 implements the first three (see the note in Task 4 of the stage 3 plan). Remaining open questions: the spec's "Open decisions (owner)" section.
 
 ## Owner's way of working (mandatory, see CLAUDE.md)
 
