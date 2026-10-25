@@ -305,5 +305,8 @@ fn display_names_line_and_column() {
 fn example_config_loads() {
     let text = include_str!("../../../../../examples/durchlauferhitzer.conf");
     let config = load(text).map_err(|e| e.to_string());
-    assert!(config.is_ok(), "examples/durchlauferhitzer.conf: {config:?}");
+    assert!(
+        config.is_ok(),
+        "examples/durchlauferhitzer.conf: {config:?}"
+    );
 }
