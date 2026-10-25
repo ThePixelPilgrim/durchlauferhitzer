@@ -32,8 +32,9 @@ impl Router {
         }
     }
 
-    /// Finds the route for `host` (as sent by the client) and `path`.
-    /// The longest matching prefix wins.
+    /// Finds the route for `host` (as sent by the client) and the validated
+    /// `path`. A route matches when the path's segments start with the
+    /// route's segments; the route with the most segments wins.
     pub fn route(&self, host: Option<&str>, path: &str) -> Result<&Route, RouteMiss> {
         let host = host.ok_or(RouteMiss::UnknownHost)?;
         let key = strip_port(host).to_ascii_lowercase();
@@ -45,8 +46,8 @@ impl Router {
         vhost
             .routes
             .iter()
-            .filter(|route| prefix_matches(&route.prefix, path))
-            .max_by_key(|route| route.prefix.len())
+            .filter(|route| segments_match(&route.segments, path))
+            .max_by_key(|route| route.segments.len())
             .ok_or(RouteMiss::NoMatchingPath)
     }
 }
@@ -72,14 +73,36 @@ fn strip_port(host: &str) -> &str {
     }
 }
 
-/// `prefix` matches `path` iff they are equal, or `path` starts with `prefix`
-/// and either `prefix` ends in `/` or the next byte of `path` is `/`.
-fn prefix_matches(prefix: &str, path: &str) -> bool {
-    match path.as_bytes().strip_prefix(prefix.as_bytes()) {
-        Some([]) => true,
-        Some([next, ..]) => prefix.ends_with('/') || *next == b'/',
-        None => false,
+/// The non-empty segments of a path. A validated path has no `//`, so only
+/// a leading and a trailing `/` produce empty pieces.
+fn segments(path: &str) -> impl Iterator<Item = &str> {
+    path.split('/').filter(|segment| !segment.is_empty())
+}
+
+/// Whether the segments of `path` start with `route`.
+fn segments_match(route: &[String], path: &str) -> bool {
+    let mut path = segments(path);
+    route
+        .iter()
+        .all(|segment| path.next() == Some(segment.as_str()))
+}
+
+/// Removes the first `count` segments of a validated path. An empty result
+/// is `/`; otherwise a trailing `/` on `path` is kept
+/// (`/api/x/`, 1 → `/x/`; `/api/`, 1 → `/`).
+pub fn strip_segments(path: &str, count: usize) -> String {
+    let mut out = String::with_capacity(path.len());
+    for segment in segments(path).skip(count) {
+        out.push('/');
+        out.push_str(segment);
     }
+    if out.is_empty() {
+        return "/".to_string();
+    }
+    if path.ends_with('/') {
+        out.push('/');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -88,9 +111,14 @@ mod tests {
     use crate::config::RouteAction;
     use std::path::PathBuf;
 
+    /// A route for `prefix`, split into segments as the config does.
     fn route(prefix: &str) -> Route {
         Route {
-            prefix: prefix.to_string(),
+            segments: prefix
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
             action: RouteAction::Static {
                 root: PathBuf::from(format!("/srv{prefix}")),
             },
@@ -105,7 +133,10 @@ mod tests {
     }
 
     fn matched(router: &Router, host: Option<&str>, path: &str) -> Option<String> {
-        router.route(host, path).ok().map(|r| r.prefix.clone())
+        router
+            .route(host, path)
+            .ok()
+            .map(|r| format!("/{}", r.segments.join("/")))
     }
 
     #[test]
@@ -113,7 +144,7 @@ mod tests {
         let r = Router::new(&[host(&["a.test"], &["/", "/api/"])]);
         assert_eq!(
             matched(&r, Some("a.test"), "/api/x").as_deref(),
-            Some("/api/")
+            Some("/api")
         );
         assert_eq!(matched(&r, Some("a.test"), "/other").as_deref(), Some("/"));
     }
@@ -123,7 +154,7 @@ mod tests {
         let r = Router::new(&[host(&["a.test"], &["/api/", "/"])]);
         assert_eq!(
             matched(&r, Some("a.test"), "/api/x").as_deref(),
-            Some("/api/")
+            Some("/api")
         );
     }
 
@@ -132,20 +163,18 @@ mod tests {
         let r = Router::new(&[host(&["a.test"], &["/api/"])]);
         assert_eq!(
             matched(&r, Some("a.test"), "/api/").as_deref(),
-            Some("/api/")
+            Some("/api")
         );
         assert_eq!(
             matched(&r, Some("a.test"), "/api/x").as_deref(),
-            Some("/api/")
+            Some("/api")
         );
         assert_eq!(
             r.route(Some("a.test"), "/apix").unwrap_err(),
             RouteMiss::NoMatchingPath
         );
-        assert_eq!(
-            r.route(Some("a.test"), "/api").unwrap_err(),
-            RouteMiss::NoMatchingPath
-        );
+        // A trailing `/` on the route is insignificant: `/api/` matches `/api`.
+        assert_eq!(matched(&r, Some("a.test"), "/api").as_deref(), Some("/api"));
 
         let r = Router::new(&[host(&["a.test"], &["/api"])]);
         assert_eq!(matched(&r, Some("a.test"), "/api").as_deref(), Some("/api"));
@@ -157,6 +186,66 @@ mod tests {
             r.route(Some("a.test"), "/apix").unwrap_err(),
             RouteMiss::NoMatchingPath
         );
+    }
+
+    #[test]
+    fn route_matches_whole_segments() {
+        for prefix in ["/api", "/api/"] {
+            let r = Router::new(&[host(&["a.test"], &[prefix])]);
+            for path in ["/api", "/api/", "/api/x", "/api/x/y/"] {
+                assert_eq!(
+                    matched(&r, Some("a.test"), path).as_deref(),
+                    Some("/api"),
+                    "route {prefix}, path {path}"
+                );
+            }
+            for path in ["/apix", "/apix/", "/ap", "/", "/x/api"] {
+                assert_eq!(
+                    r.route(Some("a.test"), path).unwrap_err(),
+                    RouteMiss::NoMatchingPath,
+                    "route {prefix}, path {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn most_segments_wins() {
+        let r = Router::new(&[host(&["a.test"], &["/a/b", "/", "/a/b/c", "/a"])]);
+        for (path, expected) in [
+            ("/a/b/c/d", "/a/b/c"),
+            ("/a/b/c", "/a/b/c"),
+            ("/a/b/", "/a/b"),
+            ("/a/bc", "/a"),
+            ("/a", "/a"),
+            ("/ab", "/"),
+            ("/", "/"),
+        ] {
+            assert_eq!(
+                matched(&r, Some("a.test"), path).as_deref(),
+                Some(expected),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_segments_cases() {
+        for (path, count, expected) in [
+            ("/api/x/", 1, "/x/"),
+            ("/api/x", 1, "/x"),
+            ("/api/", 1, "/"),
+            ("/api", 1, "/"),
+            ("/a/b/c", 2, "/c"),
+            ("/a/b/c/", 2, "/c/"),
+            ("/a/b/c", 3, "/"),
+            ("/a/b", 5, "/"),
+            ("/a/b/", 0, "/a/b/"),
+            ("/", 0, "/"),
+            ("/", 1, "/"),
+        ] {
+            assert_eq!(strip_segments(path, count), expected, "{path} {count}");
+        }
     }
 
     #[test]
@@ -196,12 +285,12 @@ mod tests {
             host(&["a.test", "www.a.test"], &["/a/"]),
             host(&["b.test"], &["/b/"]),
         ]);
-        assert_eq!(matched(&r, Some("a.test"), "/a/x").as_deref(), Some("/a/"));
+        assert_eq!(matched(&r, Some("a.test"), "/a/x").as_deref(), Some("/a"));
         assert_eq!(
             matched(&r, Some("www.a.test:81"), "/a/x").as_deref(),
-            Some("/a/")
+            Some("/a")
         );
-        assert_eq!(matched(&r, Some("b.test"), "/b/x").as_deref(), Some("/b/"));
+        assert_eq!(matched(&r, Some("b.test"), "/b/x").as_deref(), Some("/b"));
         assert_eq!(
             r.route(Some("b.test"), "/a/x").unwrap_err(),
             RouteMiss::NoMatchingPath

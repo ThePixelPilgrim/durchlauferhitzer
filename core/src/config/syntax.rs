@@ -5,6 +5,8 @@ use super::lexer::{LexErrorKind, Pos, Token, TokenKind, tokenize};
 /// Maximum block nesting depth (a top-level block has depth 1).
 const MAX_DEPTH: u32 = 8;
 
+/// `key { value } ";"`. `values` may be empty (a flag); how many values a
+/// key takes is checked by validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Setting {
     pub key: String,
@@ -32,7 +34,6 @@ pub enum SyntaxErrorKind {
     UnexpectedToken,
     UnexpectedEnd,
     UnclosedBlock,
-    EmptyValue,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,12 +108,8 @@ impl Parser {
             match token.kind {
                 TokenKind::Word(v) | TokenKind::Quoted(v) => values.push(v),
                 TokenKind::Semicolon => {
-                    if values.is_empty() {
-                        return Err(SyntaxError {
-                            kind: SyntaxErrorKind::EmptyValue,
-                            pos,
-                        });
-                    }
+                    // No values: a flag. Value counts are checked by
+                    // validation, per key.
                     return Ok(Item::Setting(Setting {
                         key: name,
                         values,
@@ -186,7 +183,7 @@ host example.com www.example.com {
   path / { static /srv/www; }
   path /api/ {
     proxy 127.0.0.1:3000;
-    strip_prefix /api;
+    strip_prefix;
     max_request_body 10MiB;
     max_response_body unlimited;
   }
@@ -232,7 +229,7 @@ host example.com www.example.com {
             panic!("strip_prefix is not a setting");
         };
         assert_eq!(strip.key, "strip_prefix");
-        assert_eq!(strip.values, strings(&["/api"]));
+        assert_eq!(strip.values, Vec::<String>::new());
     }
 
     #[test]
@@ -269,8 +266,16 @@ host example.com www.example.com {
     }
 
     #[test]
-    fn rejects_empty_value() {
-        assert_eq!(err("\nkey;"), (SyntaxErrorKind::EmptyValue, 2, 1));
+    fn flag_setting_has_no_values() {
+        let items = parse("\na;").unwrap();
+        assert_eq!(
+            items,
+            vec![Item::Setting(Setting {
+                key: "a".to_string(),
+                values: Vec::new(),
+                pos: Pos { line: 2, column: 1 },
+            })]
+        );
     }
 
     #[test]

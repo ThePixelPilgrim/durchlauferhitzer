@@ -9,7 +9,7 @@ pub mod validate;
 pub use lexer::Pos;
 pub use model::{
     BackendAddr, BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, ProxyRoute, Route,
-    RouteAction, VirtualHost,
+    RouteAction, StripPrefix, VirtualHost,
 };
 pub use units::{parse_duration, parse_size};
 pub use validate::load;

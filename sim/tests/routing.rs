@@ -11,7 +11,7 @@ use durchlauferhitzer_sim::{Sim, SimConnState, Window};
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test www.example.test {
   path / { static /srv/www; }
-  path /api/ { proxy 127.0.0.1:3000; strip_prefix /api; max_request_body 1MiB; max_response_body unlimited; }
+  path /api/ { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }
 }";
 
 /// Capacity 24 = max_head, while max_request_line + 2 = 18.

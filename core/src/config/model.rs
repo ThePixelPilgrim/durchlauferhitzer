@@ -52,7 +52,9 @@ pub struct VirtualHost {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
-    pub prefix: String,
+    /// The path prefix as segments: `/` is `[]`, `/api/v1` and `/api/v1/`
+    /// are `["api", "v1"]`.
+    pub segments: Vec<String>,
     pub action: RouteAction,
 }
 
@@ -65,9 +67,17 @@ pub enum RouteAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyRoute {
     pub backend: BackendAddr,
-    pub strip_prefix: Option<String>,
+    pub strip_prefix: StripPrefix,
     pub max_request_body: BodyLimit,
     pub max_response_body: BodyLimit,
+}
+
+/// Whether the route's own segments are removed from the request path
+/// before it is forwarded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StripPrefix {
+    Keep,
+    Strip,
 }
 
 /// A backend host and port; resolved later, by the driver.
@@ -96,7 +106,6 @@ pub enum ConfigErrorKind {
     DuplicatePath(String),
     RouteNeedsOneAction,
     StripPrefixOnStatic,
-    StripPrefixNotPrefix,
     BodyLimitOnStatic,
     MissingBodyLimit(&'static str),
 }
@@ -128,9 +137,6 @@ impl fmt::Display for ConfigError {
             }
             ConfigErrorKind::StripPrefixOnStatic => {
                 write!(f, "`strip_prefix` is only allowed on proxy routes")
-            }
-            ConfigErrorKind::StripPrefixNotPrefix => {
-                write!(f, "`strip_prefix` is not a prefix of the path")
             }
             ConfigErrorKind::BodyLimitOnStatic => {
                 write!(f, "body limits are only allowed on proxy routes")
