@@ -11,7 +11,7 @@ use durchlauferhitzer_core::http::response::{
 };
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::{
-    ConnId, FileStamp, Interest, Log, RejectReason, RequestSummary, TimeoutKind,
+    ConnId, FileError, FileStamp, Interest, Log, RejectReason, RequestSummary, TimeoutKind,
 };
 use durchlauferhitzer_sim::{Sim, SimConnState};
 
@@ -142,7 +142,8 @@ fn static_roots_are_listed() {
 }
 
 /// Waiting on the disk counts against `send_idle_timeout`: the connection
-/// is closed, and the file the late `FileOpened` reports is closed too.
+/// is closed and logged as a disk timeout. A late `FileOpened` gets its
+/// file closed; a readahead still in flight is superseded by `CloseFile`.
 #[test]
 fn disk_slower_than_send_idle_timeout_closes() {
     let mut sim = Sim::new(CONFIG);
@@ -160,13 +161,135 @@ fn disk_slower_than_send_idle_timeout_closes() {
         &[Log::Rejected {
             conn: c,
             peer: p,
-            reason: RejectReason::Timeout(TimeoutKind::Send),
+            reason: RejectReason::Timeout(TimeoutKind::Disk),
         }],
         "{}",
         sim.trace()
     );
+    assert_eq!(close_files(sim.trace(), 1), 0, "{}", sim.trace());
     sim.advance(Duration::from_secs(5));
-    assert!(sim.trace().contains("-> CloseFile"), "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+
+    // The second chunk's readahead is slower than the timeout.
+    let mut sim = Sim::new(CONFIG);
+    let bytes = vec![b'r'; 300 * 1024];
+    sim.add_file("/srv/www", "r.bin", &bytes);
+    let c = sim.connect(p);
+    sim.set_client_window(c, durchlauferhitzer_sim::Window::Stalled);
+    sim.send(c, &get("/r.bin"));
+    sim.run_until_idle();
+    sim.set_disk_delay(Duration::from_secs(40));
+    sim.set_client_window(c, durchlauferhitzer_sim::Window::Unlimited);
+    sim.run_until_idle();
+    let head_len = head(
+        "application/octet-stream",
+        300 * 1024,
+        Persistence::KeepAlive,
+    )
+    .len();
+    assert_eq!(
+        sim.take_received(c).len(),
+        head_len + 256 * 1024,
+        "{}",
+        sim.trace()
+    );
+    sim.advance(Duration::from_secs(30));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: p,
+            reason: RejectReason::Timeout(TimeoutKind::Disk),
+        }),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+    sim.advance(Duration::from_secs(15));
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(
+        sim.trace().matches("ChunkReady").count(),
+        1,
+        "{}",
+        sim.trace()
+    );
+}
+
+/// Review Focus 2: one connection waits on a slow disk while another has a
+/// stalled client; a third is served meanwhile.
+#[test]
+fn slow_disk_does_not_block_other_connections() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "slow.txt", b"slow");
+    sim.add_file("/srv/www", "small.txt", b"small");
+    sim.add_file("/srv/www", "big.bin", &vec![b'b'; 100_000]);
+    // A stalled client with a ready chunk.
+    let stalled = sim.connect(peer());
+    sim.set_client_window(stalled, durchlauferhitzer_sim::Window::Stalled);
+    sim.send(stalled, &get("/big.bin"));
+    sim.run_until_idle();
+    // A request stuck on the disk for 10 s.
+    sim.set_disk_delay(Duration::from_secs(10));
+    let a = sim.connect(peer());
+    sim.send(a, &get("/slow.txt"));
+    sim.run_until_idle();
+    assert_eq!(sim.interest(a), Interest::None, "{}", sim.trace());
+    // Meanwhile another connection gets a 404 and a small file.
+    sim.set_disk_delay(Duration::ZERO);
+    let b = sim.connect(peer());
+    let mut both = get("/missing.txt");
+    both.extend_from_slice(&get("/small.txt"));
+    sim.send(b, &both);
+    sim.run_until_idle();
+    let mut expected = fixed(Status::NotFound, Persistence::KeepAlive, BodyMode::Full);
+    expected.extend_from_slice(&head(
+        "text/plain; charset=utf-8",
+        5,
+        Persistence::KeepAlive,
+    ));
+    expected.extend_from_slice(b"small");
+    assert_eq!(sim.take_received(b), expected, "{}", sim.trace());
+    assert!(sim.take_received(a).is_empty(), "{}", sim.trace());
+    assert!(sim.take_received(stalled).is_empty(), "{}", sim.trace());
+    // The slow disk answers; the slow request is served.
+    sim.advance(Duration::from_secs(10));
+    let mut expected = head("text/plain; charset=utf-8", 4, Persistence::KeepAlive);
+    expected.extend_from_slice(b"slow");
+    assert_eq!(sim.take_received(a), expected, "{}", sim.trace());
+    assert_eq!(sim.state(a), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(sim.state(stalled), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 1, "{}", sim.trace());
+}
+
+/// A client that stops reading while its file is open: the send timeout
+/// closes the connection and the file, once.
+#[test]
+fn stalled_client_with_open_file_times_out_and_closes_file() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "big.bin", &vec![b'b'; 100_000]);
+    let p = peer();
+    let c = sim.connect(p);
+    let head_len = head("application/octet-stream", 100_000, Persistence::KeepAlive).len();
+    sim.set_client_window(c, durchlauferhitzer_sim::Window::Budget(head_len + 10));
+    sim.send(c, &get("/big.bin"));
+    sim.run_until_idle();
+    assert_eq!(sim.open_files(), 1, "{}", sim.trace());
+    sim.advance(Duration::from_secs(30));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: p,
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
 }
 
@@ -195,10 +318,11 @@ fn slow_client_gets_the_whole_file() {
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
 }
 
-/// `sendfile` hits end of file early: the connection is cut after the bytes
-/// that were there, and the file is closed. (Task 4 adds the policy.)
+/// Review Focus 1: `sendfile` hits end of file early. The client gets the
+/// bytes that were there and then a cut connection, never a short body
+/// that looks complete; the abort is logged and the file closed.
 #[test]
-fn file_shrinking_during_send_cuts_the_connection() {
+fn file_shrinking_mid_transfer_cuts_connection() {
     let mut sim = Sim::new(CONFIG);
     let bytes = vec![b'q'; 1000];
     sim.add_file("/srv/www", "s.bin", &bytes);
@@ -209,47 +333,154 @@ fn file_shrinking_during_send_cuts_the_connection() {
     let mut expected = head("application/octet-stream", 1000, Persistence::KeepAlive);
     expected.extend_from_slice(&bytes[..400]);
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
-    assert!(
-        sim.trace().contains("FileFailed error=Truncated"),
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[
+            response_log(c, Status::Ok, Method::Get, "/s.bin"),
+            aborted(c, FileError::Truncated),
+        ],
         "{}",
         sim.trace()
     );
-    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
 }
 
-/// Later chunks report the changed stamp; this task records it only.
-#[test]
-fn changed_stamp_is_reported_with_later_chunks() {
-    let mut sim = Sim::new(CONFIG);
-    let bytes = vec![b'c'; 600 * 1024];
+fn aborted(conn: ConnId, error: FileError) -> Log {
+    Log::FileAborted {
+        conn,
+        peer: peer(),
+        error,
+    }
+}
+
+/// A 600 KiB file whose stamp changes to `new` after its first chunk was
+/// read, served under `config`. Returns the connection and what it got.
+fn changing_file(config: &str, new: FileStamp) -> (Sim, ConnId, Vec<u8>, Vec<u8>) {
+    let mut sim = Sim::new(config);
+    let bytes: Vec<u8> = (0..600 * 1024).map(|i: u32| (i % 241) as u8).collect();
     sim.add_file("/srv/www", "c.bin", &bytes);
+    sim.change_during_send("/srv/www", "c.bin", 1, new);
+    let (c, received) = exchange(&mut sim, &get("/c.bin"));
+    let mut full = head(
+        "application/octet-stream",
+        bytes.len() as u64,
+        Persistence::KeepAlive,
+    );
+    full.extend_from_slice(&bytes);
+    (sim, c, received, full)
+}
+
+/// The first chunk is sent, then the second `ChunkReady` reports the change
+/// and the connection is cut: the client got exactly the first chunk.
+fn assert_aborted_after_first_chunk(
+    sim: &Sim,
+    c: ConnId,
+    received: &[u8],
+    full: &[u8],
+    error: FileError,
+) {
+    let head_len = full.len() - 600 * 1024;
+    assert!(
+        full.get(..head_len + 256 * 1024) == Some(received),
+        "got {} bytes\n{}",
+        received.len(),
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[
+            response_log(c, Status::Ok, Method::Get, "/c.bin"),
+            aborted(c, error),
+        ],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
+
+const ALLOW_GROWTH: &str = "listen 127.0.0.1:8080;
+host example.test {
+  path / { static /srv/www; on_file_change allow_growth; }
+}";
+
+/// By default any change since open, even growth, cuts the connection.
+#[test]
+fn changed_file_aborts_by_default() {
     let new = FileStamp {
         size: 700 * 1024,
         modified_ns: 99,
     };
-    sim.change_during_send("/srv/www", "c.bin", 1, new);
-    let c = sim.connect(peer());
-    sim.send(c, &get("/c.bin"));
-    sim.run_until_idle();
+    let (sim, c, received, full) = changing_file(CONFIG, new);
     let ready: Vec<&str> = sim
         .trace()
         .lines()
         .filter(|l| l.contains(" ChunkReady "))
         .collect();
-    assert_eq!(ready.len(), 3, "{}", sim.trace());
-    assert!(!ready[0].contains("modified_ns=99"), "{}", sim.trace());
+    assert_eq!(ready.len(), 2, "{}", sim.trace());
     assert!(
         ready[1].ends_with("size=716800 modified_ns=99"),
         "{}",
         sim.trace()
     );
+    assert_aborted_after_first_chunk(&sim, c, &received, &full, FileError::Changed);
+}
+
+/// `allow_growth`: a file that only got larger keeps being sent at the
+/// size seen at open; the connection stays usable.
+#[test]
+fn allow_growth_keeps_sending_grown_file() {
+    let new = FileStamp {
+        size: 700 * 1024,
+        modified_ns: 99,
+    };
+    let (sim, c, received, full) = changing_file(ALLOW_GROWTH, new);
     assert!(
-        ready[2].ends_with("size=716800 modified_ns=99"),
+        received == full,
+        "got {} bytes\n{}",
+        received.len(),
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[response_log(c, Status::Ok, Method::Get, "/c.bin")],
         "{}",
         sim.trace()
     );
+    assert_eq!(
+        sim.trace().matches(" ChunkReady ").count(),
+        3,
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
+
+/// `allow_growth`: a rewrite at the same size still aborts.
+#[test]
+fn allow_growth_aborts_on_same_size_rewrite() {
+    let new = FileStamp {
+        size: 600 * 1024,
+        modified_ns: 99,
+    };
+    let (sim, c, received, full) = changing_file(ALLOW_GROWTH, new);
+    assert_aborted_after_first_chunk(&sim, c, &received, &full, FileError::Changed);
+}
+
+/// `allow_growth`: a shrink still aborts.
+#[test]
+fn allow_growth_aborts_on_shrink() {
+    let new = FileStamp {
+        size: 500 * 1024,
+        modified_ns: 99,
+    };
+    let (sim, c, received, full) = changing_file(ALLOW_GROWTH, new);
+    assert_aborted_after_first_chunk(&sim, c, &received, &full, FileError::Truncated);
 }
 
 const CAPPED: &str = "listen 127.0.0.1:8080;
@@ -313,7 +544,7 @@ fn sendfile_reads_the_file_as_opened() {
 /// A connection reset while its file is being opened: the late
 /// `FileOpened` closes the file, exactly once.
 #[test]
-fn reset_during_open_closes_the_file_once() {
+fn reset_during_open_closes_file_later() {
     let mut sim = Sim::new(CONFIG);
     sim.add_file("/srv/www", "index.html", b"hello");
     sim.set_disk_delay(Duration::from_millis(50));
@@ -331,7 +562,7 @@ fn reset_during_open_closes_the_file_once() {
 /// A connection reset while a readahead is in flight: the file is closed at
 /// once and the readahead's completion is never delivered.
 #[test]
-fn reset_during_readahead_closes_the_file_once() {
+fn reset_during_readahead_closes_file() {
     let mut sim = Sim::new(CONFIG);
     sim.add_file("/srv/www", "index.html", b"hello");
     sim.set_disk_delay(Duration::from_millis(50));
@@ -455,7 +686,10 @@ fn assert_404(sim: &mut Sim, path: &str) {
 
 fn log_conn(log: &Log) -> ConnId {
     match log {
-        Log::Response { conn, .. } | Log::Rejected { conn, .. } | Log::Reset { conn, .. } => *conn,
+        Log::Response { conn, .. }
+        | Log::Rejected { conn, .. }
+        | Log::Reset { conn, .. }
+        | Log::FileAborted { conn, .. } => *conn,
     }
 }
 

@@ -9,8 +9,8 @@ use crate::http::target::validate_path;
 
 use super::lexer::Pos;
 use super::model::{
-    BackendAddr, BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, ProxyRoute, Route,
-    RouteAction, StripPrefix, VirtualHost,
+    BackendAddr, BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, OnFileChange, ProxyRoute,
+    Route, RouteAction, StripPrefix, VirtualHost,
 };
 use super::syntax::{Block, Item, Setting, parse};
 use super::units::{parse_duration, parse_size};
@@ -205,6 +205,7 @@ enum RouteKey {
     StripPrefix,
     MaxRequestBody,
     MaxResponseBody,
+    OnFileChange,
 }
 
 impl RouteKey {
@@ -215,6 +216,7 @@ impl RouteKey {
             "strip_prefix" => Some(Self::StripPrefix),
             "max_request_body" => Some(Self::MaxRequestBody),
             "max_response_body" => Some(Self::MaxResponseBody),
+            "on_file_change" => Some(Self::OnFileChange),
             _ => None,
         }
     }
@@ -308,6 +310,7 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
     let mut strip: Option<Slot<StripPrefix>> = None;
     let mut max_request: Option<Slot<BodyLimit>> = None;
     let mut max_response: Option<Slot<BodyLimit>> = None;
+    let mut on_change: Option<Slot<OnFileChange>> = None;
     for item in &block.items {
         let setting = match item {
             Item::Setting(setting) => setting,
@@ -324,6 +327,7 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             RouteKey::StripPrefix => strip.is_some(),
             RouteKey::MaxRequestBody => max_request.is_some(),
             RouteKey::MaxResponseBody => max_response.is_some(),
+            RouteKey::OnFileChange => on_change.is_some(),
         };
         if taken {
             return duplicate_key(name, pos);
@@ -368,6 +372,15 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
                     value: parse_body_limit(value).ok_or_else(|| bad(value))?,
                 });
             }
+            RouteKey::OnFileChange => {
+                let value = one_value(setting)?;
+                let parsed = match value {
+                    "abort" => OnFileChange::Abort,
+                    "allow_growth" => OnFileChange::AllowGrowth,
+                    _ => return Err(bad(value)),
+                };
+                on_change = Some(Slot { pos, value: parsed });
+            }
         }
     }
     let action = match (static_root, backend) {
@@ -378,9 +391,15 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             if let Some(slot) = max_request.as_ref().or(max_response.as_ref()) {
                 return fail(ConfigErrorKind::BodyLimitOnStatic, slot.pos);
             }
-            RouteAction::Static { root: root.value }
+            RouteAction::Static {
+                root: root.value,
+                on_file_change: on_change.map_or(OnFileChange::Abort, |slot| slot.value),
+            }
         }
         (None, Some(backend)) => {
+            if let Some(slot) = &on_change {
+                return fail(ConfigErrorKind::OnFileChangeOnProxy, slot.pos);
+            }
             let Some(max_request_body) = max_request else {
                 return fail(
                     ConfigErrorKind::MissingBodyLimit("max_request_body"),

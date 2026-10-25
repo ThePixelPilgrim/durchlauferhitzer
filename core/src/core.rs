@@ -101,6 +101,19 @@
 //!   of file before the segment ends (the file shrank) is reported as
 //!   `FileFailed { error: Truncated }`, after a `FileSent` for any bytes it
 //!   did send.
+//! - Every `ChunkReady` stamp is checked against the stamp at open under
+//!   the route's `on_file_change`: `abort` (the default) fails the transfer
+//!   with `Changed` on any difference; `allow_growth` keeps sending exactly
+//!   the size at open when the file only grew, and fails with `Changed` for
+//!   the same size with another modification time and with `Truncated` for
+//!   a smaller size.
+//! - A failure after the response head was queued (any `FileFailed` while
+//!   sending, or a stamp that fails the check) aborts the transfer: the core
+//!   emits `CloseFile`, logs [`Log::FileAborted`] and closes the connection
+//!   at once, with no lingering and no further writes, so the client sees a
+//!   cut body, never a complete-looking short one. A failed open is
+//!   answered 404; `Truncated` or `Changed` in answer to `OpenFile` is a
+//!   driver bug and closes the connection.
 //!
 //! # Deadlines
 //!
@@ -117,7 +130,10 @@
 //!   writes;
 //! - waiting on the disk (open or readahead in flight): the same
 //!   `send_idle_timeout`, also reset whenever the disk completes; on expiry
-//!   the connection is closed and its file, if open, closed with it;
+//!   it is logged as a disk timeout and the connection is closed: an open in
+//!   flight becomes an orphaned open, an open file is closed with it. (A
+//!   readahead in flight counts as waiting on the disk even while the send
+//!   buffer still holds part of the head.)
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
 //!
@@ -157,14 +173,14 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use crate::config::{Config, Limits, Route, RouteAction};
+use crate::config::{Config, Limits, OnFileChange, Route, RouteAction};
 use crate::conn::{
     Conn, ConnState, Counted, LINGER_SCRATCH, LINGER_TIMEOUT, OpenStep, SEND_CAPACITY,
     StaticRequest, UnreadBody,
 };
 use crate::file::{
     Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileSegment, FileStamp, FileTable,
-    Owner, RootId,
+    Owner, RootId, check_stamp,
 };
 use crate::http::mime::content_type;
 use crate::http::request::{
@@ -293,7 +309,7 @@ impl Core {
         let mut static_roots: Vec<PathBuf> = Vec::new();
         for route in config.hosts.iter().flat_map(|h| &h.routes) {
             match &route.action {
-                RouteAction::Static { root } => {
+                RouteAction::Static { root, .. } => {
                     if !static_roots.contains(root) {
                         static_roots.push(root.clone());
                     }
@@ -649,6 +665,9 @@ impl Core {
             Opened::Serve => {
                 let size = meta.stamp.size;
                 let request = c.static_request.take();
+                let on_change = request
+                    .as_ref()
+                    .map_or(OnFileChange::Abort, |r| r.on_change);
                 let name = request
                     .as_ref()
                     .and_then(|r| r.path.last())
@@ -678,6 +697,8 @@ impl Core {
                         c.state = ConnState::SendingFile {
                             file,
                             size,
+                            opened: meta.stamp,
+                            on_change,
                             offset: 0,
                             chunk,
                             persistence,
@@ -753,8 +774,9 @@ impl Core {
     }
 
     /// An open, readahead or sendfile of `file` failed. A path that cannot
-    /// be opened is answered 404; anything else closes the connection (and
-    /// the file, if it was open).
+    /// be opened is answered 404. After the head was queued, the transfer is
+    /// aborted: the file is closed and the connection cut. An answer an open
+    /// cannot give closes the connection.
     fn file_failed(
         &mut self,
         now: Instant,
@@ -809,12 +831,34 @@ impl Core {
                 FileError::Truncated | FileError::Changed => {}
             }
         }
-        if let Some(c) = self.forget(conn, actions) {
-            // A failed open leaves nothing open to close, and its answer is
-            // in: the slot `forget` kept for it is free.
-            if let ConnState::OpeningFile { .. } = c.state {
-                self.release_orphan(file);
+        match c.state {
+            ConnState::OpeningFile { .. } => {
+                if self.forget(conn, actions).is_some() {
+                    // A failed open leaves nothing open to close, and its
+                    // answer is in: the slot `forget` kept for it is free.
+                    self.release_orphan(file);
+                    actions.push(Action::Close { conn });
+                }
             }
+            ConnState::SendingFile { .. } => self.abort_transfer(conn, error, actions),
+            // `c.state.file()` is `Some(file)`: unreachable.
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::Lingering { .. } => {}
+        }
+    }
+
+    /// A file response failed after its head was queued: close the file,
+    /// log why, and cut the connection at once, so the client sees an
+    /// incomplete body rather than a short one that looks complete.
+    fn abort_transfer(&mut self, conn: ConnId, error: FileError, actions: &mut Vec<Action>) {
+        if let Some(c) = self.forget(conn, actions) {
+            actions.push(Action::Log(Log::FileAborted {
+                conn,
+                peer: c.peer,
+                error,
+            }));
             actions.push(Action::Close { conn });
         }
     }
@@ -836,11 +880,9 @@ impl Core {
         };
         let ConnState::SendingFile {
             file: sending,
-            size,
-            offset,
+            opened,
+            on_change,
             chunk: Chunk::Reading { end },
-            persistence,
-            buffered,
             ..
         } = c.state
         else {
@@ -849,15 +891,19 @@ impl Core {
         if sending != file {
             return;
         }
-        c.state = ConnState::SendingFile {
-            file,
-            size,
-            offset,
-            chunk: Chunk::Ready { end, stamp },
-            persistence,
-            buffered,
-            deadline,
-        };
+        if let Err(error) = check_stamp(on_change, opened, stamp) {
+            self.abort_transfer(conn, error, actions);
+            return;
+        }
+        if let ConnState::SendingFile {
+            chunk,
+            deadline: state_deadline,
+            ..
+        } = &mut c.state
+        {
+            *chunk = Chunk::Ready { end };
+            *state_deadline = deadline;
+        }
         self.sync_interest(conn, actions);
     }
 
@@ -871,7 +917,7 @@ impl Core {
             file,
             size,
             offset,
-            chunk: Chunk::Ready { end, stamp },
+            chunk: Chunk::Ready { end },
             persistence,
             buffered,
             ..
@@ -889,8 +935,8 @@ impl Core {
         }
         let offset = offset.saturating_add(len);
         let deadline = now.saturating_add(limits.send_idle_timeout);
-        let chunk = if offset < end {
-            Chunk::Ready { end, stamp }
+        let next_chunk = if offset < end {
+            Chunk::Ready { end }
         } else if end < size {
             let next = size.min(end.saturating_add(FILE_CHUNK));
             actions.push(Action::Readahead {
@@ -902,11 +948,11 @@ impl Core {
         } else {
             Chunk::Done
         };
-        c.state = match chunk {
+        match next_chunk {
             Chunk::Done => {
                 self.files.release(file);
                 actions.push(Action::CloseFile { file });
-                finish(
+                c.state = finish(
                     conn,
                     c,
                     persistence,
@@ -915,18 +961,22 @@ impl Core {
                     now,
                     limits,
                     actions,
-                )
+                );
             }
-            Chunk::Ready { .. } | Chunk::Reading { .. } => ConnState::SendingFile {
-                file,
-                size,
-                offset,
-                chunk,
-                persistence,
-                buffered,
-                deadline,
-            },
-        };
+            Chunk::Ready { .. } | Chunk::Reading { .. } => {
+                if let ConnState::SendingFile {
+                    offset: state_offset,
+                    chunk,
+                    deadline: state_deadline,
+                    ..
+                } = &mut c.state
+                {
+                    *state_offset = offset;
+                    *chunk = next_chunk;
+                    *state_deadline = deadline;
+                }
+            }
+        }
         self.try_parse(now, conn, actions);
         self.sync_interest(conn, actions);
     }
@@ -988,14 +1038,30 @@ impl Core {
                 actions.push(Action::Close { conn });
             }
             // The client stopped reading, or the disk did not answer in
-            // time: close without further writes.
+            // time: close without further writes. An open in flight becomes
+            // an orphan; an open file is closed.
             ConnState::Responding { .. }
             | ConnState::OpeningFile { .. }
             | ConnState::SendingFile { .. } => {
+                let kind = match c.state {
+                    ConnState::OpeningFile { .. }
+                    | ConnState::SendingFile {
+                        chunk: Chunk::Reading { .. },
+                        ..
+                    } => TimeoutKind::Disk,
+                    ConnState::SendingFile {
+                        chunk: Chunk::Ready { .. } | Chunk::Done,
+                        ..
+                    }
+                    | ConnState::Responding { .. }
+                    | ConnState::ReadingHead { .. }
+                    | ConnState::Idle { .. }
+                    | ConnState::Lingering { .. } => TimeoutKind::Send,
+                };
                 actions.push(Action::Log(Log::Rejected {
                     conn,
                     peer: c.peer,
-                    reason: RejectReason::Timeout(TimeoutKind::Send),
+                    reason: RejectReason::Timeout(kind),
                 }));
                 self.forget(conn, actions);
                 actions.push(Action::Close { conn });
@@ -1290,16 +1356,24 @@ fn not_served(
 /// How a request on a matched route is answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Plan {
-    /// Open `path` (relative segments) beneath static root `root`.
-    Open { root: RootId, path: Vec<Vec<u8>> },
+    /// Open `path` (relative segments) beneath static root `root`; the
+    /// route's change policy applies while it is sent.
+    Open {
+        root: RootId,
+        path: Vec<Vec<u8>>,
+        on_change: OnFileChange,
+    },
     /// Answer `status` right away.
     Respond(Status, Persistence),
 }
 
 /// The static route rules that need no file: method, body, path.
 fn plan(route: &Route, head: &RequestHead, static_roots: &[PathBuf]) -> Plan {
-    let root = match &route.action {
-        RouteAction::Static { root } => root,
+    let (root, on_change) = match &route.action {
+        RouteAction::Static {
+            root,
+            on_file_change,
+        } => (root, *on_file_change),
         // Not implemented yet in this stage: answered 501 and closed.
         RouteAction::Proxy(_) => return Plan::Respond(Status::NotImplemented, Persistence::Close),
     };
@@ -1324,7 +1398,11 @@ fn plan(route: &Route, head: &RequestHead, static_roots: &[PathBuf]) -> Plan {
     };
     // Dotfiles (and paths no file can have) look like missing files.
     match relative_segments(&head.target.path, route.segments.len()) {
-        Ok(path) => Plan::Open { root, path },
+        Ok(path) => Plan::Open {
+            root,
+            path,
+            on_change,
+        },
         Err(_) => Plan::Respond(Status::NotFound, head.persistence),
     }
 }
@@ -1360,7 +1438,11 @@ fn respond(
     let (status, persistence) = match route {
         Err(_) => (Status::NotFound, head.persistence),
         Ok(route) => match plan(route, &head, static_roots) {
-            Plan::Open { root, path } => {
+            Plan::Open {
+                root,
+                path,
+                on_change,
+            } => {
                 let slash = trailing_slash(&head.target.path);
                 let file = files.allocate(conn);
                 actions.push(Action::OpenFile {
@@ -1385,6 +1467,7 @@ fn respond(
                     },
                     query: head.target.query,
                     root,
+                    on_change,
                     path,
                 });
                 return;
@@ -2178,11 +2261,102 @@ mod tests {
         core.handle(now, Event::FileFailed { file, error }, &mut actions);
         assert_eq!(
             actions,
-            [Action::CloseFile { file }, Action::Close { conn }]
+            [
+                Action::CloseFile { file },
+                Action::Log(Log::FileAborted {
+                    conn,
+                    peer: PEER,
+                    error
+                }),
+                Action::Close { conn }
+            ]
         );
         assert!(core.conns.is_empty());
         assert_eq!(core.counted, 0);
         assert!(core.counted_per_ip.is_empty());
+        assert_eq!(core.files.len(), 0);
+    }
+
+    /// `Truncated` or `Changed` cannot answer an `OpenFile`: the driver is
+    /// broken, so the connection is closed (nothing is open to close).
+    #[test]
+    fn impossible_open_errors_close_the_connection() {
+        let now = secs(0);
+        let file = FileId(1);
+        let conn = ConnId(1);
+        for error in [FileError::Truncated, FileError::Changed] {
+            let mut core = files_core();
+            request(&mut core, now, 1, GET_F);
+            let mut actions = Vec::new();
+            core.handle(now, Event::FileFailed { file, error }, &mut actions);
+            assert_eq!(actions, [Action::Close { conn }], "{error:?}");
+            assert!(core.conns.is_empty());
+            assert_eq!(core.counted, 0);
+            assert!(core.counted_per_ip.is_empty());
+            assert_eq!(core.files.len(), 0);
+        }
+    }
+
+    /// `send_idle_timeout` passing while the open or a readahead is in
+    /// flight is a disk timeout; while a ready chunk waits for the client,
+    /// a send timeout.
+    #[test]
+    fn disk_and_send_timeouts_while_sending_a_file() {
+        let now = secs(0);
+        let conn = ConnId(1);
+        let file = FileId(1);
+        let rejected = |kind| {
+            Action::Log(Log::Rejected {
+                conn,
+                peer: PEER,
+                reason: RejectReason::Timeout(kind),
+            })
+        };
+        // Waiting on the open: the open becomes an orphan.
+        let mut core = files_core();
+        request(&mut core, now, 1, GET_F);
+        let mut actions = Vec::new();
+        core.handle(secs(30), Event::TimerFired, &mut actions);
+        assert_eq!(
+            actions,
+            [rejected(TimeoutKind::Disk), Action::Close { conn }]
+        );
+        assert_eq!(core.counted, 1);
+        // Waiting on a readahead: the file is closed.
+        let mut core = files_core();
+        request(&mut core, now, 1, GET_F);
+        let meta = regular(3);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        let len = core.send_buffer(conn).len();
+        core.handle(now, Event::Sent { conn, len }, &mut actions);
+        actions.clear();
+        core.handle(secs(30), Event::TimerFired, &mut actions);
+        assert_eq!(
+            actions,
+            [
+                rejected(TimeoutKind::Disk),
+                Action::CloseFile { file },
+                Action::Close { conn }
+            ]
+        );
+        assert_eq!(core.counted, 0);
+        assert_eq!(core.files.len(), 0);
+        // A ready chunk the client does not take: a send timeout.
+        let mut core = files_core();
+        request(&mut core, now, 1, GET_F);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        let stamp = stamp(3);
+        core.handle(now, Event::ChunkReady { file, stamp }, &mut actions);
+        actions.clear();
+        core.handle(secs(30), Event::TimerFired, &mut actions);
+        assert_eq!(
+            actions,
+            [
+                rejected(TimeoutKind::Send),
+                Action::CloseFile { file },
+                Action::Close { conn }
+            ]
+        );
         assert_eq!(core.files.len(), 0);
     }
 

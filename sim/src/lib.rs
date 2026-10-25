@@ -888,7 +888,10 @@ impl Sim {
 
 fn log_conn(log: &Log) -> ConnId {
     match log {
-        Log::Response { conn, .. } | Log::Rejected { conn, .. } | Log::Reset { conn, .. } => *conn,
+        Log::Response { conn, .. }
+        | Log::Rejected { conn, .. }
+        | Log::Reset { conn, .. }
+        | Log::FileAborted { conn, .. } => *conn,
     }
 }
 

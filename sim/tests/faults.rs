@@ -464,18 +464,21 @@ fn logged_status(log: &Log) -> Option<Status> {
         Log::Rejected { reason, .. } => match reason {
             RejectReason::Http(e) => Some(e.status()),
             RejectReason::Timeout(TimeoutKind::Header) => Some(Status::RequestTimeout),
-            RejectReason::Timeout(TimeoutKind::Send) => None,
+            RejectReason::Timeout(TimeoutKind::Send | TimeoutKind::Disk) => None,
             RejectReason::Limit(_) => Some(Status::ServiceUnavailable),
             // Not emitted in this stage; a route miss is answered 404.
             RejectReason::Route(_) => Some(Status::NotFound),
         },
-        Log::Reset { .. } => None,
+        Log::Reset { .. } | Log::FileAborted { .. } => None,
     }
 }
 
 fn log_conn(log: &Log) -> ConnId {
     match log {
-        Log::Response { conn, .. } | Log::Rejected { conn, .. } | Log::Reset { conn, .. } => *conn,
+        Log::Response { conn, .. }
+        | Log::Rejected { conn, .. }
+        | Log::Reset { conn, .. }
+        | Log::FileAborted { conn, .. } => *conn,
     }
 }
 
@@ -581,9 +584,10 @@ fn check_client(sim: &Sim, client: &Client, coverage: &mut Coverage) {
         let abandoned = matches!(
             logs.last(),
             Some(Log::Rejected {
-                reason: RejectReason::Timeout(TimeoutKind::Send),
+                reason: RejectReason::Timeout(TimeoutKind::Send | TimeoutKind::Disk),
                 ..
             }) | Some(Log::Reset { .. })
+                | Some(Log::FileAborted { .. })
         );
         let refused_at_once = statuses.is_empty()
             && matches!(
@@ -720,6 +724,8 @@ fn run_seed(seed: u64, coverage: &mut Coverage) {
                 RejectReason::Http(_) => coverage.http += 1,
                 RejectReason::Timeout(TimeoutKind::Header) => coverage.header_timeout += 1,
                 RejectReason::Timeout(TimeoutKind::Send) => coverage.send_timeout += 1,
+                // Static files join the random runs in a later task.
+                RejectReason::Timeout(TimeoutKind::Disk) => {}
                 RejectReason::Limit(LimitKind::Connections) => coverage.limit_connections += 1,
                 RejectReason::Limit(LimitKind::ConnectionsPerIp) => coverage.limit_per_ip += 1,
                 RejectReason::Route(_) => {}

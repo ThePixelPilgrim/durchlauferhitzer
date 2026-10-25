@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::config::OnFileChange;
 use crate::core::ConnId;
 
 /// Opaque file id, allocated by the core (sequentially from 1) and never
@@ -69,12 +70,35 @@ pub(crate) const FILE_CHUNK: u64 = 256 * 1024;
 pub(crate) enum Chunk {
     /// A `Readahead` up to `end` is in flight.
     Reading { end: u64 },
-    /// The bytes up to `end` are in the page cache; `stamp` is the file's
-    /// stamp when they were read (acted on by the change policy later).
-    Ready { end: u64, stamp: FileStamp },
+    /// The bytes up to `end` are in the page cache, and the file's stamp
+    /// when they were read passed the route's change policy.
+    Ready { end: u64 },
     /// Every byte was sent (or the file is empty): done once the send
     /// buffer is drained.
     Done,
+}
+
+/// Whether a file whose stamp was `opened` at open and is `now` at a
+/// chunk's read may still be sent under `policy`; the error the transfer is
+/// aborted with otherwise. Growth allowed under `AllowGrowth` is sent only
+/// up to the size at open.
+pub(crate) fn check_stamp(
+    policy: OnFileChange,
+    opened: FileStamp,
+    now: FileStamp,
+) -> Result<(), FileError> {
+    if now == opened {
+        return Ok(());
+    }
+    match policy {
+        OnFileChange::Abort => Err(FileError::Changed),
+        OnFileChange::AllowGrowth => match now.size.cmp(&opened.size) {
+            std::cmp::Ordering::Greater => Ok(()),
+            // Same size, other modification time: rewritten in place.
+            std::cmp::Ordering::Equal => Err(FileError::Changed),
+            std::cmp::Ordering::Less => Err(FileError::Truncated),
+        },
+    }
 }
 
 /// Who a file id the core handed out belongs to.

@@ -1,7 +1,8 @@
 //! Tests for configuration validation: top level, listen, user.
 
 use super::super::model::{
-    BackendAddr, BodyLimit, Limits, ProxyRoute, Route, RouteAction, StripPrefix, VirtualHost,
+    BackendAddr, BodyLimit, Limits, OnFileChange, ProxyRoute, Route, RouteAction, StripPrefix,
+    VirtualHost,
 };
 use super::super::syntax::SyntaxErrorKind;
 use super::*;
@@ -80,6 +81,7 @@ fn static_route(segments: &[&str], root: &str) -> Route {
         segments: strings(segments),
         action: RouteAction::Static {
             root: PathBuf::from(root),
+            on_file_change: OnFileChange::Abort,
         },
     }
 }

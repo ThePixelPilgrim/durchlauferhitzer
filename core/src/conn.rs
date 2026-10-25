@@ -4,8 +4,9 @@ use std::net::IpAddr;
 
 use std::time::Duration;
 
+use crate::config::OnFileChange;
 use crate::core::Interest;
-use crate::file::{Chunk, FileId, RootId};
+use crate::file::{Chunk, FileId, FileStamp, RootId};
 use crate::http::request::{HeadParser, Persistence};
 use crate::http::response::BodyMode;
 use crate::http::static_path::TrailingSlash;
@@ -93,10 +94,14 @@ pub(crate) enum ConnState {
     },
     /// A file response: the head is in `Conn::send`, then the open `file`'s
     /// bytes from `offset` up to `size` (its size at open) follow chunk by
-    /// chunk. `deadline` is the send idle deadline, reset on progress.
+    /// chunk. Every chunk's stamp is checked against `opened` (the stamp at
+    /// open) under the route's `on_change`. `deadline` is the send idle
+    /// deadline, reset on progress (of the socket or the disk).
     SendingFile {
         file: FileId,
         size: u64,
+        opened: FileStamp,
+        on_change: OnFileChange,
         offset: u64,
         chunk: Chunk,
         persistence: Persistence,
@@ -155,6 +160,8 @@ pub(crate) struct StaticRequest {
     /// The raw query, kept for a redirect.
     pub(crate) query: Option<String>,
     pub(crate) root: RootId,
+    /// The route's policy for a file that changes while it is sent.
+    pub(crate) on_change: OnFileChange,
     /// The relative segments of the path being opened.
     pub(crate) path: Vec<Vec<u8>>,
 }

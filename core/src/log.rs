@@ -7,6 +7,7 @@
 use std::net::IpAddr;
 
 use crate::core::ConnId;
+use crate::file::FileError;
 use crate::http::request::{HttpError, Method};
 use crate::http::status::Status;
 use crate::routing::RouteMiss;
@@ -33,6 +34,14 @@ pub enum Log {
     /// The connection failed at the transport level (reset by peer or another
     /// socket error reported by the driver).
     Reset { conn: ConnId, peer: IpAddr },
+    /// A file response was cut off after its head was queued: the file
+    /// failed or changed mid-transfer, so the connection was closed and the
+    /// client saw an incomplete body.
+    FileAborted {
+        conn: ConnId,
+        peer: IpAddr,
+        error: FileError,
+    },
 }
 
 /// The parts of a request worth logging. `host` and `path` come from the
@@ -60,6 +69,9 @@ pub enum TimeoutKind {
     Header,
     /// The client stopped reading the response for `send_idle_timeout`.
     Send,
+    /// The disk did not complete an open or readahead within
+    /// `send_idle_timeout`.
+    Disk,
 }
 
 /// Which connection limit was hit.

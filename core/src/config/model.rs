@@ -60,8 +60,24 @@ pub struct Route {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RouteAction {
-    Static { root: PathBuf },
+    Static {
+        root: PathBuf,
+        on_file_change: OnFileChange,
+    },
     Proxy(ProxyRoute),
+}
+
+/// What a static route does when a file changes while it is being sent
+/// (detected from the stamp the driver reports with every chunk). Either
+/// way the headers are already out, so a failure cuts the connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnFileChange {
+    /// Any change since open (growth, rewrite, shrink) aborts.
+    Abort,
+    /// A file that only got larger keeps being sent at the size seen at
+    /// open; a rewrite at the same size or a shrink still aborts. A rewrite
+    /// that also grows the file looks like growth and is accepted.
+    AllowGrowth,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +123,7 @@ pub enum ConfigErrorKind {
     RouteNeedsOneAction,
     StripPrefixOnStatic,
     BodyLimitOnStatic,
+    OnFileChangeOnProxy,
     MissingBodyLimit(&'static str),
 }
 
@@ -140,6 +157,9 @@ impl fmt::Display for ConfigError {
             }
             ConfigErrorKind::BodyLimitOnStatic => {
                 write!(f, "body limits are only allowed on proxy routes")
+            }
+            ConfigErrorKind::OnFileChangeOnProxy => {
+                write!(f, "`on_file_change` is only allowed on static routes")
             }
             ConfigErrorKind::MissingBodyLimit(key) => {
                 write!(f, "proxy route is missing `{key}`")

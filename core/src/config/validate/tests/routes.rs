@@ -462,3 +462,62 @@ fn body_limit_values() {
         "    max_request_body 0;\n    max_response_body unlimited;",
     ));
 }
+
+fn first_on_file_change(config: &Config) -> OnFileChange {
+    match first_route(config).map(|r| r.action) {
+        Some(RouteAction::Static { on_file_change, .. }) => on_file_change,
+        other => panic!("expected a static route, got {other:?}"),
+    }
+}
+
+#[test]
+fn on_file_change_values() {
+    let static_path = |extra: &str| in_host(&format!("  path / {{\n    static /s;\n{extra}\n  }}"));
+    assert_eq!(
+        first_on_file_change(&ok(&static_path(""))),
+        OnFileChange::Abort
+    );
+    assert_eq!(
+        first_on_file_change(&ok(&static_path("    on_file_change abort;"))),
+        OnFileChange::Abort
+    );
+    assert_eq!(
+        first_on_file_change(&ok(&static_path("    on_file_change allow_growth;"))),
+        OnFileChange::AllowGrowth
+    );
+    assert_eq!(
+        err(&static_path("    on_file_change ignore;")),
+        (invalid("on_file_change", "ignore"), 5, 5)
+    );
+    for bad in ["on_file_change;", "on_file_change abort allow_growth;"] {
+        assert_eq!(
+            err(&static_path(&format!("    {bad}"))),
+            (
+                ConfigErrorKind::WrongValueCount("on_file_change".to_string()),
+                5,
+                5
+            ),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        err(&static_path(
+            "    on_file_change abort;\n    on_file_change abort;"
+        )),
+        (
+            ConfigErrorKind::DuplicateKey("on_file_change".to_string()),
+            6,
+            5
+        )
+    );
+}
+
+#[test]
+fn on_file_change_on_proxy_is_rejected() {
+    assert_eq!(
+        err(&proxy_path(
+            "    max_request_body 1;\n    max_response_body 1;\n    on_file_change abort;"
+        )),
+        (ConfigErrorKind::OnFileChangeOnProxy, 7, 5)
+    );
+}

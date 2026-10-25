@@ -108,7 +108,7 @@ pub fn strip_segments(path: &str, count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RouteAction;
+    use crate::config::{OnFileChange, RouteAction};
     use std::path::PathBuf;
 
     /// A route for `prefix`, split into segments as the config does.
@@ -121,6 +121,7 @@ mod tests {
                 .collect(),
             action: RouteAction::Static {
                 root: PathBuf::from(format!("/srv{prefix}")),
+                on_file_change: OnFileChange::Abort,
             },
         }
     }
