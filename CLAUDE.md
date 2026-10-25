@@ -74,6 +74,8 @@ The superpowers skills are vendored as project skills in `.claude/skills/`
 
 - Strict red/green TDD: write the failing test, run it and see it fail, then
   implement.
+- Each crate has a README describing its purpose and layout; update it in
+  the same commit when modules are added, moved or removed.
 - Before every commit run `cargo fmt --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace` and `scripts/check-product-deps.sh`.
