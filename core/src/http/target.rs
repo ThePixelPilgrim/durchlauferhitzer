@@ -1,7 +1,10 @@
 //! Strict validation of the HTTP request target (origin-form only).
 //!
 //! Stage 2 percent-decodes accepted paths exactly once, so anything that
-//! could decode into traversal is rejected here.
+//! could decode into traversal is rejected here. Escapes of unreserved
+//! characters are rejected too, so an accepted path has exactly one
+//! spelling for them and the raw path is canonical: routing and forwarding
+//! use it as-is (only the case of the remaining hex escapes may vary).
 
 /// A validated origin-form request target.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +21,10 @@ pub enum TargetError {
     DotSegment,
     EmptySegment,
     EncodedDot,
+    /// An escape for an unreserved character other than `.` (ALPHA, DIGIT,
+    /// `-`, `_`, `~`): it must be written plainly, so each path has one
+    /// spelling.
+    EncodedUnreserved,
     EncodedSlash,
     EncodedBackslash,
     EncodedNul,
@@ -98,7 +105,8 @@ fn hex_value(b: u8) -> Option<u8> {
 }
 
 /// Byte-class and well-formed-escape rules for path and query. Only the path
-/// additionally rejects `;` and escapes that decode to dangerous bytes.
+/// additionally rejects `;`, escapes that decode to dangerous bytes and
+/// escapes of unreserved characters (RFC 3986 section 2.3).
 fn check_bytes(bytes: &[u8], is_path: bool) -> Result<(), TargetError> {
     let mut iter = bytes.iter();
     while let Some(&b) = iter.next() {
@@ -120,6 +128,9 @@ fn check_bytes(bytes: &[u8], is_path: bool) -> Result<(), TargetError> {
                 match hi * 16 + lo {
                     0x01..=0x1F | 0x7F => return Err(TargetError::EncodedControl),
                     0x2E => return Err(TargetError::EncodedDot),
+                    b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'-' | b'_' | b'~' => {
+                        return Err(TargetError::EncodedUnreserved);
+                    }
                     0x2F => return Err(TargetError::EncodedSlash),
                     0x5C => return Err(TargetError::EncodedBackslash),
                     0x00 => return Err(TargetError::EncodedNul),
@@ -178,6 +189,21 @@ mod tests {
             (b"/a%01", TargetError::EncodedControl),
             (b"/a%7f", TargetError::EncodedControl),
             (b"/a%7F", TargetError::EncodedControl),
+            // Unreserved characters have exactly one spelling in a path,
+            // so routing on the raw path is routing on the canonical one.
+            (b"/%61ssets/a.css", TargetError::EncodedUnreserved),
+            (b"/%41", TargetError::EncodedUnreserved),
+            (b"/a%7a", TargetError::EncodedUnreserved),
+            (b"/a%7A", TargetError::EncodedUnreserved),
+            (b"/%7E", TargetError::EncodedUnreserved),
+            (b"/%7e", TargetError::EncodedUnreserved),
+            (b"/%2D", TargetError::EncodedUnreserved),
+            (b"/%2d", TargetError::EncodedUnreserved),
+            (b"/%5F", TargetError::EncodedUnreserved),
+            (b"/%5f", TargetError::EncodedUnreserved),
+            (b"/%30", TargetError::EncodedUnreserved),
+            (b"/%39", TargetError::EncodedUnreserved),
+            (b"/x/%30/y", TargetError::EncodedUnreserved),
         ];
         for (raw, want) in rows {
             assert_eq!(
@@ -236,6 +262,13 @@ mod tests {
             b"/a?x=1;y=2",
             b"/%C3%A4",
             b"/%80%ff",
+            // Reserved and other characters may stay encoded.
+            b"/a%20b",
+            b"/a%3Fb",
+            b"/a%25",
+            b"/a%40%21%2C",
+            // The query is not canonicalised.
+            b"/a?x=%61%7E%2D%5F%30",
         ] {
             assert!(
                 parse_target(ok).is_ok(),
@@ -270,8 +303,20 @@ mod tests {
         out
     }
 
+    fn is_unreserved(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
+    }
+
     fn check_accepted(raw: &[u8]) {
         if let Ok(t) = parse_target(raw) {
+            // The raw path is canonical: no escape decodes to an
+            // unreserved character.
+            let p = t.path.as_bytes();
+            for (i, _) in p.iter().enumerate().filter(|&(_, &c)| c == b'%') {
+                let hex = t.path.get(i + 1..i + 3).unwrap_or("");
+                let decoded = u8::from_str_radix(hex, 16).unwrap_or(b'%');
+                assert!(!is_unreserved(decoded), "{raw:?}");
+            }
             let d = decode(&t.path);
             assert!(!d.contains(&b'\\') && !d.contains(&b';'), "{raw:?}");
             assert!(d.iter().all(|&c| c > 0x1F && c != 0x7F), "{raw:?}");
@@ -295,7 +340,7 @@ mod tests {
             raw in proptest::collection::vec(
                 proptest::sample::select(
                     vec![b'/', b'.', b'%', b'2', b'e', b'E', b'f', b'F', b'5', b'c', b'C',
-                         b'0', b'a', b'?', b';']
+                         b'0', b'a', b'?', b';', b'6', b'7', b'D', b'3']
                 ),
                 0..24,
             )
@@ -311,7 +356,8 @@ mod tests {
                 prop_oneof![
                     proptest::sample::select(vec![
                         "/", ".", "..", "a", "b.c", "%2e", "%2E", "%2f", "%5c", "%00", "%25",
-                        "%0a", "%7f", "%C3%A4", "%41", ";", "?q=1",
+                        "%0a", "%7f", "%C3%A4", "%41", ";", "?q=1", "%61", "%7E", "%7e",
+                        "%2D", "%5F", "%30", "%20", "%3f",
                     ])
                     .prop_map(str::to_string),
                     "[ -~]{0,3}",

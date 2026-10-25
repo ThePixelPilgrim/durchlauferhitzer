@@ -140,8 +140,14 @@ reject.
   `chunked`; malformed chunk framing.
 - **Targets:** absolute-form, authority-form, asterisk-form → 400. Reject
   (400) paths containing `.` or `..` segments, `//`, `%2F`, `%5C`, `%00`,
-  backslash, or non-ASCII bytes. After this check the raw path is canonical;
-  routing and forwarding use it as-is, static serving percent-decodes it.
+  backslash, or non-ASCII bytes, and paths with a percent escape that
+  decodes to an unreserved character (ALPHA, DIGIT, `-`, `.`, `_`, `~`,
+  in either hex case, e.g. `/%61ssets`): RFC 3986 treats `%61` and `a` as
+  the same, so allowing both spellings would let a request route past a
+  more specific route. The query is not subject to this rule. After this
+  check the raw path is canonical (only the hex case of the remaining
+  escapes may vary); routing and forwarding use it as-is, static serving
+  percent-decodes it. Configured route paths follow the same rules.
 - **Host:** required for HTTP/1.1 (400 if missing or duplicated). Matched
   case-insensitively, port ignored, exact names only. No matching host → 404.
 - **Routing:** route prefixes are lists of path segments (`/api/v1` is

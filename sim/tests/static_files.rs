@@ -5,11 +5,12 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use durchlauferhitzer_core::http::request::{Method, Persistence};
+use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
 use durchlauferhitzer_core::http::response::{
     BodyMode, render_file_head, render_fixed, render_redirect,
 };
 use durchlauferhitzer_core::http::status::Status;
+use durchlauferhitzer_core::http::target::TargetError;
 use durchlauferhitzer_core::{
     ConnId, FileError, FileStamp, Interest, Log, RejectReason, RequestSummary, TimeoutKind,
 };
@@ -1337,4 +1338,34 @@ fn redirect_that_just_fits_is_301() {
         "{}",
         sim.trace()
     );
+}
+
+/// C2: a percent-encoded unreserved character in the path is rejected, so
+/// `/%61ssets/a.css` cannot slip past the `/assets` route into `/`.
+#[test]
+fn encoded_unreserved_character_in_the_path_is_400() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/assets", "a.css", b"body{}");
+    sim.add_file("/srv/www", "assets/a.css", b"shadowed");
+    for target in ["/%61ssets/a.css", "/assets/%61.css", "/assets/a.c%73s"] {
+        let (c, received) = exchange(&mut sim, &get(target));
+        assert_eq!(
+            received,
+            fixed(Status::BadRequest, Persistence::Close, BodyMode::Full),
+            "{target}\n{}",
+            sim.trace()
+        );
+        let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+        assert_eq!(
+            logs,
+            [&Log::Rejected {
+                conn: c,
+                peer: peer(),
+                reason: RejectReason::Http(HttpError::BadTarget(TargetError::EncodedUnreserved)),
+            }],
+            "{target}\n{}",
+            sim.trace()
+        );
+    }
+    assert_eq!(opens(sim.trace()), 0, "{}", sim.trace());
 }
