@@ -8,6 +8,10 @@ pub enum StaticPathError {
     /// A `%` escape is not followed by two hex digits. Paths that passed
     /// `parse_target` never contain one.
     BadEscape,
+    /// The path is not usable as a file path: it does not start with `/`,
+    /// has an empty non-trailing segment, or a decoded segment contains `/`
+    /// or NUL.
+    BadSegment,
 }
 
 /// Whether a path ends in `/`.
@@ -28,16 +32,31 @@ pub fn trailing_slash(path: &str) -> TrailingSlash {
 
 /// Skips the route's first `skip` segments, percent-decodes each remaining
 /// segment exactly once and drops the empty trailing segment.
+///
+/// Safe on arbitrary input: the path must start with `/`, may have only a
+/// trailing empty segment, and decoded segments must not start with `.` or
+/// contain `/` or NUL. The only precondition is that `path` is a path
+/// without a query (`?` is treated as an ordinary byte).
 pub fn relative_segments(path: &str, skip: usize) -> Result<Vec<Vec<u8>>, StaticPathError> {
-    let mut raw: Vec<&str> = path.split('/').skip(1).collect();
-    if raw.last() == Some(&"") {
-        raw.pop();
-    }
+    let rest = path.strip_prefix('/').ok_or(StaticPathError::BadSegment)?;
     let mut out = Vec::new();
-    for segment in raw.into_iter().skip(skip) {
+    let mut segments = rest.split('/').enumerate().peekable();
+    while let Some((index, segment)) = segments.next() {
+        if segment.is_empty() {
+            if segments.peek().is_some() {
+                return Err(StaticPathError::BadSegment);
+            }
+            break;
+        }
+        if index < skip {
+            continue;
+        }
         let decoded = decode(segment)?;
         if decoded.first() == Some(&b'.') {
             return Err(StaticPathError::DotSegment);
+        }
+        if decoded.iter().any(|&b| b == b'/' || b == 0) {
+            return Err(StaticPathError::BadSegment);
         }
         out.push(decoded);
     }
@@ -113,6 +132,35 @@ mod tests {
             Err(StaticPathError::DotSegment)
         );
         assert_eq!(relative_segments("/.x/y", 1), Ok(vec![b"y".to_vec()]));
+    }
+
+    #[test]
+    fn rejects_dot_after_decoding() {
+        for (path, skip) in [("/%2ehidden", 0), ("/a/%2E%2e", 0), ("/x/%2Ey", 1)] {
+            assert_eq!(
+                relative_segments(path, skip),
+                Err(StaticPathError::DotSegment),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_segments_are_errors() {
+        for path in [
+            "", "a", "a/b", "/a//b", "//", "///", "/%2F", "/a%2Fb", "/%00", "/a/b%00",
+        ] {
+            assert_eq!(
+                relative_segments(path, 0),
+                Err(StaticPathError::BadSegment),
+                "{path}"
+            );
+        }
+        // Skipped segments are checked too.
+        assert_eq!(
+            relative_segments("/a//b", 2),
+            Err(StaticPathError::BadSegment)
+        );
     }
 
     #[test]
