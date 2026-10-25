@@ -5,8 +5,9 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::core::Interest;
-use crate::file::{Chunk, FileId};
+use crate::file::{Chunk, FileId, RootId};
 use crate::http::request::{HeadParser, Persistence};
+use crate::http::response::BodyMode;
 use crate::http::static_path::TrailingSlash;
 use crate::log::RequestSummary;
 use crate::time::Instant;
@@ -41,6 +42,15 @@ pub(crate) enum UnreadBody {
     Pending,
 }
 
+/// Which open of a static request is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenStep {
+    /// The requested path itself.
+    Requested,
+    /// The `index.html` of the requested directory (path ended in `/`).
+    Index,
+}
+
 /// Where a connection is in its lifecycle. Each variant carries only the data
 /// valid in that state, including the instant at which it times out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,14 +76,17 @@ pub(crate) enum ConnState {
         buffered: usize,
         deadline: Instant,
     },
-    /// A body-less GET on a static route: `OpenFile` for `file` is in
-    /// flight. `content_type` comes from the requested name, `slash` says
-    /// whether the path ended in `/`; `persistence` and `buffered` as in
-    /// `Responding`. `deadline` is the send idle deadline.
+    /// A body-less GET or HEAD on a static route: `OpenFile` for `file` is
+    /// in flight, for the requested path or its directory's index (`step`).
+    /// `slash` says whether the path ended in `/`; `body` is `HeadOnly` for
+    /// HEAD; `persistence` and `buffered` as in `Responding`. `deadline` is
+    /// the send idle deadline. The request itself is in
+    /// `Conn::static_request`.
     OpeningFile {
         file: FileId,
-        content_type: &'static str,
         slash: TrailingSlash,
+        step: OpenStep,
+        body: BodyMode,
         persistence: Persistence,
         buffered: usize,
         deadline: Instant,
@@ -133,6 +146,19 @@ impl ConnState {
     }
 }
 
+/// A request being answered from a static root, kept while its file is
+/// opened.
+#[derive(Debug)]
+pub(crate) struct StaticRequest {
+    /// Logged once the outcome of the open is known.
+    pub(crate) summary: RequestSummary,
+    /// The raw query, kept for a redirect.
+    pub(crate) query: Option<String>,
+    pub(crate) root: RootId,
+    /// The relative segments of the path being opened.
+    pub(crate) path: Vec<Vec<u8>>,
+}
+
 /// One open connection. Dropping it frees both buffers.
 #[derive(Debug)]
 pub(crate) struct Conn {
@@ -146,9 +172,9 @@ pub(crate) struct Conn {
     pub(crate) recv: Box<[u8]>,
     /// Bytes waiting to be written, at most `SEND_CAPACITY`.
     pub(crate) send: Vec<u8>,
-    /// The request being answered from a file, logged once the outcome of
-    /// the open is known.
-    pub(crate) request: Option<RequestSummary>,
+    /// The request being answered from a static root, while its file is
+    /// opened.
+    pub(crate) static_request: Option<StaticRequest>,
 }
 
 impl Conn {
@@ -165,7 +191,7 @@ impl Conn {
             interest: Interest::None,
             recv: vec![0; recv_capacity].into_boxed_slice(),
             send: Vec::with_capacity(SEND_CAPACITY),
-            request: None,
+            static_request: None,
         }
     }
 

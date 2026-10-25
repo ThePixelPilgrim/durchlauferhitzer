@@ -1,5 +1,5 @@
 //! Response heads: fixed plain-text responses (status line plus short text
-//! body) and the head of a `200 OK` file response.
+//! body), `301` redirects and the head of a `200 OK` file response.
 
 use super::request::Persistence;
 use super::status::Status;
@@ -12,6 +12,7 @@ pub enum BodyMode {
 
 /// Appends a fixed response for `status` to `out` (existing bytes are kept).
 /// `Content-Length` always describes the full body, also for `HeadOnly`.
+/// A `405` names the allowed methods (`Allow: GET, HEAD`).
 pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, out: &mut Vec<u8>) {
     let text = format!("{} {}\n", status.code(), status.reason());
     let mut head = format!(
@@ -20,6 +21,20 @@ pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, ou
         status.reason(),
         text.len()
     );
+    match status {
+        Status::MethodNotAllowed => head.push_str("Allow: GET, HEAD\r\n"),
+        Status::Ok
+        | Status::MovedPermanently
+        | Status::BadRequest
+        | Status::NotFound
+        | Status::RequestTimeout
+        | Status::ContentTooLarge
+        | Status::UriTooLong
+        | Status::RequestHeaderFieldsTooLarge
+        | Status::NotImplemented
+        | Status::ServiceUnavailable
+        | Status::HttpVersionNotSupported => {}
+    }
     match persistence {
         Persistence::Close => head.push_str("Connection: close\r\n"),
         Persistence::KeepAlive => {}
@@ -28,6 +43,34 @@ pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, ou
     out.extend_from_slice(head.as_bytes());
     match body {
         BodyMode::Full => out.extend_from_slice(text.as_bytes()),
+        BodyMode::HeadOnly => {}
+    }
+}
+
+/// Body of every redirect.
+const REDIRECT_BODY: &str = "301 Moved Permanently\n";
+
+/// Appends a `301 Moved Permanently` response pointing at `location` (a
+/// validated ASCII path, plus `?query`) to `out` (existing bytes are kept).
+/// The body is fixed; `Content-Length` describes it also for `HeadOnly`.
+pub fn render_redirect(
+    location: &str,
+    persistence: Persistence,
+    body: BodyMode,
+    out: &mut Vec<u8>,
+) {
+    let mut head = format!(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\n",
+        REDIRECT_BODY.len()
+    );
+    match persistence {
+        Persistence::Close => head.push_str("Connection: close\r\n"),
+        Persistence::KeepAlive => {}
+    }
+    head.push_str("\r\n");
+    out.extend_from_slice(head.as_bytes());
+    match body {
+        BodyMode::Full => out.extend_from_slice(REDIRECT_BODY.as_bytes()),
         BodyMode::HeadOnly => {}
     }
 }
@@ -130,6 +173,60 @@ mod tests {
         assert_eq!(
             out,
             b"xHTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 0\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn renders_405_with_allow() {
+        let mut out = Vec::new();
+        render_fixed(
+            Status::MethodNotAllowed,
+            Persistence::KeepAlive,
+            BodyMode::Full,
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 23\r\nX-Content-Type-Options: nosniff\r\nAllow: GET, HEAD\r\n\r\n405 Method Not Allowed\n"
+        );
+    }
+
+    #[test]
+    fn only_405_carries_allow() {
+        for status in [
+            Status::NotFound,
+            Status::ContentTooLarge,
+            Status::NotImplemented,
+        ] {
+            let mut out = Vec::new();
+            render_fixed(status, Persistence::Close, BodyMode::Full, &mut out);
+            let text = String::from_utf8(out).unwrap();
+            assert!(!text.contains("Allow:"), "{text}");
+        }
+    }
+
+    #[test]
+    fn renders_redirect_keep_alive() {
+        let mut out = b"x".to_vec();
+        render_redirect(
+            "/docs/?x=1",
+            Persistence::KeepAlive,
+            BodyMode::Full,
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            b"xHTTP/1.1 301 Moved Permanently\r\nLocation: /docs/?x=1\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 22\r\nX-Content-Type-Options: nosniff\r\n\r\n301 Moved Permanently\n"
+        );
+    }
+
+    #[test]
+    fn renders_redirect_close_head_only() {
+        let mut out = Vec::new();
+        render_redirect("/a/", Persistence::Close, BodyMode::HeadOnly, &mut out);
+        assert_eq!(
+            out,
+            b"HTTP/1.1 301 Moved Permanently\r\nLocation: /a/\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 22\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
         );
     }
 }

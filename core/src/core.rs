@@ -76,6 +76,10 @@
 //!   `FileFailed`, even after the connection that asked closed: the core
 //!   never closes a file whose open is unanswered. It answers a late
 //!   `FileOpened` with `CloseFile` and ignores a late `FileFailed`.
+//! - A connection holds at most one file id at a time: for a directory
+//!   requested with a trailing `/`, the core closes the directory before it
+//!   opens its `index.html` under a new id. A HEAD request's file is closed
+//!   right after its head is queued, without any `Readahead`.
 //! - A file is open from its `FileOpened` until the core's `CloseFile`; a
 //!   failed open leaves nothing to close. `CloseFile` comes exactly once per
 //!   opened file, also when its connection closes.
@@ -155,7 +159,8 @@ use std::path::PathBuf;
 
 use crate::config::{Config, Limits, Route, RouteAction};
 use crate::conn::{
-    Conn, ConnState, Counted, LINGER_SCRATCH, LINGER_TIMEOUT, SEND_CAPACITY, UnreadBody,
+    Conn, ConnState, Counted, LINGER_SCRATCH, LINGER_TIMEOUT, OpenStep, SEND_CAPACITY,
+    StaticRequest, UnreadBody,
 };
 use crate::file::{
     Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileSegment, FileStamp, FileTable,
@@ -165,7 +170,7 @@ use crate::http::mime::content_type;
 use crate::http::request::{
     BodyFraming, HeadLimits, HeadParser, HttpError, Method, ParseStatus, Persistence, RequestHead,
 };
-use crate::http::response::{BodyMode, render_file_head, render_fixed};
+use crate::http::response::{BodyMode, render_file_head, render_fixed, render_redirect};
 use crate::http::static_path::{TrailingSlash, relative_segments, trailing_slash};
 use crate::http::status::Status;
 use crate::log::{LimitKind, Log, RejectReason, RequestSummary, TimeoutKind};
@@ -357,7 +362,7 @@ impl Core {
             }
             Event::TimerFired => self.timer_fired(now, actions),
             Event::FileOpened { file, meta } => self.file_opened(now, file, meta, actions),
-            Event::FileFailed { file, error: _ } => self.file_failed(file, actions),
+            Event::FileFailed { file, error } => self.file_failed(now, file, error, actions),
             Event::ChunkReady { file, stamp } => self.chunk_ready(now, file, stamp, actions),
             Event::FileSent { conn, len } => self.file_sent(now, conn, len, actions),
         }
@@ -604,8 +609,9 @@ impl Core {
         };
         let ConnState::OpeningFile {
             file: opening,
-            content_type,
             slash,
+            step,
+            body,
             persistence,
             buffered,
             ..
@@ -616,67 +622,146 @@ impl Core {
         if opening != file {
             return;
         }
-        let size = meta.stamp.size;
-        let status = match (meta.kind, slash) {
-            (FileKind::Regular, TrailingSlash::Absent) => Status::Ok,
-            // Not served yet in this stage.
-            (FileKind::Regular, TrailingSlash::Present)
-            | (FileKind::Directory | FileKind::Other, _) => Status::NotImplemented,
+        let outcome = match (meta.kind, step, slash) {
+            (FileKind::Regular, OpenStep::Requested, TrailingSlash::Absent)
+            | (
+                FileKind::Regular,
+                OpenStep::Index,
+                TrailingSlash::Present | TrailingSlash::Absent,
+            ) => Opened::Serve,
+            (FileKind::Directory, OpenStep::Requested, TrailingSlash::Absent) => {
+                Opened::NotServed(NotServed::Redirect)
+            }
+            (FileKind::Directory, OpenStep::Requested, TrailingSlash::Present) => Opened::OpenIndex,
+            (FileKind::Regular, OpenStep::Requested, TrailingSlash::Present)
+            | (
+                FileKind::Directory,
+                OpenStep::Index,
+                TrailingSlash::Present | TrailingSlash::Absent,
+            )
+            | (
+                FileKind::Other,
+                OpenStep::Requested | OpenStep::Index,
+                TrailingSlash::Present | TrailingSlash::Absent,
+            ) => Opened::NotServed(NotServed::NotFound),
         };
-        actions.push(Action::Log(Log::Response {
-            conn,
-            peer: c.peer,
-            status,
-            request: c.request.take(),
-        }));
-        match (meta.kind, slash) {
-            (FileKind::Regular, TrailingSlash::Absent) => {
+        match outcome {
+            Opened::Serve => {
+                let size = meta.stamp.size;
+                let request = c.static_request.take();
+                let name = request
+                    .as_ref()
+                    .and_then(|r| r.path.last())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let content_type = content_type(name);
+                actions.push(Action::Log(Log::Response {
+                    conn,
+                    peer: c.peer,
+                    status: Status::Ok,
+                    request: request.map(|r| r.summary),
+                }));
                 render_file_head(content_type, size, persistence, &mut c.send);
-                let chunk = if size == 0 {
-                    Chunk::Done
-                } else {
-                    let end = size.min(FILE_CHUNK);
-                    actions.push(Action::Readahead {
-                        file,
-                        offset: 0,
-                        len: end,
-                    });
-                    Chunk::Reading { end }
-                };
-                c.state = ConnState::SendingFile {
-                    file,
-                    size,
-                    offset: 0,
-                    chunk,
+                match body {
+                    BodyMode::Full => {
+                        let chunk = if size == 0 {
+                            Chunk::Done
+                        } else {
+                            let end = size.min(FILE_CHUNK);
+                            actions.push(Action::Readahead {
+                                file,
+                                offset: 0,
+                                len: end,
+                            });
+                            Chunk::Reading { end }
+                        };
+                        c.state = ConnState::SendingFile {
+                            file,
+                            size,
+                            offset: 0,
+                            chunk,
+                            persistence,
+                            buffered,
+                            deadline,
+                        };
+                    }
+                    // HEAD: the head is all; nothing is read.
+                    BodyMode::HeadOnly => {
+                        self.files.release(file);
+                        actions.push(Action::CloseFile { file });
+                        c.state = ConnState::Responding {
+                            persistence,
+                            unread_body: UnreadBody::None,
+                            buffered,
+                            deadline,
+                        };
+                    }
+                }
+            }
+            Opened::OpenIndex => {
+                // One file per connection: the directory goes first.
+                self.files.release(file);
+                actions.push(Action::CloseFile { file });
+                match c.static_request.as_mut() {
+                    Some(request) => {
+                        request.path.push(INDEX.to_vec());
+                        let next = self.files.allocate(conn);
+                        actions.push(Action::OpenFile {
+                            file: next,
+                            root: request.root,
+                            path: request.path.clone(),
+                        });
+                        c.state = ConnState::OpeningFile {
+                            file: next,
+                            slash,
+                            step: OpenStep::Index,
+                            body,
+                            persistence,
+                            buffered,
+                            deadline,
+                        };
+                    }
+                    // Every open has its request; answer 404 should it not.
+                    None => not_served(
+                        c,
+                        conn,
+                        NotServed::NotFound,
+                        body,
+                        persistence,
+                        buffered,
+                        deadline,
+                        actions,
+                    ),
+                }
+            }
+            Opened::NotServed(reason) => {
+                self.files.release(file);
+                actions.push(Action::CloseFile { file });
+                not_served(
+                    c,
+                    conn,
+                    reason,
+                    body,
                     persistence,
                     buffered,
                     deadline,
-                };
-            }
-            (FileKind::Regular, TrailingSlash::Present)
-            | (FileKind::Directory | FileKind::Other, _) => {
-                self.files.release(file);
-                actions.push(Action::CloseFile { file });
-                render_fixed(
-                    Status::NotImplemented,
-                    Persistence::Close,
-                    BodyMode::Full,
-                    &mut c.send,
+                    actions,
                 );
-                c.state = ConnState::Responding {
-                    persistence: Persistence::Close,
-                    unread_body: UnreadBody::None,
-                    buffered,
-                    deadline,
-                };
             }
         }
         self.sync_interest(conn, actions);
     }
 
-    /// An open, readahead or sendfile of `file` failed: close its
-    /// connection (and the file, if it was open).
-    fn file_failed(&mut self, file: FileId, actions: &mut Vec<Action>) {
+    /// An open, readahead or sendfile of `file` failed. A path that cannot
+    /// be opened is answered 404; anything else closes the connection (and
+    /// the file, if it was open).
+    fn file_failed(
+        &mut self,
+        now: Instant,
+        file: FileId,
+        error: FileError,
+        actions: &mut Vec<Action>,
+    ) {
         let conn = match self.files.owner(file) {
             Owner::Conn(conn) => conn,
             Owner::Orphan => {
@@ -685,11 +770,44 @@ impl Core {
             }
             Owner::Unknown => return,
         };
-        let Some(c) = self.conns.get(&conn) else {
+        let deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
         if c.state.file() != Some(file) {
             return;
+        }
+        if let ConnState::OpeningFile {
+            body,
+            persistence,
+            buffered,
+            ..
+        } = c.state
+        {
+            match error {
+                // Missing, symlinked, denied or otherwise unopenable: all
+                // look the same to the client.
+                FileError::NotFound
+                | FileError::Symlink
+                | FileError::PermissionDenied
+                | FileError::Other => {
+                    self.files.release(file);
+                    not_served(
+                        c,
+                        conn,
+                        NotServed::NotFound,
+                        body,
+                        persistence,
+                        buffered,
+                        deadline,
+                        actions,
+                    );
+                    self.sync_interest(conn, actions);
+                    return;
+                }
+                // Not an answer an open can give: treat as a broken driver.
+                FileError::Truncated | FileError::Changed => {}
+            }
         }
         if let Some(c) = self.forget(conn, actions) {
             // A failed open leaves nothing open to close, and its answer is
@@ -1102,27 +1220,113 @@ fn finish(
     }
 }
 
-/// Where a body-less GET on a static route is served from: the root's id
-/// and the path's relative segments. `None` for anything this stage does
-/// not serve from a file.
-fn static_target(
-    route: &Route,
-    head: &RequestHead,
-    unread_body: UnreadBody,
-    static_roots: &[PathBuf],
-) -> Option<(RootId, Vec<Vec<u8>>)> {
+/// The name served for a directory requested with a trailing `/`.
+const INDEX: &[u8] = b"index.html";
+
+/// What became of an opened static path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opened {
+    /// A regular file to send (or, for HEAD, describe).
+    Serve,
+    /// A directory requested with `/`: open its `index.html` next.
+    OpenIndex,
+    NotServed(NotServed),
+}
+
+/// Why a static request is answered without a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotServed {
+    /// A directory requested without `/`: 301 to the path plus `/`.
+    Redirect,
+    NotFound,
+}
+
+/// Close out `c`'s static request without a file: a 301 to the slash form
+/// of its path (query kept), or a 404. Logged once, with the raw path.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the state fields of the connection being answered"
+)]
+fn not_served(
+    c: &mut Conn,
+    conn: ConnId,
+    reason: NotServed,
+    body: BodyMode,
+    persistence: Persistence,
+    buffered: usize,
+    deadline: Instant,
+    actions: &mut Vec<Action>,
+) {
+    let request = c.static_request.take();
+    let status = match (reason, &request) {
+        (NotServed::Redirect, Some(request)) => {
+            let mut location = format!("{}/", request.summary.path);
+            if let Some(query) = &request.query {
+                location.push('?');
+                location.push_str(query);
+            }
+            render_redirect(&location, persistence, body, &mut c.send);
+            Status::MovedPermanently
+        }
+        (NotServed::Redirect, None) | (NotServed::NotFound, Some(_) | None) => {
+            render_fixed(Status::NotFound, persistence, body, &mut c.send);
+            Status::NotFound
+        }
+    };
+    actions.push(Action::Log(Log::Response {
+        conn,
+        peer: c.peer,
+        status,
+        request: request.map(|r| r.summary),
+    }));
+    c.state = ConnState::Responding {
+        persistence,
+        unread_body: UnreadBody::None,
+        buffered,
+        deadline,
+    };
+}
+
+/// How a request on a matched route is answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Plan {
+    /// Open `path` (relative segments) beneath static root `root`.
+    Open { root: RootId, path: Vec<Vec<u8>> },
+    /// Answer `status` right away.
+    Respond(Status, Persistence),
+}
+
+/// The static route rules that need no file: method, body, path.
+fn plan(route: &Route, head: &RequestHead, static_roots: &[PathBuf]) -> Plan {
     let root = match &route.action {
         RouteAction::Static { root } => root,
-        RouteAction::Proxy(_) => return None,
+        // Not implemented yet in this stage: answered 501 and closed.
+        RouteAction::Proxy(_) => return Plan::Respond(Status::NotImplemented, Persistence::Close),
     };
-    match (&head.method, unread_body) {
-        (Method::Get, UnreadBody::None) => {}
-        (Method::Get, UnreadBody::Pending) | (Method::Head | Method::Other(_), _) => return None,
+    match &head.method {
+        Method::Get | Method::Head => {}
+        Method::Other(_) => return Plan::Respond(Status::MethodNotAllowed, head.persistence),
     }
-    let index = static_roots.iter().position(|r| r == root)?;
-    let root = RootId(u32::try_from(index).ok()?);
-    let path = relative_segments(&head.target.path, route.segments.len()).ok()?;
-    Some((root, path))
+    match head.body {
+        BodyFraming::None => {}
+        BodyFraming::Length(_) | BodyFraming::Chunked => {
+            return Plan::Respond(Status::ContentTooLarge, Persistence::Close);
+        }
+    }
+    let Some(root) = static_roots
+        .iter()
+        .position(|r| r == root)
+        .and_then(|index| u32::try_from(index).ok())
+        .map(RootId)
+    else {
+        // Every configured root is listed; unreachable in practice.
+        return Plan::Respond(Status::NotFound, head.persistence);
+    };
+    // Dotfiles (and paths no file can have) look like missing files.
+    match relative_segments(&head.target.path, route.segments.len()) {
+        Ok(path) => Plan::Open { root, path },
+        Err(_) => Plan::Respond(Status::NotFound, head.persistence),
+    }
 }
 
 /// Answer a complete request head on `c`, which then responds until
@@ -1148,44 +1352,50 @@ fn respond(
         BodyFraming::None => UnreadBody::None,
         BodyFraming::Length(_) | BodyFraming::Chunked => UnreadBody::Pending,
     };
-    let target = route
-        .ok()
-        .and_then(|route| static_target(route, &head, unread_body, static_roots));
-    if let Some((root, path)) = target {
-        let name = path.last().map(Vec::as_slice).unwrap_or_default();
-        let content_type = content_type(name);
-        let slash = trailing_slash(&head.target.path);
-        let file = files.allocate(conn);
-        actions.push(Action::OpenFile { file, root, path });
-        c.state = ConnState::OpeningFile {
-            file,
-            content_type,
-            slash,
-            persistence: head.persistence,
-            buffered: leftover,
-            deadline: send_deadline,
-        };
-        c.request = Some(RequestSummary {
-            method: head.method,
-            host: head.host,
-            path: head.target.path,
-        });
-        return;
-    }
-    // Everything else on a matched route is not implemented yet in this
-    // stage: answered 501 and the connection closed.
+    // Every response to a HEAD request is head only.
+    let body = match head.method {
+        Method::Head => BodyMode::HeadOnly,
+        Method::Get | Method::Other(_) => BodyMode::Full,
+    };
     let (status, persistence) = match route {
-        Ok(_) => (Status::NotImplemented, Persistence::Close),
         Err(_) => (Status::NotFound, head.persistence),
+        Ok(route) => match plan(route, &head, static_roots) {
+            Plan::Open { root, path } => {
+                let slash = trailing_slash(&head.target.path);
+                let file = files.allocate(conn);
+                actions.push(Action::OpenFile {
+                    file,
+                    root,
+                    path: path.clone(),
+                });
+                c.state = ConnState::OpeningFile {
+                    file,
+                    slash,
+                    step: OpenStep::Requested,
+                    body,
+                    persistence: head.persistence,
+                    buffered: leftover,
+                    deadline: send_deadline,
+                };
+                c.static_request = Some(StaticRequest {
+                    summary: RequestSummary {
+                        method: head.method,
+                        host: head.host,
+                        path: head.target.path,
+                    },
+                    query: head.target.query,
+                    root,
+                    path,
+                });
+                return;
+            }
+            Plan::Respond(status, persistence) => (status, persistence),
+        },
     };
     // An unread body leaves the stream unframed: it cannot be reused.
     let persistence = match unread_body {
         UnreadBody::None => persistence,
         UnreadBody::Pending => Persistence::Close,
-    };
-    let body = match head.method {
-        Method::Head => BodyMode::HeadOnly,
-        Method::Get | Method::Other(_) => BodyMode::Full,
     };
     render_fixed(status, persistence, body, &mut c.send);
     actions.push(Action::Log(Log::Response {
@@ -1760,7 +1970,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_is_closed_and_answered_501() {
+    fn directory_without_slash_is_closed_and_redirected() {
         let mut core = files_core();
         let now = secs(0);
         let conn = ConnId(1);
@@ -1772,12 +1982,78 @@ mod tests {
             stamp: stamp(0),
         };
         core.handle(now, Event::FileOpened { file, meta }, &mut actions);
-        assert!(actions.contains(&Action::CloseFile { file }), "{actions:?}");
+        assert_eq!(
+            actions,
+            [
+                Action::CloseFile { file },
+                Action::Log(Log::Response {
+                    conn,
+                    peer: PEER,
+                    status: Status::MovedPermanently,
+                    request: Some(RequestSummary {
+                        method: Method::Get,
+                        host: Some("a.test".to_owned()),
+                        path: "/x/f.txt".to_owned(),
+                    }),
+                }),
+                Action::SetInterest {
+                    conn,
+                    interest: Interest::Write
+                },
+            ]
+        );
+        let mut expected = Vec::new();
+        crate::http::response::render_redirect(
+            "/x/f.txt/",
+            Persistence::KeepAlive,
+            BodyMode::Full,
+            &mut expected,
+        );
+        assert_eq!(core.send_buffer(conn), expected.as_slice());
+        assert_eq!(core.files.len(), 0);
+    }
+
+    #[test]
+    fn directory_with_slash_opens_its_index_after_closing_it() {
+        let mut core = files_core();
+        let now = secs(0);
+        let conn = ConnId(1);
+        request(
+            &mut core,
+            now,
+            1,
+            b"GET /x/d/ HTTP/1.1\r\nHost: a.test\r\n\r\n",
+        );
+        let mut actions = Vec::new();
+        let directory = FileMeta {
+            kind: FileKind::Directory,
+            stamp: stamp(0),
+        };
+        let file = FileId(1);
+        let meta = directory;
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        assert_eq!(
+            actions,
+            [
+                Action::CloseFile { file },
+                Action::OpenFile {
+                    file: FileId(2),
+                    root: RootId(1),
+                    path: vec![b"d".to_vec(), b"index.html".to_vec()],
+                },
+            ]
+        );
+        assert!(core.send_buffer(conn).is_empty());
+        // The index is a directory too: 404.
+        actions.clear();
+        let file = FileId(2);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        assert_eq!(actions.first(), Some(&Action::CloseFile { file }));
         assert!(
             actions.iter().any(|a| matches!(
                 a,
                 Action::Log(Log::Response {
-                    status: Status::NotImplemented,
+                    status: Status::NotFound,
                     ..
                 })
             )),
@@ -1785,28 +2061,114 @@ mod tests {
         );
         let mut expected = Vec::new();
         render_fixed(
-            Status::NotImplemented,
-            Persistence::Close,
+            Status::NotFound,
+            Persistence::KeepAlive,
             BodyMode::Full,
             &mut expected,
         );
         assert_eq!(core.send_buffer(conn), expected.as_slice());
+        assert_eq!(core.files.len(), 0);
+    }
+
+    #[test]
+    fn head_of_a_file_sends_the_head_and_closes_it() {
+        let mut core = files_core();
+        let now = secs(0);
+        let conn = ConnId(1);
+        let file = FileId(1);
+        request(
+            &mut core,
+            now,
+            1,
+            b"HEAD /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n",
+        );
+        let mut actions = Vec::new();
+        let meta = regular(1 << 40);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        assert_eq!(
+            actions,
+            [
+                Action::Log(Log::Response {
+                    conn,
+                    peer: PEER,
+                    status: Status::Ok,
+                    request: Some(RequestSummary {
+                        method: Method::Head,
+                        host: Some("a.test".to_owned()),
+                        path: "/x/f.txt".to_owned(),
+                    }),
+                }),
+                Action::CloseFile { file },
+                Action::SetInterest {
+                    conn,
+                    interest: Interest::Write
+                },
+            ]
+        );
+        let mut head = Vec::new();
+        crate::http::response::render_file_head(
+            "text/plain; charset=utf-8",
+            1 << 40,
+            Persistence::KeepAlive,
+            &mut head,
+        );
+        assert_eq!(core.send_buffer(conn), head.as_slice());
+        assert_eq!(core.send_file(conn), None);
+        actions.clear();
+        let len = head.len();
+        core.handle(now, Event::Sent { conn, len }, &mut actions);
+        assert_eq!(
+            actions,
+            [Action::SetInterest {
+                conn,
+                interest: Interest::Read
+            }]
+        );
+        assert_eq!(core.files.len(), 0);
     }
 
     #[test]
     fn file_failure_closes_the_connection_and_its_file() {
         let mut core = files_core();
         let now = secs(0);
+        // Failed open: 404, nothing to close, the connection stays.
         let file = FileId(1);
         let conn = ConnId(1);
-        // Failed open: no file to close.
-        request(&mut core, now, 1, GET_F);
         let mut actions = Vec::new();
-        let error = FileError::NotFound;
-        core.handle(now, Event::FileFailed { file, error }, &mut actions);
-        assert_eq!(actions, [Action::Close { conn }]);
+        for error in [
+            FileError::NotFound,
+            FileError::Symlink,
+            FileError::PermissionDenied,
+            FileError::Other,
+        ] {
+            let mut core = files_core();
+            request(&mut core, now, 1, GET_F);
+            actions.clear();
+            core.handle(now, Event::FileFailed { file, error }, &mut actions);
+            assert_eq!(
+                actions,
+                [
+                    Action::Log(Log::Response {
+                        conn,
+                        peer: PEER,
+                        status: Status::NotFound,
+                        request: Some(RequestSummary {
+                            method: Method::Get,
+                            host: Some("a.test".to_owned()),
+                            path: "/x/f.txt".to_owned(),
+                        }),
+                    }),
+                    Action::SetInterest {
+                        conn,
+                        interest: Interest::Write
+                    },
+                ],
+                "{error:?}"
+            );
+            assert_eq!(core.files.len(), 0);
+            assert_eq!(core.counted, 1);
+        }
         // Failed readahead: the open file is closed too.
-        let file = FileId(2);
         let conn = ConnId(2);
         request(&mut core, now, 2, GET_F);
         let meta = regular(3);
@@ -1884,37 +2246,47 @@ mod tests {
     }
 
     #[test]
-    fn only_body_less_get_of_a_file_opens_it() {
+    fn static_rules_decided_before_opening() {
         let mut core = files_core();
         let now = secs(0);
-        for (id, req) in [
+        for (id, req, status) in [
             (
                 1,
                 b"HEAD /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n".as_slice(),
+                None,
             ),
-            (2, b"POST /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n"),
-            (3, b"GET /x/.f HTTP/1.1\r\nHost: a.test\r\n\r\n"),
+            (
+                2,
+                b"POST /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n",
+                Some(Status::MethodNotAllowed),
+            ),
+            (
+                3,
+                b"GET /x/.f HTTP/1.1\r\nHost: a.test\r\n\r\n",
+                Some(Status::NotFound),
+            ),
             (
                 4,
                 b"GET /x/f HTTP/1.1\r\nHost: a.test\r\nContent-Length: 1\r\n\r\nx",
+                Some(Status::ContentTooLarge),
             ),
-            (5, b"GET /p/f HTTP/1.1\r\nHost: b.test\r\n\r\n"),
+            (
+                5,
+                b"GET /p/f HTTP/1.1\r\nHost: b.test\r\n\r\n",
+                Some(Status::NotImplemented),
+            ),
         ] {
             let actions = request(&mut core, now, id, req);
-            assert!(
-                !actions.iter().any(|a| matches!(a, Action::OpenFile { .. })),
-                "{id}: {actions:?}"
-            );
-            assert!(
-                actions.iter().any(|a| matches!(
-                    a,
-                    Action::Log(Log::Response {
-                        status: Status::NotImplemented,
-                        ..
-                    })
-                )),
-                "{id}: {actions:?}"
-            );
+            let opened = actions.iter().any(|a| matches!(a, Action::OpenFile { .. }));
+            let logged = actions.iter().find_map(|a| {
+                if let Action::Log(Log::Response { status, .. }) = a {
+                    Some(*status)
+                } else {
+                    None
+                }
+            });
+            assert_eq!(opened, status.is_none(), "{id}: {actions:?}");
+            assert_eq!(logged, status, "{id}: {actions:?}");
         }
     }
 

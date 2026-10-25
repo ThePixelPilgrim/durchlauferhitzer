@@ -209,6 +209,12 @@ impl Sim {
         self.fs.add_symlink(root, path);
     }
 
+    /// A FIFO, socket or device `path` under `root`: it opens as
+    /// `FileKind::Other`.
+    pub fn add_special(&mut self, root: &str, path: &str) {
+        self.fs.add_special(root, path);
+    }
+
     /// Opening `path` under `root`, or anything beneath it, fails with
     /// permission denied.
     pub fn deny(&mut self, root: &str, path: &str) {

@@ -18,6 +18,8 @@ pub(crate) enum Node {
     File(SimFile),
     Dir,
     Symlink,
+    /// A FIFO, socket or device: opens as `FileKind::Other`.
+    Special,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +112,11 @@ impl Fs {
         self.insert(root, path, Node::Symlink);
     }
 
+    /// A non-regular, non-directory entry (FIFO, socket, device).
+    pub(crate) fn add_special(&mut self, root: &str, path: &str) {
+        self.insert(root, path, Node::Special);
+    }
+
     fn entry_mut(&mut self, root: &str, path: &str) -> &mut Entry {
         let key = key(path);
         match self.root_mut(root).get_mut(&key) {
@@ -125,7 +132,9 @@ impl Fs {
     fn file_mut(&mut self, root: &str, path: &str) -> &mut SimFile {
         match &mut self.entry_mut(root, path).node {
             Node::File(f) => f,
-            Node::Dir | Node::Symlink => panic!("{path} in sim root {root} is not a file"),
+            Node::Dir | Node::Symlink | Node::Special => {
+                panic!("{path} in sim root {root} is not a file")
+            }
         }
     }
 
@@ -173,7 +182,16 @@ impl Fs {
             match (&entry.node, last) {
                 (Node::Symlink, _) => return Err(FileError::Symlink),
                 (Node::Dir, false) => {}
-                (Node::File(_), false) => return Err(FileError::NotFound),
+                (Node::File(_) | Node::Special, false) => return Err(FileError::NotFound),
+                (Node::Special, true) => {
+                    return Ok(FileMeta {
+                        kind: FileKind::Other,
+                        stamp: FileStamp {
+                            size: 0,
+                            modified_ns: 0,
+                        },
+                    });
+                }
                 (Node::Dir, true) => return Ok(directory),
                 (Node::File(f), true) => {
                     return Ok(FileMeta {
@@ -190,7 +208,7 @@ impl Fs {
     pub(crate) fn file(&self, root: &str, key: &Key) -> Option<&SimFile> {
         match &self.roots.get(root)?.get(key)?.node {
             Node::File(f) => Some(f),
-            Node::Dir | Node::Symlink => None,
+            Node::Dir | Node::Symlink | Node::Special => None,
         }
     }
 }
@@ -213,7 +231,10 @@ mod tests {
         fs.add_symlink("/r", "link2");
         fs.add_file("/r", "secret/x", b"");
         fs.deny("/r", "secret");
+        fs.add_special("/r", "d/fifo");
         assert_eq!(kind(&fs, ""), Ok(FileKind::Directory));
+        assert_eq!(kind(&fs, "d/fifo"), Ok(FileKind::Other));
+        assert_eq!(kind(&fs, "d/fifo/x"), Err(FileError::NotFound));
         assert_eq!(kind(&fs, "d"), Ok(FileKind::Directory));
         assert_eq!(kind(&fs, "empty"), Ok(FileKind::Directory));
         assert_eq!(kind(&fs, "d/f.txt"), Ok(FileKind::Regular));

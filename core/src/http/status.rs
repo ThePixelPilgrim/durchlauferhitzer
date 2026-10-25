@@ -5,9 +5,12 @@ use super::request::HttpError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Ok,
+    MovedPermanently,
     BadRequest,
     NotFound,
+    MethodNotAllowed,
     RequestTimeout,
+    ContentTooLarge,
     UriTooLong,
     RequestHeaderFieldsTooLarge,
     NotImplemented,
@@ -20,8 +23,11 @@ impl Status {
         match self {
             Status::Ok => 200,
             Status::BadRequest => 400,
+            Status::MovedPermanently => 301,
             Status::NotFound => 404,
+            Status::MethodNotAllowed => 405,
             Status::RequestTimeout => 408,
+            Status::ContentTooLarge => 413,
             Status::UriTooLong => 414,
             Status::RequestHeaderFieldsTooLarge => 431,
             Status::NotImplemented => 501,
@@ -34,8 +40,11 @@ impl Status {
         match self {
             Status::Ok => "OK",
             Status::BadRequest => "Bad Request",
+            Status::MovedPermanently => "Moved Permanently",
             Status::NotFound => "Not Found",
+            Status::MethodNotAllowed => "Method Not Allowed",
             Status::RequestTimeout => "Request Timeout",
+            Status::ContentTooLarge => "Content Too Large",
             Status::UriTooLong => "URI Too Long",
             Status::RequestHeaderFieldsTooLarge => "Request Header Fields Too Large",
             Status::NotImplemented => "Not Implemented",
@@ -83,8 +92,11 @@ mod tests {
         let all = [
             (Status::Ok, 200, "OK"),
             (Status::BadRequest, 400, "Bad Request"),
+            (Status::MovedPermanently, 301, "Moved Permanently"),
             (Status::NotFound, 404, "Not Found"),
+            (Status::MethodNotAllowed, 405, "Method Not Allowed"),
             (Status::RequestTimeout, 408, "Request Timeout"),
+            (Status::ContentTooLarge, 413, "Content Too Large"),
             (Status::UriTooLong, 414, "URI Too Long"),
             (
                 Status::RequestHeaderFieldsTooLarge,
