@@ -66,6 +66,14 @@ The superpowers skills are vendored as project skills in `.claude/skills/`
 (see `.claude/skills/SUPERPOWERS-SOURCE.md`). Where a skill refers to
 `superpowers:<name>`, use the project skill `<name>`.
 
+## Requirements stay current (mandatory)
+
+- Whenever a new owner decision or mandate changes the product's behaviour or
+  constraints, add or update the matching requirement (with its ID and status)
+  in the design spec in the same commit as the change — before any plan,
+  brief or code relies on it. Retired requirements are marked as such, not
+  silently deleted. Process-only rules (like this file's) stay here.
+
 ## Reporting (mandatory)
 
 - Whenever a Markdown file is written and pushed, post its public GitHub URL
