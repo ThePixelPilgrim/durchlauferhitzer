@@ -195,16 +195,26 @@ reject.
 - No body is ever held whole. Each connection has fixed-size buffers; a
   50 GB transfer uses the same memory as a 5 KB one. Timeouts measure
   stalls, not total duration.
-- Backpressure with hysteresis: stop reading a side when its buffer is
-  full; resume only when it has drained below the low watermark (half).
-  This avoids tiny reads/writes and frequent short pauses (which push the
-  upstream TCP connection back into slow start).
+- Backpressure by fill, drain, refill: a body buffer is filled by one
+  read, then sent until it is completely empty, and only then read into
+  again (from offset 0, with its full capacity). There is no partial
+  compaction, so body bytes are never copied, and every read gets the whole
+  buffer, which rules out tiny reads/writes. While our buffer drains, the
+  kernel's socket buffers keep both TCP connections busy, so the pause is
+  one system call long — far below the ~200 ms idle that would push a
+  connection back into slow start. The strategy is internal to the core
+  (drivers only see "a slice to read into" / "a slice to send from"), so a
+  double-buffered variant (two halves taking turns, overlapping read and
+  send) can replace it in stage 7 if measurements show a gap. Leftover
+  bytes of a pipelined next request after a body end are moved to the
+  front once, as for request heads.
 - Write in large pieces with `TCP_NODELAY` set; never set `SO_RCVBUF` /
   `SO_SNDBUF` (keeps kernel autotuning).
 - Responses stream as soon as their headers are validated; chunked framing
   is validated chunk by chunk in flight.
-- Simulation tests assert bounded memory, intact bytes, watermark
-  behavior, and write sizes with bodies far larger than the buffers. TCP
+- Simulation tests assert bounded memory, intact bytes, the
+  fill-drain-refill pattern (body reads only into an empty buffer, each
+  offered the full capacity), and write sizes with bodies far larger than the buffers. TCP
   congestion behavior itself is measured in stage 7 over loopback with
   `tc netem` (delay, loss), including recovery after pauses.
 
@@ -280,7 +290,7 @@ reject.
 
 - **Stage 3 decisions** (details in the stage 3 plan's "Spec amendments"):
   upstream ids are core-allocated and backends are resolved by the driver at
-  startup; body bytes are forwarded without copying, straight from the
+  startup; body bytes are forwarded without copying (fill, drain, refill), straight from the
   receiving side's buffer; chunked framing is strict (no extensions, no
   non-empty trailers) and forwarded verbatim after validation; the core
   answers `Expect: 100-continue` itself (other `Expect` → 417); backend `1xx`
