@@ -91,6 +91,8 @@ mod tests {
             &b"a.tar.gz"[..],
             b"noext",
             b".x",
+            b".html",
+            b".css",
             b"",
             b"a.",
             b"a.\xff",
