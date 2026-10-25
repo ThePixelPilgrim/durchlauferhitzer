@@ -13,6 +13,8 @@ A new session should read this file first, then `CLAUDE.md`.
 
 Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ← **next**, 5 upstream interface + scripted backends, 6 request bodies, 7 response bodies, 8 timeouts/failure matrix, 9 randomized sim. Then the stage 3 whole-branch review, fixes, review record, merge to `main` (owner approves merges and pushes to `main`).
 
+Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…, consolidated 2026-10-25); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
+
 Key documents: spec `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md` (binding), crate READMEs `core/README.md`, `sim/README.md`, example config `examples/durchlauferhitzer.conf` (a test keeps it loadable).
 
 ## Open decision before Task 4

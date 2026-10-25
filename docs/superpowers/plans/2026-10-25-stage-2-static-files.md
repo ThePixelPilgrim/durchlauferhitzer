@@ -12,6 +12,8 @@
 
 ## Spec amendments (decided while planning; listed for the owner's review)
 
+Folded into the spec as FR-STATIC-01, -03, -05, -06, -09, -12, -14, -16, FR-HTTP-20, -21, FR-CFG-19 and FR-CONN-08 on 2026-10-25 (amendment n → 1: FR-STATIC-01; 2: FR-STATIC-05/06; 3: FR-STATIC-09; 4: FR-HTTP-20; 5: FR-HTTP-21; 6: FR-STATIC-16; 7: FR-STATIC-14, FR-CFG-19; 8: FR-STATIC-12). The spec is binding; the text below is kept as the record.
+
 1. **Static routes strip their own prefix** (alias semantics): on `path /assets { static /srv/assets; }`, `/assets/a.css` serves `/srv/assets/a.css`.
 2. **A directory requested without a trailing `/`** gets `301 Moved Permanently` with `Location: <path>/` (plus the original query). With the `/`, its `index.html` is served if present, else 404.
 3. **Permission denied, symlinks, dotfiles, missing files, non-regular files** (devices, sockets, FIFOs) → all 404, so the response does not reveal which.

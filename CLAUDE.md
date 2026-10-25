@@ -2,6 +2,8 @@
 
 New session? Read `docs/superpowers/HANDOFF.md` first — it says where work stands and what is next.
 
+Requirements live in the design spec (`docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md`) with stable IDs (FR-…, NFR-…, DRV-…); plans and reviews cite those IDs, and a new owner decision is written into the spec before it is cited.
+
 ## Model roles (mandatory)
 
 - **Fable never does implementation work itself.** When the session runs on

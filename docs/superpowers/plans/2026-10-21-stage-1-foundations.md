@@ -11,6 +11,8 @@
 **Spec:** `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md` — read it before any task.
 
 > **Note:** Task 11 (at the end) supersedes earlier task text on `EmptyValue`, `StripPrefixNotPrefix`, string route prefixes and `strip_prefix <value>`. The spec is the current reference.
+>
+> **Spec amendments** (Tasks 1b, 1c, 11): folded into the spec as FR-CFG-02, -03, -09, -10, -13, -17, -21 and FR-ROUTE-03…05 on 2026-10-25.
 
 ## Global Constraints
 
