@@ -149,18 +149,26 @@ reject.
   decodes to an unreserved character (ALPHA, DIGIT, `-`, `.`, `_`, `~`,
   in either hex case, e.g. `/%61ssets`): RFC 3986 treats `%61` and `a` as
   the same, so allowing both spellings would let a request route past a
-  more specific route. The query is not subject to this rule. After this
-  check the raw path is canonical (only the hex case of the remaining
-  escapes may vary); routing and forwarding use it as-is, static serving
-  percent-decodes it. Configured route paths follow the same rules.
+  more specific route. The query is not subject to this rule. A `;` in
+  the path is rejected (400) raw or as `%3B` (the `..;/` defence); the
+  query may contain either. Reserved characters (`@`, `!`, `$`, ...) may
+  still be sent raw or escaped, and escapes in either hex case, so routing
+  compares percent-decoded segments (below); the unreserved rule stays as
+  defence in depth. Forwarding uses the raw path as received, static
+  serving percent-decodes it. Configured route paths follow the same
+  rules.
 - **Host:** required for HTTP/1.1 (400 if missing or duplicated). Matched
   case-insensitively, port ignored, exact names only. No matching host → 404.
 - **Routing:** route prefixes are lists of path segments (`/api/v1` is
   `["api", "v1"]`; a trailing `/` in config is insignificant, so `path /api`
   and `path /api/` are the same route). A route matches when the request
   path's segments start with the route's segments, so `/api` matches `/api`,
-  `/api/` and `/api/x` but never `/apix`. The route with the most segments
-  wins. No match → 404.
+  `/api/` and `/api/x` but never `/apix`. Segments are compared
+  percent-decoded, so `/%40a/x` and `/%c3%a4/x` reach routes `/@a` and
+  `/%C3%A4` (and two `path` blocks whose segments decode equal are a
+  duplicate). `%2F` is rejected, so decoding never changes the segment
+  count, and stripping a route's segments keeps the rest of the raw path.
+  The route with the most segments wins. No match → 404.
 - **Keep-alive** with clients; one request at a time per connection (the next
   request is not read until the response is done). Pipelined bytes are
   buffered within limits.

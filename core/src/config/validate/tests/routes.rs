@@ -375,6 +375,24 @@ fn paths_with_equal_segments_are_duplicates() {
         )),
         (ConfigErrorKind::DuplicatePath("/a/b".to_string()), 4, 3)
     );
+    // Segments are compared decoded: an escaped reserved character and
+    // another hex case spell the same route.
+    assert_eq!(
+        err(&in_host(
+            "  path /@a { static /s; }\n  path /%40a { static /s; }"
+        )),
+        (ConfigErrorKind::DuplicatePath("/%40a".to_string()), 4, 3)
+    );
+    assert_eq!(
+        err(&in_host(
+            "  path /x/%C3%A4/ { static /s; }\n  path /x/%c3%a4 { static /s; }"
+        )),
+        (
+            ConfigErrorKind::DuplicatePath("/x/%c3%a4".to_string()),
+            4,
+            3
+        )
+    );
     // A shared leading segment is not a duplicate.
     ok(&in_host(
         "  path /api { static /s; }\n  path /api/v1 { static /s; }",

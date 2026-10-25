@@ -2,9 +2,10 @@
 //!
 //! Stage 2 percent-decodes accepted paths exactly once, so anything that
 //! could decode into traversal is rejected here. Escapes of unreserved
-//! characters are rejected too, so an accepted path has exactly one
-//! spelling for them and the raw path is canonical: routing and forwarding
-//! use it as-is (only the case of the remaining hex escapes may vary).
+//! characters are rejected too, so they have exactly one spelling (defence
+//! in depth: routing compares decoded segments anyway, since reserved
+//! characters and hex case still allow several spellings). Forwarding uses
+//! the raw path as received.
 
 /// A validated origin-form request target.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +96,7 @@ fn check_path(path: &[u8]) -> Result<(), TargetError> {
     Ok(())
 }
 
-fn hex_value(b: u8) -> Option<u8> {
+pub(crate) fn hex_value(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
@@ -105,7 +106,7 @@ fn hex_value(b: u8) -> Option<u8> {
 }
 
 /// Byte-class and well-formed-escape rules for path and query. Only the path
-/// additionally rejects `;`, escapes that decode to dangerous bytes and
+/// additionally rejects `;` (raw or as `%3B`), escapes that decode to dangerous bytes and
 /// escapes of unreserved characters (RFC 3986 section 2.3).
 fn check_bytes(bytes: &[u8], is_path: bool) -> Result<(), TargetError> {
     let mut iter = bytes.iter();
@@ -128,6 +129,7 @@ fn check_bytes(bytes: &[u8], is_path: bool) -> Result<(), TargetError> {
                 match hi * 16 + lo {
                     0x01..=0x1F | 0x7F => return Err(TargetError::EncodedControl),
                     0x2E => return Err(TargetError::EncodedDot),
+                    0x3B => return Err(TargetError::Semicolon),
                     b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'-' | b'_' | b'~' => {
                         return Err(TargetError::EncodedUnreserved);
                     }
@@ -183,6 +185,10 @@ mod tests {
             (b"/a?q=%zz", TargetError::BadPercentEncoding),
             (b"/public/..;/admin", TargetError::Semicolon),
             (b"/a;b", TargetError::Semicolon),
+            // An encoded `;` is a `;` once decoded: same defence as `..;/`.
+            (b"/a%3Bb", TargetError::Semicolon),
+            (b"/a%3bb", TargetError::Semicolon),
+            (b"/public/..%3B/admin", TargetError::Semicolon),
             (b"/a%0a", TargetError::EncodedControl),
             (b"/a%1B", TargetError::EncodedControl),
             (b"/a%1b", TargetError::EncodedControl),
@@ -260,6 +266,8 @@ mod tests {
             &b"/a?next=%2Fhome"[..],
             b"/a?x=%2e%00%5C",
             b"/a?x=1;y=2",
+            b"/a?x=%3B",
+            b"/a?x=%3b;",
             b"/%C3%A4",
             b"/%80%ff",
             // Reserved and other characters may stay encoded.
@@ -284,6 +292,7 @@ mod tests {
         assert_eq!(validate_path("x"), Err(TargetError::NotOriginForm));
         assert_eq!(validate_path("/a?b"), Err(TargetError::QueryInPath));
         assert_eq!(validate_path("/a;b"), Err(TargetError::Semicolon));
+        assert_eq!(validate_path("/a%3Bb"), Err(TargetError::Semicolon));
     }
 
     fn decode(path: &str) -> Vec<u8> {
@@ -357,7 +366,7 @@ mod tests {
                     proptest::sample::select(vec![
                         "/", ".", "..", "a", "b.c", "%2e", "%2E", "%2f", "%5c", "%00", "%25",
                         "%0a", "%7f", "%C3%A4", "%41", ";", "?q=1", "%61", "%7E", "%7e",
-                        "%2D", "%5F", "%30", "%20", "%3f",
+                        "%2D", "%5F", "%30", "%20", "%3f", "%3B", "%3b", "%40",
                     ])
                     .prop_map(str::to_string),
                     "[ -~]{0,3}",

@@ -1489,3 +1489,76 @@ fn head_with_a_late_parse_error_is_head_only() {
         );
     }
 }
+
+const SPELLINGS: &str = "listen 127.0.0.1:8080;
+host example.test {
+  path / { static /srv/www; }
+  path /@a { static /srv/at; }
+  path /%C3%A4 { static /srv/ae; }
+}";
+
+/// Routing compares decoded segments: an escaped reserved character
+/// (`%40` for `@`) or another hex case (`%c3%a4` for `%C3%A4`) reaches the
+/// specific route, not the same name beneath `/`. The raw path is logged.
+#[test]
+fn escaped_spellings_reach_the_specific_route() {
+    let mut sim = Sim::new(SPELLINGS);
+    sim.add_file("/srv/at", "x.txt", b"at");
+    sim.add_file("/srv/ae", "x.txt", b"ae");
+    sim.add_file("/srv/www", "@a/x.txt", b"www-at");
+    sim.add_file("/srv/www", "\u{e4}/x.txt", b"www-ae");
+    for (path, body) in [
+        ("/@a/x.txt", b"at"),
+        ("/%40a/x.txt", b"at"),
+        ("/%C3%A4/x.txt", b"ae"),
+        ("/%c3%a4/x.txt", b"ae"),
+        ("/%C3%a4/x.txt", b"ae"),
+    ] {
+        let (c, received) = exchange(&mut sim, &get(path));
+        let mut expected = head("text/plain; charset=utf-8", 2, Persistence::KeepAlive);
+        expected.extend_from_slice(body);
+        assert_eq!(received, expected, "{path}\n{}", sim.trace());
+        let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+        assert_eq!(
+            logs,
+            [&response_log(c, Status::Ok, Method::Get, path)],
+            "{path}\n{}",
+            sim.trace()
+        );
+    }
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
+
+/// An encoded `;` in the path is rejected like a raw one; in the query it
+/// is fine.
+#[test]
+fn encoded_semicolon_in_the_path_is_400() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "a;b", b"semi");
+    for target in ["/a%3Bb", "/a%3bb", "/assets/..%3B/x"] {
+        let (c, received) = exchange(&mut sim, &get(target));
+        assert_eq!(
+            received,
+            fixed(Status::BadRequest, Persistence::Close, BodyMode::Full),
+            "{target}\n{}",
+            sim.trace()
+        );
+        let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+        assert_eq!(
+            logs,
+            [&Log::Rejected {
+                conn: c,
+                peer: peer(),
+                reason: RejectReason::Http(HttpError::BadTarget(TargetError::Semicolon)),
+            }],
+            "{target}\n{}",
+            sim.trace()
+        );
+    }
+    assert_eq!(opens(sim.trace()), 0, "{}", sim.trace());
+    sim.add_file("/srv/www", "q.txt", b"q");
+    let (_, received) = exchange(&mut sim, &get("/q.txt?x=%3B"));
+    let mut expected = head("text/plain; charset=utf-8", 1, Persistence::KeepAlive);
+    expected.extend_from_slice(b"q");
+    assert_eq!(received, expected, "{}", sim.trace());
+}

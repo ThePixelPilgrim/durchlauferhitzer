@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::http::target::validate_path;
+use crate::routing::same_segments;
 
 use super::lexer::Pos;
 use super::model::{
@@ -448,8 +449,12 @@ fn parse_host(block: &Block, seen: &mut Vec<String>) -> Result<VirtualHost, Conf
             Item::Setting(setting) => return unknown_key(&setting.key, setting.pos),
             Item::Block(inner) if inner.name == "path" => {
                 let route = parse_route(inner)?;
-                // Equal segments are the same route (`/api` and `/api/`).
-                if routes.iter().any(|r| r.segments == route.segments) {
+                // Equal segments are the same route (`/api` and `/api/`),
+                // compared decoded as the router does (`/@a` and `/%40a`).
+                if routes
+                    .iter()
+                    .any(|r| same_segments(&r.segments, &route.segments))
+                {
                     let path = inner.args.first().cloned().unwrap_or_default();
                     return fail(ConfigErrorKind::DuplicatePath(path), inner.pos);
                 }

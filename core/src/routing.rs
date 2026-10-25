@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::config::{Route, VirtualHost};
+use crate::http::target::hex_value;
 
 /// Why a request could not be routed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +35,8 @@ impl Router {
 
     /// Finds the route for `host` (as sent by the client) and the validated
     /// `path`. A route matches when the path's segments start with the
-    /// route's segments; the route with the most segments wins.
+    /// route's segments, compared percent-decoded ([`decoded_eq`]); the
+    /// route with the most segments wins.
     pub fn route(&self, host: Option<&str>, path: &str) -> Result<&Route, RouteMiss> {
         let host = host.ok_or(RouteMiss::UnknownHost)?;
         let key = strip_port(host).to_ascii_lowercase();
@@ -84,7 +86,41 @@ fn segments_match(route: &[String], path: &str) -> bool {
     let mut path = segments(path);
     route
         .iter()
-        .all(|segment| path.next() == Some(segment.as_str()))
+        .all(|segment| path.next().is_some_and(|p| decoded_eq(segment, p)))
+}
+
+/// Whether two path segments are equal once percent-decoded, without
+/// allocating: `%40a` equals `@a`, `%c3%a4` equals `%C3%A4`. Validated paths
+/// reject `%2F` and empty segments, so decoding never changes how a path
+/// splits into segments. A truncated or non-hex escape (which validated
+/// paths never contain) makes the segments unequal.
+pub fn decoded_eq(route_seg: &str, path_seg: &str) -> bool {
+    let mut route = route_seg.bytes();
+    let mut path = path_seg.bytes();
+    loop {
+        match (next_decoded(&mut route), next_decoded(&mut path)) {
+            (None, None) => return true,
+            (Some(Some(a)), Some(Some(b))) if a == b => {}
+            (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => return false,
+        }
+    }
+}
+
+/// The next decoded byte: `None` at the end, `Some(None)` for a malformed
+/// escape.
+fn next_decoded(bytes: &mut impl Iterator<Item = u8>) -> Option<Option<u8>> {
+    let b = bytes.next()?;
+    if b != b'%' {
+        return Some(Some(b));
+    }
+    let hi = bytes.next().and_then(hex_value);
+    let lo = bytes.next().and_then(hex_value);
+    Some(hi.zip(lo).map(|(hi, lo)| hi * 16 + lo))
+}
+
+/// Whether two routes' segment lists are the same route once decoded.
+pub fn same_segments(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| decoded_eq(a, b))
 }
 
 /// Removes the first `count` segments of a validated path. An empty result
@@ -256,6 +292,78 @@ mod tests {
             r.route(Some("a.test"), "/API/x").unwrap_err(),
             RouteMiss::NoMatchingPath
         );
+    }
+
+    #[test]
+    fn decoded_eq_rows() {
+        for (a, b, want) in [
+            ("a", "a", true),
+            ("", "", true),
+            ("a", "A", false),
+            // Hex case does not matter.
+            ("%C3%A4", "%c3%a4", true),
+            ("%c3%a4", "%C3%A4", true),
+            ("%C3%a4", "%c3%A4", true),
+            ("%C3%A4", "%C3%A5", false),
+            // Reserved characters equal their escapes, both ways.
+            ("@a", "%40a", true),
+            ("%40a", "@a", true),
+            ("%40", "%40", true),
+            ("!$&'()*+,=:@", "%21%24%26%27%28%29%2A%2B%2C%3D%3A%40", true),
+            ("%2a", "*", true),
+            ("%20", " ", true),
+            ("%25", "%", false),
+            // Non-ASCII bytes equal their escapes.
+            ("%C3%A4", "\u{e4}", true),
+            ("\u{e4}", "%c3%a4", true),
+            ("\u{e4}", "\u{e5}", false),
+            // Unequal lengths.
+            ("a", "ab", false),
+            ("ab", "a", false),
+            ("%40", "%40a", false),
+            ("%40a", "%40", false),
+            ("", "a", false),
+            ("a", "", false),
+            ("%C3", "%C3%A4", false),
+            // Truncated or malformed escapes never match (and never panic).
+            ("%", "%", false),
+            ("%4", "%4", false),
+            ("%", "%25", false),
+            ("a%", "a%", false),
+            ("%zz", "%zz", false),
+            ("%G1", "%G1", false),
+            ("%4", "@", false),
+            ("@", "%4", false),
+            ("%C3%A", "%C3%A4", false),
+            ("%C3%A4", "%C3%A", false),
+        ] {
+            assert_eq!(decoded_eq(a, b), want, "{a:?} vs {b:?}");
+        }
+    }
+
+    /// Routing compares decoded segments, so an escape of a reserved
+    /// character or another hex case reaches the same route.
+    #[test]
+    fn routes_match_decoded_segments() {
+        let r = Router::new(&[host(&["a.test"], &["/", "/@a", "/%C3%A4", "/x/%2A"])]);
+        for (path, expected) in [
+            ("/@a/x", "/@a"),
+            ("/%40a/x", "/@a"),
+            ("/%40a", "/@a"),
+            ("/%C3%A4/x", "/%C3%A4"),
+            ("/%c3%a4/x", "/%C3%A4"),
+            ("/%c3%A4/", "/%C3%A4"),
+            ("/x/*/y", "/x/%2A"),
+            ("/x/%2a/y", "/x/%2A"),
+            ("/%40b/x", "/"),
+            ("/%C3%A5/x", "/"),
+        ] {
+            assert_eq!(
+                matched(&r, Some("a.test"), path).as_deref(),
+                Some(expected),
+                "{path}"
+            );
+        }
     }
 
     #[test]

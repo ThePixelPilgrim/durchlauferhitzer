@@ -49,6 +49,7 @@ host example.test {
   path / { static /srv/www; }
   path /g { static /srv/www; on_file_change allow_growth; }
   path /.well-known { static /srv/www; }
+  path /@%C3%A4 { static /srv/www; on_file_change allow_growth; }
   path /api/ { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body unlimited; }
 }";
 
@@ -68,6 +69,7 @@ host example.test {
   path / { static /srv/www; }
   path /g { static /srv/www; on_file_change allow_growth; }
   path /.well-known { static /srv/www; }
+  path /@%C3%A4 { static /srv/www; on_file_change allow_growth; }
   path /api/ { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body unlimited; }
 }";
 
@@ -455,11 +457,17 @@ fn random_static_request(rng: &mut fastrand::Rng, long_dir: Option<&str>) -> Vec
         let method = if rng.bool() { "GET" } else { "HEAD" };
         return format!("{method} /{dir}{slash}{query} HTTP/1.1\r\n{host}\r\n").into_bytes();
     }
-    let prefix = match rng.u8(0..5) {
-        0 | 1 => "/",
-        2 | 3 => "/g/",
-        _ => "/.well-known/",
+    let prefix = match rng.u8(0..6) {
+        0 | 1 => "/".to_owned(),
+        2 | 3 => "/g/".to_owned(),
+        4 => "/.well-known/".to_owned(),
+        // The route `/@%C3%A4`, spelled any way that decodes the same.
+        _ => format!(
+            "/{}/",
+            rng.choice(ESCAPED_ROUTE).copied().unwrap_or_default()
+        ),
     };
+    let prefix = prefix.as_str();
     // Bias `/g/` toward the growing file, so growth sent under
     // `allow_growth` is common.
     let rel = match prefix {
@@ -467,7 +475,8 @@ fn random_static_request(rng: &mut fastrand::Rng, long_dir: Option<&str>) -> Vec
         _ => rng.choice(STATIC_PATHS).copied().unwrap_or_default(),
     };
     let path = match (rel, prefix) {
-        ("", "/g/" | "/.well-known/") if rng.bool() => prefix.trim_end_matches('/').to_owned(),
+        ("", "/") => prefix.to_owned(),
+        ("", _) if rng.bool() => prefix.trim_end_matches('/').to_owned(),
         _ => format!("{prefix}{rel}"),
     };
     let query = rng.choice(QUERIES).copied().unwrap_or_default();
@@ -610,16 +619,42 @@ fn has_encoded_unreserved(path: &str) -> bool {
 }
 
 /// The change policy and route-relative part of a request path on
-/// `example.test`'s static routes.
+/// `example.test`'s static routes. The first segment is compared decoded,
+/// as the router does; the rest stays raw.
 fn split_route(path: &str) -> (Policy, &str) {
-    for (prefix, policy) in [("/g", Policy::AllowGrowth), ("/.well-known", Policy::Abort)] {
-        if let Some(rest) = path.strip_prefix(prefix) {
-            if rest.is_empty() || rest.starts_with('/') {
-                return (policy, rest);
-            }
+    let after = path.strip_prefix('/').unwrap_or(path);
+    let (first, rest) = match after.find('/') {
+        Some(i) => (
+            after.get(..i).unwrap_or(after),
+            after.get(i..).unwrap_or(""),
+        ),
+        None => (after, ""),
+    };
+    let first = decode(first);
+    for (prefix, policy) in [
+        ("g", Policy::AllowGrowth),
+        (".well-known", Policy::Abort),
+        ("@\u{e4}", Policy::AllowGrowth),
+    ] {
+        if first == prefix {
+            return (policy, rest);
         }
     }
     (Policy::Abort, path)
+}
+
+/// Spellings of the `/@%C3%A4` route's segment: as configured, with `@`
+/// escaped, and in other hex cases. Only the first is canonical.
+const ESCAPED_ROUTE: &[&str] = &["@%C3%A4", "%40%C3%A4", "@%c3%a4", "%40%c3%A4", "%40%C3%a4"];
+
+/// Whether `path` reaches the `/@%C3%A4` route through a spelling other
+/// than the configured one.
+fn is_respelled_route(path: &str) -> bool {
+    let first = path
+        .strip_prefix('/')
+        .and_then(|p| p.split('/').next())
+        .unwrap_or("");
+    ESCAPED_ROUTE.iter().skip(1).any(|s| *s == first)
 }
 
 fn content_type_of(name: &str) -> &'static str {
@@ -964,6 +999,9 @@ struct Coverage {
     well_known: usize,
     /// Directory redirects that kept a query.
     redirect_query: usize,
+    /// 200s on the `/@%C3%A4` route through an escaped or re-cased
+    /// spelling of its segment.
+    respelled_route: usize,
 }
 
 /// `grown` must be well clear of zero, so a refactor cannot silently lose
@@ -993,6 +1031,10 @@ impl Coverage {
             ),
             (".well-known responses", self.well_known),
             ("redirects with a query", self.redirect_query),
+            (
+                "200s through a respelled route segment",
+                self.respelled_route,
+            ),
         ];
         assert!(
             self.grown >= MIN_GROWN,
@@ -1620,6 +1662,13 @@ fn run_seed(seed: u64, coverage: &mut Coverage) {
                 {
                     coverage.well_known += 1;
                 }
+                if *status == Status::Ok
+                    && request
+                        .as_ref()
+                        .is_some_and(|r| is_respelled_route(&r.path))
+                {
+                    coverage.respelled_route += 1;
+                }
             }
             Log::Rejected {
                 reason: RejectReason::Http(HttpError::BadTarget(TargetError::EncodedUnreserved)),
@@ -1682,7 +1731,7 @@ fn random_fault_schedules() {
                 "COVERAGE statuses={:?} http={} header={} send={} disk={} conns={} per_ip={} \
                  pipelined={} truncated={} changed={} first_chunk={} multi_chunk={} grown={} \
                  head_ok={} redirect_414={} encoded_unreserved={} well_known={} \
-                 redirect_query={}",
+                 redirect_query={} respelled_route={}",
                 coverage.statuses,
                 coverage.http,
                 coverage.header_timeout,
@@ -1700,7 +1749,8 @@ fn random_fault_schedules() {
                 coverage.redirect_414,
                 coverage.encoded_unreserved,
                 coverage.well_known,
-                coverage.redirect_query
+                coverage.redirect_query,
+                coverage.respelled_route
             );
             coverage.check();
         }
