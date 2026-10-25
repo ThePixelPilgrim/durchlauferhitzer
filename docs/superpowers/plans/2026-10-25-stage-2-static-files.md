@@ -18,7 +18,7 @@
 4. **405** responses carry `Allow: GET, HEAD`.
 5. **Error responses to HEAD requests** carry no body (any request whose method was parsed).
 6. **Waiting on the disk** counts against `send_idle_timeout` (no separate disk timeout): a connection whose open or readahead does not complete in time is closed and logged.
-7. **A file that ends early** (shrank) aborts the connection after the headers were sent; growth after open is ignored (exactly the size seen at open is sent).
+7. **A file that changes during a transfer** is handled by a per-route setting `on_file_change abort | ignore;` (optional, default `abort`). The driver reports the file's current stamp (size + modification time) with every chunk. `abort` (the safe default): any change to size or modification time since open cuts the connection after the headers were sent and is logged. `ignore`: keep sending exactly the size seen at open as long as the file has not shrunk. A file that shrank aborts under both settings, since its promised length can no longer be delivered.
 8. **Content types:** `html htm` text/html; charset=utf-8, `css` text/css; charset=utf-8, `js mjs` text/javascript; charset=utf-8, `json` application/json, `txt` text/plain; charset=utf-8, `xml` application/xml, `svg` image/svg+xml, `png` image/png, `jpg jpeg` image/jpeg, `gif` image/gif, `webp` image/webp, `avif` image/avif, `ico` image/x-icon, `woff` font/woff, `woff2` font/woff2, `pdf` application/pdf, `wasm` application/wasm, `mp4` video/mp4, `webm` video/webm; anything else application/octet-stream. Extension match is ASCII case-insensitive on the last `.` of the file name.
 
 ## Global Constraints
@@ -93,14 +93,14 @@ Like stage 1's Task 8a: the contract and the sim first, with only the simplest b
   - `pub struct FileId(pub u64)` — allocated by the core, never reused
   - `pub struct RootId(pub u32)` — index into `Core::static_roots()`
   - `pub fn Core::static_roots(&self) -> &[PathBuf]` — every distinct static root in config order; the driver opens them once at startup
-  - `pub enum FileKind { Regular, Directory, Other }`, `pub struct FileMeta { pub kind: FileKind, pub size: u64 }`
-  - `pub enum FileError { NotFound, Symlink, PermissionDenied, Truncated, Other }`
+  - `pub enum FileKind { Regular, Directory, Other }`, `pub struct FileStamp { pub size: u64, pub modified_ns: u64 }`, `pub struct FileMeta { pub kind: FileKind, pub stamp: FileStamp }`
+  - `pub enum FileError { NotFound, Symlink, PermissionDenied, Truncated, Changed, Other }`
   - `Action::OpenFile { file: FileId, root: RootId, path: Vec<Vec<u8>> }` (relative segments; the driver resolves beneath the root without following symlinks and without leaving it), `Action::Readahead { file: FileId, offset: u64, len: u64 }`, `Action::CloseFile { file: FileId }`
-  - `Event::FileOpened { file: FileId, meta: FileMeta }`, `Event::FileFailed { file: FileId, error: FileError }`, `Event::ChunkReady { file: FileId }`, `Event::FileSent { conn: ConnId, len: u64 }`
+  - `Event::FileOpened { file: FileId, meta: FileMeta }`, `Event::FileFailed { file: FileId, error: FileError }`, `Event::ChunkReady { file: FileId, stamp: FileStamp }` (the file's stamp when the chunk was read), `Event::FileSent { conn: ConnId, len: u64 }`
   - `pub struct FileSegment { pub file: FileId, pub offset: u64, pub len: u64 }` and `pub fn Core::send_file(&self, conn: ConnId) -> Option<FileSegment>` — the file range the driver may `sendfile` now; only after `send_buffer` is empty
   - `Status::Ok` (200) and `pub fn render_file_head(content_type: &str, len: u64, persistence: Persistence, out: &mut Vec<u8>)` — `HTTP/1.1 200 OK`, `Content-Type`, `Content-Length`, `X-Content-Type-Options: nosniff`, `Connection: close` only for `Close`
 - Produces (sim):
-  - `pub fn Sim::add_file(&mut self, root: &str, path: &str, bytes: &[u8])`, `add_dir`, `add_symlink(root, path, target)`, `deny(root, path)` (permission denied), `set_disk_delay(&mut self, d: Duration)` (each open/readahead completes after `d` of virtual time), `shrink_on_send(root, path, at: u64)` (sendfile hits EOF at `at`), `pub fn open_files(&self) -> usize`
+  - `pub fn Sim::add_file(&mut self, root: &str, path: &str, bytes: &[u8])`, `add_dir`, `add_symlink(root, path, target)`, `deny(root, path)` (permission denied), `set_disk_delay(&mut self, d: Duration)` (each open/readahead completes after `d` of virtual time), `shrink_on_send(root, path, at: u64)` (sendfile hits EOF at `at`), `change_during_send(root, path, after_chunks: usize, new: FileStamp)` (later chunks report a different stamp), `pub fn open_files(&self) -> usize`
 
 Contract additions (core module docs): file ids are the core's; every `OpenFile` is answered by exactly one `FileOpened` or `FileFailed`, every `Readahead` by one `ChunkReady` or `FileFailed`, even after the connection closed (the core then just emits `CloseFile` for a late `FileOpened`); the driver writes `send_buffer` before `send_file`; interest is `Write` while either has bytes; `FileSent` reports bytes the socket accepted from the segment; a short `sendfile` at EOF before the segment ends is reported as `FileFailed { error: Truncated }`; after `CloseFile` the driver delivers no more events for that file. Behaviour in this task: GET on a static route whose path resolves to a regular file → `OpenFile`, then on `FileOpened{Regular}` render the head, then `Readahead` of the first chunk, then on `ChunkReady` expose the segment; continue chunk by chunk; after the last byte `CloseFile` and return to `Idle`/close per persistence. Everything else on static routes still answers 501 (Task 3 replaces that).
 
@@ -142,16 +142,16 @@ Rules (spec "Static routes" + amendments 2–5): methods other than GET/HEAD →
 ### Task 4: Failures mid-transfer, slow disks and timeouts
 
 **Files:**
-- Modify: `core/src/core.rs`, `core/src/conn.rs`, `core/src/log.rs`
-- Test: `sim/tests/static_files.rs`
+- Modify: `core/src/core.rs`, `core/src/conn.rs`, `core/src/log.rs`, `core/src/config/model.rs`, `core/src/config/validate/` (new static-route key `on_file_change`: one value, `abort` or `ignore`; only on static routes; default `abort`; model `pub enum OnFileChange { Abort, Ignore }` in `RouteAction::Static { root, on_file_change }`)
+- Test: `sim/tests/static_files.rs`, config tests
 
 **Interfaces:**
 - Consumes: Tasks 2–3
 - Produces: `Log::FileAborted { conn: ConnId, peer: IpAddr, error: FileError }`; `TimeoutKind::Disk` (logged when `send_idle_timeout` expires while waiting on `FileOpened`/`ChunkReady`).
 
-Rules: `FileFailed` after the head was queued (any error incl. `Truncated`) → `CloseFile` (if open), `Log::FileAborted`, `Close` without lingering more bytes (the client sees a cut body); while waiting on the disk, `send_idle_timeout` runs and expiry → `Rejected{Timeout(Disk)}` + `CloseFile` when the file is open + `Close` (the late `FileOpened`/`ChunkReady` for that file then yields only `CloseFile` or nothing); reset/EOF/send-timeout while a file is open → `CloseFile` exactly once.
+Rules: `ChunkReady` whose stamp differs from the one at open → with `on_file_change abort` (default) treat as a mid-transfer failure with `FileError::Changed`; with `ignore`, continue unless the new size is smaller than the size at open (then `Truncated`). `FileFailed` after the head was queued (any error incl. `Truncated`) → `CloseFile` (if open), `Log::FileAborted`, `Close` without lingering more bytes (the client sees a cut body); while waiting on the disk, `send_idle_timeout` runs and expiry → `Rejected{Timeout(Disk)}` + `CloseFile` when the file is open + `Close` (the late `FileOpened`/`ChunkReady` for that file then yields only `CloseFile` or nothing); reset/EOF/send-timeout while a file is open → `CloseFile` exactly once.
 
-- [ ] **Step 1: Write the failing tests** — `file_shrinking_mid_transfer_cuts_connection` (Review Focus 1: received bytes < head's Content-Length, `Closed`, `Log::FileAborted{Truncated}`), `slow_disk_does_not_block_other_connections` (Review Focus 2: conn A on a 10 s disk delay, conn B gets a 404 and a small file meanwhile), `disk_slower_than_send_idle_timeout_closes` (`Rejected{Timeout(Disk)}`, file closed after the late events), `reset_during_open_closes_file_later` (Review Focus 4), `reset_during_readahead_closes_file`, `stalled_client_with_open_file_times_out_and_closes_file`.
+- [ ] **Step 1: Write the failing tests** — `file_shrinking_mid_transfer_cuts_connection` (Review Focus 1: received bytes < head's Content-Length, `Closed`, `Log::FileAborted{Truncated}`), `slow_disk_does_not_block_other_connections` (Review Focus 2: conn A on a 10 s disk delay, conn B gets a 404 and a small file meanwhile), `disk_slower_than_send_idle_timeout_closes` (`Rejected{Timeout(Disk)}`, file closed after the late events), `reset_during_open_closes_file_later` (Review Focus 4), `reset_during_readahead_closes_file`, `stalled_client_with_open_file_times_out_and_closes_file`, `changed_file_aborts_by_default` (`Log::FileAborted{Changed}`), `ignore_setting_keeps_sending_grown_file` (exactly the size at open is sent, connection stays open), `ignore_setting_still_aborts_on_shrink`.
 - [ ] **Step 2: Run to verify they fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run everything** (pre-commit checks) → PASS.
@@ -167,7 +167,7 @@ Rules: `FileFailed` after the head was queued (any error incl. `Truncated`) → 
 **Interfaces:**
 - Consumes: the sim file-system API (Task 2)
 
-- [ ] **Step 1: Extend the tests** — each seed builds a small random tree (files of 0 B to 1 MiB, directories with and without `index.html`, symlinks, a denied file, a special file), random disk delays, random `shrink_on_send`; request templates add static GET/HEAD for existing, missing, directory and dotfile paths. Response checking accepts 200 heads (exact `render_file_head` for the file's type and size) followed by exactly `size` body bytes or a cut connection with `FileAborted`; 301 bytes exact. End-of-run checks add `open_files() == 0`. Coverage adds 200, 301, 405, 413, `FileAborted`, `Timeout(Disk)`.
+- [ ] **Step 1: Extend the tests** — each seed builds a small random tree (files of 0 B to 1 MiB, directories with and without `index.html`, symlinks, a denied file, a special file), random disk delays, random `shrink_on_send` and `change_during_send`, routes with both `on_file_change` settings; request templates add static GET/HEAD for existing, missing, directory and dotfile paths. Response checking accepts 200 heads (exact `render_file_head` for the file's type and size) followed by exactly `size` body bytes or a cut connection with `FileAborted`; 301 bytes exact. End-of-run checks add `open_files() == 0`. Coverage adds 200, 301, 405, 413, `FileAborted`, `Timeout(Disk)`.
 - [ ] **Step 2: Run** — any failure is a core bug: fix it with a named regression test (pinned seed).
 - [ ] **Step 3: Run everything** (pre-commit checks; keep the run under ~10 s debug) → PASS.
 - [ ] **Step 4: Commit** — `"Randomized simulation covers static files"`

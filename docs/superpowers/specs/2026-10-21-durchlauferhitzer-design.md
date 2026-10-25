@@ -206,9 +206,12 @@ reject.
 - HEAD gets the head with the full `Content-Length` and no body; error
   responses to HEAD carry no body either.
 - Waiting on the disk counts against `send_idle_timeout`.
-- A file that ends early (shrank) aborts that connection after the headers
-  were sent, and is logged; growth after open is ignored (exactly the size
-  seen at open is sent).
+- A file that changes during a transfer: per static route,
+  `on_file_change abort | ignore;` (optional, default `abort`). `abort` cuts
+  the connection (after the headers were sent) on any change of size or
+  modification time since open, and logs it. `ignore` keeps sending exactly
+  the size seen at open as long as the file has not shrunk. A file that
+  shrank aborts under both settings.
 
 ### Proxy routes
 
