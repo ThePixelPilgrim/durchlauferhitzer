@@ -126,38 +126,33 @@
 //! `Received`/`Sent`/`FileSent` length larger than the space or segment
 //! offered is clamped.
 
+mod static_files;
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use crate::config::{Config, Limits, OnFileChange, Route, RouteAction};
+use self::static_files::{Plan, plan};
+use crate::config::{Config, Limits, RouteAction};
 use crate::conn::{
-    Conn, ConnState, Counted, LINGER_SCRATCH, LINGER_TIMEOUT, OpenStep, SEND_CAPACITY,
+    Conn, ConnState, Counted, Exchange, LINGER_SCRATCH, LINGER_TIMEOUT, SEND_CAPACITY,
     StaticRequest, UnreadBody,
 };
 use crate::file::{
-    Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileSegment, FileStamp, FileTable,
-    OrphanSlots, Owner, RootId, check_stamp,
+    Chunk, FileError, FileId, FileMeta, FileSegment, FileStamp, FileTable, OrphanSlots, Owner,
+    RootId,
 };
-use crate::http::mime::content_type;
 use crate::http::request::{
     BodyFraming, HeadLimits, HeadParser, HttpError, KnownMethod, Method, ParseStatus, Persistence,
     RequestHead,
 };
-use crate::http::response::{
-    BodyMode, redirect_len, render_file_head, render_fixed, render_redirect,
-};
-use crate::http::static_path::{TrailingSlash, relative_segments, trailing_slash};
+use crate::http::response::{BodyMode, render_fixed};
 use crate::http::status::Status;
 use crate::log::{LimitKind, Log, RejectReason, RequestSummary, TimeoutKind};
 use crate::routing::Router;
 use crate::time::Instant;
-
-mod static_files;
-
-use static_files::{Plan, plan};
-#[cfg(test)]
-mod tests;
 
 /// Opaque connection id, allocated by the driver and never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -450,9 +445,11 @@ impl Core {
                 }
                 self.refused = self.refused.saturating_add(1);
                 let state = ConnState::Responding {
-                    persistence: Persistence::Close,
+                    exchange: Exchange {
+                        persistence: Persistence::Close,
+                        buffered: 0,
+                    },
                     unread_body: UnreadBody::None,
-                    buffered: 0,
                     deadline: now.saturating_add(limits.send_idle_timeout),
                 };
                 // Refused connections never read while responding and then
@@ -534,41 +531,21 @@ impl Core {
         if c.send.is_empty() {
             match c.state {
                 ConnState::Responding {
-                    persistence,
+                    exchange,
                     unread_body,
-                    buffered,
                     ..
                 } => {
-                    c.state = finish(
-                        conn,
-                        c,
-                        persistence,
-                        unread_body,
-                        buffered,
-                        now,
-                        limits,
-                        actions,
-                    );
+                    c.state = finish(conn, c, exchange, unread_body, now, limits, actions);
                 }
                 ConnState::SendingFile {
                     file,
                     chunk: Chunk::Done,
-                    persistence,
-                    buffered,
+                    exchange,
                     ..
                 } => {
                     self.files.release(file);
                     actions.push(Action::CloseFile { file });
-                    c.state = finish(
-                        conn,
-                        c,
-                        persistence,
-                        UnreadBody::None,
-                        buffered,
-                        now,
-                        limits,
-                        actions,
-                    );
+                    c.state = finish(conn, c, exchange, UnreadBody::None, now, limits, actions);
                 }
                 ConnState::SendingFile { .. }
                 | ConnState::ReadingHead { .. }
@@ -623,9 +600,11 @@ impl Core {
                     reason: RejectReason::Timeout(TimeoutKind::Header),
                 }));
                 c.state = ConnState::Responding {
-                    persistence: Persistence::Close,
+                    exchange: Exchange {
+                        persistence: Persistence::Close,
+                        buffered: 0,
+                    },
                     unread_body: UnreadBody::None,
-                    buffered: 0,
                     deadline: now.saturating_add(send_idle_timeout),
                 };
                 self.sync_interest(conn, actions);
@@ -711,17 +690,7 @@ impl Core {
                 if consumed <= buffered {
                     c.recv.copy_within(consumed..buffered, 0);
                 }
-                respond(
-                    c,
-                    &self.router,
-                    &self.static_roots,
-                    &mut self.files,
-                    conn,
-                    head,
-                    leftover,
-                    send_deadline,
-                    actions,
-                );
+                self.respond(conn, head, leftover, send_deadline, actions);
             }
             Err(error) => {
                 // Once the request line is valid the method is known: a HEAD
@@ -738,13 +707,94 @@ impl Core {
                     reason: RejectReason::Http(error),
                 }));
                 c.state = ConnState::Responding {
-                    persistence: Persistence::Close,
+                    exchange: Exchange {
+                        persistence: Persistence::Close,
+                        buffered: 0,
+                    },
                     unread_body: UnreadBody::None,
-                    buffered: 0,
                     deadline: send_deadline,
                 };
             }
         }
+    }
+
+    /// Answer a complete request head on `conn`, which then responds until
+    /// `send_deadline` (unless the socket makes progress). `leftover` bytes
+    /// at the front of its receive buffer wait for the next request.
+    fn respond(
+        &mut self,
+        conn: ConnId,
+        head: RequestHead,
+        leftover: usize,
+        send_deadline: Instant,
+        actions: &mut Vec<Action>,
+    ) {
+        let route = self.router.route(head.host.as_deref(), &head.target.path);
+        let unread_body = match head.body {
+            BodyFraming::None => UnreadBody::None,
+            BodyFraming::Length(_) | BodyFraming::Chunked => UnreadBody::Pending,
+        };
+        // Every response to a HEAD request is head only.
+        let body = match head.method {
+            Method::Head => BodyMode::HeadOnly,
+            Method::Get | Method::Other(_) => BodyMode::Full,
+        };
+        let (status, persistence) = match route {
+            Err(_) => (Status::NotFound, head.persistence),
+            Ok(route) => match plan(route, &head, &self.static_roots) {
+                Plan::Open {
+                    root,
+                    path,
+                    on_change,
+                } => {
+                    let exchange = Exchange {
+                        persistence: head.persistence,
+                        buffered: leftover,
+                    };
+                    let request = StaticRequest {
+                        summary: RequestSummary {
+                            method: head.method,
+                            host: head.host,
+                            path: head.target.path,
+                        },
+                        query: head.target.query,
+                        root,
+                        on_change,
+                        path,
+                    };
+                    self.open_static(conn, request, body, exchange, send_deadline, actions);
+                    return;
+                }
+                Plan::Respond(status, persistence) => (status, persistence),
+            },
+        };
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        // An unread body leaves the stream unframed: it cannot be reused.
+        let persistence = match unread_body {
+            UnreadBody::None => persistence,
+            UnreadBody::Pending => Persistence::Close,
+        };
+        render_fixed(status, persistence, body, &mut c.send);
+        actions.push(Action::Log(Log::Response {
+            conn,
+            peer: c.peer,
+            status,
+            request: Some(RequestSummary {
+                method: head.method,
+                host: head.host,
+                path: head.target.path,
+            }),
+        }));
+        c.state = ConnState::Responding {
+            exchange: Exchange {
+                persistence,
+                buffered: leftover,
+            },
+            unread_body,
+            deadline: send_deadline,
+        };
     }
 
     /// Tell the driver if the interest the connection needs has changed.
@@ -856,20 +906,19 @@ impl Core {
 
 /// The response on `conn` is fully written: keep the connection for the
 /// next request, or shut down its sending side and linger.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "free function over disjoint borrows of the core's fields"
-)]
 fn finish(
     conn: ConnId,
     c: &mut Conn,
-    persistence: Persistence,
+    exchange: Exchange,
     unread_body: UnreadBody,
-    buffered: usize,
     now: Instant,
     limits: &Limits,
     actions: &mut Vec<Action>,
 ) -> ConnState {
+    let Exchange {
+        persistence,
+        buffered,
+    } = exchange;
     match (persistence, unread_body) {
         (Persistence::KeepAlive, UnreadBody::None) => {
             if buffered > 0 {
@@ -894,96 +943,4 @@ fn finish(
             }
         }
     }
-}
-
-/// Answer a complete request head on `c`, which then responds until
-/// `send_deadline` (unless the socket makes progress). `leftover` bytes at
-/// the front of `c.recv` wait for the next request.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "free function over disjoint borrows of the core's fields"
-)]
-fn respond(
-    c: &mut Conn,
-    router: &Router,
-    static_roots: &[PathBuf],
-    files: &mut FileTable,
-    conn: ConnId,
-    head: RequestHead,
-    leftover: usize,
-    send_deadline: Instant,
-    actions: &mut Vec<Action>,
-) {
-    let route = router.route(head.host.as_deref(), &head.target.path);
-    let unread_body = match head.body {
-        BodyFraming::None => UnreadBody::None,
-        BodyFraming::Length(_) | BodyFraming::Chunked => UnreadBody::Pending,
-    };
-    // Every response to a HEAD request is head only.
-    let body = match head.method {
-        Method::Head => BodyMode::HeadOnly,
-        Method::Get | Method::Other(_) => BodyMode::Full,
-    };
-    let (status, persistence) = match route {
-        Err(_) => (Status::NotFound, head.persistence),
-        Ok(route) => match plan(route, &head, static_roots) {
-            Plan::Open {
-                root,
-                path,
-                on_change,
-            } => {
-                let slash = trailing_slash(&head.target.path);
-                let file = files.allocate(conn);
-                actions.push(Action::OpenFile {
-                    file,
-                    root,
-                    path: path.clone(),
-                });
-                c.state = ConnState::OpeningFile {
-                    file,
-                    slash,
-                    step: OpenStep::Requested,
-                    body,
-                    persistence: head.persistence,
-                    buffered: leftover,
-                    deadline: send_deadline,
-                };
-                c.static_request = Some(StaticRequest {
-                    summary: RequestSummary {
-                        method: head.method,
-                        host: head.host,
-                        path: head.target.path,
-                    },
-                    query: head.target.query,
-                    root,
-                    on_change,
-                    path,
-                });
-                return;
-            }
-            Plan::Respond(status, persistence) => (status, persistence),
-        },
-    };
-    // An unread body leaves the stream unframed: it cannot be reused.
-    let persistence = match unread_body {
-        UnreadBody::None => persistence,
-        UnreadBody::Pending => Persistence::Close,
-    };
-    render_fixed(status, persistence, body, &mut c.send);
-    actions.push(Action::Log(Log::Response {
-        conn,
-        peer: c.peer,
-        status,
-        request: Some(RequestSummary {
-            method: head.method,
-            host: head.host,
-            path: head.target.path,
-        }),
-    }));
-    c.state = ConnState::Responding {
-        persistence,
-        unread_body,
-        buffered: leftover,
-        deadline: send_deadline,
-    };
 }

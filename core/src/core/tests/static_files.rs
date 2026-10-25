@@ -408,12 +408,12 @@ fn file_failure_closes_the_connection_and_its_file() {
     assert_eq!(
         actions,
         [
-            Action::CloseFile { file },
             Action::Log(Log::FileAborted {
                 conn,
                 peer: PEER,
                 error
             }),
+            Action::CloseFile { file },
             Action::Close { conn }
         ]
     );
@@ -737,4 +737,61 @@ fn disk_timeout_orphan_slot_is_released_by_any_late_answer() {
         assert_eq!(core.files.len(), 0);
         assert_eq!(core.next_deadline(), None);
     }
+}
+
+/// An aborted transfer and a send timeout while sending a file end the
+/// same way: the reason is logged, then the file and the connection are
+/// closed (stage-2 review M7).
+#[test]
+fn abort_and_timeout_emit_log_close_file_close() {
+    let mut core = files_core();
+    let now = secs(0);
+    let meta = regular(3);
+    // conn 1: its chunk fails to read.
+    let (aborted, aborted_file) = (ConnId(1), FileId(1));
+    request(&mut core, now, 1, GET_F);
+    let mut actions = Vec::new();
+    let file = aborted_file;
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    // conn 2: its chunk is ready, but the client does not take it.
+    let (stalled, stalled_file) = (ConnId(2), FileId(2));
+    request(&mut core, now, 2, GET_F);
+    let file = stalled_file;
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    let stamp = stamp(3);
+    core.handle(now, Event::ChunkReady { file, stamp }, &mut actions);
+
+    actions.clear();
+    let error = FileError::Other;
+    let file = aborted_file;
+    core.handle(now, Event::FileFailed { file, error }, &mut actions);
+    assert_eq!(
+        actions,
+        [
+            Action::Log(Log::FileAborted {
+                conn: aborted,
+                peer: PEER,
+                error
+            }),
+            Action::CloseFile { file },
+            Action::Close { conn: aborted }
+        ]
+    );
+
+    actions.clear();
+    core.handle(secs(30), Event::TimerFired, &mut actions);
+    assert_eq!(
+        actions,
+        [
+            Action::Log(Log::Rejected {
+                conn: stalled,
+                peer: PEER,
+                reason: RejectReason::Timeout(TimeoutKind::Send),
+            }),
+            Action::CloseFile { file: stalled_file },
+            Action::Close { conn: stalled }
+        ]
+    );
+    assert!(core.conns.is_empty());
+    assert_eq!(core.files.len(), 0);
 }

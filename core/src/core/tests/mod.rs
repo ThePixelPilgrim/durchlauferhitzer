@@ -4,7 +4,8 @@ mod connections;
 mod static_files;
 
 use super::*;
-use crate::file::{FileError, FileKind, FileMeta, FileStamp};
+use crate::file::{FileKind, FileMeta, FileStamp};
+use crate::http::response::render_file_head;
 use std::net::Ipv4Addr;
 
 const PEER: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);

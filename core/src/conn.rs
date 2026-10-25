@@ -43,6 +43,15 @@ pub(crate) enum UnreadBody {
     Pending,
 }
 
+/// What a response leaves for the connection's next request: whether the
+/// connection is kept, and how many bytes of pipelined input wait at the
+/// front of `Conn::recv`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Exchange {
+    pub(crate) persistence: Persistence,
+    pub(crate) buffered: usize,
+}
+
 /// Which open of a static request is in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenStep {
@@ -53,8 +62,10 @@ pub(crate) enum OpenStep {
 }
 
 /// Where a connection is in its lifecycle. Each variant carries only the data
-/// valid in that state, including the instant at which it times out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// valid in that state, including the instant at which it times out. A
+/// state owns its data, so it is not `Copy`: a transition that needs the
+/// data by value takes the state with [`Conn::take_state`].
+#[derive(Debug)]
 pub(crate) enum ConnState {
     /// Reading the request head; `buffered` bytes of `Conn::recv` are filled
     /// and `parser` remembers how far it has judged them, so no byte is
@@ -67,29 +78,26 @@ pub(crate) enum ConnState {
     },
     /// Keep-alive between requests, nothing buffered.
     Idle { deadline: Instant },
-    /// A response is being written. The first `buffered` bytes of
-    /// `Conn::recv` are pipelined input waiting for the next request; the
-    /// core does not read meanwhile. `deadline` is the send idle deadline,
-    /// reset whenever the socket accepts bytes.
+    /// A response is being written. The core does not read meanwhile: the
+    /// `exchange`'s buffered bytes wait for the next request. `deadline` is
+    /// the send idle deadline, reset whenever the socket accepts bytes.
     Responding {
-        persistence: Persistence,
+        exchange: Exchange,
         unread_body: UnreadBody,
-        buffered: usize,
         deadline: Instant,
     },
     /// A body-less GET or HEAD on a static route: `OpenFile` for `file` is
     /// in flight, for the requested path or its directory's index (`step`).
     /// `slash` says whether the path ended in `/`; `body` is `HeadOnly` for
-    /// HEAD; `persistence` and `buffered` as in `Responding`. `deadline` is
-    /// the send idle deadline. The request itself is in
-    /// `Conn::static_request`.
+    /// HEAD; `exchange` as in `Responding`. `request` is the request being
+    /// answered. `deadline` is the send idle deadline.
     OpeningFile {
         file: FileId,
         slash: TrailingSlash,
         step: OpenStep,
         body: BodyMode,
-        persistence: Persistence,
-        buffered: usize,
+        exchange: Exchange,
+        request: StaticRequest,
         deadline: Instant,
     },
     /// A file response: the head is in `Conn::send`, then the open `file`'s
@@ -104,8 +112,7 @@ pub(crate) enum ConnState {
         on_change: OnFileChange,
         offset: u64,
         chunk: Chunk,
-        persistence: Persistence,
-        buffered: usize,
+        exchange: Exchange,
         deadline: Instant,
     },
     /// The sending side is shut down; input is read and discarded until the
@@ -151,8 +158,8 @@ impl ConnState {
     }
 }
 
-/// A request being answered from a static root, kept while its file is
-/// opened.
+/// A request being answered from a static root, kept in `OpeningFile`
+/// while its file is opened.
 #[derive(Debug)]
 pub(crate) struct StaticRequest {
     /// Logged once the outcome of the open is known.
@@ -179,9 +186,6 @@ pub(crate) struct Conn {
     pub(crate) recv: Box<[u8]>,
     /// Bytes waiting to be written, at most `SEND_CAPACITY`.
     pub(crate) send: Vec<u8>,
-    /// The request being answered from a static root, while its file is
-    /// opened.
-    pub(crate) static_request: Option<StaticRequest>,
 }
 
 impl Conn {
@@ -198,8 +202,17 @@ impl Conn {
             interest: Interest::None,
             recv: vec![0; recv_capacity].into_boxed_slice(),
             send: Vec::with_capacity(SEND_CAPACITY),
-            static_request: None,
         }
+    }
+
+    /// Take the state out by value, for a transition that needs its data.
+    /// A placeholder (`Lingering`, timing out at time zero) stands in, and
+    /// the caller replaces it with the new state before it returns.
+    pub(crate) fn take_state(&mut self) -> ConnState {
+        let placeholder = ConnState::Lingering {
+            deadline: Instant::from_nanos(0),
+        };
+        std::mem::replace(&mut self.state, placeholder)
     }
 
     /// Spare space of the connection's own buffer the driver may read into;
