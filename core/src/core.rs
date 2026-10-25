@@ -4,7 +4,7 @@
 //!
 //! The core never touches sockets, clocks or files. A *driver* (the
 //! simulation in tests, the epoll driver in production) owns all I/O and talks
-//! to the core through exactly three channels:
+//! to the core through exactly four channels:
 //!
 //! 1. **Events in.** The driver calls [`Core::handle`] with the current time
 //!    and one [`Event`]. The core appends zero or more [`Action`]s to the
@@ -18,6 +18,13 @@
 //!    [`Interest::Write`], the driver writes *directly* from
 //!    [`Core::send_buffer`] and reports how many bytes the socket accepted
 //!    with [`Event::Sent`]; the core then drops those bytes from the front.
+//! 4. **Files.** File bytes never pass through the core. The core asks the
+//!    driver to open a file ([`Action::OpenFile`]), to read a chunk of it
+//!    into the page cache ([`Action::Readahead`]) and to close it
+//!    ([`Action::CloseFile`]); the driver answers with [`Event::FileOpened`],
+//!    [`Event::ChunkReady`] or [`Event::FileFailed`]. Once a chunk is ready
+//!    the driver `sendfile`s the range [`Core::send_file`] returns and
+//!    reports how many bytes the socket accepted with [`Event::FileSent`].
 //!
 //! Rules every driver follows:
 //!
@@ -49,6 +56,39 @@
 //!   After `TimerFired`, every deadline at or before `now` has been handled:
 //!   `next_deadline` is `None` or later than `now`.
 //!
+//! Rules for files:
+//!
+//! - The core allocates [`FileId`]s, sequentially from 1, and never reuses
+//!   one. A [`RootId`] indexes [`Core::static_roots`]: the driver opens each
+//!   root once at startup.
+//! - `OpenFile { root, path }` names a path as relative segments (decoded
+//!   bytes, never `.`, `..`, empty, or containing `/` or NUL; no segments
+//!   means the root itself). The driver resolves it beneath the root,
+//!   without following symlinks anywhere in the path and without ever
+//!   leaving the root (`openat2` with `RESOLVE_BENEATH |
+//!   RESOLVE_NO_SYMLINKS`), and reports the metadata of the open descriptor.
+//! - Every `OpenFile` is answered by exactly one `FileOpened` or
+//!   `FileFailed`, and every `Readahead` by exactly one `ChunkReady` or
+//!   `FileFailed`, even after the connection that asked closed. The core
+//!   then answers a late `FileOpened` with `CloseFile` and ignores a late
+//!   `FileFailed`. `ChunkReady` carries the file's stamp at the time the
+//!   chunk was read.
+//! - A file is open from its `FileOpened` until the core's `CloseFile`; a
+//!   failed open leaves nothing to close. `CloseFile` comes exactly once per
+//!   opened file, also when its connection closes, and cancels any
+//!   `Readahead` in flight: after `CloseFile` the driver delivers no more
+//!   events for that file (the core ignores any that still arrive).
+//! - The driver writes `send_buffer` before `send_file`: `send_file` returns
+//!   a segment only while the send buffer is empty and that chunk's
+//!   `ChunkReady` has arrived. Interest is [`Interest::Write`] while either
+//!   has bytes, and [`Interest::None`] while the connection waits on the
+//!   disk.
+//! - `FileSent { len }` reports how many bytes of the segment the socket
+//!   accepted (more than the segment is clamped). A `sendfile` that hits end
+//!   of file before the segment ends (the file shrank) is reported as
+//!   `FileFailed { error: Truncated }`, after a `FileSent` for any bytes it
+//!   did send.
+//!
 //! # Deadlines
 //!
 //! Every connection state carries one deadline, set on entry:
@@ -62,6 +102,9 @@
 //! - writing a response: `send_idle_timeout`, reset whenever the socket
 //!   accepts bytes; on expiry the connection is closed without further
 //!   writes;
+//! - waiting on the disk (open or readahead in flight): the same
+//!   `send_idle_timeout`, also reset whenever the disk completes; on expiry
+//!   the connection is closed and its file, if open, closed with it;
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
 //!
@@ -86,20 +129,29 @@
 //!   buffer of [`LINGER_SCRATCH`] bytes, whose contents are never inspected.
 //!
 //! The core tolerates driver mistakes without panicking: events for unknown
-//! connections are ignored, a duplicate `Accepted` is ignored, and a
-//! `Received`/`Sent` length larger than the space offered is clamped.
+//! connections or files are ignored, a duplicate `Accepted` is ignored, a
+//! file event that does not fit the file's state is ignored, and a
+//! `Received`/`Sent`/`FileSent` length larger than the space or segment
+//! offered is clamped.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::path::PathBuf;
 
-use crate::config::Config;
+use crate::config::{Config, Limits, Route, RouteAction};
 use crate::conn::{
     Conn, ConnState, Counted, LINGER_SCRATCH, LINGER_TIMEOUT, SEND_CAPACITY, UnreadBody,
 };
+use crate::file::{
+    CHUNK_SIZE, Chunk, FileError, FileId, FileKind, FileMeta, FileSegment, FileStamp, FileTable,
+    Owner, RootId,
+};
+use crate::http::mime::content_type;
 use crate::http::request::{
     BodyFraming, HeadLimits, HeadParser, HttpError, Method, ParseStatus, Persistence, RequestHead,
 };
-use crate::http::response::{BodyMode, render_fixed};
+use crate::http::response::{BodyMode, render_file_head, render_fixed};
+use crate::http::static_path::{TrailingSlash, relative_segments, trailing_slash};
 use crate::http::status::Status;
 use crate::log::{LimitKind, Log, RejectReason, RequestSummary, TimeoutKind};
 use crate::routing::Router;
@@ -142,6 +194,17 @@ pub enum Event {
     /// After handling it, every deadline at or before `now` has been
     /// handled: `next_deadline` returns `None` or an instant after `now`.
     TimerFired,
+    /// The `OpenFile` for `file` succeeded; `meta` describes the open
+    /// descriptor.
+    FileOpened { file: FileId, meta: FileMeta },
+    /// An `OpenFile`, `Readahead` or `sendfile` for `file` failed.
+    FileFailed { file: FileId, error: FileError },
+    /// The last `Readahead` for `file` completed; `stamp` is the file's
+    /// stamp when the chunk was read.
+    ChunkReady { file: FileId, stamp: FileStamp },
+    /// The socket accepted the first `len` bytes of the segment last
+    /// returned by [`Core::send_file`] for `conn`.
+    FileSent { conn: ConnId, len: u64 },
 }
 
 /// Which readiness the driver should wait for on a connection. Replaces the
@@ -153,7 +216,8 @@ pub enum Interest {
     None,
     /// Read into [`Core::recv_buffer`] when readable.
     Read,
-    /// Write from [`Core::send_buffer`] when writable.
+    /// Write from [`Core::send_buffer`], then from [`Core::send_file`],
+    /// when writable.
     Write,
 }
 
@@ -166,6 +230,18 @@ pub enum Action {
     ShutdownWrite { conn: ConnId },
     /// Close `conn`. The last action the core emits for it.
     Close { conn: ConnId },
+    /// Open `path` (relative segments) beneath static root `root`, without
+    /// following symlinks and without leaving the root, as `file`.
+    OpenFile {
+        file: FileId,
+        root: RootId,
+        path: Vec<Vec<u8>>,
+    },
+    /// Read `len` bytes of `file` from `offset` into the page cache, then
+    /// report `ChunkReady`. Never beyond the size reported at open.
+    Readahead { file: FileId, offset: u64, len: u64 },
+    /// Close `file`; drop any completion still pending for it.
+    CloseFile { file: FileId },
     /// Emit a log entry.
     Log(Log),
 }
@@ -186,11 +262,25 @@ pub struct Core {
     refused: u32,
     /// Where every lingering connection discards its input.
     scratch: Box<[u8]>,
+    /// Distinct static roots in config order; a `RootId` indexes it.
+    static_roots: Vec<PathBuf>,
+    files: FileTable,
 }
 
 impl Core {
     /// A core serving `config`, with no connections.
     pub fn new(config: Config) -> Core {
+        let mut static_roots: Vec<PathBuf> = Vec::new();
+        for route in config.hosts.iter().flat_map(|h| &h.routes) {
+            match &route.action {
+                RouteAction::Static { root } => {
+                    if !static_roots.contains(root) {
+                        static_roots.push(root.clone());
+                    }
+                }
+                RouteAction::Proxy(_) => {}
+            }
+        }
         Core {
             router: Router::new(&config.hosts),
             head_limits: HeadLimits::from(&config.limits),
@@ -200,7 +290,16 @@ impl Core {
             counted_per_ip: BTreeMap::new(),
             refused: 0,
             scratch: vec![0; LINGER_SCRATCH].into_boxed_slice(),
+            static_roots,
+            files: FileTable::new(),
         }
+    }
+
+    /// Every distinct static root in config order (identical paths once).
+    /// A [`RootId`] is an index into it; the driver opens each root once at
+    /// startup.
+    pub fn static_roots(&self) -> &[PathBuf] {
+        &self.static_roots
     }
 
     /// Capacity of each connection's receive buffer: room for the largest
@@ -219,20 +318,22 @@ impl Core {
             Event::Accepted { conn, peer } => self.accepted(now, conn, peer, actions),
             Event::Received { conn, len } => self.received(now, conn, len, actions),
             Event::ReadClosed { conn } => {
-                if self.forget(conn).is_some() {
+                if self.forget(conn, actions).is_some() {
                     actions.push(Action::Close { conn });
                 }
             }
             Event::Sent { conn, len } => self.sent(now, conn, len, actions),
             Event::Failed { conn, error: _ } => {
-                if let Some(c) = self.forget(conn) {
+                if let Some(c) = self.forget(conn, actions) {
                     match c.state {
                         // A reset while discarding input after our response is
                         // the expected end of a lingering close, not news.
                         ConnState::Lingering { .. } => {}
                         ConnState::ReadingHead { .. }
                         | ConnState::Idle { .. }
-                        | ConnState::Responding { .. } => {
+                        | ConnState::Responding { .. }
+                        | ConnState::OpeningFile { .. }
+                        | ConnState::SendingFile { .. } => {
                             actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
                         }
                     }
@@ -240,12 +341,28 @@ impl Core {
                 }
             }
             Event::TimerFired => self.timer_fired(now, actions),
+            Event::FileOpened { file, meta } => self.file_opened(now, file, meta, actions),
+            Event::FileFailed { file, error: _ } => self.file_failed(file, actions),
+            Event::ChunkReady { file, stamp } => self.chunk_ready(now, file, stamp, actions),
+            Event::FileSent { conn, len } => self.file_sent(now, conn, len, actions),
         }
     }
 
-    /// Remove `conn` from the map and release its share of the limits.
-    fn forget(&mut self, conn: ConnId) -> Option<Conn> {
+    /// Remove `conn` from the map and release its share of the limits and
+    /// its file: an open file is closed, an open in flight is orphaned.
+    fn forget(&mut self, conn: ConnId, actions: &mut Vec<Action>) -> Option<Conn> {
         let c = self.conns.remove(&conn)?;
+        match c.state {
+            ConnState::OpeningFile { file, .. } => self.files.orphan(file),
+            ConnState::SendingFile { file, .. } => {
+                self.files.release(file);
+                actions.push(Action::CloseFile { file });
+            }
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::Lingering { .. } => {}
+        }
         match c.counted {
             Counted::Yes => {
                 self.counted = self.counted.saturating_sub(1);
@@ -363,7 +480,9 @@ impl Core {
             // does not extend the linger deadline.
             ConnState::Lingering { .. } => return,
             // Not reading: nothing was offered, so nothing can have arrived.
-            ConnState::Responding { .. } => return,
+            ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. } => return,
         }
         self.try_parse(now, conn, actions);
         self.sync_interest(conn, actions);
@@ -376,53 +495,288 @@ impl Core {
         };
         let len = len.min(c.send.len());
         c.send.drain(..len);
-        if let ConnState::Responding {
-            persistence,
-            unread_body,
-            buffered,
-            deadline,
-        } = c.state
-        {
-            c.state = if !c.send.is_empty() {
-                // Progress resets the send idle deadline.
-                let deadline = if len > 0 {
-                    now.saturating_add(limits.send_idle_timeout)
-                } else {
-                    deadline
-                };
+        // Progress resets the send idle deadline.
+        if len > 0 {
+            c.state
+                .set_deadline(now.saturating_add(limits.send_idle_timeout));
+        }
+        if c.send.is_empty() {
+            match c.state {
                 ConnState::Responding {
                     persistence,
                     unread_body,
                     buffered,
-                    deadline,
+                    ..
+                } => {
+                    c.state = finish(
+                        conn,
+                        c,
+                        persistence,
+                        unread_body,
+                        buffered,
+                        now,
+                        limits,
+                        actions,
+                    );
                 }
-            } else {
-                match (persistence, unread_body) {
-                    (Persistence::KeepAlive, UnreadBody::None) => {
-                        if buffered > 0 {
-                            ConnState::ReadingHead {
-                                buffered,
-                                parser: HeadParser::new(),
-                                deadline: now.saturating_add(limits.header_timeout),
-                            }
-                        } else {
-                            ConnState::Idle {
-                                deadline: now.saturating_add(limits.keepalive_timeout),
-                            }
-                        }
-                    }
-                    (Persistence::Close, UnreadBody::None | UnreadBody::Pending)
-                    | (Persistence::KeepAlive, UnreadBody::Pending) => {
-                        actions.push(Action::ShutdownWrite { conn });
-                        // Lingering input goes to the shared scratch buffer.
-                        c.recv = Box::default();
-                        ConnState::Lingering {
-                            deadline: now.saturating_add(LINGER_TIMEOUT),
-                        }
-                    }
+                ConnState::SendingFile {
+                    file,
+                    chunk: Chunk::Done,
+                    persistence,
+                    buffered,
+                    ..
+                } => {
+                    self.files.release(file);
+                    actions.push(Action::CloseFile { file });
+                    c.state = finish(
+                        conn,
+                        c,
+                        persistence,
+                        UnreadBody::None,
+                        buffered,
+                        now,
+                        limits,
+                        actions,
+                    );
                 }
-            };
+                ConnState::SendingFile { .. }
+                | ConnState::ReadingHead { .. }
+                | ConnState::Idle { .. }
+                | ConnState::OpeningFile { .. }
+                | ConnState::Lingering { .. } => {}
+            }
         }
+        self.try_parse(now, conn, actions);
+        self.sync_interest(conn, actions);
+    }
+
+    /// The driver opened `file`: answer the request it belongs to.
+    fn file_opened(
+        &mut self,
+        now: Instant,
+        file: FileId,
+        meta: FileMeta,
+        actions: &mut Vec<Action>,
+    ) {
+        let conn = match self.files.owner(file) {
+            Owner::Conn(conn) => conn,
+            Owner::Orphan => {
+                self.files.release(file);
+                actions.push(Action::CloseFile { file });
+                return;
+            }
+            Owner::Unknown => return,
+        };
+        let deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        let ConnState::OpeningFile {
+            file: opening,
+            content_type,
+            slash,
+            persistence,
+            buffered,
+            ..
+        } = c.state
+        else {
+            return;
+        };
+        if opening != file {
+            return;
+        }
+        let size = meta.stamp.size;
+        let status = match (meta.kind, slash) {
+            (FileKind::Regular, TrailingSlash::Absent) => Status::Ok,
+            // Not served yet in this stage.
+            (FileKind::Regular, TrailingSlash::Present)
+            | (FileKind::Directory | FileKind::Other, _) => Status::NotImplemented,
+        };
+        actions.push(Action::Log(Log::Response {
+            conn,
+            peer: c.peer,
+            status,
+            request: c.request.take(),
+        }));
+        match (meta.kind, slash) {
+            (FileKind::Regular, TrailingSlash::Absent) => {
+                render_file_head(content_type, size, persistence, &mut c.send);
+                let chunk = if size == 0 {
+                    Chunk::Done
+                } else {
+                    let end = size.min(CHUNK_SIZE);
+                    actions.push(Action::Readahead {
+                        file,
+                        offset: 0,
+                        len: end,
+                    });
+                    Chunk::Reading { end }
+                };
+                c.state = ConnState::SendingFile {
+                    file,
+                    size,
+                    offset: 0,
+                    chunk,
+                    persistence,
+                    buffered,
+                    deadline,
+                };
+            }
+            (FileKind::Regular, TrailingSlash::Present)
+            | (FileKind::Directory | FileKind::Other, _) => {
+                self.files.release(file);
+                actions.push(Action::CloseFile { file });
+                render_fixed(
+                    Status::NotImplemented,
+                    Persistence::Close,
+                    BodyMode::Full,
+                    &mut c.send,
+                );
+                c.state = ConnState::Responding {
+                    persistence: Persistence::Close,
+                    unread_body: UnreadBody::None,
+                    buffered,
+                    deadline,
+                };
+            }
+        }
+        self.sync_interest(conn, actions);
+    }
+
+    /// An open, readahead or sendfile of `file` failed: close its
+    /// connection (and the file, if it was open).
+    fn file_failed(&mut self, file: FileId, actions: &mut Vec<Action>) {
+        let conn = match self.files.owner(file) {
+            Owner::Conn(conn) => conn,
+            Owner::Orphan => {
+                self.files.release(file);
+                return;
+            }
+            Owner::Unknown => return,
+        };
+        let Some(c) = self.conns.get(&conn) else {
+            return;
+        };
+        if c.state.file() != Some(file) {
+            return;
+        }
+        if let Some(c) = self.forget(conn, actions) {
+            // A failed open leaves nothing open to close.
+            if let ConnState::OpeningFile { .. } = c.state {
+                self.files.release(file);
+            }
+            actions.push(Action::Close { conn });
+        }
+    }
+
+    /// The readahead in flight for `file` completed.
+    fn chunk_ready(
+        &mut self,
+        now: Instant,
+        file: FileId,
+        stamp: FileStamp,
+        actions: &mut Vec<Action>,
+    ) {
+        let Owner::Conn(conn) = self.files.owner(file) else {
+            return;
+        };
+        let deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        let ConnState::SendingFile {
+            file: sending,
+            size,
+            offset,
+            chunk: Chunk::Reading { end },
+            persistence,
+            buffered,
+            ..
+        } = c.state
+        else {
+            return;
+        };
+        if sending != file {
+            return;
+        }
+        c.state = ConnState::SendingFile {
+            file,
+            size,
+            offset,
+            chunk: Chunk::Ready { end, stamp },
+            persistence,
+            buffered,
+            deadline,
+        };
+        self.sync_interest(conn, actions);
+    }
+
+    /// The socket accepted `len` bytes of `conn`'s file segment.
+    fn file_sent(&mut self, now: Instant, conn: ConnId, len: u64, actions: &mut Vec<Action>) {
+        let limits = &self.config.limits;
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        let ConnState::SendingFile {
+            file,
+            size,
+            offset,
+            chunk: Chunk::Ready { end, stamp },
+            persistence,
+            buffered,
+            ..
+        } = c.state
+        else {
+            return;
+        };
+        // No segment was offered while the send buffer held bytes.
+        if !c.send.is_empty() {
+            return;
+        }
+        let len = len.min(end.saturating_sub(offset));
+        if len == 0 {
+            return;
+        }
+        let offset = offset.saturating_add(len);
+        let deadline = now.saturating_add(limits.send_idle_timeout);
+        let chunk = if offset < end {
+            Chunk::Ready { end, stamp }
+        } else if end < size {
+            let next = size.min(end.saturating_add(CHUNK_SIZE));
+            actions.push(Action::Readahead {
+                file,
+                offset: end,
+                len: next.saturating_sub(end),
+            });
+            Chunk::Reading { end: next }
+        } else {
+            Chunk::Done
+        };
+        c.state = match chunk {
+            Chunk::Done => {
+                self.files.release(file);
+                actions.push(Action::CloseFile { file });
+                finish(
+                    conn,
+                    c,
+                    persistence,
+                    UnreadBody::None,
+                    buffered,
+                    now,
+                    limits,
+                    actions,
+                )
+            }
+            Chunk::Ready { .. } | Chunk::Reading { .. } => ConnState::SendingFile {
+                file,
+                size,
+                offset,
+                chunk,
+                persistence,
+                buffered,
+                deadline,
+            },
+        };
         self.try_parse(now, conn, actions);
         self.sync_interest(conn, actions);
     }
@@ -480,17 +834,20 @@ impl Core {
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Lingering { .. } => {
-                self.forget(conn);
+                self.forget(conn, actions);
                 actions.push(Action::Close { conn });
             }
-            // The client stopped reading: close without further writes.
-            ConnState::Responding { .. } => {
+            // The client stopped reading, or the disk did not answer in
+            // time: close without further writes.
+            ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. } => {
                 actions.push(Action::Log(Log::Rejected {
                     conn,
                     peer: c.peer,
                     reason: RejectReason::Timeout(TimeoutKind::Send),
                 }));
-                self.forget(conn);
+                self.forget(conn, actions);
                 actions.push(Action::Close { conn });
             }
         }
@@ -541,6 +898,8 @@ impl Core {
                 respond(
                     c,
                     &self.router,
+                    &self.static_roots,
+                    &mut self.files,
                     conn,
                     head,
                     leftover,
@@ -594,7 +953,9 @@ impl Core {
                 ConnState::Lingering { .. } => &mut self.scratch,
                 ConnState::ReadingHead { .. }
                 | ConnState::Idle { .. }
-                | ConnState::Responding { .. } => c.recv_spare(),
+                | ConnState::Responding { .. }
+                | ConnState::OpeningFile { .. }
+                | ConnState::SendingFile { .. } => c.recv_spare(),
             },
             None => &mut [],
         }
@@ -620,8 +981,37 @@ impl Core {
             ConnState::Lingering { .. } => self.scratch.len(),
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
-            | ConnState::Responding { .. } => c.recv.len(),
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. } => c.recv.len(),
         })
+    }
+
+    /// The file range the driver may `sendfile` to `conn` now: only once
+    /// [`Core::send_buffer`] is empty and the chunk's `ChunkReady` has
+    /// arrived. `None` when there is none or the connection is unknown.
+    pub fn send_file(&self, conn: ConnId) -> Option<FileSegment> {
+        let c = self.conns.get(&conn)?;
+        if !c.send.is_empty() {
+            return None;
+        }
+        let ConnState::SendingFile {
+            file,
+            offset,
+            chunk,
+            ..
+        } = c.state
+        else {
+            return None;
+        };
+        match chunk {
+            Chunk::Ready { end, .. } if end > offset => Some(FileSegment {
+                file,
+                offset,
+                len: end.saturating_sub(offset),
+            }),
+            Chunk::Ready { .. } | Chunk::Reading { .. } | Chunk::Done => None,
+        }
     }
 
     /// Capacity of `conn`'s send buffer; 0 for unknown connections.
@@ -638,27 +1028,123 @@ impl Core {
     }
 }
 
+/// The response on `conn` is fully written: keep the connection for the
+/// next request, or shut down its sending side and linger.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "free function over disjoint borrows of the core's fields"
+)]
+fn finish(
+    conn: ConnId,
+    c: &mut Conn,
+    persistence: Persistence,
+    unread_body: UnreadBody,
+    buffered: usize,
+    now: Instant,
+    limits: &Limits,
+    actions: &mut Vec<Action>,
+) -> ConnState {
+    match (persistence, unread_body) {
+        (Persistence::KeepAlive, UnreadBody::None) => {
+            if buffered > 0 {
+                ConnState::ReadingHead {
+                    buffered,
+                    parser: HeadParser::new(),
+                    deadline: now.saturating_add(limits.header_timeout),
+                }
+            } else {
+                ConnState::Idle {
+                    deadline: now.saturating_add(limits.keepalive_timeout),
+                }
+            }
+        }
+        (Persistence::Close, UnreadBody::None | UnreadBody::Pending)
+        | (Persistence::KeepAlive, UnreadBody::Pending) => {
+            actions.push(Action::ShutdownWrite { conn });
+            // Lingering input goes to the shared scratch buffer.
+            c.recv = Box::default();
+            ConnState::Lingering {
+                deadline: now.saturating_add(LINGER_TIMEOUT),
+            }
+        }
+    }
+}
+
+/// Where a body-less GET on a static route is served from: the root's id
+/// and the path's relative segments. `None` for anything this stage does
+/// not serve from a file.
+fn static_target(
+    route: &Route,
+    head: &RequestHead,
+    unread_body: UnreadBody,
+    static_roots: &[PathBuf],
+) -> Option<(RootId, Vec<Vec<u8>>)> {
+    let root = match &route.action {
+        RouteAction::Static { root } => root,
+        RouteAction::Proxy(_) => return None,
+    };
+    match (&head.method, unread_body) {
+        (Method::Get, UnreadBody::None) => {}
+        (Method::Get, UnreadBody::Pending) | (Method::Head | Method::Other(_), _) => return None,
+    }
+    let index = static_roots.iter().position(|r| r == root)?;
+    let root = RootId(u32::try_from(index).ok()?);
+    let path = relative_segments(&head.target.path, route.segments.len()).ok()?;
+    Some((root, path))
+}
+
 /// Answer a complete request head on `c`, which then responds until
 /// `send_deadline` (unless the socket makes progress). `leftover` bytes at
 /// the front of `c.recv` wait for the next request.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "free function over disjoint borrows of the core's fields"
+)]
 fn respond(
     c: &mut Conn,
     router: &Router,
+    static_roots: &[PathBuf],
+    files: &mut FileTable,
     conn: ConnId,
     head: RequestHead,
     leftover: usize,
     send_deadline: Instant,
     actions: &mut Vec<Action>,
 ) {
-    // No handler exists yet in this stage: a matched route is answered 501
-    // and the connection closed.
-    let (status, persistence) = match router.route(head.host.as_deref(), &head.target.path) {
-        Ok(_) => (Status::NotImplemented, Persistence::Close),
-        Err(_) => (Status::NotFound, head.persistence),
-    };
+    let route = router.route(head.host.as_deref(), &head.target.path);
     let unread_body = match head.body {
         BodyFraming::None => UnreadBody::None,
         BodyFraming::Length(_) | BodyFraming::Chunked => UnreadBody::Pending,
+    };
+    let target = route
+        .ok()
+        .and_then(|route| static_target(route, &head, unread_body, static_roots));
+    if let Some((root, path)) = target {
+        let name = path.last().map(Vec::as_slice).unwrap_or_default();
+        let content_type = content_type(name);
+        let slash = trailing_slash(&head.target.path);
+        let file = files.allocate(conn);
+        actions.push(Action::OpenFile { file, root, path });
+        c.state = ConnState::OpeningFile {
+            file,
+            content_type,
+            slash,
+            persistence: head.persistence,
+            buffered: leftover,
+            deadline: send_deadline,
+        };
+        c.request = Some(RequestSummary {
+            method: head.method,
+            host: head.host,
+            path: head.target.path,
+        });
+        return;
+    }
+    // Everything else on a matched route is not implemented yet in this
+    // stage: answered 501 and the connection closed.
+    let (status, persistence) = match route {
+        Ok(_) => (Status::NotImplemented, Persistence::Close),
+        Err(_) => (Status::NotFound, head.persistence),
     };
     // An unread body leaves the stream unframed: it cannot be reused.
     let persistence = match unread_body {
@@ -691,6 +1177,7 @@ fn respond(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file::{FileError, FileKind, FileMeta, FileStamp};
     use std::net::Ipv4Addr;
 
     const CONFIG: &str = "listen 127.0.0.1:8080; \
@@ -1026,10 +1513,9 @@ mod tests {
             );
         }
         let used = work::take();
+        // The complete head was answered: `/` is opened as a file.
         assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, Action::Log(Log::Response { .. }))),
+            actions.iter().any(|a| matches!(a, Action::OpenFile { .. })),
             "{actions:?}"
         );
         assert!(
@@ -1041,5 +1527,359 @@ mod tests {
         assert!(used.scanned <= total, "{used:?} for a {total}-byte head");
         assert!(used.judged <= total, "{used:?} for a {total}-byte head");
         assert!(used.built <= total, "{used:?} for a {total}-byte head");
+    }
+
+    const FILES: &str = "listen 127.0.0.1:8080; \
+        host a.test { path / { static /srv/a; } path /x { static /srv/b; } } \
+        host b.test { path / { static /srv/a; } path /p { proxy 127.0.0.1:3000; \
+        max_request_body 1MiB; max_response_body unlimited; } path /c { static /srv/c; } }";
+
+    fn files_core() -> Core {
+        Core::new(crate::config::load(FILES).unwrap())
+    }
+
+    /// Accept `id` and deliver `request` in one read; returns the actions.
+    fn request(core: &mut Core, now: Instant, id: u64, request: &[u8]) -> Vec<Action> {
+        let mut actions = accept(core, now, id, PEER);
+        let conn = ConnId(id);
+        let spare = core.recv_buffer(conn);
+        spare
+            .get_mut(..request.len())
+            .unwrap()
+            .copy_from_slice(request);
+        let len = request.len();
+        actions.clear();
+        core.handle(now, Event::Received { conn, len }, &mut actions);
+        actions
+    }
+
+    const GET_F: &[u8] = b"GET /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n";
+
+    fn stamp(size: u64) -> FileStamp {
+        FileStamp {
+            size,
+            modified_ns: 7,
+        }
+    }
+
+    fn regular(size: u64) -> FileMeta {
+        FileMeta {
+            kind: FileKind::Regular,
+            stamp: stamp(size),
+        }
+    }
+
+    #[test]
+    fn static_roots_are_distinct_in_config_order() {
+        let core = files_core();
+        assert_eq!(
+            core.static_roots(),
+            [
+                std::path::PathBuf::from("/srv/a"),
+                std::path::PathBuf::from("/srv/b"),
+                std::path::PathBuf::from("/srv/c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_is_opened_read_sent_and_closed() {
+        let mut core = files_core();
+        let now = secs(0);
+        let conn = ConnId(1);
+        let file = FileId(1);
+        let actions = request(&mut core, now, 1, GET_F);
+        assert_eq!(
+            actions,
+            [
+                Action::OpenFile {
+                    file,
+                    root: RootId(1),
+                    path: vec![b"f.txt".to_vec()],
+                },
+                Action::SetInterest {
+                    conn,
+                    interest: Interest::None
+                },
+            ]
+        );
+        assert_eq!(core.send_file(conn), None);
+        let mut actions = Vec::new();
+        let meta = regular(3);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        assert_eq!(
+            actions,
+            [
+                Action::Log(Log::Response {
+                    conn,
+                    peer: PEER,
+                    status: Status::Ok,
+                    request: Some(RequestSummary {
+                        method: Method::Get,
+                        host: Some("a.test".to_owned()),
+                        path: "/x/f.txt".to_owned(),
+                    }),
+                }),
+                Action::Readahead {
+                    file,
+                    offset: 0,
+                    len: 3
+                },
+                Action::SetInterest {
+                    conn,
+                    interest: Interest::Write
+                },
+            ]
+        );
+        let mut head = Vec::new();
+        crate::http::response::render_file_head(
+            "text/plain; charset=utf-8",
+            3,
+            Persistence::KeepAlive,
+            &mut head,
+        );
+        assert_eq!(core.send_buffer(conn), head.as_slice());
+        // Ready before the head is written: still nothing to sendfile.
+        actions.clear();
+        let stamp = stamp(3);
+        core.handle(now, Event::ChunkReady { file, stamp }, &mut actions);
+        assert_eq!(core.send_file(conn), None);
+        let len = head.len();
+        core.handle(now, Event::Sent { conn, len }, &mut actions);
+        assert_eq!(
+            core.send_file(conn),
+            Some(FileSegment {
+                file,
+                offset: 0,
+                len: 3
+            })
+        );
+        assert_eq!(core.next_deadline(), Some(secs(30)));
+        actions.clear();
+        core.handle(secs(1), Event::FileSent { conn, len: 2 }, &mut actions);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(
+            core.send_file(conn),
+            Some(FileSegment {
+                file,
+                offset: 2,
+                len: 1
+            })
+        );
+        assert_eq!(core.next_deadline(), Some(secs(31)));
+        core.handle(secs(1), Event::FileSent { conn, len: 9 }, &mut actions);
+        assert_eq!(
+            actions,
+            [
+                Action::CloseFile { file },
+                Action::SetInterest {
+                    conn,
+                    interest: Interest::Read
+                },
+            ]
+        );
+        assert_eq!(core.send_file(conn), None);
+        // The next request gets a fresh file id.
+        let next = GET_F;
+        let spare = core.recv_buffer(conn);
+        spare.get_mut(..next.len()).unwrap().copy_from_slice(next);
+        actions.clear();
+        let len = next.len();
+        core.handle(secs(1), Event::Received { conn, len }, &mut actions);
+        assert!(
+            actions.contains(&Action::OpenFile {
+                file: FileId(2),
+                root: RootId(1),
+                path: vec![b"f.txt".to_vec()],
+            }),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn empty_file_sends_only_the_head() {
+        let mut core = files_core();
+        let now = secs(0);
+        let conn = ConnId(1);
+        let file = FileId(1);
+        request(&mut core, now, 1, GET_F);
+        let mut actions = Vec::new();
+        let meta = regular(0);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::Readahead { .. })),
+            "{actions:?}"
+        );
+        actions.clear();
+        let len = core.send_buffer(conn).len();
+        core.handle(now, Event::Sent { conn, len }, &mut actions);
+        assert_eq!(
+            actions,
+            [
+                Action::CloseFile { file },
+                Action::SetInterest {
+                    conn,
+                    interest: Interest::Read
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_is_closed_and_answered_501() {
+        let mut core = files_core();
+        let now = secs(0);
+        let conn = ConnId(1);
+        let file = FileId(1);
+        request(&mut core, now, 1, GET_F);
+        let mut actions = Vec::new();
+        let meta = FileMeta {
+            kind: FileKind::Directory,
+            stamp: stamp(0),
+        };
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        assert!(actions.contains(&Action::CloseFile { file }), "{actions:?}");
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::Log(Log::Response {
+                    status: Status::NotImplemented,
+                    ..
+                })
+            )),
+            "{actions:?}"
+        );
+        let mut expected = Vec::new();
+        render_fixed(
+            Status::NotImplemented,
+            Persistence::Close,
+            BodyMode::Full,
+            &mut expected,
+        );
+        assert_eq!(core.send_buffer(conn), expected.as_slice());
+    }
+
+    #[test]
+    fn file_failure_closes_the_connection_and_its_file() {
+        let mut core = files_core();
+        let now = secs(0);
+        let file = FileId(1);
+        let conn = ConnId(1);
+        // Failed open: no file to close.
+        request(&mut core, now, 1, GET_F);
+        let mut actions = Vec::new();
+        let error = FileError::NotFound;
+        core.handle(now, Event::FileFailed { file, error }, &mut actions);
+        assert_eq!(actions, [Action::Close { conn }]);
+        // Failed readahead: the open file is closed too.
+        let file = FileId(2);
+        let conn = ConnId(2);
+        request(&mut core, now, 2, GET_F);
+        let meta = regular(3);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        actions.clear();
+        let error = FileError::Other;
+        core.handle(now, Event::FileFailed { file, error }, &mut actions);
+        assert_eq!(
+            actions,
+            [Action::CloseFile { file }, Action::Close { conn }]
+        );
+        assert!(core.conns.is_empty());
+    }
+
+    #[test]
+    fn late_file_events_after_close() {
+        let mut core = files_core();
+        let now = secs(0);
+        let conn = ConnId(1);
+        let file = FileId(1);
+        request(&mut core, now, 1, GET_F);
+        let mut actions = Vec::new();
+        // The open is still in flight when the send idle deadline passes.
+        core.handle(secs(30), Event::TimerFired, &mut actions);
+        assert!(actions.contains(&Action::Close { conn }), "{actions:?}");
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::CloseFile { .. })),
+            "{actions:?}"
+        );
+        assert_eq!(core.next_deadline(), None);
+        actions.clear();
+        let meta = regular(3);
+        core.handle(secs(31), Event::FileOpened { file, meta }, &mut actions);
+        assert_eq!(actions, [Action::CloseFile { file }]);
+        // Anything later for that file, or for files never opened, is ignored.
+        actions.clear();
+        let stamp = stamp(3);
+        for event in [
+            Event::FileOpened { file, meta },
+            Event::ChunkReady { file, stamp },
+            Event::FileFailed {
+                file,
+                error: FileError::Truncated,
+            },
+            Event::FileOpened {
+                file: FileId(9),
+                meta,
+            },
+            Event::FileSent { conn, len: 1 },
+        ] {
+            core.handle(secs(31), event, &mut actions);
+        }
+        assert!(actions.is_empty(), "{actions:?}");
+
+        // A connection reading a file that goes away closes its file.
+        let conn = ConnId(2);
+        let file = FileId(2);
+        request(&mut core, now, 2, GET_F);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        actions.clear();
+        core.handle(now, Event::ReadClosed { conn }, &mut actions);
+        assert_eq!(
+            actions,
+            [Action::CloseFile { file }, Action::Close { conn }]
+        );
+        actions.clear();
+        core.handle(now, Event::ChunkReady { file, stamp }, &mut actions);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(core.files.len(), 0);
+    }
+
+    #[test]
+    fn only_body_less_get_of_a_file_opens_it() {
+        let mut core = files_core();
+        let now = secs(0);
+        for (id, req) in [
+            (
+                1,
+                b"HEAD /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n".as_slice(),
+            ),
+            (2, b"POST /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n"),
+            (3, b"GET /x/.f HTTP/1.1\r\nHost: a.test\r\n\r\n"),
+            (
+                4,
+                b"GET /x/f HTTP/1.1\r\nHost: a.test\r\nContent-Length: 1\r\n\r\nx",
+            ),
+            (5, b"GET /p/f HTTP/1.1\r\nHost: b.test\r\n\r\n"),
+        ] {
+            let actions = request(&mut core, now, id, req);
+            assert!(
+                !actions.iter().any(|a| matches!(a, Action::OpenFile { .. })),
+                "{id}: {actions:?}"
+            );
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    Action::Log(Log::Response {
+                        status: Status::NotImplemented,
+                        ..
+                    })
+                )),
+                "{id}: {actions:?}"
+            );
+        }
     }
 }

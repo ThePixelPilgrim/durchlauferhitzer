@@ -4,6 +4,7 @@ use super::request::HttpError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
+    Ok,
     BadRequest,
     NotFound,
     RequestTimeout,
@@ -17,6 +18,7 @@ pub enum Status {
 impl Status {
     pub fn code(self) -> u16 {
         match self {
+            Status::Ok => 200,
             Status::BadRequest => 400,
             Status::NotFound => 404,
             Status::RequestTimeout => 408,
@@ -30,6 +32,7 @@ impl Status {
 
     pub fn reason(self) -> &'static str {
         match self {
+            Status::Ok => "OK",
             Status::BadRequest => "Bad Request",
             Status::NotFound => "Not Found",
             Status::RequestTimeout => "Request Timeout",
@@ -78,6 +81,7 @@ mod tests {
     #[test]
     fn status_codes_and_reasons() {
         let all = [
+            (Status::Ok, 200, "OK"),
             (Status::BadRequest, 400, "Bad Request"),
             (Status::NotFound, 404, "Not Found"),
             (Status::RequestTimeout, 408, "Request Timeout"),

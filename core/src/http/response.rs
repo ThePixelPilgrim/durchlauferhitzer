@@ -1,4 +1,5 @@
-//! Fixed plain-text responses (status line plus short text body).
+//! Response heads: fixed plain-text responses (status line plus short text
+//! body) and the head of a `200 OK` file response.
 
 use super::request::Persistence;
 use super::status::Status;
@@ -29,6 +30,20 @@ pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, ou
         BodyMode::Full => out.extend_from_slice(text.as_bytes()),
         BodyMode::HeadOnly => {}
     }
+}
+
+/// Appends the head of a `200 OK` response whose body is `len` bytes of a
+/// file of type `content_type` (existing bytes are kept).
+pub fn render_file_head(content_type: &str, len: u64, persistence: Persistence, out: &mut Vec<u8>) {
+    let mut head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nX-Content-Type-Options: nosniff\r\n"
+    );
+    match persistence {
+        Persistence::Close => head.push_str("Connection: close\r\n"),
+        Persistence::KeepAlive => {}
+    }
+    head.push_str("\r\n");
+    out.extend_from_slice(head.as_bytes());
 }
 
 #[cfg(test)]
@@ -91,5 +106,30 @@ mod tests {
         assert!(!second.is_empty());
         assert_eq!(out.get(..first.len()), Some(first.as_slice()));
         assert_eq!(out.get(first.len()..), Some(second.as_slice()));
+    }
+
+    #[test]
+    fn renders_file_head_keep_alive() {
+        let mut out = Vec::new();
+        render_file_head(
+            "text/css; charset=utf-8",
+            1234,
+            Persistence::KeepAlive,
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=utf-8\r\nContent-Length: 1234\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn renders_file_head_close() {
+        let mut out = b"x".to_vec();
+        render_file_head("image/png", 0, Persistence::Close, &mut out);
+        assert_eq!(
+            out,
+            b"xHTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 0\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+        );
     }
 }

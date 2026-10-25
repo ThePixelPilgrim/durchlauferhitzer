@@ -5,7 +5,10 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::core::Interest;
+use crate::file::{Chunk, FileId};
 use crate::http::request::{HeadParser, Persistence};
+use crate::http::static_path::TrailingSlash;
+use crate::log::RequestSummary;
 use crate::time::Instant;
 
 /// Capacity of each connection's send buffer.
@@ -63,6 +66,30 @@ pub(crate) enum ConnState {
         buffered: usize,
         deadline: Instant,
     },
+    /// A body-less GET on a static route: `OpenFile` for `file` is in
+    /// flight. `content_type` comes from the requested name, `slash` says
+    /// whether the path ended in `/`; `persistence` and `buffered` as in
+    /// `Responding`. `deadline` is the send idle deadline.
+    OpeningFile {
+        file: FileId,
+        content_type: &'static str,
+        slash: TrailingSlash,
+        persistence: Persistence,
+        buffered: usize,
+        deadline: Instant,
+    },
+    /// A file response: the head is in `Conn::send`, then the open `file`'s
+    /// bytes from `offset` up to `size` (its size at open) follow chunk by
+    /// chunk. `deadline` is the send idle deadline, reset on progress.
+    SendingFile {
+        file: FileId,
+        size: u64,
+        offset: u64,
+        chunk: Chunk,
+        persistence: Persistence,
+        buffered: usize,
+        deadline: Instant,
+    },
     /// The sending side is shut down; input is read and discarded until the
     /// peer closes or `deadline` passes.
     Lingering { deadline: Instant },
@@ -75,7 +102,33 @@ impl ConnState {
             ConnState::ReadingHead { deadline, .. }
             | ConnState::Idle { deadline }
             | ConnState::Responding { deadline, .. }
+            | ConnState::OpeningFile { deadline, .. }
+            | ConnState::SendingFile { deadline, .. }
             | ConnState::Lingering { deadline } => deadline,
+        }
+    }
+
+    /// Reset the deadline of a state that responds or waits on the disk;
+    /// other states keep theirs.
+    pub(crate) fn set_deadline(&mut self, new: Instant) {
+        match self {
+            ConnState::Responding { deadline, .. }
+            | ConnState::OpeningFile { deadline, .. }
+            | ConnState::SendingFile { deadline, .. } => *deadline = new,
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Lingering { .. } => {}
+        }
+    }
+
+    /// The file this state holds an id for, if any.
+    pub(crate) fn file(&self) -> Option<FileId> {
+        match *self {
+            ConnState::OpeningFile { file, .. } | ConnState::SendingFile { file, .. } => Some(file),
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::Lingering { .. } => None,
         }
     }
 }
@@ -93,6 +146,9 @@ pub(crate) struct Conn {
     pub(crate) recv: Box<[u8]>,
     /// Bytes waiting to be written, at most `SEND_CAPACITY`.
     pub(crate) send: Vec<u8>,
+    /// The request being answered from a file, logged once the outcome of
+    /// the open is known.
+    pub(crate) request: Option<RequestSummary>,
 }
 
 impl Conn {
@@ -109,6 +165,7 @@ impl Conn {
             interest: Interest::None,
             recv: vec![0; recv_capacity].into_boxed_slice(),
             send: Vec::with_capacity(SEND_CAPACITY),
+            request: None,
         }
     }
 
@@ -121,7 +178,10 @@ impl Conn {
                 self.recv.get_mut(buffered..).unwrap_or_default()
             }
             ConnState::Idle { .. } => &mut self.recv,
-            ConnState::Responding { .. } | ConnState::Lingering { .. } => &mut [],
+            ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Lingering { .. } => &mut [],
         }
     }
 
@@ -142,6 +202,12 @@ impl Conn {
             // A response in progress always has bytes to send; reaching this
             // arm means nothing is left to do but wait.
             ConnState::Responding { .. } => Interest::None,
+            // Waiting on the disk.
+            ConnState::OpeningFile { .. } => Interest::None,
+            ConnState::SendingFile { chunk, .. } => match chunk {
+                Chunk::Ready { .. } => Interest::Write,
+                Chunk::Reading { .. } | Chunk::Done => Interest::None,
+            },
         }
     }
 }
