@@ -317,7 +317,10 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
                 });
             }
             RouteKey::StripPrefix => {
-                if value.is_empty() {
+                // Whole segments only, and the stripped path must still start
+                // with `/`: so the prefix starts with `/` and does not end
+                // with one (this also rejects the empty prefix and `/`).
+                if !value.starts_with('/') || value.ends_with('/') {
                     return Err(bad());
                 }
                 strip = Some(Slot {
@@ -351,8 +354,12 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
         }
         (None, Some(backend)) => {
             if let Some(slot) = &strip {
-                if !prefix.starts_with(slot.value.as_str()) {
+                let Some(after) = prefix.strip_prefix(slot.value.as_str()) else {
                     return fail(ConfigErrorKind::StripPrefixNotPrefix, slot.pos);
+                };
+                // It must end where a path segment of `path` ends.
+                if !(after.is_empty() || after.starts_with('/')) {
+                    return Err(invalid_value("strip_prefix", &slot.value, slot.pos));
                 }
             }
             let Some(max_request_body) = max_request else {
@@ -887,7 +894,7 @@ host a { path / { static /s; } }
         ] {
             let value = match key {
                 "proxy" => "127.0.0.1:1",
-                "strip_prefix" => "/",
+                "strip_prefix" => "/x",
                 _ => "1",
             };
             assert_eq!(
@@ -1022,7 +1029,7 @@ host a { path / { static /s; } }
     fn strip_prefix_on_static_is_rejected() {
         assert_eq!(
             err(&in_host(
-                "  path / {\n    static /s;\n    strip_prefix /;\n  }"
+                "  path / {\n    static /s;\n    strip_prefix /x;\n  }"
             )),
             (ConfigErrorKind::StripPrefixOnStatic, 5, 5)
         );
@@ -1039,8 +1046,49 @@ host a { path / { static /s; } }
             err(&proxy_path(&format!("    strip_prefix /api/x;\n{rest}"))),
             (ConfigErrorKind::StripPrefixNotPrefix, 5, 5)
         );
-        for good in ["/api", "/api/", "/"] {
-            ok(&proxy_path(&format!("    strip_prefix {good};\n{rest}")));
+        ok(&proxy_path(&format!("    strip_prefix /api;\n{rest}")));
+    }
+
+    /// `strip_prefix` must remove whole path segments and leave a path that
+    /// still starts with `/`.
+    #[test]
+    fn strip_prefix_must_end_at_a_segment_boundary() {
+        let rest = "    max_request_body 1;\n    max_response_body 1;";
+        let route = |path: &str, strip: &str| {
+            in_host(&format!(
+                "  path {path} {{\n    proxy 127.0.0.1:3000;\n    strip_prefix {strip};\n{rest}\n  }}"
+            ))
+        };
+        for (path, strip) in [
+            ("/api/", "/ap"),
+            ("/api/", "/api/"),
+            ("/", "/"),
+            ("/api/", "/"),
+            ("/a/b/c/", "/a/b/"),
+            ("/api/", "api"),
+        ] {
+            assert_eq!(
+                err(&route(path, strip)),
+                (invalid("strip_prefix", strip), 5, 5),
+                "strip_prefix {strip} on path {path}"
+            );
+        }
+        for (path, strip) in [
+            ("/api/", "/api"),
+            ("/a/b/c/", "/a/b"),
+            ("/a/b/c/", "/a"),
+            ("/a/b/c/", "/a/b/c"),
+        ] {
+            let config = ok(&route(path, strip));
+            let action = config
+                .hosts
+                .first()
+                .and_then(|h| h.routes.first())
+                .map(|r| r.action.clone());
+            let Some(RouteAction::Proxy(proxy)) = action else {
+                panic!("expected a proxy route, got {action:?}");
+            };
+            assert_eq!(proxy.strip_prefix.as_deref(), Some(strip), "{path}");
         }
     }
 

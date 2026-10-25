@@ -263,7 +263,9 @@ host example.com www.example.com {
 
 - Unknown keys, duplicate keys, duplicate hosts or paths within a host, a
   `path` with both or neither of `static`/`proxy`, `strip_prefix` on a static
-  route, `strip_prefix` that is not a prefix of its `path`, a proxy route
+  route, `strip_prefix` that is not a prefix of its `path` ending at a
+  segment boundary (it must start with `/`, must not end with `/`, and be
+  followed in `path` by `/` or nothing), a proxy route
   missing `max_request_body` or `max_response_body`, or either of them on a
   static route → startup
   error naming the line and column.
