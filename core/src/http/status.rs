@@ -1,5 +1,6 @@
 //! Status codes the server can emit, and the mapping from parse errors.
 
+use super::forward::ForwardError;
 use super::request::HttpError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,15 @@ impl HttpError {
     }
 }
 
+impl ForwardError {
+    /// A request that may not be forwarded is the client's fault.
+    pub fn status(&self) -> Status {
+        match self {
+            ForwardError::DuplicateForwardedFor => Status::BadRequest,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +165,13 @@ mod tests {
         for (err, status) in cases {
             assert_eq!(err.status(), status, "{err:?}");
         }
+    }
+
+    #[test]
+    fn forward_errors_map_to_bad_request() {
+        assert_eq!(
+            ForwardError::DuplicateForwardedFor.status(),
+            Status::BadRequest
+        );
     }
 }

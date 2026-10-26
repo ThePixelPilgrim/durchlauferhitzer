@@ -53,6 +53,8 @@ src/
     head_line.rs        line scanning, limits, header-line, framing and
                         `Connection` rules shared by the two head parsers
     chunked.rs          strict, streaming chunked-body framing validator
+    forward.rs          proxy head rewriting: request head to the backend,
+                        response head to the client, hop-by-hop rules
     target.rs           request-target validation (traversal, encodings)
     static_path.rs      decoding paths to file-system segments
     response.rs         rendering fixed responses, file heads, redirects
