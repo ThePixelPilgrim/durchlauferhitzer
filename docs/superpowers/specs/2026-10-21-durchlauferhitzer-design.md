@@ -323,6 +323,12 @@ Request head:
   `Connection` contains the token `close` (comma-separated,
   case-insensitive); HTTP/1.0 always closes (`Connection: keep-alive` is
   ignored).
+- **FR-HTTP-09a** [stage 3] A `Connection` header that lists
+  `content-length`, `transfer-encoding` or `host` (case-insensitive, in any
+  `Connection` line) → 400, on every route. *Owner decision 2026-10-26:
+  removing those as hop-by-hop headers (FR-PROXY-06) would change the
+  message's framing or target on the way to the backend, a request-smuggling
+  vector; RFC 9110 §7.6.1 already forbids senders to list them.*
 - **FR-HTTP-10** [done] Every parse error is answered with its status
   (FR-HTTP-01, -06; all others 400) and closes the connection
   (FR-CONN-05).
@@ -508,7 +514,10 @@ Request head toward the backend:
 - **FR-PROXY-07** [stage 3] `Host` is forwarded unchanged.
 - **FR-PROXY-08** [stage 3] `X-Forwarded-For` = the client's existing value
   (if any) + `, ` + the peer address in canonical form (IPv4-mapped IPv6
-  shown as IPv4); set to the peer address when absent.
+  shown as IPv4); set to the peer address when absent. A request with more
+  than one `X-Forwarded-For` header line → 400 (owner decision
+  2026-10-26: strict and simple; backends must trust only the last entry
+  either way).
 - **FR-PROXY-09** [stage 3] `X-Forwarded-Proto: http` replaces any client
   value.
 - **FR-PROXY-10** [stage 3] A request `Content-Length` is re-rendered
@@ -518,7 +527,9 @@ Request head toward the backend:
 
 Response head toward the client:
 
-- **FR-PROXY-12** [stage 3] The same hop-by-hop headers are removed; the
+- **FR-PROXY-12** [stage 3] The same hop-by-hop headers are removed (the
+  whole FR-PROXY-06 list, `Expect` included: one list for both directions,
+  owner decision 2026-10-26); the
   status line is re-rendered as `HTTP/1.1 <code> <reason>` with the
   backend's reason; `Connection: close` is added when the client
   connection will close; backend `Date`, `Server` and `Content-Length`
@@ -526,7 +537,8 @@ Response head toward the client:
   value is already validated as digits only). An empty backend reason
   phrase stays empty. (The parser only admits printable ASCII/HTAB reasons,
   FR-PROXY-15; the renderer still substitutes the standard reason for any
-  other byte, as defence in depth.)
+  other byte, as defence in depth, and an empty reason for a code that has
+  no standard one, owner decision 2026-10-26.)
 - **FR-PROXY-13** [stage 3] Header values containing obs-text (bytes ≥
   0x80) are never forwarded: from a client → 400 (FR-HTTP-05); from a
   backend → 502 (FR-PROXY-26). Owner decision.
@@ -543,7 +555,9 @@ Backend response parsing:
   (`Content-Length` + `Transfer-Encoding`, duplicate or bad
   `Content-Length`, a `Transfer-Encoding` other than `chunked`, and
   `Transfer-Encoding` in an HTTP/1.0 response are errors); these checks
-  also apply to 1xx, 204, 304 and responses to HEAD. `Content-Length: 0`
+  also apply to 1xx, 204, 304 and responses to HEAD, and so does
+  FR-HTTP-09a (a `Connection` listing `content-length`,
+  `transfer-encoding` or `host` → 502). `Content-Length: 0`
   means no body (the header is kept). No framing header means the body ends
   when the backend closes.
 - **FR-PROXY-17** [done] A head is judged line by line as its LF arrives;
@@ -590,8 +604,9 @@ Bodies:
   silently truncated "complete" one).
 - **FR-PROXY-25** [stage 3] `Expect: 100-continue`: the core answers
   `100 Continue` itself once the request head passed all checks (route,
-  limits) and strips `Expect` toward the backend; any other `Expect` value
-  → 417.
+  limits) and strips `Expect` toward the backend; any other `Expect` value,
+  more than one `Expect` header, or a list such as `100-continue, foo` → 417
+  (owner decision 2026-10-26: when in doubt, reject).
 - **FR-PROXY-25a** [stage 3] Outside proxy routes (static routes, route
   misses) `Expect: 100-continue` is never answered with `100 Continue`: the
   normal final response (413, 404, …) is sent at once. Any other `Expect`
@@ -763,7 +778,7 @@ Failures, persistence, timeouts:
 ### NFR-SEC — Security
 
 - **NFR-SEC-01** [done; proxy stage 3] No request smuggling: every framing
-  ambiguity is a hard rejection (FR-HTTP-03…08, FR-PROXY-16, -19).
+  ambiguity is a hard rejection (FR-HTTP-03…08, -09a, FR-PROXY-16, -19).
 - **NFR-SEC-02** [stage 3] A backend receives exactly one well-framed
   request per client request: `Content-Length` + `Transfer-Encoding`,
   duplicate lengths, chunk-extension and trailer tricks, and a second
