@@ -318,7 +318,8 @@ fn interim_then_final_head_byte_by_byte() {
 fn rejects_malformed_responses() {
     use ResponseError::*;
     let d = defaults();
-    let rows: Vec<(&[u8], HeadLimits, ResponseError)> = vec![
+    let rows: Vec<(&[u8], HeadLimits, ResponseError)> =
+        vec![
         (
             b"HTTP/1.1 200 OK\r\nA: 1234567890123456789012345678901234567890\r\n\r\n",
             tight(),
@@ -353,6 +354,10 @@ fn rejects_malformed_responses() {
         (b"HTTP/1.1 200 OK\r\nNoColon\r\n\r\n", d, BadHeaderName),
         (b"HTTP/1.1 200 OK\r\nX: a\rb\r\n\r\n", d, BadHeaderValue),
         (b"HTTP/1.1 200 OK\r\nX: a\0b\r\n\r\n", d, BadHeaderValue),
+        // Obs-text is never forwarded (FR-HTTP-05, FR-PROXY-13).
+        (b"HTTP/1.1 200 OK\r\nX: caf\xc3\xa9\r\n\r\n", d, BadHeaderValue),
+        (b"HTTP/1.1 200 OK\r\nX: \x80\r\n\r\n", d, BadHeaderValue),
+        (b"HTTP/1.1 200 OK\r\nX: a\xffb\r\n\r\n", d, BadHeaderValue),
         (b"HTTP/1.1 200 OK\n\n", d, BareLf),
         (b"HTTP/1.1 200 OK\r\nX: a\n\r\n", d, BareLf),
         (b"HTTP/1.1 200 OK\r\n\n", d, BareLf),

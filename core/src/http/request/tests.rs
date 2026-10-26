@@ -512,12 +512,27 @@ fn body_framing() {
     );
 }
 
+/// FR-HTTP-05: obs-text (bytes >= 0x80) in a header value is rejected, so
+/// it is never forwarded (FR-PROXY-13).
 #[test]
-fn obs_text_in_values_is_allowed() {
-    let head = head_of(b"GET / HTTP/1.1\r\nHost: a\r\nX: caf\xc3\xa9\r\n\r\n");
+fn obs_text_in_values_is_rejected() {
+    for value in [
+        &b"caf\xc3\xa9"[..],
+        b"\x80",
+        b"a\xffb",
+        b"\xa0 x",
+        b"x\t\x80",
+    ] {
+        let mut raw = b"GET / HTTP/1.1\r\nHost: a\r\nX: ".to_vec();
+        raw.extend_from_slice(value);
+        raw.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(err_of(&raw), HttpError::BadHeaderValue, "{value:?}");
+    }
+    // The highest VCHAR is still fine.
+    let head = head_of(b"GET / HTTP/1.1\r\nHost: a\r\nX: ~\x7e\r\n\r\n");
     assert_eq!(
         head.headers.last().map(|h| h.value.clone()),
-        Some(b"caf\xc3\xa9".to_vec())
+        Some(b"~~".to_vec())
     );
 }
 

@@ -281,7 +281,9 @@ pub(crate) fn split_header(line: &[u8]) -> Result<(&[u8], &[u8]), LineError> {
     if !is_token(name) {
         return Err(LineError::BadHeaderName);
     }
-    let valid_value = |&b: &u8| b == b'\t' || b == b' ' || (0x21..=0x7E).contains(&b) || b >= 0x80;
+    // HTAB, SP and VCHAR only: obs-text (bytes >= 0x80) is rejected so it
+    // is never forwarded (FR-HTTP-05, FR-PROXY-13).
+    let valid_value = |&b: &u8| b == b'\t' || b == b' ' || (0x21..=0x7E).contains(&b);
     if !value.iter().all(valid_value) {
         return Err(LineError::BadHeaderValue);
     }

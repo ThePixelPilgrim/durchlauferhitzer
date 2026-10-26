@@ -37,6 +37,10 @@ pub enum TargetError {
     Semicolon,
     EncodedControl,
     QueryInPath,
+    /// `%3F` in the path (FR-HTTP-15a): a backend that decodes before
+    /// splitting off the query would see another path and query than the
+    /// router did.
+    EncodedQuestionMark,
 }
 
 /// Parses an origin-form request target (`/path?query`), splitting at the
@@ -106,8 +110,9 @@ pub(crate) fn hex_value(b: u8) -> Option<u8> {
 }
 
 /// Byte-class and well-formed-escape rules for path and query. Only the path
-/// additionally rejects `;` (raw or as `%3B`), escapes that decode to dangerous bytes and
-/// escapes of unreserved characters (RFC 3986 section 2.3).
+/// additionally rejects `;` (raw or as `%3B`), `%3F`, escapes that decode to
+/// dangerous bytes and escapes of unreserved characters (RFC 3986 section
+/// 2.3).
 fn check_bytes(bytes: &[u8], is_path: bool) -> Result<(), TargetError> {
     let mut iter = bytes.iter();
     while let Some(&b) = iter.next() {
@@ -130,6 +135,7 @@ fn check_bytes(bytes: &[u8], is_path: bool) -> Result<(), TargetError> {
                     0x01..=0x1F | 0x7F => return Err(TargetError::EncodedControl),
                     0x2E => return Err(TargetError::EncodedDot),
                     0x3B => return Err(TargetError::Semicolon),
+                    0x3F => return Err(TargetError::EncodedQuestionMark),
                     b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'-' | b'_' | b'~' => {
                         return Err(TargetError::EncodedUnreserved);
                     }
@@ -272,12 +278,32 @@ mod tests {
             b"/%80%ff",
             // Reserved and other characters may stay encoded.
             b"/a%20b",
-            b"/a%3Fb",
             b"/a%25",
             b"/a%40%21%2C",
             // The query is not canonicalised.
             b"/a?x=%61%7E%2D%5F%30",
         ] {
+            assert!(
+                parse_target(ok).is_ok(),
+                "{:?}",
+                String::from_utf8_lossy(ok)
+            );
+        }
+    }
+
+    /// FR-HTTP-15a: an encoded `?` in the path is rejected, in either hex
+    /// case; the query is left alone.
+    #[test]
+    fn rejects_encoded_question_mark_in_path() {
+        for raw in [&b"/a%3Fb"[..], b"/a%3fb", b"/%3F", b"/x/%3f?q=1"] {
+            assert_eq!(
+                parse_target(raw),
+                Err(TargetError::EncodedQuestionMark),
+                "{:?}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+        for ok in [&b"/a?x=%3F"[..], b"/a?x=%3f&y=?"] {
             assert!(
                 parse_target(ok).is_ok(),
                 "{:?}",
@@ -329,7 +355,10 @@ mod tests {
                 assert!(!is_unreserved(decoded), "{raw:?}");
             }
             let d = decode(&t.path);
-            assert!(!d.contains(&b'\\') && !d.contains(&b';'), "{raw:?}");
+            assert!(
+                !d.contains(&b'\\') && !d.contains(&b';') && !d.contains(&b'?'),
+                "{raw:?}"
+            );
             assert!(d.iter().all(|&c| c > 0x1F && c != 0x7F), "{raw:?}");
             assert!(!d.windows(2).any(|w| w == b"//"), "{raw:?}");
             for seg in d.split(|&c| c == b'/') {
