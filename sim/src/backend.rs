@@ -342,6 +342,16 @@ impl Sim {
                 }
                 (Phase::Connected, Interest::Read) => progress |= self.pump_upstream_read(up),
                 (Phase::Connected, Interest::Write) => progress |= self.pump_upstream_write(up),
+                (Phase::Connected, Interest::ReadWrite) => {
+                    progress |= self.pump_upstream_read(up);
+                    // The read may have changed what the core wants.
+                    let u = self.upstream(up);
+                    if u.phase == Phase::Connected
+                        && matches!(u.interest, Interest::Write | Interest::ReadWrite)
+                    {
+                        progress |= self.pump_upstream_write(up);
+                    }
+                }
                 (Phase::Connecting(ConnectBehaviour::Hang), _)
                 | (Phase::Connected, Interest::None)
                 | (Phase::Failed | Phase::Closed, _) => {}
@@ -550,9 +560,15 @@ impl Sim {
                 up.0
             ));
         }
-        if interest == Interest::Read && recv == 0 {
+        if matches!(interest, Interest::Read | Interest::ReadWrite) && recv == 0 {
             self.violation(&format!(
                 "up={} wants to read but upstream_recv_buffer is empty",
+                up.0
+            ));
+        }
+        if matches!(interest, Interest::Write | Interest::ReadWrite) && send == 0 {
+            self.violation(&format!(
+                "up={} wants to write but upstream_send_buffer is empty",
                 up.0
             ));
         }
@@ -575,7 +591,7 @@ impl Sim {
     pub(crate) fn check_upstreams_settled(&self) {
         for (up, u) in &self.backends.upstreams {
             if u.phase == Phase::Connected
-                && u.interest != Interest::Write
+                && !matches!(u.interest, Interest::Write | Interest::ReadWrite)
                 && !self.core.upstream_send_buffer(*up).is_empty()
             {
                 self.violation(&format!(

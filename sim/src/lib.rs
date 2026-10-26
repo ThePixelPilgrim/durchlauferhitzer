@@ -295,6 +295,8 @@ impl Sim {
                 Interest::None => {}
                 Interest::Read => progress |= self.pump_read(conn),
                 Interest::Write => progress |= self.pump_write(conn),
+                // Never set: `apply` rejects it.
+                Interest::ReadWrite => {}
             }
         }
         progress
@@ -550,6 +552,13 @@ impl Sim {
         }
         let c = self.conns.get_mut(&conn).unwrap();
         match action {
+            Action::SetInterest {
+                interest: Interest::ReadWrite,
+                ..
+            } => self.violation(&format!(
+                "SetInterest ReadWrite for conn={}: it is for upstreams only",
+                conn.0
+            )),
             Action::SetInterest { interest, .. } => c.interest = interest,
             Action::ShutdownWrite { .. } => c.state = SimConnState::WriteShutdown,
             Action::Close { .. } => {

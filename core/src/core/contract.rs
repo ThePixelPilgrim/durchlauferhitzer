@@ -91,6 +91,16 @@ pub enum Interest {
     /// Write from [`Core::send_buffer`], then from [`Core::send_file`]
     /// (an upstream: from [`Core::upstream_send_buffer`]), when writable.
     Write,
+    /// Upstreams only: both at once. Read into
+    /// [`Core::upstream_recv_buffer`] when readable and write from
+    /// [`Core::upstream_send_buffer`] when writable. Each read and each
+    /// write is still reported as the very next `handle` call, and the
+    /// driver asks for both buffers afresh after every call (either may
+    /// have become empty, or the interest may have changed). The core sets
+    /// it while request body bytes wait for the backend, so a response the
+    /// backend sends before taking the whole body is seen (FR-PROXY-27).
+    /// Never set for a client connection.
+    ReadWrite,
 }
 
 /// Something the driver must do, in the order emitted.

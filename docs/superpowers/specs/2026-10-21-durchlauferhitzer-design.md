@@ -665,13 +665,20 @@ Failures, persistence, timeouts:
   (logged as `Rejected { Timeout(RequestBody) }`, then close) when the
   core waited for the client's body bytes, and a 504 (`BackendFailed {
   ResponseTimeout }`) when body bytes waited for the backend: a backend
-  that stops taking the body is at fault. While body bytes wait for the
-  backend the upstream is not read (one interest at a time), so such a
-  backend's early response is not seen; it gets the 504. A client that
-  ends its stream mid-body closes both connections at once.
+  that stops taking the body is at fault. *Owner decision 2026-10-26:*
+  while body bytes wait for the backend, the upstream is read too (the
+  driver contract's upstream-only `Interest::ReadWrite`), so a backend
+  that stops taking the body and answers has its response relayed at once
+  (FR-PROXY-27); only one that neither reads nor answers gets the 504. A
+  client that ends its stream mid-body closes both connections at once.
 - **FR-PROXY-27** [done] A backend that answers before the request body
   is complete: the response is forwarded, body forwarding stops, and the
-  client closes after the response (its body is unread).
+  client closes after the response (its body is unread). This holds also
+  while body bytes wait for a backend that stopped taking them: the
+  upstream is read while it is written (`Interest::ReadWrite`, DRV-10;
+  owner decision 2026-10-26). *Builder call (stage 3 Task 6):* if the
+  whole body was already read from the client, the unsent body bytes are
+  dropped and the client keeps its persistence (FR-PROXY-28).
 - **FR-PROXY-28** [stage 3] After a proxied response the client stays
   keep-alive only if the request asked for it, its body was fully read and
   the response was not close-delimited.
@@ -1110,7 +1117,11 @@ sim implements and checks it; the epoll driver is [stage 4].
   `Connect` is a non-blocking connect answered by exactly one
   `UpstreamConnected` or `UpstreamFailed` unless `CloseUpstream` comes
   first (then nothing more for that id); upstream buffers follow DRV-02…04;
-  `CloseUpstream` closes the socket.
+  `CloseUpstream` closes the socket. An upstream (never a client) may get
+  `Interest::ReadWrite`: the driver then reads and writes as readiness
+  allows, reports each read and write as the very next call, and asks for
+  both buffers afresh after every call (owner decision 2026-10-26, for
+  FR-PROXY-27).
 - **DRV-11** [stage 4] Sockets are non-blocking on `epoll`, with
   `TCP_NODELAY` (NFR-PERF-04); `RLIMIT_NOFILE` is checked against
   NFR-RES-05 at startup.

@@ -430,3 +430,26 @@ fn forwarded_request_is_judged_as_one_message() {
         Err("1 bytes after the end of its request".to_owned())
     );
 }
+
+#[test]
+#[should_panic(expected = "SetInterest ReadWrite for conn=1: it is for upstreams only")]
+fn client_read_write_interest_is_a_violation() {
+    let (mut sim, c, _) = connecting();
+    sim.apply(Action::SetInterest {
+        conn: c,
+        interest: Interest::ReadWrite,
+    });
+}
+
+#[test]
+#[should_panic(expected = "up=1 wants to write but upstream_send_buffer is empty")]
+fn upstream_read_write_with_nothing_to_write_is_a_violation() {
+    let (sim, _, up) = connecting();
+    let view = crate::backend::UpstreamView {
+        interest: Interest::ReadWrite,
+        recv: 100,
+        send: 0,
+        body_pending: None,
+    };
+    sim.check_upstream_view(up, &view);
+}

@@ -208,7 +208,8 @@
 //!   whatever the interest: [`Event::Failed`] for a client,
 //!   [`Event::UpstreamFailed`] for an upstream. End of stream, by contrast,
 //!   is only learnt from a read, so [`Event::ReadClosed`] and
-//!   [`Event::UpstreamReadClosed`] come only while the interest is `Read`.
+//!   [`Event::UpstreamReadClosed`] come only while the interest is `Read`
+//!   (for an upstream, `Read` or `ReadWrite`).
 //! - While a request is proxied the client connection is not read (its
 //!   interest is `None` or `Write`), except for the request's body, so a
 //!   client that half-closes after its complete request is noticed only
@@ -224,7 +225,12 @@
 //!   (read until the buffer is empty or the socket would block, write until
 //!   the buffer is empty or the socket would block); `EAGAIN` is not
 //!   reported and neither count is ever 0; an empty buffer means "do not
-//!   read now" or "nothing to write". End of stream is
+//!   read now" or "nothing to write". Upstreams alone may also get
+//!   [`Interest::ReadWrite`]: the driver then waits for both readiness
+//!   kinds and does both, each read and each write reported as the very
+//!   next call, and asks for both buffers afresh after every call, since
+//!   either may have become empty or the interest may have changed. A
+//!   client connection never gets it. End of stream is
 //!   `UpstreamReadClosed`; a socket error after the connect (`ECONNRESET`,
 //!   `EPIPE` as `Reset`, anything else as `Other`) is `UpstreamFailed`.
 //! - `CloseUpstream { up }` means: close the socket, also while its connect
@@ -241,10 +247,12 @@
 //!   every body byte of the previous read was written, and then into the
 //!   whole buffer but an incomplete chunked-framing tail of at most 35 bytes
 //!   moved to its front (NFR-RES-04). While body bytes wait for the
-//!   backend the upstream's interest is `Write`; otherwise it is `Read`, so
-//!   a response that comes before the body is complete is seen
-//!   (FR-PROXY-27). A backend that stops taking the body is noticed by the
-//!   body idle timeout (504).
+//!   backend the upstream's interest is `ReadWrite` (`Write` only while the
+//!   response buffer is full); otherwise it is `Read`. Either way a
+//!   response that comes before the body is complete is seen and relayed,
+//!   and the rest of the body is not forwarded (FR-PROXY-27). A backend
+//!   that stops taking the body and does not answer is noticed by the body
+//!   idle timeout (504).
 //! - `Expect: 100-continue`: the core queues `HTTP/1.1 100 Continue` in the
 //!   connection's send buffer at `UpstreamConnected`, for a request with a
 //!   body (FR-PROXY-25); the driver writes it like any other bytes, before
@@ -703,7 +711,7 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return &mut [];
         };
-        if c.state.upstream_interest() != Some((up, Interest::Read)) {
+        if !c.state.reads_upstream(up) {
             return &mut [];
         }
         match &mut c.state {

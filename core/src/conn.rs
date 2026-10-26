@@ -261,10 +261,22 @@ impl ConnState {
         }
     }
 
+    /// Whether the interest this state calls for upstream `up` includes
+    /// reading (`Read` or `ReadWrite`): only then may a read have been
+    /// offered.
+    pub(crate) fn reads_upstream(&self, up: UpstreamId) -> bool {
+        match self.upstream_interest() {
+            Some((own, Interest::Read | Interest::ReadWrite)) => own == up,
+            Some((_, Interest::None | Interest::Write)) | None => false,
+        }
+    }
+
     /// The open upstream of this state and the interest it calls for:
-    /// nothing while connecting; writing the request head, then reading
-    /// the response head; reading body bytes only once every earlier one
-    /// was sent (fill, drain, refill).
+    /// nothing while connecting; writing the request head; then writing the
+    /// request body while reading the response head (`ReadWrite`), or only
+    /// reading it once no request byte is left to write; reading response
+    /// body bytes only once every earlier one was sent (fill, drain,
+    /// refill).
     pub(crate) fn upstream_interest(&self) -> Option<(UpstreamId, Interest)> {
         match self {
             ConnState::Connecting { up, .. } => Some((*up, Interest::None)),
@@ -275,9 +287,18 @@ impl ConnState {
                 filled,
                 ..
             } => {
-                let interest = if !buffers.head.is_empty() || request.body.unsent_len() > 0 {
+                let room = *filled < buffers.recv.len();
+                let interest = if !buffers.head.is_empty() {
                     Interest::Write
-                } else if *filled < buffers.recv.len() {
+                } else if request.body.unsent_len() > 0 {
+                    // A response may come before the backend takes the
+                    // whole body (FR-PROXY-27): read while writing.
+                    if room {
+                        Interest::ReadWrite
+                    } else {
+                        Interest::Write
+                    }
+                } else if room {
                     Interest::Read
                 } else {
                     Interest::None

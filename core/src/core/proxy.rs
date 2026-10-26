@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use super::request::{AfterResponse, HeadEnd, finish};
-use super::{Action, ConnId, Core, Interest};
+use super::{Action, ConnId, Core};
 use crate::config::{BackendAddr, BodyLimit, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, Source, UnreadBody};
 use crate::http::forward::{
@@ -342,7 +342,7 @@ impl Core {
             return;
         };
         // Only what was offered can have arrived: clamp to it.
-        if c.state.upstream_interest() != Some((up, Interest::Read)) {
+        if !c.state.reads_upstream(up) {
             return;
         }
         match &mut c.state {
