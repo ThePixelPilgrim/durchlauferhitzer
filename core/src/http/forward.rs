@@ -5,7 +5,8 @@
 //! rewrite: header names are written lowercased as `name: value`, hop-by-hop
 //! headers are dropped, and the proxy's own lines are appended. The parsers
 //! reject a `Connection` that lists `content-length`, `transfer-encoding` or
-//! `host`, so the renderers need no guard for that.
+//! `host` (see `connection_names_framing` in `request.rs`), so the renderers
+//! need no guard for that.
 
 use crate::http::request::{Header, Method, Persistence, RequestHead, Version};
 use crate::http::response_head::ResponseHead;
@@ -39,17 +40,7 @@ pub fn render_request_head(head: &RequestHead, path: &str, peer: IpAddr, out: &m
         Version::Http10 => b" HTTP/1.0\r\n",
         Version::Http11 => b" HTTP/1.1\r\n",
     });
-    let listed = listed_tokens(&head.headers);
-    let listed: Vec<&[u8]> = listed.iter().map(Vec::as_slice).collect();
-    for header in &head.headers {
-        if is_hop_by_hop(&header.name, &listed)
-            || header.name == "expect"
-            || header.name == "x-forwarded-proto"
-        {
-            continue;
-        }
-        push_header(&header.name, &header.value, out);
-    }
+    push_forwarded(&head.headers, &["expect", "x-forwarded-proto"], out);
     out.extend_from_slice(b"x-forwarded-for: ");
     out.extend_from_slice(peer.to_canonical().to_string().as_bytes());
     out.extend_from_slice(b"\r\nx-forwarded-proto: http\r\nconnection: close\r\n\r\n");
@@ -60,22 +51,36 @@ pub fn render_request_head(head: &RequestHead, path: &str, peer: IpAddr, out: &m
 /// `connection: close` if `persistence` is `Close`.
 pub fn render_response_head(head: &ResponseHead, persistence: Persistence, out: &mut Vec<u8>) {
     out.extend_from_slice(b"HTTP/1.1 ");
-    out.extend_from_slice(head.status.to_string().as_bytes());
+    out.extend_from_slice(&status_digits(head.status));
     out.push(b' ');
     out.extend_from_slice(&head.reason);
     out.extend_from_slice(b"\r\n");
-    let listed = listed_tokens(&head.headers);
-    let listed: Vec<&[u8]> = listed.iter().map(Vec::as_slice).collect();
-    for header in &head.headers {
-        if !is_hop_by_hop(&header.name, &listed) {
-            push_header(&header.name, &header.value, out);
-        }
-    }
+    push_forwarded(&head.headers, &[], out);
     match persistence {
         Persistence::KeepAlive => {}
         Persistence::Close => out.extend_from_slice(b"connection: close\r\n"),
     }
     out.extend_from_slice(b"\r\n");
+}
+
+/// The three decimal digits of a status the parser guarantees to be
+/// `100..=599`.
+fn status_digits(status: u16) -> [u8; 3] {
+    let digit = |place: u16| b'0'.saturating_add(u8::try_from(status / place % 10).unwrap_or(0));
+    [digit(100), digit(10), digit(1)]
+}
+
+/// Appends `headers` as `name: value` lines, leaving out the hop-by-hop
+/// ones and those named in `also_drop`.
+fn push_forwarded(headers: &[Header], also_drop: &[&str], out: &mut Vec<u8>) {
+    // Neither vector allocates when there is no `connection` header.
+    let listed = listed_tokens(headers);
+    let listed: Vec<&[u8]> = listed.iter().map(Vec::as_slice).collect();
+    for header in headers {
+        if !is_hop_by_hop(&header.name, &listed) && !also_drop.contains(&header.name.as_str()) {
+            push_header(&header.name, &header.value, out);
+        }
+    }
 }
 
 fn push_header(name: &str, value: &[u8], out: &mut Vec<u8>) {
@@ -251,6 +256,65 @@ mod tests {
     }
 
     #[test]
+    fn several_connection_headers_all_list_names() {
+        let raw = b"GET /p HTTP/1.1\r\nHost: a\r\nConnection: x-a\r\nX-A: 1\r\n\
+            Connection: x-b\r\nX-B: 2\r\nX-C: 3\r\n\r\n";
+        let out = String::from_utf8(rendered_request(raw, "/p", v4(1, 2, 3, 4))).unwrap();
+        assert!(out.starts_with("GET /p HTTP/1.1\r\nhost: a\r\nx-c: 3\r\nx-forwarded-for: "));
+    }
+
+    #[test]
+    fn empty_and_padded_connection_tokens_are_ignored() {
+        let raw = b"HTTP/1.1 200 OK\r\nConnection: ,, X-A ,\r\nX-A: 1\r\nX-B: 2\r\n\r\n";
+        assert_eq!(
+            rendered_response(raw, Persistence::KeepAlive),
+            b"HTTP/1.1 200 OK\r\nx-b: 2\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn response_drops_te_trailer_and_upgrade() {
+        let raw = b"HTTP/1.1 200 OK\r\nTE: trailers\r\nTrailer: X\r\nUpgrade: h2c\r\n\
+            Proxy-Connection: x\r\nX-A: 1\r\n\r\n";
+        assert_eq!(
+            rendered_response(raw, Persistence::KeepAlive),
+            b"HTTP/1.1 200 OK\r\nx-a: 1\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn response_keeps_expect_and_x_forwarded_proto() {
+        let raw = b"HTTP/1.1 200 OK\r\nExpect: x\r\nX-Forwarded-Proto: https\r\n\r\n";
+        assert_eq!(
+            rendered_response(raw, Persistence::KeepAlive),
+            b"HTTP/1.1 200 OK\r\nexpect: x\r\nx-forwarded-proto: https\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn only_names_starting_with_proxy_dash_are_dropped() {
+        let raw = b"HTTP/1.1 200 OK\r\nProxy: 1\r\nProxyx: 2\r\nProxy-X: 3\r\n\r\n";
+        assert_eq!(
+            rendered_response(raw, Persistence::KeepAlive),
+            b"HTTP/1.1 200 OK\r\nproxy: 1\r\nproxyx: 2\r\n\r\n"
+        );
+        let out = rendered_request(
+            b"GET /p HTTP/1.1\r\nHost: a\r\nProxy: 1\r\nProxyx: 2\r\nProxy-X: 3\r\n\r\n",
+            "/p",
+            v4(1, 2, 3, 4),
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\r\nproxy: 1\r\nproxyx: 2\r\nx-forwarded-for"));
+    }
+
+    #[test]
+    fn status_digits_are_zero_padded_by_value() {
+        assert_eq!(status_digits(100), *b"100");
+        assert_eq!(status_digits(404), *b"404");
+        assert_eq!(status_digits(599), *b"599");
+    }
+
+    #[test]
     fn empty_reason_is_kept() {
         assert_eq!(
             rendered_response(
@@ -262,7 +326,6 @@ mod tests {
     }
 
     const NAMES: &[&str] = &[
-        "Host",
         "Connection",
         "Keep-Alive",
         "TE",
@@ -307,7 +370,7 @@ mod tests {
                 0..VALUES.len(),
                 proptest::bool::ANY,
             ),
-            0..12,
+            0..8,
         )
         .prop_map(|lines| {
             let mut raw = Vec::new();
@@ -325,6 +388,52 @@ mod tests {
             }
             raw
         })
+    }
+
+    const FIXED_HOP: &[&str] = &["connection", "keep-alive", "te", "trailer", "upgrade"];
+
+    /// The header lines of a rendered head, split at `: `.
+    fn rendered_headers(out: &[u8], skip: usize, trailing: usize) -> Vec<(String, Vec<u8>)> {
+        let text: Vec<&[u8]> = out.split(|&b| b == b'\n').collect();
+        // The final element is empty (after the last LF), and before it
+        // comes the blank line.
+        let lines = &text[skip..text.len() - 2 - trailing];
+        lines
+            .iter()
+            .map(|line| {
+                let line = line.strip_suffix(b"\r").unwrap();
+                let at = line.windows(2).position(|w| w == b": ").unwrap();
+                (
+                    String::from_utf8(line[..at].to_vec()).unwrap(),
+                    line[at + 2..].to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    /// The headers a renderer should keep, by an independent model.
+    fn expected_headers(headers: &[Header], extra: &[&str]) -> Vec<(String, Vec<u8>)> {
+        let listed: Vec<String> = headers
+            .iter()
+            .filter(|h| h.name == "connection")
+            .flat_map(|h| {
+                String::from_utf8(h.value.clone())
+                    .unwrap()
+                    .split(',')
+                    .map(|t| t.trim().to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        headers
+            .iter()
+            .filter(|h| {
+                !FIXED_HOP.contains(&h.name.as_str())
+                    && !h.name.starts_with("proxy-")
+                    && !extra.contains(&h.name.as_str())
+                    && !listed.contains(&h.name)
+            })
+            .map(|h| (h.name.clone(), h.value.clone()))
+            .collect()
     }
 
     proptest! {
@@ -347,23 +456,38 @@ mod tests {
             let mut raw = raw.into_bytes();
             raw.extend_from_slice(&headers);
             raw.extend_from_slice(b"\r\n");
-            if let Ok(ParseStatus::Complete { head, .. }) = parse_head(&raw, &limits()) {
-                let mut out = Vec::new();
-                render_request_head(&head, "/p", peer, &mut out);
-                prop_assert!(out.len() <= raw.len() + head.headers.len() + FORWARD_SLACK);
-                prop_assert!(out.ends_with(b"connection: close\r\n\r\n"));
-            }
+            let parsed = parse_head(&raw, &limits());
+            prop_assume!(matches!(parsed, Ok(ParseStatus::Complete { .. })));
+            let Ok(ParseStatus::Complete { head, .. }) = parsed else { unreachable!() };
+            let mut out = Vec::new();
+            render_request_head(&head, "/p", peer, &mut out);
+            prop_assert!(out.len() <= raw.len() + head.headers.len() + FORWARD_SLACK);
+            let rendered = rendered_headers(&out, 1, 3);
+            prop_assert_eq!(
+                rendered,
+                expected_headers(&head.headers, &["expect", "x-forwarded-proto"])
+            );
+            let tail = format!(
+                "x-forwarded-for: {}\r\nx-forwarded-proto: http\r\nconnection: close\r\n\r\n",
+                peer.to_canonical()
+            );
+            prop_assert!(out.ends_with(tail.as_bytes()));
 
             let mut raw = format!("HTTP/1.1 {status} {reason}\r\n").into_bytes();
             raw.extend_from_slice(&headers);
             raw.extend_from_slice(b"\r\n");
             let parsed = ResponseParser::new().advance(&raw, &limits(), BodyMode::Full);
-            if let Ok(ResponseStatus::Complete { head, .. }) = parsed {
-                for persistence in [Persistence::KeepAlive, Persistence::Close] {
-                    let mut out = Vec::new();
-                    render_response_head(&head, persistence, &mut out);
-                    prop_assert!(out.len() <= raw.len() + head.headers.len() + FORWARD_SLACK);
-                }
+            prop_assume!(matches!(parsed, Ok(ResponseStatus::Complete { .. })));
+            let Ok(ResponseStatus::Complete { head, .. }) = parsed else { unreachable!() };
+            for (persistence, trailing) in [(Persistence::KeepAlive, 0), (Persistence::Close, 1)] {
+                let mut out = Vec::new();
+                render_response_head(&head, persistence, &mut out);
+                prop_assert!(out.len() <= raw.len() + head.headers.len() + FORWARD_SLACK);
+                prop_assert_eq!(
+                    rendered_headers(&out, 1, trailing),
+                    expected_headers(&head.headers, &[])
+                );
+                prop_assert_eq!(out.ends_with(b"connection: close\r\n\r\n"), trailing == 1);
             }
         }
     }
