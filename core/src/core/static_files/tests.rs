@@ -1,5 +1,5 @@
 use crate::core::test_support::{GET_F, PEER, files_core, regular, request, secs, stamp};
-use crate::core::{Action, ConnId, Event, Interest};
+use crate::core::{Action, ConnError, ConnId, Event, Interest};
 use crate::file::{FileError, FileId, FileKind, FileMeta, FileSegment, RootId};
 use crate::http::request::{Method, Persistence};
 use crate::http::response::{BodyMode, render_fixed};
@@ -374,12 +374,12 @@ fn file_failure_closes_the_connection_and_its_file() {
     assert_eq!(
         actions,
         [
-            Action::CloseFile { file },
             Action::Log(Log::FileAborted {
                 conn,
                 peer: PEER,
                 error
             }),
+            Action::CloseFile { file },
             Action::Close { conn }
         ]
     );
@@ -574,4 +574,87 @@ fn static_rules_decided_before_opening() {
         assert_eq!(opened, status.is_none(), "{id}: {actions:?}");
         assert_eq!(logged, status, "{id}: {actions:?}");
     }
+}
+
+/// An aborted transfer and a send timeout while sending a file end the
+/// same way: the reason is logged, then the file and the connection are
+/// closed (stage-2 review M7).
+#[test]
+fn abort_and_timeout_emit_log_close_file_close() {
+    let mut core = files_core();
+    let now = secs(0);
+    let meta = regular(3);
+    // conn 1: its chunk fails to read.
+    let (aborted, aborted_file) = (ConnId(1), FileId(1));
+    request(&mut core, now, 1, GET_F);
+    let mut actions = Vec::new();
+    let file = aborted_file;
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    // conn 2: its chunk is ready, but the client does not take it.
+    let (stalled, stalled_file) = (ConnId(2), FileId(2));
+    request(&mut core, now, 2, GET_F);
+    let file = stalled_file;
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    let stamp = stamp(3);
+    core.handle(now, Event::ChunkReady { file, stamp }, &mut actions);
+
+    actions.clear();
+    let error = FileError::Other;
+    let file = aborted_file;
+    core.handle(now, Event::FileFailed { file, error }, &mut actions);
+    assert_eq!(
+        actions,
+        [
+            Action::Log(Log::FileAborted {
+                conn: aborted,
+                peer: PEER,
+                error
+            }),
+            Action::CloseFile { file },
+            Action::Close { conn: aborted }
+        ]
+    );
+
+    actions.clear();
+    core.handle(secs(30), Event::TimerFired, &mut actions);
+    assert_eq!(
+        actions,
+        [
+            Action::Log(Log::Rejected {
+                conn: stalled,
+                peer: PEER,
+                reason: RejectReason::Timeout(TimeoutKind::Send),
+            }),
+            Action::CloseFile { file: stalled_file },
+            Action::Close { conn: stalled }
+        ]
+    );
+    assert!(core.conns.is_empty());
+    assert_eq!(core.files.len(), 0);
+}
+
+/// A reset while sending a file ends like the other teardowns: the reason is
+/// logged, then the file and the connection are closed.
+#[test]
+fn reset_while_sending_a_file_emits_log_close_file_close() {
+    let mut core = files_core();
+    let now = secs(0);
+    let (conn, file) = (ConnId(1), FileId(1));
+    request(&mut core, now, 1, GET_F);
+    let mut actions = Vec::new();
+    let meta = regular(3);
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    actions.clear();
+    let error = ConnError::Reset;
+    core.handle(now, Event::Failed { conn, error }, &mut actions);
+    assert_eq!(
+        actions,
+        [
+            Action::Log(Log::Reset { conn, peer: PEER }),
+            Action::CloseFile { file },
+            Action::Close { conn }
+        ]
+    );
+    assert!(core.conns.is_empty());
+    assert_eq!(core.files.len(), 0);
 }

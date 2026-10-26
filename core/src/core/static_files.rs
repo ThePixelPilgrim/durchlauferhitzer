@@ -248,18 +248,20 @@ impl Core {
         }
     }
 
-    /// A file response failed after its head was queued: close the file,
-    /// log why, and cut the connection at once, so the client sees an
+    /// A file response failed after its head was queued: log why, close
+    /// the file, and cut the connection at once, so the client sees an
     /// incomplete body rather than a short one that looks complete.
     fn abort_transfer(&mut self, conn: ConnId, error: FileError, actions: &mut Vec<Action>) {
-        if let Some(c) = self.forget(conn, actions) {
-            actions.push(Action::Log(Log::FileAborted {
-                conn,
-                peer: c.peer,
-                error,
-            }));
-            actions.push(Action::Close { conn });
-        }
+        let Some(c) = self.conns.get(&conn) else {
+            return;
+        };
+        actions.push(Action::Log(Log::FileAborted {
+            conn,
+            peer: c.peer,
+            error,
+        }));
+        self.forget(conn, actions);
+        actions.push(Action::Close { conn });
     }
 
     /// The readahead in flight for `file` completed.

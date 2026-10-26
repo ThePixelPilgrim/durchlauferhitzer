@@ -35,6 +35,8 @@
 //!   delivering the next event. A slice obtained from `recv_buffer` or
 //!   `send_buffer` is only valid until the next `handle` call (the borrow
 //!   checker enforces this).
+//! - A connection that ends emits, in this order: its [`Action::Log`] (if
+//!   any), [`Action::CloseFile`] (if a file is open), then [`Action::Close`].
 //! - After [`Action::Close`] the core forgets the connection; the driver
 //!   closes the socket and delivers no further events for that id. The core
 //!   emits no further actions for it. Stray I/O events for a forgotten id are
@@ -163,7 +165,7 @@
 //!   a smaller size.
 //! - A failure after the response head was queued (any `FileFailed` while
 //!   sending, or a stamp that fails the check) aborts the transfer: the core
-//!   emits `CloseFile`, logs [`Log::FileAborted`] and closes the connection
+//!   logs [`Log::FileAborted`], emits `CloseFile` and closes the connection
 //!   at once, with no lingering and no further writes, so the client sees a
 //!   cut body, never a complete-looking short one. A failed open is
 //!   answered 404; `Truncated` or `Changed` in answer to `OpenFile` is a
@@ -336,21 +338,25 @@ impl Core {
             }
             Event::Sent { conn, len } => self.sent(now, conn, len, actions),
             Event::Failed { conn, error: _ } => {
-                if let Some(c) = self.forget(conn, actions) {
-                    match c.state {
-                        // A reset while discarding input after our response is
-                        // the expected end of a lingering close, not news.
-                        ConnState::Lingering { .. } => {}
-                        ConnState::ReadingHead { .. }
-                        | ConnState::Idle { .. }
-                        | ConnState::Responding { .. }
-                        | ConnState::OpeningFile { .. }
-                        | ConnState::SendingFile { .. } => {
-                            actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
-                        }
+                // Log first (peek at the state), then forget, which closes
+                // an open file: the order is Log, CloseFile, Close.
+                let Some(c) = self.conns.get(&conn) else {
+                    return;
+                };
+                match c.state {
+                    // A reset while discarding input after our response is
+                    // the expected end of a lingering close, not news.
+                    ConnState::Lingering { .. } => {}
+                    ConnState::ReadingHead { .. }
+                    | ConnState::Idle { .. }
+                    | ConnState::Responding { .. }
+                    | ConnState::OpeningFile { .. }
+                    | ConnState::SendingFile { .. } => {
+                        actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
                     }
-                    actions.push(Action::Close { conn });
                 }
+                self.forget(conn, actions);
+                actions.push(Action::Close { conn });
             }
             Event::TimerFired => self.timer_fired(now, actions),
             Event::FileOpened { file, meta } => self.file_opened(now, file, meta, actions),
