@@ -77,7 +77,8 @@ impl HttpError {
             | HttpError::BadContentLength
             | HttpError::DuplicateContentLength
             | HttpError::UnsupportedTransferEncoding
-            | HttpError::TransferEncodingInHttp10 => Status::BadRequest,
+            | HttpError::TransferEncodingInHttp10
+            | HttpError::ConnectionNamesFraming => Status::BadRequest,
         }
     }
 }
@@ -149,6 +150,7 @@ mod tests {
             (HttpError::DuplicateContentLength, Status::BadRequest),
             (HttpError::UnsupportedTransferEncoding, Status::BadRequest),
             (HttpError::TransferEncodingInHttp10, Status::BadRequest),
+            (HttpError::ConnectionNamesFraming, Status::BadRequest),
         ];
         for (err, status) in cases {
             assert_eq!(err.status(), status, "{err:?}");

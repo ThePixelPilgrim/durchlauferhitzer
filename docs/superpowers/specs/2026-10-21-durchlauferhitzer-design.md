@@ -325,7 +325,9 @@ Request head:
   ignored).
 - **FR-HTTP-09a** [stage 3] A `Connection` header that lists
   `content-length`, `transfer-encoding` or `host` (case-insensitive, in any
-  `Connection` line) → 400, on every route. *Owner decision 2026-10-26:
+  `Connection` line) → 400, on every route. It is the first check on the
+  whole head (after all line checks), before the Host and framing checks,
+  so the reported error is deterministic. *Owner decision 2026-10-26:
   removing those as hop-by-hop headers (FR-PROXY-06) would change the
   message's framing or target on the way to the backend, a request-smuggling
   vector; RFC 9110 §7.6.1 already forbids senders to list them.*

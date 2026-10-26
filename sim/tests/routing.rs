@@ -99,6 +99,37 @@ fn matched_route_gets_501_and_closes() {
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
 }
 
+/// FR-HTTP-09a: a `Connection` naming a framing header is a 400 with
+/// close on a static route too.
+#[test]
+fn connection_naming_content_length_gets_400_and_closes() {
+    let mut sim = Sim::new(CONFIG);
+    let p = peer();
+    let c = sim.connect(p);
+    sim.send(
+        c,
+        b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: content-length\r\n\r\n",
+    );
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        fixed(Status::BadRequest, Persistence::Close, BodyMode::Full),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[Log::Rejected {
+            conn: c,
+            peer: p,
+            reason: RejectReason::Http(HttpError::ConnectionNamesFraming),
+        }],
+        "{}",
+        sim.trace()
+    );
+}
+
 #[test]
 fn malformed_request_gets_400_and_closes() {
     let mut sim = Sim::new(CONFIG);

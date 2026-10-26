@@ -369,6 +369,94 @@ fn connection_close_and_http10_persistence() {
     );
 }
 
+/// FR-HTTP-09a: a `Connection` header may not name a framing header or
+/// `Host`, in any `Connection` line, in any case, on either version.
+#[test]
+fn connection_naming_framing_headers_is_rejected() {
+    use HttpError::ConnectionNamesFraming;
+    const L: &str = "GET / HTTP/1.1\r\nHost: a\r\n";
+    let with = |tail: &str| parse(format!("{L}{tail}\r\n").as_bytes());
+    let rejected = [
+        "Connection: close, Content-Length\r\n",
+        "Connection: transfer-encoding\r\n",
+        "Connection: HOST\r\n",
+        "Connection: keep-alive\r\nConnection: host\r\n",
+        "Connection:\tclose ,\tTransfer-Encoding \t\r\n",
+        "Connection: ,content-length,\r\n",
+    ];
+    for tail in rejected {
+        assert_eq!(with(tail), Err(ConnectionNamesFraming), "{tail:?}");
+    }
+    let accepted = [
+        "Connection: keep-alive, x-foo\r\n",
+        "Connection: ,, close ,\r\n",
+        "Connection: content-length-x, xhost, transfer-encodings\r\n",
+        "X-Connection: host\r\n",
+        "Connection:\r\n",
+    ];
+    for tail in accepted {
+        assert!(
+            matches!(with(tail), Ok(ParseStatus::Complete { .. })),
+            "{tail:?}: {:?}",
+            with(tail)
+        );
+    }
+    assert_eq!(
+        parse(b"GET / HTTP/1.0\r\nConnection: Content-Length\r\n\r\n"),
+        Err(ConnectionNamesFraming)
+    );
+}
+
+/// The `Connection` check is the first whole-head check: it wins over the
+/// Host (FR-HTTP-07) and framing (FR-HTTP-08) checks, while every per-line
+/// fault still wins over it.
+#[test]
+fn connection_naming_framing_headers_precedence() {
+    use HttpError::*;
+    let rows: &[(&[u8], HttpError)] = &[
+        (
+            b"GET / HTTP/1.1\r\nConnection: host\r\n\r\n",
+            ConnectionNamesFraming,
+        ),
+        (
+            b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\nConnection: host\r\n\r\n",
+            ConnectionNamesFraming,
+        ),
+        (
+            b"GET / HTTP/1.1\r\nHost: a_b\r\nConnection: host\r\n\r\n",
+            ConnectionNamesFraming,
+        ),
+        (
+            b"GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\nConnection: content-length\r\n\r\n",
+            ConnectionNamesFraming,
+        ),
+        (
+            b"GET / HTTP/1.0\r\nTransfer-Encoding: chunked\r\nConnection: transfer-encoding\r\n\r\n",
+            ConnectionNamesFraming,
+        ),
+        (
+            b"GET / HTTP/1.1\r\nConnection: host\r\nA : b\r\n\r\n",
+            BadHeaderName,
+        ),
+        (
+            b"GET / HTTP/1.1\r\nConnection: host\r\nA: b\n\r\n",
+            BareLf,
+        ),
+        (
+            b"GET / HTTP/9.9\r\nConnection: host\r\n\r\n",
+            UnsupportedVersion,
+        ),
+    ];
+    for &(input, expected) in rows {
+        assert_eq!(
+            parse(input),
+            Err(expected),
+            "{:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
 #[test]
 fn http10_host_is_optional_but_validated() {
     let head = head_of(b"GET / HTTP/1.0\r\n\r\n");

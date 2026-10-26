@@ -21,9 +21,9 @@
 //! applies the limits to the next head anew.
 
 use crate::http::head_line::{
-    DeclaredFraming, FramingError, LineError, LineScanner, Position, check_line,
-    check_unterminated, declared_framing, head_lines, parse_headers, split_header, to_string,
-    values, work,
+    ConnectionNamesFraming, DeclaredFraming, FramingError, LineError, LineScanner, Position,
+    check_connection, check_line, check_unterminated, declared_framing, head_lines, parse_headers,
+    split_header, to_string, values, work,
 };
 use crate::http::request::{HeadLimits, Header, Version};
 
@@ -74,6 +74,9 @@ pub enum ResponseError {
     BadContentLength,
     DuplicateContentLength,
     UnsupportedTransferEncoding,
+    /// A `Connection` header names `content-length`, `transfer-encoding`
+    /// or `host` (FR-HTTP-09a).
+    ConnectionNamesFraming,
     /// `101 Switching Protocols`: upgrades are not supported.
     SwitchingProtocols,
 }
@@ -116,6 +119,12 @@ impl From<FramingError> for ResponseError {
             FramingError::DuplicateContentLength => Self::DuplicateContentLength,
             FramingError::UnsupportedTransferEncoding => Self::UnsupportedTransferEncoding,
         }
+    }
+}
+
+impl From<ConnectionNamesFraming> for ResponseError {
+    fn from(_: ConnectionNamesFraming) -> Self {
+        Self::ConnectionNamesFraming
     }
 }
 
@@ -255,11 +264,17 @@ fn parse_status_line(line: &[u8]) -> Result<StatusLine<'_>, ResponseError> {
 /// Builds the result for `head`, a complete head (blank line included)
 /// whose lines [`ResponseParser::advance`] has already judged valid, and
 /// applies the checks that need all headers.
+///
+/// As for requests, those run after every per-line check: first
+/// `Connection` naming a framing header or `Host` (FR-HTTP-09a), then
+/// `Transfer-Encoding` in HTTP/1.0, then the framing headers. All of them
+/// apply to every head, whatever its status or request kind (FR-PROXY-16).
 fn build_head(head: &[u8], kind: RequestKind) -> Result<ResponseStatus, ResponseError> {
     work::built(head.len());
     let mut lines = head_lines(head);
     let status = parse_status_line(lines.next().unwrap_or_default())?;
     let headers = parse_headers(lines)?;
+    check_connection(&headers)?;
     if status.version == Version::Http10 && values(&headers, "transfer-encoding").next().is_some() {
         return Err(ResponseError::UnsupportedTransferEncoding);
     }

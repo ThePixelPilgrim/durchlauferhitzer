@@ -195,6 +195,71 @@ fn interim_heads_are_judged_like_final_ones() {
     }
 }
 
+/// FR-HTTP-09a via FR-PROXY-16: a `Connection` naming a framing header or
+/// `Host` is rejected on every head, including 1xx, 204, 304 and responses
+/// to HEAD; it is the first whole-head check, after every per-line fault.
+#[test]
+fn connection_naming_framing_headers_is_rejected() {
+    use ResponseError::*;
+    let starts: &[(&str, RequestKind)] = &[
+        ("HTTP/1.1 200 OK", RequestKind::Other),
+        ("HTTP/1.1 100 Continue", RequestKind::Other),
+        ("HTTP/1.1 204 No Content", RequestKind::Other),
+        ("HTTP/1.1 304 Not Modified", RequestKind::Other),
+        ("HTTP/1.1 200 OK", RequestKind::Head),
+        ("HTTP/1.0 200 OK", RequestKind::Other),
+    ];
+    let rejected = [
+        "Connection: close, Content-Length\r\n",
+        "Connection: transfer-encoding\r\n",
+        "Connection: HOST\r\n",
+        "Connection: keep-alive\r\nConnection: host\r\n",
+        "Connection: ,\tTransfer-Encoding \t\r\n",
+        // Wins over the framing checks.
+        "Content-Length: 1\r\nTransfer-Encoding: chunked\r\nConnection: content-length\r\n",
+        "Transfer-Encoding: gzip\r\nConnection: transfer-encoding\r\n",
+        "Content-Length: x\r\nConnection: host\r\n",
+    ];
+    let accepted = [
+        "Connection: keep-alive, x-foo\r\n",
+        "Connection: ,, close ,\r\n",
+        "Connection: content-length-x, xhost\r\n",
+    ];
+    for &(start, kind) in starts {
+        for tail in rejected {
+            let input = format!("{start}\r\n{tail}\r\n");
+            assert_eq!(
+                parse_with(input.as_bytes(), &defaults(), kind),
+                Err(ConnectionNamesFraming),
+                "{input:?}"
+            );
+        }
+        for tail in accepted {
+            let input = format!("{start}\r\n{tail}\r\n");
+            let got = parse_with(input.as_bytes(), &defaults(), kind);
+            assert!(
+                matches!(
+                    got,
+                    Ok(ResponseStatus::Complete { .. } | ResponseStatus::Interim { .. })
+                ),
+                "{input:?}: {got:?}"
+            );
+        }
+        // Per-line faults win over it.
+        let input = format!("{start}\r\nConnection: host\r\nA : b\r\n\r\n");
+        assert_eq!(
+            parse_with(input.as_bytes(), &defaults(), kind),
+            Err(BadHeaderName),
+            "{input:?}"
+        );
+    }
+    // The 1.0 rule for Transfer-Encoding comes after it as well.
+    assert_eq!(
+        parse(b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: host\r\n\r\n"),
+        Err(ConnectionNamesFraming)
+    );
+}
+
 /// The first bad line wins: a line-ending fault later in the head does not
 /// mask an earlier header fault, nor the other way round.
 #[test]

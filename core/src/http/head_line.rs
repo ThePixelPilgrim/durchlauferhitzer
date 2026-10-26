@@ -87,6 +87,11 @@ pub(crate) enum FramingError {
     UnsupportedTransferEncoding,
 }
 
+/// FR-HTTP-09a: a `Connection` header lists `content-length`,
+/// `transfer-encoding` or `host`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConnectionNamesFraming;
+
 /// How a line ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ending {
@@ -346,5 +351,35 @@ pub(crate) fn declared_framing(headers: &[Header]) -> Result<DeclaredFraming, Fr
         [] => Ok(DeclaredFraming::Absent),
         [one] if one.eq_ignore_ascii_case(b"chunked") => Ok(DeclaredFraming::Chunked),
         _ => Err(FramingError::UnsupportedTransferEncoding),
+    }
+}
+
+/// The header names a `Connection` header may not list (FR-HTTP-09a):
+/// dropping them as hop-by-hop would change the message's framing or target
+/// on its way on.
+const NOT_HOP_BY_HOP: [&[u8]; 3] = [b"content-length", b"transfer-encoding", b"host"];
+
+/// The comma-separated tokens of every `Connection` header, OWS trimmed;
+/// empty tokens are skipped.
+pub(crate) fn connection_tokens(headers: &[Header]) -> impl Iterator<Item = &[u8]> {
+    values(headers, "connection")
+        .flat_map(|v| v.split(|&b| b == b','))
+        .map(trim_ows)
+        .filter(|token| !token.is_empty())
+}
+
+/// Checks every `Connection` header: none of its tokens (compared ASCII
+/// case-insensitively) may name `content-length`, `transfer-encoding` or
+/// `host`.
+pub(crate) fn check_connection(headers: &[Header]) -> Result<(), ConnectionNamesFraming> {
+    let names_framing = connection_tokens(headers).any(|token| {
+        NOT_HOP_BY_HOP
+            .iter()
+            .any(|name| token.eq_ignore_ascii_case(name))
+    });
+    if names_framing {
+        Err(ConnectionNamesFraming)
+    } else {
+        Ok(())
     }
 }

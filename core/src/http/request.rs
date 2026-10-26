@@ -13,9 +13,9 @@
 
 use crate::config::model::Limits;
 use crate::http::head_line::{
-    DeclaredFraming, FramingError, LineError, LineScanner, Position, check_line,
-    check_unterminated, declared_framing, head_lines, is_token, parse_headers, split_header,
-    to_string, trim_ows, values,
+    ConnectionNamesFraming, DeclaredFraming, FramingError, LineError, LineScanner, Position,
+    check_connection, check_line, check_unterminated, connection_tokens, declared_framing,
+    head_lines, is_token, parse_headers, split_header, to_string, values,
 };
 // The work counters are shared by both head parsers; tests elsewhere reach
 // them through this module.
@@ -103,6 +103,9 @@ pub enum HttpError {
     DuplicateContentLength,
     UnsupportedTransferEncoding,
     TransferEncodingInHttp10,
+    /// A `Connection` header names `content-length`, `transfer-encoding`
+    /// or `host` (FR-HTTP-09a).
+    ConnectionNamesFraming,
 }
 
 impl From<LineError> for HttpError {
@@ -128,6 +131,12 @@ impl From<FramingError> for HttpError {
             FramingError::DuplicateContentLength => Self::DuplicateContentLength,
             FramingError::UnsupportedTransferEncoding => Self::UnsupportedTransferEncoding,
         }
+    }
+}
+
+impl From<ConnectionNamesFraming> for HttpError {
+    fn from(_: ConnectionNamesFraming) -> Self {
+        Self::ConnectionNamesFraming
     }
 }
 
@@ -292,11 +301,19 @@ impl HeadParser {
 /// Builds the request head from `head`, a complete head (blank line
 /// included) whose lines [`HeadParser::advance`] has already judged valid,
 /// and applies the checks that need all headers.
+///
+/// Those run after every per-line check, in this order, so the reported
+/// error is deterministic: `Connection` naming a framing header or `Host`
+/// (FR-HTTP-09a), then Host (FR-HTTP-07), then framing (FR-HTTP-08, in its
+/// own order). The `Connection` check comes first because it says the
+/// header set itself is a smuggling attempt, which makes the Host and
+/// framing verdicts on those very headers beside the point.
 fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
     work::built(head.len());
     let mut lines = head_lines(head);
     let (method, target, version) = parse_request_line(lines.next().unwrap_or_default())?;
     let headers = parse_headers(lines)?;
+    check_connection(&headers)?;
     let host = check_host(&headers, version)?;
     let body = check_framing(&headers, version)?;
     let persistence = persistence(&headers, version);
@@ -417,10 +434,8 @@ fn persistence(headers: &[Header], version: Version) -> Persistence {
     match version {
         Version::Http10 => Persistence::Close,
         Version::Http11 => {
-            let close = values(headers, "connection").any(|v| {
-                v.split(|&b| b == b',')
-                    .any(|token| trim_ows(token).eq_ignore_ascii_case(b"close"))
-            });
+            let close =
+                connection_tokens(headers).any(|token| token.eq_ignore_ascii_case(b"close"));
             if close {
                 Persistence::Close
             } else {
