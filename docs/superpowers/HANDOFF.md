@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-26, after the unification with the abandoned branch landed on `main` (see "Unification" below).
+Last updated 2026-10-26, after stage 3 Task 4 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -9,9 +9,9 @@ A new session should start from the latest `main`, read this file first, then `C
 |---|---|
 | 1 Foundations | done, merged to `main` (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done, merged to `main` (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
-| 3 Reverse proxy | **in progress** on `main` (Tasks 1–3 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
+| 3 Reverse proxy | **in progress** on `main` (Tasks 1–4 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
 
-Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ← **next**, 5 upstream interface + scripted backends, 6 request bodies, 7 response bodies, 8 timeouts/failure matrix, 9 randomized sim. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
+Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ← **next**, 6 request bodies, 7 response bodies, 8 timeouts/failure matrix, 9 randomized sim. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…, consolidated 2026-10-25); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -32,8 +32,10 @@ The abandoned branch `ccr-716d91b0-bff174` had redone Tasks 1–4. A comparison 
 - Owner decisions D1–D5 written into the spec: FR-HTTP-09a; FR-PROXY-08 (more than one `X-Forwarded-For` line → 400); FR-PROXY-12 (one hop-by-hop list both ways, `Expect` included; empty reason for a code with no standard reason); FR-PROXY-25 (duplicate `Expect` or a list → 417); FR-PROXY-16 states the response check order.
 - MIT license declared in the manifests and README.
 
-Still to carry into later tasks (from the comparison, `.superpowers/` notes are not in git, so listed here):
-- Task 4: seed it from the abandoned branch's `core/src/http/forward.rs` and tests (`git show origin/ccr-716d91b0-bff174:core/src/http/forward.rs`), adapted to FR-PROXY-06…13 (request line always HTTP/1.1 per this plan, one merged `X-Forwarded-For` value, re-rendered `Content-Length`, reason substitution, `head_line.rs` reuse, obs-text rejected, D2/D4/D5).
+Task 4 (done, `e05a468`..`4b8a681`): obs-text rejected in both parsers (FR-HTTP-05, FR-PROXY-13), `%3F` in paths → 400 (FR-HTTP-15a), `core/src/http/forward.rs` (seeded from the abandoned branch, adapted): `render_backend_request` / `render_client_response` with exact `*_len`, `is_hop_by_hop`, and `check_forwardable` for FR-PROXY-08's duplicate-`X-Forwarded-For` rule. Calls accepted in review: request line always HTTP/1.1; empty client XFF counts as absent; `Connection: x-forwarded-for` drops the client value; header names go out lowercased (values byte-exact); standard reasons = RFC 9110 + 103/428/429/431/511, else empty.
+
+Still to carry into later tasks (`.superpowers/` notes are not in git, so listed here):
+- Task 5: call `forward::check_forwardable` before `Connect` (its `ForwardError::status()` is 400); map every `ResponseError` (incl. `BadHeaderValue` for obs-text, the FR-HTTP-09a variant) to 502.
 - Task 5: the abandoned branch's `Exchange { persistence, buffered }` struct shared by the responding states (removes repeated fields); statuses 417/502/504 and a 502 mapping for every `ResponseError`.
 - Task 6: the abandoned branch's `Expect` parsing (with D3) as a starting point.
 
@@ -42,7 +44,7 @@ Still to carry into later tasks (from the comparison, `.superpowers/` notes are 
 - `main` holds all verified work; from now on each task is fast-forwarded to `main` once it passes review (CLAUDE.md, "Branches and main").
 - `claude/magical-dijkstra-2eoh4y`: the branch stage 3 Tasks 1–3 were built on; fully contained in `main`.
 - `unify`: the unification work; fully contained in `main`.
-- `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A later session (2026-10-25/26) missed this branch and wrote a second stage 3 plan (`2026-10-25-stage-3-reverse-proxy.md`) from the pre-consolidation spec, then redid Tasks 1–4 there. It contradicts owner decisions (allows obs-text, resume-at-half backpressure, no interim cap). Kept only as a record until Task 4 has used its `forward.rs`; the owner decides whether to delete it then.
+- `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A later session (2026-10-25/26) missed this branch and wrote a second stage 3 plan (`2026-10-25-stage-3-reverse-proxy.md`) from the pre-consolidation spec, then redid Tasks 1–4 there. It contradicts owner decisions (allows obs-text, resume-at-half backpressure, no interim cap). Task 4 has used its `forward.rs`; Tasks 5–6 still take the `Exchange` struct and `Expect` parsing from it, then it can go (owner decides).
 
 ## Owner's way of working (mandatory, see CLAUDE.md)
 
