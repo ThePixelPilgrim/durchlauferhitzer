@@ -39,14 +39,24 @@ tests/
   connections.rs      accepting, buffering, backpressure, resets
   routing.rs          request handling, keep-alive, pipelining
   limits.rs           timeouts, connection caps, lingering close
-  static_files.rs     static routes end to end
+  static_files/       static routes end to end (one test binary)
+    main.rs             shared configs and helpers
+    transfer.rs         chunks, slow disks and clients, changing files, resets
+    rules.rs            methods, bodies, 404s, redirects, index files, HEAD
+    edge.rs             index opens in flight, long redirects, encodings
   proxy.rs            proxy routes end to end, with scripted backends
-  faults.rs           fault injection and randomized runs (see below)
+  faults/             fault injection and randomized runs (see below)
+    main.rs             shared configs and helpers
+    split.rs            deterministic split, byte-by-byte and pipelined runs
+    generator.rs        random requests and schedule steps
+    model.rs            the model of the random file tree
+    oracle.rs           what each client must receive; coverage
+    run.rs              one random schedule; the test over all seeds
 ```
 
 ## Randomized runs
 
-`tests/faults.rs` runs thousands of seeded random scenarios (requests, chunk
+`tests/faults/` runs thousands of seeded random scenarios (requests, chunk
 sizes, stalls, resets, clock jumps, file trees, disk faults). Each run checks
 every response byte against a model of what the server should do, and the test
 fails if any interesting outcome never occurs across all seeds. To replay one
