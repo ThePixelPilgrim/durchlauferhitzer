@@ -60,12 +60,16 @@ impl Core {
             // Input after our response: discarded, the buffer is reused. It
             // does not extend the linger deadline.
             ConnState::Lingering { .. } => return,
+            // More of a proxied request's body.
+            ConnState::AwaitingResponse { .. } => {
+                self.body_received(now, conn, len, actions);
+                return;
+            }
             // Not reading: nothing was offered, so nothing can have arrived.
             ConnState::Responding { .. }
             | ConnState::OpeningFile { .. }
             | ConnState::SendingFile { .. }
             | ConnState::Connecting { .. }
-            | ConnState::AwaitingResponse { .. }
             | ConnState::Relaying { .. } => return,
         }
         self.try_parse(now, conn, actions);
@@ -188,13 +192,11 @@ impl Core {
         match result {
             Ok(ParseStatus::Incomplete) => {}
             Ok(ParseStatus::Complete { head, consumed }) => {
-                // Bytes after the head belong to the next request: move them
-                // to the front.
-                let leftover = buffered.saturating_sub(consumed);
-                if consumed <= buffered {
-                    c.recv.copy_within(consumed..buffered, 0);
-                }
-                self.respond(now, conn, head, leftover, actions);
+                let after = HeadEnd {
+                    consumed: consumed.min(buffered),
+                    buffered,
+                };
+                self.respond(now, conn, head, after, actions);
             }
             Err(error) => {
                 // Once the request line is valid the method is known: a HEAD
@@ -218,6 +220,26 @@ impl Core {
                 };
             }
         }
+    }
+}
+
+/// Where a request head ended in `Conn::recv`: the first `consumed` of
+/// `buffered` bytes. What follows is the request's body, if it has one, and
+/// then the next request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct HeadEnd {
+    pub(super) consumed: usize,
+    pub(super) buffered: usize,
+}
+
+impl HeadEnd {
+    /// Move the bytes after the head to the front of `recv` (they belong to
+    /// the next request, or to a body that is not read); returns how many.
+    pub(super) fn compact(self, recv: &mut [u8]) -> usize {
+        if self.consumed <= self.buffered && self.buffered <= recv.len() {
+            recv.copy_within(self.consumed..self.buffered, 0);
+        }
+        self.buffered.saturating_sub(self.consumed)
     }
 }
 
@@ -276,14 +298,15 @@ impl Core {
     /// that needs no file or backend is answered at once (the connection
     /// then responds until the send idle deadline, unless the socket makes
     /// progress); a static route opens its file, a proxy route connects to
-    /// its backend. `leftover` bytes at the front of the connection's
-    /// receive buffer wait for the next request.
+    /// its backend. The bytes after the head (`after`) are a proxied
+    /// request's body, forwarded from where they are; otherwise they move to
+    /// the front of the receive buffer for the next request.
     fn respond(
         &mut self,
         now: Instant,
         conn: ConnId,
         head: RequestHead,
-        leftover: usize,
+        after: HeadEnd,
         actions: &mut Vec<Action>,
     ) {
         let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
@@ -308,6 +331,7 @@ impl Core {
                     on_file_change,
                 } => match plan(route, root, *on_file_change, &head, &self.static_roots) {
                     Plan::Open(open) => {
+                        let leftover = after.compact(&mut c.recv);
                         self.open_static(now, conn, head, open, leftover, actions);
                         return;
                     }
@@ -316,7 +340,7 @@ impl Core {
                 RouteAction::Proxy(target) => {
                     match proxy::plan(route, target, &head, &self.backends) {
                         ProxyPlan::Forward(forward) => {
-                            self.forward(now, conn, head, forward, leftover, actions);
+                            self.forward(now, conn, head, forward, after, actions);
                             return;
                         }
                         ProxyPlan::Respond(status, persistence) => (status, persistence),
@@ -324,6 +348,7 @@ impl Core {
                 }
             },
         };
+        let leftover = after.compact(&mut c.recv);
         // An unread body leaves the stream unframed: it cannot be reused.
         let persistence = match unread_body {
             UnreadBody::None => persistence,

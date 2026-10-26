@@ -191,8 +191,13 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
         Log::Rejected { reason, .. } => {
             let status = match reason {
                 RejectReason::Http(e) => e.status(),
-                RejectReason::Timeout(TimeoutKind::Header) => Status::RequestTimeout,
+                RejectReason::Timeout(TimeoutKind::Header | TimeoutKind::RequestBody) => {
+                    Status::RequestTimeout
+                }
                 RejectReason::Timeout(TimeoutKind::Send | TimeoutKind::Disk) => return Ok(None),
+                RejectReason::Body(RequestBodyError::Chunked(_)) => Status::BadRequest,
+                // A body over the limit is cut, not answered.
+                RejectReason::Body(RequestBodyError::TooLarge) => return Ok(None),
                 RejectReason::Limit(_) => Status::ServiceUnavailable,
                 // Not emitted in this stage; a route miss is answered 404.
                 RejectReason::Route(_) => Status::NotFound,

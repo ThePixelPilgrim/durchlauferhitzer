@@ -449,12 +449,9 @@ impl Tree {
     /// `example.test` must get.
     pub(crate) fn expected_status(&self, method: &Method, path: &str) -> Status {
         if path.starts_with("/api/") {
-            // The proxy templates: body-less GET and HEAD (the backend
-            // refuses), POST with a body.
-            return match method {
-                Method::Get | Method::Head => Status::BadGateway,
-                Method::Other(_) => Status::NotImplemented,
-            };
+            // The proxy templates (GET, HEAD, POST with a body): the
+            // backend refuses.
+            return Status::BadGateway;
         }
         match method {
             Method::Get | Method::Head => {}

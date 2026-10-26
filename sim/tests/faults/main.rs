@@ -22,7 +22,8 @@ use durchlauferhitzer_core::http::response::{
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::http::target::TargetError;
 use durchlauferhitzer_core::{
-    ConnId, FileError, FileStamp, LimitKind, Log, RejectReason, RequestSummary, TimeoutKind,
+    ConnId, FileError, FileStamp, LimitKind, Log, RejectReason, RequestBodyError, RequestSummary,
+    TimeoutKind,
 };
 use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
 

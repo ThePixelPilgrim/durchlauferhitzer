@@ -144,7 +144,10 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
                 RejectReason::Timeout(TimeoutKind::Disk) => coverage.disk_timeout += 1,
                 RejectReason::Limit(LimitKind::Connections) => coverage.limit_connections += 1,
                 RejectReason::Limit(LimitKind::ConnectionsPerIp) => coverage.limit_per_ip += 1,
-                RejectReason::Route(_) => {}
+                // Proxied bodies are not generated yet (Task 9).
+                RejectReason::Route(_)
+                | RejectReason::Body(_)
+                | RejectReason::Timeout(TimeoutKind::RequestBody) => {}
             }
         }
     }

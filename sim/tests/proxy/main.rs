@@ -1,7 +1,8 @@
 //! Proxy routes end to end: the upstream interface between core and
 //! driver, with scripted backends behind it. Heads, failures and timeouts
-//! here; `Expect` in `expect.rs`.
+//! here; request bodies in `bodies.rs`, `Expect` in `expect.rs`.
 
+mod bodies;
 mod expect;
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -444,21 +445,6 @@ fn duplicate_forwarded_for_is_400_without_connect() {
         fixed(Status::BadRequest, Persistence::Close, BodyMode::Full)
     );
     assert_eq!(sim.state(c), SimConnState::WriteShutdown);
-}
-
-/// Request bodies are Task 6's: still 501, with no connect.
-#[test]
-fn request_with_body_is_still_501() {
-    let mut sim = Sim::new(CONFIG);
-    let c = request(
-        &mut sim,
-        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\nhi",
-    );
-    assert!(sim.upstreams().is_empty(), "{}", sim.trace());
-    assert_eq!(
-        sim.take_received(c),
-        fixed(Status::NotImplemented, Persistence::Close, BodyMode::Full)
-    );
 }
 
 /// Chunked and close-delimited responses are Task 7's: still 501, and the

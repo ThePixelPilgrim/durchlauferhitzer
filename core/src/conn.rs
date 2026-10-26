@@ -7,11 +7,12 @@ use std::time::Duration;
 use crate::config::OnFileChange;
 use crate::core::Interest;
 use crate::file::{Chunk, FileId, FileStamp, RootId};
-use crate::http::request::{HeadParser, Persistence};
+use crate::http::request::{Expect, HeadParser, Persistence};
 use crate::http::response::BodyMode;
 use crate::http::response_head::{RequestKind, ResponseParser};
 use crate::http::static_path::TrailingSlash;
 use crate::log::RequestSummary;
+use crate::request_body::{RequestBody, Stage};
 use crate::time::Instant;
 use crate::upstream::{BackendId, ExchangeBuffers, UpstreamId};
 
@@ -112,8 +113,9 @@ pub(crate) enum ConnState {
         buffered: usize,
         deadline: Instant,
     },
-    /// A body-less request on a proxy route: the `Connect` for `up` is in
-    /// flight and the rewritten request head waits in `buffers.head`.
+    /// A request on a proxy route: the `Connect` for `up` is in flight and
+    /// the rewritten request head waits in `buffers.head` (its body, if
+    /// any, waits in `Conn::recv`; the client is not read meanwhile).
     /// `deadline` is the backend connect timeout.
     Connecting {
         up: UpstreamId,
@@ -122,10 +124,14 @@ pub(crate) enum ConnState {
         deadline: Instant,
     },
     /// Connected to `up`: the request head is written from `buffers.head`
-    /// while it holds bytes, then the response head is read into
-    /// `buffers.recv`, whose first `filled` bytes `parser` has judged so far.
-    /// `deadline` is the backend response timeout, restarted once the
-    /// request head is fully written.
+    /// while it holds bytes, then the request body (if any) straight out of
+    /// `Conn::recv`, read from the client fill, drain, refill
+    /// (`request.body`). Whenever no request byte waits to be written, the
+    /// response head is read into `buffers.recv`, whose first `filled` bytes
+    /// `parser` has judged so far (a backend may answer before the body is
+    /// complete). `deadline` is the backend response timeout while the head
+    /// is written and once the whole request is; the body idle timeout,
+    /// reset on progress, while the body streams.
     AwaitingResponse {
         up: UpstreamId,
         request: ProxyRequest,
@@ -180,8 +186,11 @@ pub(crate) struct ProxyRequest {
     /// A response to HEAD never has a body.
     pub(crate) kind: RequestKind,
     pub(crate) persistence: Persistence,
-    /// Pipelined input waiting at the front of `Conn::recv`.
-    pub(crate) buffered: usize,
+    /// The body in `Conn::recv` (and, past its end, any pipelined input).
+    pub(crate) body: RequestBody,
+    /// `Continue` when the core answers `100 Continue` once connected: the
+    /// request asked for it and has a body (FR-PROXY-25).
+    pub(crate) expect: Expect,
 }
 
 impl ConnState {
@@ -261,11 +270,12 @@ impl ConnState {
             ConnState::Connecting { up, .. } => Some((*up, Interest::None)),
             ConnState::AwaitingResponse {
                 up,
+                request,
                 buffers,
                 filled,
                 ..
             } => {
-                let interest = if !buffers.head.is_empty() {
+                let interest = if !buffers.head.is_empty() || request.body.unsent_len() > 0 {
                     Interest::Write
                 } else if *filled < buffers.recv.len() {
                     Interest::Read
@@ -357,6 +367,12 @@ impl Conn {
                 self.recv.get_mut(buffered..).unwrap_or_default()
             }
             ConnState::Idle { .. } => &mut self.recv,
+            // A request body is read once the head was written.
+            ConnState::AwaitingResponse {
+                ref request,
+                ref buffers,
+                ..
+            } if buffers.head.is_empty() => request.body.spare(&mut self.recv),
             ConnState::Responding { .. }
             | ConnState::OpeningFile { .. }
             | ConnState::SendingFile { .. }
@@ -400,6 +416,18 @@ impl Conn {
                 Chunk::Ready { .. } => Interest::Write,
                 Chunk::Reading { .. } | Chunk::Done => Interest::None,
             },
+            // Reading the request body, once the head was written and every
+            // earlier body byte too, if there is room (a buffer of at most
+            // 35 bytes can be full of a chunked tail: the body then stalls
+            // into its idle timeout).
+            ConnState::AwaitingResponse {
+                request, buffers, ..
+            } if buffers.head.is_empty()
+                && request.body.stage() == Stage::Receiving
+                && request.body.spare_len(self.recv.len()) > 0 =>
+            {
+                Interest::Read
+            }
             // Waiting on the backend.
             ConnState::Connecting { .. } | ConnState::AwaitingResponse { .. } => Interest::None,
             ConnState::Relaying {

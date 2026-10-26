@@ -24,11 +24,17 @@
 //! rewritten: the fill-drain-refill check relies on the core's
 //! `upstream_body_pending` report for that, and checks the offered
 //! buffer against it. Once `run_until_idle` settles, an upstream the
-//! backend failed or ended must have been closed.
+//! backend failed or ended must have been closed. And every upstream gets
+//! exactly one well-framed request: what the sim writes to a backend is
+//! judged as it goes (the head by the core's request parser, then the body
+//! by its `Content-Length` or chunked framing), and a malformed head or
+//! body, or any byte after the body's end, is a violation (FR-PROXY-22).
 
 use std::collections::{BTreeMap, VecDeque};
 
 use durchlauferhitzer_core::config::{BackendAddr, Limits};
+use durchlauferhitzer_core::http::chunked::{ChunkedValidator, Done};
+use durchlauferhitzer_core::http::request::{BodyFraming, HeadLimits, ParseStatus, parse_head};
 use durchlauferhitzer_core::{Action, BackendId, ConnError, ConnId, Event, Interest, UpstreamId};
 
 use crate::{Eof, Pending, Sim, SimConnState, Window};
@@ -67,7 +73,96 @@ struct Upstream {
     eof: Eof,
     /// Bytes the backend has received (taken by `take_backend_request`).
     received: Vec<u8>,
+    /// Every byte the backend has received, judged as one request.
+    forwarded: Forwarded,
     window: Window,
+}
+
+/// What a backend has been sent, judged as exactly one request: its head
+/// (until complete), then its body by its framing, then nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Forwarded {
+    Head(Vec<u8>),
+    /// This many (more than 0) `Content-Length` bytes are still due.
+    Length(u64),
+    /// A chunked body; `tail` are bytes the validator has not consumed.
+    Chunked {
+        validator: ChunkedValidator,
+        tail: Vec<u8>,
+    },
+    Done,
+}
+
+impl Forwarded {
+    pub(crate) fn new() -> Forwarded {
+        Forwarded::Head(Vec::new())
+    }
+
+    /// Judge `bytes`, the next ones the backend received; why they cannot
+    /// be part of one well-framed request, if they cannot.
+    pub(crate) fn feed(&mut self, bytes: &[u8], limits: &HeadLimits) -> Result<(), String> {
+        match self {
+            Forwarded::Head(head) => {
+                head.extend_from_slice(bytes);
+                match parse_head(head, limits) {
+                    Ok(ParseStatus::Incomplete) => Ok(()),
+                    Ok(ParseStatus::Complete {
+                        head: parsed,
+                        consumed,
+                    }) => {
+                        let rest = head[consumed..].to_vec();
+                        *self = match parsed.body {
+                            BodyFraming::None => Forwarded::Done,
+                            BodyFraming::Length(n) => Forwarded::Length(n),
+                            BodyFraming::Chunked => Forwarded::Chunked {
+                                validator: ChunkedValidator::new(),
+                                tail: Vec::new(),
+                            },
+                        };
+                        self.feed(&rest, limits)
+                    }
+                    Err(e) => Err(format!("a request head the parser rejects ({e:?})")),
+                }
+            }
+            Forwarded::Length(remaining) => {
+                let n = bytes.len() as u64;
+                if n > *remaining {
+                    return Err(format!(
+                        "{} bytes after the end of its Content-Length body",
+                        n - *remaining
+                    ));
+                }
+                *remaining -= n;
+                if *remaining == 0 {
+                    *self = Forwarded::Done;
+                }
+                Ok(())
+            }
+            Forwarded::Chunked { validator, tail } => {
+                tail.extend_from_slice(bytes);
+                let progress = validator
+                    .advance(tail)
+                    .map_err(|e| format!("a chunked body the validator rejects ({e:?})"))?;
+                tail.drain(..progress.consumed);
+                match progress.done {
+                    Done::No => Ok(()),
+                    Done::Yes if tail.is_empty() => {
+                        *self = Forwarded::Done;
+                        Ok(())
+                    }
+                    Done::Yes => Err(format!(
+                        "{} bytes after the end of its chunked body",
+                        tail.len()
+                    )),
+                }
+            }
+            Forwarded::Done if bytes.is_empty() => Ok(()),
+            Forwarded::Done => Err(format!(
+                "{} bytes after the end of its request",
+                bytes.len()
+            )),
+        }
+    }
 }
 
 /// What the core hands out for an open upstream, as the checks see it.
@@ -91,6 +186,9 @@ pub(crate) struct Backends {
     pub(crate) recv_bound: usize,
     /// The head buffer's capacity, `max_head + max_headers + 128`.
     pub(crate) head_bound: usize,
+    /// Limits to judge a forwarded request head by: the head buffer's
+    /// capacity, and room for the proxy's own header lines.
+    pub(crate) forwarded_limits: HeadLimits,
 }
 
 impl Backends {
@@ -101,6 +199,11 @@ impl Backends {
             upstreams: BTreeMap::new(),
             recv_bound: limits.max_head.max(16 * 1024),
             head_bound: limits.max_head + limits.max_headers + 128,
+            forwarded_limits: HeadLimits {
+                max_request_line: limits.max_head + limits.max_headers + 128,
+                max_head: limits.max_head + limits.max_headers + 128,
+                max_headers: limits.max_headers + 3,
+            },
         }
     }
 }
@@ -286,9 +389,13 @@ impl Sim {
             return false;
         }
         let bytes = pending[..n].to_vec();
+        let limits = self.backends.forwarded_limits;
         let u = self.upstream_mut(up);
         u.window.take(n);
         u.received.extend_from_slice(&bytes);
+        if let Err(what) = u.forwarded.feed(&bytes, &limits) {
+            self.violation(&format!("up={} received {what}", up.0));
+        }
         self.deliver(Event::UpstreamSent { up, len: n });
         true
     }
@@ -346,6 +453,7 @@ impl Sim {
                         to_core: VecDeque::new(),
                         eof: Eof::NotSent,
                         received: Vec::new(),
+                        forwarded: Forwarded::new(),
                         window,
                     },
                 );

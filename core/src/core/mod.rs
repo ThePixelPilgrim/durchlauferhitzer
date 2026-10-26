@@ -210,9 +210,11 @@
 //!   is only learnt from a read, so [`Event::ReadClosed`] and
 //!   [`Event::UpstreamReadClosed`] come only while the interest is `Read`.
 //! - While a request is proxied the client connection is not read (its
-//!   interest is `None` or `Write`), so a client that half-closes after its
-//!   request is noticed only after the exchange, when the connection reads
-//!   again (consistent with FR-PROXY-26's half-close rule).
+//!   interest is `None` or `Write`), except for the request's body, so a
+//!   client that half-closes after its complete request is noticed only
+//!   after the exchange, when the connection reads again (consistent with
+//!   FR-PROXY-26's half-close rule). An end of stream in the middle of a
+//!   body closes both connections.
 //! - The buffer, readiness and reporting rules of client sockets apply
 //!   unchanged to upstreams: reads go
 //!   straight into `upstream_recv_buffer(up)` and are reported by
@@ -231,6 +233,22 @@
 //!   failure, client reset or close, timeout), never after its
 //!   connection's `Close`. Stray events for unknown or closed upstreams are
 //!   ignored.
+//! - Request bodies are never copied either: once the request head is
+//!   written, [`Core::upstream_send_buffer`] hands out the region of the
+//!   client's receive buffer the body bytes landed in (bytes after the
+//!   body's end are the next request and never reach the backend). The
+//!   client is read for its body only once the request head is written and
+//!   every body byte of the previous read was written, and then into the
+//!   whole buffer but an incomplete chunked-framing tail of at most 35 bytes
+//!   moved to its front (NFR-RES-04). While body bytes wait for the
+//!   backend the upstream's interest is `Write`; otherwise it is `Read`, so
+//!   a response that comes before the body is complete is seen
+//!   (FR-PROXY-27). A backend that stops taking the body is noticed by the
+//!   body idle timeout (504).
+//! - `Expect: 100-continue`: the core queues `HTTP/1.1 100 Continue` in the
+//!   connection's send buffer at `UpstreamConnected`, for a request with a
+//!   body (FR-PROXY-25); the driver writes it like any other bytes, before
+//!   the response.
 //! - Body bytes are never copied by the core: the bytes [`Core::send_buffer`]
 //!   hands out for a relayed response body are the region of the upstream's
 //!   receive buffer the backend's bytes landed in. That buffer is offered
@@ -253,8 +271,12 @@
 //!   ([`BackendFailure::BadResponse`]), a connect or response timeout 504.
 //!   Each is logged as [`Log::BackendFailed`] before the response's
 //!   [`Log::Response`], and the client connection stays as the request
-//!   asked. After the head was queued, any failure cuts the client
-//!   connection at once (logged, then `CloseUpstream`, then `Close`).
+//!   asked if its body was fully read (else it closes). After the head was
+//!   queued, any failure cuts the client connection at once (logged, then
+//!   `CloseUpstream`, then `Close`). A request body with invalid chunked
+//!   framing is answered 400 if it came with the head, else both
+//!   connections are cut; a chunked body over `max_request_body` is cut
+//!   (both logged as [`Log::Rejected`]).
 //!
 //! # Deadlines
 //!
@@ -280,6 +302,10 @@
 //! - writing the request to a backend and waiting for its response head:
 //!   the backend response timeout (60 s), restarted once the request head
 //!   is fully written, then a 504 ([`BackendFailure::ResponseTimeout`]);
+//!   while a request body streams, the body idle timeout (30 s) instead,
+//!   reset on progress either way, then a 408 if the core waited for the
+//!   client's body bytes, a 504 if they waited for the backend; once the
+//!   whole request is written, the response timeout again;
 //! - relaying a response: the client's `send_idle_timeout` while the client
 //!   has bytes to take (or nothing more is due from the backend), the body
 //!   idle timeout (30 s) while it waits for the backend's next body bytes;
@@ -336,6 +362,7 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 mod timers;
+mod upload;
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -352,6 +379,7 @@ use crate::http::request::HeadLimits;
 #[cfg(doc)]
 use crate::log::BackendFailure;
 use crate::log::Log;
+pub use crate::request_body::BodyPending;
 use crate::routing::Router;
 use crate::time::Instant;
 #[cfg(doc)]
@@ -551,8 +579,8 @@ impl Core {
 
     /// Bytes waiting to be written to `conn`. Empty when there are none or
     /// the connection is unknown. While a proxied response is relayed they
-    /// are any bytes of the connection's own send buffer first (none in
-    /// this task; an interim response of the core's own later), then the
+    /// are any bytes of the connection's own send buffer first (a `100
+    /// Continue` of the core's own not yet fully written), then the
     /// response's rewritten head, then its body bytes straight out of the
     /// upstream's receive buffer.
     pub fn send_buffer(&self, conn: ConnId) -> &[u8] {
@@ -693,8 +721,10 @@ impl Core {
         }
     }
 
-    /// Bytes waiting to be written to upstream `up` (the rewritten request
-    /// head). Empty when there are none or the upstream is unknown.
+    /// Bytes waiting to be written to upstream `up`: the rewritten request
+    /// head, then the request body's bytes straight out of the client's
+    /// receive buffer. Empty when there are none or the upstream is
+    /// unknown.
     pub fn upstream_send_buffer(&self, up: UpstreamId) -> &[u8] {
         let Some(c) = self
             .upstreams
@@ -705,8 +735,17 @@ impl Core {
         };
         match &c.state {
             ConnState::AwaitingResponse {
-                up: own, buffers, ..
-            } if *own == up => &buffers.head,
+                up: own,
+                buffers,
+                request,
+                ..
+            } if *own == up => {
+                if buffers.head.is_empty() {
+                    request.body.unsent(&c.recv)
+                } else {
+                    &buffers.head
+                }
+            }
             ConnState::AwaitingResponse { .. }
             | ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
@@ -761,6 +800,27 @@ impl Core {
             | ConnState::SendingFile { .. }
             | ConnState::Connecting { .. }
             | ConnState::AwaitingResponse { .. }
+            | ConnState::Lingering { .. } => None,
+        }
+    }
+
+    /// While `conn` forwards a request body: how many body bytes of its
+    /// receive buffer are not yet written to the backend, and how long a
+    /// chunked-framing tail it keeps at the front. `None` outside a body
+    /// (or once it is fully written). For drivers' invariant checks (fill,
+    /// drain, refill), not for I/O.
+    #[doc(hidden)]
+    pub fn request_body_pending(&self, conn: ConnId) -> Option<BodyPending> {
+        match &self.conns.get(&conn)?.state {
+            ConnState::Connecting { request, .. } | ConnState::AwaitingResponse { request, .. } => {
+                request.body.pending()
+            }
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Relaying { .. }
             | ConnState::Lingering { .. } => None,
         }
     }

@@ -34,8 +34,11 @@ src/
     request.rs          reading request heads, routing, fixed responses,
                         keep-alive, pipelining, lingering close
     static_files.rs     static routes: open, index.html, send, abort
-    proxy.rs            proxy routes: connect, forward the request head,
-                        judge the response head, relay it and its body
+    proxy.rs            proxy routes: plan, connect, `100 Continue`, judge
+                        the response head, relay it and its body
+    upload.rs           the request side once connected: write the head
+                        and body to the backend, read the body from the
+                        client, body errors and stalls (400/408/504, cut)
     limits.rs           connection counting, refusals (503), orphaned opens
     timers.rs           deadlines and TimerFired
     test_support.rs     helpers shared by the unit tests
@@ -43,6 +46,9 @@ src/
   file.rs             file ids, file metadata/stamps, change policy
   upstream.rs         upstream and backend ids, open upstreams, the
                       fixed-size buffers of a proxied exchange
+  request_body.rs     a request body in the client's receive buffer:
+                      what is due, unsent, kept as a chunked tail or
+                      pipelined after it (fill, drain, refill)
   time.rs             Instant: monotonic time supplied by the driver
   log.rs              structured log entries (the driver formats them)
   routing.rs          virtual hosts and segment-based route matching

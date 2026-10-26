@@ -69,41 +69,6 @@ fn unknown_host_gets_404_and_keeps_connection() {
     );
 }
 
-/// Request bodies are not forwarded yet (stage 3 Task 6): 501, and the
-/// connection closes.
-#[test]
-fn matched_proxy_route_with_body_gets_501_and_closes() {
-    let mut sim = Sim::new(CONFIG);
-    let p = peer();
-    let c = sim.connect(p);
-    sim.send(
-        c,
-        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\nhi",
-    );
-    sim.run_until_idle();
-    assert_eq!(
-        sim.take_received(c),
-        fixed(Status::NotImplemented, Persistence::Close, BodyMode::Full),
-        "{}",
-        sim.trace()
-    );
-    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
-    assert_eq!(
-        sim.logs(),
-        &[Log::Response {
-            conn: c,
-            peer: p,
-            status: Status::NotImplemented,
-            request: summary(Method::Other("POST".to_owned()), "example.test", "/api/x"),
-        }],
-        "{}",
-        sim.trace()
-    );
-    sim.send_eof(c);
-    sim.run_until_idle();
-    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
-}
-
 /// FR-HTTP-09a: a `Connection` naming a framing header is a 400 with
 /// close on a static route too.
 #[test]

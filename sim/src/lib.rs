@@ -40,8 +40,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use durchlauferhitzer_core::config::load;
+use durchlauferhitzer_core::http::chunked::MAX_UNCONSUMED;
 use durchlauferhitzer_core::{
-    Action, ConnError, ConnId, Core, Event, FileId, Instant, Interest, Log, UpstreamId,
+    Action, BodyPending, ConnError, ConnId, Core, Event, FileId, Instant, Interest, Log, UpstreamId,
 };
 
 use crate::backend::Backends;
@@ -605,6 +606,8 @@ impl Sim {
                     conn.0
                 ));
             }
+            let pending = self.core.request_body_pending(conn);
+            self.check_request_body(conn, recv, recv_cap, pending);
             let send = self.core.send_buffer(conn).len();
             if send > send_cap {
                 self.violation(&format!(
@@ -612,6 +615,48 @@ impl Sim {
                     conn.0
                 ));
             }
+        }
+    }
+}
+
+impl Sim {
+    /// Fill, drain, refill on the client side of a request body
+    /// (NFR-RES-04): while `conn` forwards a body (`pending`, the core's
+    /// report), a read is offered only once no body byte of its buffer is
+    /// unsent, and then with all of the buffer's `capacity` but a
+    /// chunked-framing tail of at most `MAX_UNCONSUMED` bytes kept at its
+    /// front.
+    pub(crate) fn check_request_body(
+        &self,
+        conn: ConnId,
+        offered: usize,
+        capacity: usize,
+        pending: Option<BodyPending>,
+    ) {
+        let Some(BodyPending { unsent, tail }) = pending else {
+            return;
+        };
+        if tail > MAX_UNCONSUMED {
+            self.violation(&format!(
+                "conn={} keeps a chunked tail of {tail} bytes, more than {MAX_UNCONSUMED}",
+                conn.0
+            ));
+        }
+        if offered == 0 {
+            return;
+        }
+        if unsent > 0 {
+            self.violation(&format!(
+                "conn={} offers a read while {unsent} request body bytes are unsent",
+                conn.0
+            ));
+        }
+        if offered + tail != capacity {
+            self.violation(&format!(
+                "conn={} offers a body read of {offered} bytes behind a {tail}-byte tail, \
+                 not the rest of its capacity {capacity}",
+                conn.0
+            ));
         }
     }
 }

@@ -349,3 +349,84 @@ fn changed_send_capacity_is_a_violation() {
     sim.conn_mut(c).send_capacity = 7;
     sim.check_buffers();
 }
+
+#[test]
+fn a_body_read_behind_a_short_tail_is_fine() {
+    let (sim, c, _) = connecting();
+    let pending = |unsent, tail| Some(BodyPending { unsent, tail });
+    sim.check_request_body(c, 100, 100, pending(0, 0));
+    sim.check_request_body(c, 65, 100, pending(0, 35));
+    // Nothing offered while bytes are unsent.
+    sim.check_request_body(c, 0, 100, pending(7, 0));
+    sim.check_request_body(c, 40, 100, None);
+}
+
+#[test]
+#[should_panic(expected = "conn=1 offers a read while 7 request body bytes are unsent")]
+fn request_body_read_with_unsent_bytes_is_a_violation() {
+    let (sim, c, _) = connecting();
+    sim.check_request_body(c, 93, 100, Some(BodyPending { unsent: 7, tail: 0 }));
+}
+
+#[test]
+#[should_panic(expected = "offers a body read of 90 bytes behind a 2-byte tail, not the rest")]
+fn partial_request_body_read_is_a_violation() {
+    let (sim, c, _) = connecting();
+    sim.check_request_body(c, 90, 100, Some(BodyPending { unsent: 0, tail: 2 }));
+}
+
+#[test]
+#[should_panic(expected = "keeps a chunked tail of 36 bytes, more than 35")]
+fn long_chunked_tail_is_a_violation() {
+    let (sim, c, _) = connecting();
+    sim.check_request_body(
+        c,
+        0,
+        100,
+        Some(BodyPending {
+            unsent: 0,
+            tail: 36,
+        }),
+    );
+}
+
+/// What a backend receives is judged as exactly one request, however the
+/// bytes are split.
+#[test]
+fn forwarded_request_is_judged_as_one_message() {
+    use crate::backend::Forwarded;
+    let sim = Sim::new(PROXY);
+    let limits = sim.backends.forwarded_limits;
+    let judge = |pieces: &[&[u8]]| {
+        let mut f = Forwarded::new();
+        pieces
+            .iter()
+            .try_for_each(|p| f.feed(p, &limits))
+            .map(|()| f)
+    };
+    let head = b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\n";
+    assert_eq!(judge(&[head, b"ab", b"c"]), Ok(Forwarded::Done));
+    assert_eq!(
+        judge(&[head, b"abcGET"]),
+        Err("3 bytes after the end of its Content-Length body".to_owned())
+    );
+    assert_eq!(
+        judge(&[head, b"abc", b"x"]),
+        Err("1 bytes after the end of its request".to_owned())
+    );
+    let chunked = b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r";
+    assert_eq!(
+        judge(&[chunked, b"\nabc\r\n0\r\n", b"\r\n"]),
+        Ok(Forwarded::Done)
+    );
+    assert_eq!(
+        judge(&[chunked, b"\nabc\r\n0\r\n\r\nX"]),
+        Err("1 bytes after the end of its chunked body".to_owned())
+    );
+    assert!(judge(&[chunked, b";x"]).is_err());
+    assert!(judge(&[b"GET / HTTP/1.1\r\n\r\n"]).is_err());
+    assert_eq!(
+        judge(&[b"GET / HTTP/1.1\r\nHost: a\r\n\r\n", b"G"]),
+        Err("1 bytes after the end of its request".to_owned())
+    );
+}

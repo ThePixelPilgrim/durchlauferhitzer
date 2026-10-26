@@ -23,7 +23,9 @@ documented in [`../core/src/core/mod.rs`](../core/src/core/mod.rs) from the
 core's side — no actions for closed connections, files or upstreams, buffers
 within their capacities, every file and upstream closed exactly once and never
 left open after its connection, at most one upstream per client, body reads
-only into a drained buffer and with its full capacity (fill, drain, refill), no
+only into a drained buffer and with its full capacity (fill, drain, refill;
+for request bodies, behind a chunked tail of at most 35 bytes), every backend
+receiving exactly one well-framed request and nothing after its body, no
 stalled output, no deadline left in the past, and more. A violation fails the test with a replayable trace.
 
 ## Layout
@@ -46,6 +48,7 @@ tests/
     edge.rs             index opens in flight, long redirects, encodings
   proxy/              proxy routes end to end, with scripted backends
     main.rs             heads, failures, timeouts; shared helpers
+    bodies.rs           request bodies, `100 Continue`, early responses
     expect.rs           `Expect` on every route
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers

@@ -8,6 +8,7 @@ use std::net::IpAddr;
 
 use crate::core::ConnId;
 use crate::file::FileError;
+use crate::http::chunked::ChunkedError;
 use crate::http::request::{HttpError, Method};
 use crate::http::response_head::ResponseError;
 use crate::http::status::Status;
@@ -103,6 +104,19 @@ pub enum RejectReason {
     Route(RouteMiss),
     Timeout(TimeoutKind),
     Limit(LimitKind),
+    /// The request body on a proxy route broke a rule: answered 400 while
+    /// its head had not been forwarded yet, else both connections were cut.
+    Body(RequestBodyError),
+}
+
+/// What was wrong with a request body on a proxy route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestBodyError {
+    /// Its chunked framing is invalid (FR-PROXY-19).
+    Chunked(ChunkedError),
+    /// Its chunked payload passed the route's `max_request_body`
+    /// (FR-PROXY-23).
+    TooLarge,
 }
 
 /// Which timeout fired.
@@ -115,6 +129,9 @@ pub enum TimeoutKind {
     /// The disk did not complete an open or readahead within
     /// `send_idle_timeout`.
     Disk,
+    /// The client made no progress with its request body on a proxy route
+    /// for the body idle timeout, before the response head (FR-PROXY-26).
+    RequestBody,
 }
 
 /// Which connection limit was hit.

@@ -1,30 +1,32 @@
 //! Proxy routes: the rules decided before connecting, connecting to the
 //! backend, writing the rewritten request head, reading and judging the
 //! response head, and relaying the rewritten head and a `Content-Length`
-//! body to the client straight out of the upstream's receive buffer.
+//! body to the client straight out of the upstream's receive buffer. The
+//! request body's side (reading it from the client and writing it to the
+//! backend, its errors and stalls) is in `upload.rs`.
 //!
-//! In this stage's Task 5 only body-less requests are forwarded and only
-//! responses without a body or with a `Content-Length` one are relayed;
-//! the rest answers 501 (request bodies: Task 6; chunked, close-delimited
-//! and interim responses: Task 7).
+//! Only responses without a body or with a `Content-Length` one are
+//! relayed so far; the rest answers 501 (chunked, close-delimited and
+//! interim responses: Task 7).
 
 use std::time::Duration;
 
-use super::request::{AfterResponse, finish};
+use super::request::{AfterResponse, HeadEnd, finish};
 use super::{Action, ConnId, Core, Interest};
-use crate::config::{BackendAddr, ProxyRoute, Route, StripPrefix};
+use crate::config::{BackendAddr, BodyLimit, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, Source, UnreadBody};
 use crate::http::forward::{
     backend_request_len, check_forwardable, client_response_len, render_backend_request,
     render_client_response,
 };
-use crate::http::request::{BodyFraming, Method, Persistence, RequestHead};
+use crate::http::request::{BodyFraming, Expect, Method, Persistence, RequestHead};
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::response_head::{
     RequestKind, ResponseBody, ResponseError, ResponseHead, ResponseParser, ResponseStatus,
 };
 use crate::http::status::Status;
 use crate::log::{BackendFailure, Log, RejectReason, RequestSummary, TimeoutKind};
+use crate::request_body::{Arrived, BodyEnd, RequestBody, Stage};
 use crate::routing::strip_segments;
 use crate::time::Instant;
 use crate::upstream::{BackendId, ExchangeBuffers, UpstreamId, UpstreamTable};
@@ -38,8 +40,9 @@ pub(super) const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// `backend_response_timeout`). It also bounds writing the request head.
 pub(super) const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a relayed body may make no progress while the upstream is open
-/// (the default of `body_idle_timeout`).
+/// How long a body may make no progress, in either direction: a relayed
+/// response body while the upstream is open, a request body before the
+/// response head (the default of `body_idle_timeout`).
 pub(super) const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How a request on a proxy route is answered.
@@ -52,17 +55,19 @@ pub(super) enum ProxyPlan {
 }
 
 /// Forward a request to `backend` with `path` as its (possibly stripped)
-/// raw path.
+/// raw path; a chunked body may carry at most `limit` payload bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Forward {
     backend: BackendId,
     path: String,
+    limit: BodyLimit,
 }
 
 /// The proxy route rules that need no backend: the request must be
 /// forwardable (FR-PROXY-08: at most one `X-Forwarded-For`, else 400 and
-/// close) and, in this task, have no body (else 501 and close). Any method
-/// is forwarded (FR-PROXY-01).
+/// close), and a `Content-Length` must not exceed the route's
+/// `max_request_body` (FR-PROXY-23: else 413 and close, its body unread).
+/// Any method is forwarded (FR-PROXY-01).
 pub(super) fn plan(
     route: &Route,
     target: &ProxyRoute,
@@ -72,12 +77,12 @@ pub(super) fn plan(
     if let Err(error) = check_forwardable(head) {
         return ProxyPlan::Respond(error.status(), Persistence::Close);
     }
-    match head.body {
-        BodyFraming::None => {}
-        // Request bodies are forwarded from Task 6 on.
-        BodyFraming::Length(_) | BodyFraming::Chunked => {
-            return ProxyPlan::Respond(Status::NotImplemented, Persistence::Close);
+    let limit = target.max_request_body;
+    match (head.body, limit) {
+        (BodyFraming::Length(length), BodyLimit::Bytes(max)) if length > max => {
+            return ProxyPlan::Respond(Status::ContentTooLarge, Persistence::Close);
         }
+        (BodyFraming::None | BodyFraming::Length(_) | BodyFraming::Chunked, _) => {}
     }
     let Some(backend) = backends
         .iter()
@@ -92,21 +97,25 @@ pub(super) fn plan(
         StripPrefix::Strip => strip_segments(&head.target.path, route.segments.len()),
         StripPrefix::Keep => head.target.path.clone(),
     };
-    ProxyPlan::Forward(Forward { backend, path })
+    ProxyPlan::Forward(Forward {
+        backend,
+        path,
+        limit,
+    })
 }
 
 impl Core {
-    /// Start forwarding `head` on `conn`: render the rewritten request head
-    /// into a fresh exchange's head buffer and connect. `leftover` bytes at
-    /// the front of the connection's receive buffer wait for the next
-    /// request.
+    /// Start forwarding `head` on `conn`: judge the body bytes that came
+    /// with it, render the rewritten request head into a fresh exchange's
+    /// head buffer and connect. The bytes after the head (`after`) are the
+    /// body, forwarded from where they are, then the next request.
     pub(super) fn forward(
         &mut self,
         now: Instant,
         conn: ConnId,
         head: RequestHead,
         forward: Forward,
-        leftover: usize,
+        after: HeadEnd,
         actions: &mut Vec<Action>,
     ) {
         let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
@@ -114,7 +123,11 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        let Forward { backend, path } = forward;
+        let Forward {
+            backend,
+            path,
+            limit,
+        } = forward;
         let summary = RequestSummary {
             method: head.method.clone(),
             host: head.host.clone(),
@@ -139,11 +152,31 @@ impl Core {
             c.state = ConnState::Responding {
                 persistence: Persistence::Close,
                 unread_body: UnreadBody::None,
-                buffered: leftover,
+                buffered: 0,
                 deadline: send_deadline,
             };
             return;
         }
+        // The body bytes that came with the head are judged before anything
+        // is forwarded: a framing error is still a 400.
+        let body = match RequestBody::new(
+            head.body,
+            limit,
+            after.consumed,
+            after.buffered,
+            &mut c.recv,
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                self.reject_body(now, conn, &head.method, error, actions);
+                return;
+            }
+        };
+        // `100 Continue` only makes sense for a body still to come.
+        let expect = match head.body {
+            BodyFraming::Length(_) | BodyFraming::Chunked => head.expect,
+            BodyFraming::None => Expect::None,
+        };
         let mut buffers = ExchangeBuffers::new(recv_capacity, head_capacity);
         render_backend_request(&head, &path, c.peer, &mut buffers.head);
         let up = self.upstreams.allocate(conn);
@@ -158,7 +191,8 @@ impl Core {
                     Method::Get | Method::Other(_) => RequestKind::Other,
                 },
                 persistence: head.persistence,
-                buffered: leftover,
+                body,
+                expect,
             },
             buffers,
             deadline: now.saturating_add(BACKEND_CONNECT_TIMEOUT),
@@ -200,7 +234,9 @@ enum Verdict {
 }
 
 impl Core {
-    /// The connect for `up` completed: write the request head.
+    /// The connect for `up` completed: write the request head, and answer
+    /// `100 Continue` if the client waits for it (FR-PROXY-25: the head
+    /// passed every check and the backend is there to take the body).
     pub(super) fn upstream_connected(
         &mut self,
         now: Instant,
@@ -219,14 +255,20 @@ impl Core {
                 request,
                 buffers,
                 ..
-            } if own == up => ConnState::AwaitingResponse {
-                up,
-                request,
-                buffers,
-                filled: 0,
-                parser: ResponseParser::new(),
-                deadline: now.saturating_add(BACKEND_RESPONSE_TIMEOUT),
-            },
+            } if own == up => {
+                match request.expect {
+                    Expect::Continue => c.send.extend_from_slice(CONTINUE),
+                    Expect::None => {}
+                }
+                ConnState::AwaitingResponse {
+                    up,
+                    request,
+                    buffers,
+                    filled: 0,
+                    parser: ResponseParser::new(),
+                    deadline: now.saturating_add(BACKEND_RESPONSE_TIMEOUT),
+                }
+            }
             other @ (ConnState::Connecting { .. }
             | ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
@@ -281,38 +323,6 @@ impl Core {
         actions: &mut Vec<Action>,
     ) {
         self.upstream_failed(now, up, actions);
-    }
-
-    /// The socket accepted `len` bytes of the request head.
-    pub(super) fn upstream_sent(
-        &mut self,
-        now: Instant,
-        up: UpstreamId,
-        len: usize,
-        actions: &mut Vec<Action>,
-    ) {
-        let Some(conn) = self.upstreams.conn(up) else {
-            return;
-        };
-        let Some(c) = self.conns.get_mut(&conn) else {
-            return;
-        };
-        let ConnState::AwaitingResponse {
-            buffers, deadline, ..
-        } = &mut c.state
-        else {
-            return;
-        };
-        let len = len.min(buffers.head.len());
-        if len == 0 {
-            return;
-        }
-        buffers.head.drain(..len);
-        if buffers.head.is_empty() {
-            // The response timeout runs from the head being fully written.
-            *deadline = now.saturating_add(BACKEND_RESPONSE_TIMEOUT);
-        }
-        self.sync_interest(conn, actions);
     }
 
     /// The driver read `len` bytes from `up`: more of the response head,
@@ -465,11 +475,15 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        // The persistence of the request: its body (none) was fully read,
-        // and a `Content-Length` or body-less response is not close
-        // delimited (FR-PROXY-28).
+        // The persistence of the request, if its body was fully read (else
+        // the backend answered early and the body stays unread, FR-PROXY-27);
+        // a `Content-Length` or body-less response is not close delimited
+        // (FR-PROXY-28).
         let persistence = match &c.state {
-            ConnState::AwaitingResponse { request, .. } => request.persistence,
+            ConnState::AwaitingResponse { request, .. } => match request.body.all_arrived() {
+                Arrived::All => request.persistence,
+                Arrived::Partly => Persistence::Close,
+            },
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }
@@ -484,8 +498,14 @@ impl Core {
             self.fail_before_head(now, conn, error, actions);
             return;
         }
-        let Some((up, request, mut buffers, filled)) = take_awaiting(c) else {
+        let Some((up, mut request, mut buffers, filled)) = take_awaiting(c) else {
             return;
+        };
+        // Body forwarding stops here; a fully read body leaves the next
+        // request at the front.
+        let buffered = match request.body.end(&mut c.recv) {
+            BodyEnd::Read { buffered } => buffered,
+            BodyEnd::Unread => 0,
         };
         actions.push(Action::Log(Log::ProxiedResponse {
             conn,
@@ -518,7 +538,7 @@ impl Core {
             start: consumed,
             end: consumed.saturating_add(first),
             persistence,
-            buffered: request.buffered,
+            buffered,
             deadline,
         };
         self.sync_interest(conn, actions);
@@ -535,6 +555,7 @@ impl Core {
             return;
         };
         let status = Status::NotImplemented;
+        // The exchange ends with `Connection: close` (Task 7 relays these).
         render_fixed(
             status,
             Persistence::Close,
@@ -551,14 +572,16 @@ impl Core {
         c.state = ConnState::Responding {
             persistence: Persistence::Close,
             unread_body: UnreadBody::None,
-            buffered: request.buffered,
+            buffered: 0,
             deadline,
         };
         self.sync_interest(conn, actions);
     }
 
     /// The backend failed before its response head was queued: log why,
-    /// close the upstream and answer 502, or 504 for a timeout.
+    /// close the upstream and answer 502, or 504 for a timeout. The client
+    /// stays as the request asked if its body was fully read, else it
+    /// closes (FR-PROXY-26, -28).
     pub(super) fn fail_before_head(
         &mut self,
         now: Instant,
@@ -570,8 +593,12 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        let Some((up, request)) = take_request(c) else {
+        let Some((up, mut request)) = take_request(c) else {
             return;
+        };
+        let (persistence, unread_body, buffered) = match request.body.end(&mut c.recv) {
+            BodyEnd::Read { buffered } => (request.persistence, UnreadBody::None, buffered),
+            BodyEnd::Unread => (Persistence::Close, UnreadBody::Pending, 0),
         };
         let status = match kind {
             BackendFailure::Refused | BackendFailure::Reset | BackendFailure::BadResponse(_) => {
@@ -589,7 +616,7 @@ impl Core {
         }));
         render_fixed(
             status,
-            request.persistence,
+            persistence,
             body_mode(&request.summary.method),
             &mut c.send,
         );
@@ -601,9 +628,9 @@ impl Core {
         }));
         close_upstream(&mut self.upstreams, up, actions);
         c.state = ConnState::Responding {
-            persistence: request.persistence,
-            unread_body: UnreadBody::None,
-            buffered: request.buffered,
+            persistence,
+            unread_body,
+            buffered,
             deadline,
         };
         self.sync_interest(conn, actions);
@@ -644,6 +671,13 @@ impl Core {
         match &c.state {
             ConnState::Connecting { .. } => {
                 self.fail_before_head(now, conn, BackendFailure::ConnectTimeout, actions);
+            }
+            // A client that stalls its body is at fault (408); anything
+            // else waits on the backend (504).
+            ConnState::AwaitingResponse {
+                request, buffers, ..
+            } if buffers.head.is_empty() && request.body.stage() == Stage::Receiving => {
+                self.body_stalled(now, conn, actions);
             }
             ConnState::AwaitingResponse { .. } => {
                 self.fail_before_head(now, conn, BackendFailure::ResponseTimeout, actions);
@@ -748,6 +782,9 @@ impl Core {
         self.sync_interest(conn, actions);
     }
 }
+
+/// What the core answers itself to `Expect: 100-continue`.
+const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 
 /// The deadline of a relaying connection after progress at `now`: the
 /// client's `send_idle_timeout` while it has bytes to take (`pending`) or

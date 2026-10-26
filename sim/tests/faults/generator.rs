@@ -7,8 +7,10 @@ use super::*;
 
 pub(crate) const SEEDS: u64 = 1500;
 
-/// Every status the core can send; each must be seen across the seeds.
-pub(crate) const STATUSES: [Status; 13] = [
+/// Every status the core can send to these clients; each must be seen
+/// across the seeds. (501 is left: it now only answers backend responses
+/// Task 7 relays, and these backends refuse every connect.)
+pub(crate) const STATUSES: [Status; 12] = [
     Status::Ok,
     Status::MovedPermanently,
     Status::BadRequest,
@@ -18,7 +20,6 @@ pub(crate) const STATUSES: [Status; 13] = [
     Status::ContentTooLarge,
     Status::UriTooLong,
     Status::RequestHeaderFieldsTooLarge,
-    Status::NotImplemented,
     Status::BadGateway,
     Status::ServiceUnavailable,
     Status::HttpVersionNotSupported,
@@ -32,7 +33,7 @@ pub(crate) const REQUESTS: &[&[u8]] = &[
     b"GET /y HTTP/1.1\r\nHost: other.test\r\n\r\n",
     b"HEAD / HTTP/1.1\r\nHost: other.test\r\n\r\n",
     // Matched proxy route, whose backend refuses every connect: 502,
-    // keep-alive; with a request body (not forwarded yet): 501, close.
+    // keep-alive (with a request body: close unless all of it was read).
     b"GET /api/v HTTP/1.1\r\nHost: example.test\r\n\r\n",
     b"HEAD /api/v HTTP/1.1\r\nHost: example.test\r\n\r\n",
     b"POST /api/v HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\nhi",
