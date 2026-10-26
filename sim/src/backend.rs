@@ -17,11 +17,18 @@
 //! per client; no upstream left open after its client closed; upstream
 //! buffers within their capacities; no `Read` interest with nothing to read
 //! into; and during a body, a read offered only into a drained buffer and
-//! always with its full capacity (fill, drain, refill).
+//! always with its full capacity (fill, drain, refill). Capacities are
+//! recomputed from the config by the documented formulas, not taken from
+//! the core. Which phase an upstream is in (and how many body bytes are
+//! still unsent) the sim cannot tell from the bytes alone, since heads are
+//! rewritten: the fill-drain-refill check relies on the core's
+//! `upstream_body_pending` report for that, and checks the offered
+//! buffer against it. Once `run_until_idle` settles, an upstream the
+//! backend failed or ended must have been closed.
 
 use std::collections::{BTreeMap, VecDeque};
 
-use durchlauferhitzer_core::config::BackendAddr;
+use durchlauferhitzer_core::config::{BackendAddr, Limits};
 use durchlauferhitzer_core::{Action, BackendId, ConnError, ConnId, Event, Interest, UpstreamId};
 
 use crate::{Eof, Pending, Sim, SimConnState, Window};
@@ -63,20 +70,37 @@ struct Upstream {
     window: Window,
 }
 
+/// What the core hands out for an open upstream, as the checks see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UpstreamView {
+    pub(crate) interest: Interest,
+    pub(crate) recv: usize,
+    pub(crate) send: usize,
+    /// The core's report of unsent body bytes (`None` outside a body).
+    pub(crate) body_pending: Option<usize>,
+}
+
 /// The sim's scripted backends and the upstreams the core opened.
 #[derive(Debug)]
 pub(crate) struct Backends {
     connect: BTreeMap<String, ConnectBehaviour>,
     default_window: Window,
     upstreams: BTreeMap<UpstreamId, Upstream>,
+    /// The upstream receive buffer's capacity for this config, by the
+    /// documented formula `max(16 KiB, max_head)`.
+    pub(crate) recv_bound: usize,
+    /// The head buffer's capacity, `max_head + max_headers + 128`.
+    pub(crate) head_bound: usize,
 }
 
-impl Default for Backends {
-    fn default() -> Self {
+impl Backends {
+    pub(crate) fn new(limits: &Limits) -> Backends {
         Backends {
             connect: BTreeMap::new(),
             default_window: Window::Unlimited,
             upstreams: BTreeMap::new(),
+            recv_bound: limits.max_head.max(16 * 1024),
+            head_bound: limits.max_head + limits.max_headers + 128,
         }
     }
 }
@@ -226,7 +250,11 @@ impl Sim {
     /// Deliver queued backend bytes into `upstream_recv_buffer`, reported
     /// with `UpstreamReceived` right away; or the queued end of stream.
     fn pump_upstream_read(&mut self, up: UpstreamId) -> bool {
-        let u = self.backends.upstreams.get_mut(&up).unwrap();
+        // Field borrows, not `upstream_mut`: the core's buffer is borrowed
+        // alongside.
+        let Some(u) = self.backends.upstreams.get_mut(&up) else {
+            self.violation(&format!("read from unknown up={}", up.0));
+        };
         if u.to_core.is_empty() {
             if u.eof == Eof::Queued {
                 u.eof = Eof::Delivered;
@@ -251,14 +279,16 @@ impl Sim {
     /// Write from `upstream_send_buffer` as far as the backend's window
     /// allows.
     fn pump_upstream_write(&mut self, up: UpstreamId) -> bool {
+        let window = self.upstream(up).window.size();
         let pending = self.core.upstream_send_buffer(up);
-        let u = self.backends.upstreams.get_mut(&up).unwrap();
-        let n = pending.len().min(u.window.size());
+        let n = pending.len().min(window);
         if n == 0 {
             return false;
         }
+        let bytes = pending[..n].to_vec();
+        let u = self.upstream_mut(up);
         u.window.take(n);
-        u.received.extend_from_slice(&pending[..n]);
+        u.received.extend_from_slice(&bytes);
         self.deliver(Event::UpstreamSent { up, len: n });
         true
     }
@@ -367,55 +397,110 @@ impl Sim {
                     up.0, conn.0
                 ));
             }
-            let send = self.core.upstream_send_buffer(up).len();
-            let send_cap = self.core.upstream_send_capacity(up);
-            if send > send_cap {
+            // The capacities follow from the config alone; the core's own
+            // report must agree with them.
+            let reported = (
+                self.core.upstream_recv_capacity(up),
+                self.core.upstream_send_capacity(up),
+            );
+            let expected = (self.backends.recv_bound, self.backends.head_bound);
+            if reported != expected {
                 self.violation(&format!(
-                    "up={} upstream_send_buffer {send} bytes exceeds capacity {send_cap}",
+                    "up={} reports capacities {reported:?} (receive, send), not {expected:?}",
                     up.0
                 ));
             }
-            let recv_cap = self.core.upstream_recv_capacity(up);
-            let pending = self.core.upstream_body_pending(up);
-            let recv = self.core.upstream_recv_buffer(up).len();
-            if recv > recv_cap {
+            let view = UpstreamView {
+                interest,
+                recv: self.core.upstream_recv_buffer(up).len(),
+                send: self.core.upstream_send_buffer(up).len(),
+                body_pending: self.core.upstream_body_pending(up),
+            };
+            self.check_upstream_view(up, &view);
+        }
+    }
+
+    /// Judge what the core offers for open upstream `up` against the
+    /// capacities the config implies.
+    pub(crate) fn check_upstream_view(&self, up: UpstreamId, view: &UpstreamView) {
+        let (recv_cap, send_cap) = (self.backends.recv_bound, self.backends.head_bound);
+        let UpstreamView {
+            interest,
+            recv,
+            send,
+            body_pending,
+        } = *view;
+        if send > send_cap {
+            self.violation(&format!(
+                "up={} upstream_send_buffer {send} bytes exceeds capacity {send_cap}",
+                up.0
+            ));
+        }
+        if recv > recv_cap {
+            self.violation(&format!(
+                "up={} upstream_recv_buffer {recv} bytes exceeds capacity {recv_cap}",
+                up.0
+            ));
+        }
+        if interest == Interest::Read && recv == 0 {
+            self.violation(&format!(
+                "up={} wants to read but upstream_recv_buffer is empty",
+                up.0
+            ));
+        }
+        match body_pending {
+            Some(unsent) if recv > 0 && unsent > 0 => self.violation(&format!(
+                "up={} offers a read while {unsent} body bytes are unsent",
+                up.0
+            )),
+            Some(_) if recv > 0 && recv != recv_cap => self.violation(&format!(
+                "up={} offers a body read of {recv} bytes, not its capacity {recv_cap}",
+                up.0
+            )),
+            Some(_) | None => {}
+        }
+    }
+
+    /// Once nothing moves: no connected upstream keeps bytes to write
+    /// without `Write` interest, and none that failed or reached end of
+    /// stream is left unclosed by the core.
+    pub(crate) fn check_upstreams_settled(&self) {
+        for (up, u) in &self.backends.upstreams {
+            if u.phase == Phase::Connected
+                && u.interest != Interest::Write
+                && !self.core.upstream_send_buffer(*up).is_empty()
+            {
                 self.violation(&format!(
-                    "up={} upstream_recv_buffer {recv} bytes exceeds capacity {recv_cap}",
-                    up.0
+                    "up={} has pending send bytes but interest stays {:?}",
+                    up.0, u.interest
                 ));
             }
-            if interest == Interest::Read && recv == 0 {
+            if u.phase == Phase::Failed {
+                self.violation(&format!("up={} failed but the core never closed it", up.0));
+            }
+            if u.eof == Eof::Delivered && u.phase != Phase::Closed {
                 self.violation(&format!(
-                    "up={} wants to read but upstream_recv_buffer is empty",
+                    "up={} reached end of stream but the core never closed it",
                     up.0
                 ));
-            }
-            match pending {
-                Some(unsent) if recv > 0 && unsent > 0 => self.violation(&format!(
-                    "up={} offers a read while {unsent} body bytes are unsent",
-                    up.0
-                )),
-                Some(_) if recv > 0 && recv != recv_cap => self.violation(&format!(
-                    "up={} offers a body read of {recv} bytes, not its capacity {recv_cap}",
-                    up.0
-                )),
-                Some(_) | None => {}
             }
         }
     }
 
-    /// No connected upstream keeps bytes to write without `Write` interest.
-    pub(crate) fn check_upstreams_not_stuck(&self) {
-        let stuck = self.backends.upstreams.iter().find(|(id, u)| {
-            u.phase == Phase::Connected
-                && u.interest != Interest::Write
-                && !self.core.upstream_send_buffer(**id).is_empty()
-        });
-        if let Some((up, u)) = stuck {
-            self.violation(&format!(
-                "up={} has pending send bytes but interest stays {:?}",
-                up.0, u.interest
-            ));
+    /// Test hook: put `up` into the state a driver reaches after the
+    /// backend failed (`failed`) or after delivering its end of stream.
+    #[cfg(test)]
+    pub(crate) fn fake_upstream_end(&mut self, up: UpstreamId, failed: bool) {
+        let u = self.upstream_mut(up);
+        if failed {
+            u.phase = Phase::Failed;
+        } else {
+            u.eof = Eof::Delivered;
         }
+    }
+
+    /// Whether `conn` ever had an upstream.
+    pub(crate) fn ever_proxied(&self, conn: ConnId) -> bool {
+        self.backends.upstreams.values().any(|u| u.conn == conn)
     }
 }

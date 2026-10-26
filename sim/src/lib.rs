@@ -117,6 +117,11 @@ struct SimConn {
     window: Window,
     interest: Interest,
     state: SimConnState,
+    /// Send capacity the core reported right after `Accepted` (0 until
+    /// recorded). It stays the same while the connection is open, except
+    /// once it has proxied: then it may also be the head buffer's or the
+    /// upstream receive buffer's capacity while a response is relayed.
+    send_capacity: usize,
 }
 
 /// A read into a core buffer not yet reported.
@@ -159,6 +164,7 @@ impl Sim {
             Ok(c) => c,
             Err(e) => panic!("invalid sim config: {e:?}"),
         };
+        let limits = config.limits.clone();
         Sim {
             core: Core::new(config),
             now: Instant::from_nanos(0),
@@ -174,7 +180,7 @@ impl Sim {
             disk: VecDeque::new(),
             files: BTreeMap::new(),
             context: None,
-            backends: Backends::default(),
+            backends: Backends::new(&limits),
         }
     }
 
@@ -198,9 +204,12 @@ impl Sim {
                 window: Window::Unlimited,
                 interest: Interest::None,
                 state: SimConnState::Open,
+                send_capacity: 0,
             },
         );
         self.deliver(Event::Accepted { conn, peer });
+        let send_capacity = self.core.send_capacity(conn);
+        self.conn_mut(conn).send_capacity = send_capacity;
         conn
     }
 
@@ -257,7 +266,7 @@ impl Sim {
                 ));
             }
         }
-        self.check_upstreams_not_stuck();
+        self.check_upstreams_settled();
         let stuck = self.conns.iter().find(|(id, c)| {
             c.state != SimConnState::Closed
                 && c.interest != Interest::Write
@@ -556,20 +565,32 @@ impl Sim {
         }
     }
 
-    /// Buffers stay within the capacities the core reports for the
-    /// connection's current state (both can change with it: the receive
-    /// buffer on entering a lingering close, the send side while a proxied
-    /// response is written from the exchange's buffers).
+    /// Buffers stay within their capacities. The receive capacity is the
+    /// core's current report (it changes on entering a lingering close);
+    /// the send capacity is the one recorded at accept, or, once the
+    /// connection has proxied, one of the exchange's buffer capacities the
+    /// config implies.
     fn check_buffers(&mut self) {
-        let open: Vec<(ConnId, Interest)> = self
+        let open: Vec<(ConnId, Interest, usize)> = self
             .conns
             .iter()
-            .filter(|(_, c)| c.state != SimConnState::Closed)
-            .map(|(id, c)| (*id, c.interest))
-            .filter(|(id, _)| self.core.send_capacity(*id) > 0)
+            .filter(|(_, c)| c.state != SimConnState::Closed && c.send_capacity > 0)
+            .map(|(id, c)| (*id, c.interest, c.send_capacity))
             .collect();
-        for (conn, interest) in open {
+        for (conn, interest, accepted) in open {
             let send_cap = self.core.send_capacity(conn);
+            let allowed = if self.ever_proxied(conn) {
+                [accepted, self.backends.head_bound, self.backends.recv_bound].contains(&send_cap)
+            } else {
+                send_cap == accepted
+            };
+            if !allowed {
+                self.violation(&format!(
+                    "conn={} send capacity {send_cap} is not one it may have \
+                     (accepted with {accepted})",
+                    conn.0
+                ));
+            }
             let recv_cap = self.core.recv_capacity(conn);
             let recv = self.core.recv_buffer(conn).len();
             if recv > recv_cap {

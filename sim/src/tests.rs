@@ -261,3 +261,91 @@ fn unreported_upstream_read_is_a_violation() {
     sim.pending_read = Some(Pending::Upstream(up));
     sim.deliver(Event::TimerFired);
 }
+
+/// What a correct core offers for an upstream in a body: a full, drained
+/// buffer.
+fn body_view(recv: usize, pending: usize) -> crate::backend::UpstreamView {
+    crate::backend::UpstreamView {
+        interest: Interest::Read,
+        recv,
+        send: 0,
+        body_pending: Some(pending),
+    }
+}
+
+#[test]
+fn a_full_read_into_a_drained_body_buffer_is_fine() {
+    let (sim, _, up) = connecting();
+    let cap = sim.backends.recv_bound;
+    sim.check_upstream_view(up, &body_view(cap, 0));
+}
+
+#[test]
+#[should_panic(expected = "up=1 offers a read while 5 body bytes are unsent")]
+fn read_offered_with_unsent_body_bytes_is_a_violation() {
+    let (sim, _, up) = connecting();
+    let cap = sim.backends.recv_bound;
+    sim.check_upstream_view(up, &body_view(cap, 5));
+}
+
+#[test]
+#[should_panic(expected = "offers a body read of 16383 bytes, not its capacity 16384")]
+fn partial_body_read_is_a_violation() {
+    let (sim, _, up) = connecting();
+    sim.check_upstream_view(up, &body_view(16383, 0));
+}
+
+#[test]
+#[should_panic(expected = "up=1 upstream_recv_buffer 16385 bytes exceeds capacity 16384")]
+fn upstream_recv_buffer_over_capacity_is_a_violation() {
+    let (sim, _, up) = connecting();
+    let mut view = body_view(16385, 0);
+    view.body_pending = None;
+    sim.check_upstream_view(up, &view);
+}
+
+#[test]
+#[should_panic(expected = "upstream_send_buffer 99999 bytes exceeds capacity")]
+fn upstream_send_buffer_over_capacity_is_a_violation() {
+    let (sim, _, up) = connecting();
+    let mut view = body_view(0, 0);
+    view.send = 99999;
+    sim.check_upstream_view(up, &view);
+}
+
+#[test]
+#[should_panic(expected = "up=1 wants to read but upstream_recv_buffer is empty")]
+fn upstream_read_interest_with_empty_buffer_is_a_violation() {
+    let (mut sim, _, up) = connecting();
+    // The core offers nothing while the connect is pending.
+    sim.apply(Action::SetUpstreamInterest {
+        up,
+        interest: Interest::Read,
+    });
+    sim.check_upstreams();
+}
+
+#[test]
+#[should_panic(expected = "up=1 failed but the core never closed it")]
+fn failed_upstream_left_open_is_a_violation() {
+    let (mut sim, _, up) = connecting();
+    sim.fake_upstream_end(up, true);
+    sim.run_until_idle();
+}
+
+#[test]
+#[should_panic(expected = "up=1 reached end of stream but the core never closed it")]
+fn ended_upstream_left_open_is_a_violation() {
+    let (mut sim, _, up) = connecting();
+    sim.fake_upstream_end(up, false);
+    sim.run_until_idle();
+}
+
+#[test]
+#[should_panic(expected = "conn=1 send capacity 1024 is not one it may have (accepted with 7)")]
+fn changed_send_capacity_is_a_violation() {
+    let mut sim = Sim::new(CONFIG);
+    let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    sim.conn_mut(c).send_capacity = 7;
+    sim.check_buffers();
+}
