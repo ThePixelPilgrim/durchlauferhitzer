@@ -268,6 +268,25 @@ fn empty_client_forwarded_for_counts_as_absent() {
 }
 
 #[test]
+fn forwarded_for_listed_in_connection_is_dropped_before_the_merge() {
+    let raw = b"GET /p HTTP/1.1\r\nHost: a\r\nConnection: X-Forwarded-For\r\n\
+        X-Forwarded-For: 10.0.0.1\r\n\r\n";
+    assert_eq!(
+        rendered_request(raw, "/p", v4(192, 0, 2, 1)),
+        format!("GET /p HTTP/1.1\r\nhost: a\r\nx-forwarded-for: 192.0.2.1\r\n{TAIL}")
+    );
+}
+
+#[test]
+fn hop_by_hop_bytes_fails_closed_on_non_utf8_tokens() {
+    // Unreachable while the parsers reject obs-text, but a non-UTF-8 token
+    // must still match, never be skipped.
+    assert!(is_hop_by_hop_bytes(b"x-\xff", &[b"X-\xFF".as_slice()]));
+    assert!(is_hop_by_hop_bytes(b"x-\xff", &[b"a", b"x-\xff"]));
+    assert!(!is_hop_by_hop_bytes(b"x-\xfe", &[b"x-\xff".as_slice()]));
+}
+
+#[test]
 fn is_hop_by_hop_covers_the_fixed_list_proxy_prefix_and_connection_tokens() {
     for name in [
         "connection",
@@ -440,6 +459,7 @@ const VALUES: &[&str] = &[
     "1.2.3.4",
     "https",
     "Upgrade, ,TE",
+    "x-forwarded-for",
 ];
 const SEPS: &[&str] = &[":", ": ", ":  ", ":\t"];
 

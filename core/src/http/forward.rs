@@ -52,15 +52,22 @@ pub fn check_forwardable(head: &RequestHead) -> Result<(), ForwardError> {
 /// name listed in `connection_tokens` (the tokens of the head's
 /// `Connection` headers). All comparisons are ASCII case-insensitive.
 pub fn is_hop_by_hop(name: &str, connection_tokens: &[&str]) -> bool {
-    const FIXED: [&str; 6] = [
-        "connection",
-        "keep-alive",
-        "te",
-        "trailer",
-        "upgrade",
-        "expect",
+    let tokens: Vec<&[u8]> = connection_tokens.iter().map(|t| t.as_bytes()).collect();
+    is_hop_by_hop_bytes(name.as_bytes(), &tokens)
+}
+
+/// [`is_hop_by_hop`] on raw bytes, so a token is compared whatever bytes it
+/// holds (fail closed: no token is skipped for not being UTF-8).
+fn is_hop_by_hop_bytes(name: &[u8], connection_tokens: &[&[u8]]) -> bool {
+    const FIXED: [&[u8]; 6] = [
+        b"connection",
+        b"keep-alive",
+        b"te",
+        b"trailer",
+        b"upgrade",
+        b"expect",
     ];
-    const PROXY: &str = "proxy-";
+    const PROXY: &[u8] = b"proxy-";
     FIXED.iter().any(|fixed| fixed.eq_ignore_ascii_case(name))
         || name
             .get(..PROXY.len())
@@ -161,12 +168,9 @@ fn put_header(sink: &mut impl Sink, name: &str, value: &[u8]) {
     sink.put(b"\r\n");
 }
 
-/// The tokens of every `Connection` header. Validated values are ASCII
-/// (obs-text is rejected), so every token is valid UTF-8.
-fn listed_tokens(headers: &[Header]) -> Vec<&str> {
-    connection_tokens(headers)
-        .filter_map(|token| std::str::from_utf8(token).ok())
-        .collect()
+/// The tokens of every `Connection` header, as raw bytes.
+fn listed_tokens(headers: &[Header]) -> Vec<&[u8]> {
+    connection_tokens(headers).collect()
 }
 
 fn backend_request(head: &RequestHead, path: &str, peer: IpAddr, sink: &mut impl Sink) {
@@ -184,10 +188,9 @@ fn backend_request(head: &RequestHead, path: &str, peer: IpAddr, sink: &mut impl
     sink.put(b" HTTP/1.1\r\n");
 
     let listed = listed_tokens(&head.headers);
-    let forwardable = head
-        .headers
-        .iter()
-        .filter(|h| !is_hop_by_hop(&h.name, &listed) && h.name != "x-forwarded-proto");
+    let forwardable = head.headers.iter().filter(|h| {
+        !is_hop_by_hop_bytes(h.name.as_bytes(), &listed) && h.name != "x-forwarded-proto"
+    });
     for header in forwardable.clone() {
         match header.name.as_str() {
             "x-forwarded-for" => {}
@@ -237,7 +240,7 @@ fn client_response(head: &ResponseHead, persistence: Persistence, sink: &mut imp
 
     let listed = listed_tokens(&head.headers);
     for header in &head.headers {
-        if !is_hop_by_hop(&header.name, &listed) {
+        if !is_hop_by_hop_bytes(header.name.as_bytes(), &listed) {
             put_header(sink, &header.name, &header.value);
         }
     }

@@ -528,11 +528,11 @@ fn obs_text_in_values_is_rejected() {
         raw.extend_from_slice(b"\r\n\r\n");
         assert_eq!(err_of(&raw), HttpError::BadHeaderValue, "{value:?}");
     }
-    // The highest VCHAR is still fine.
-    let head = head_of(b"GET / HTTP/1.1\r\nHost: a\r\nX: ~\x7e\r\n\r\n");
+    // The lowest and highest VCHAR, with inner SP and HTAB, are fine.
+    let head = head_of(b"GET / HTTP/1.1\r\nHost: a\r\nX: ! \t~\r\n\r\n");
     assert_eq!(
         head.headers.last().map(|h| h.value.clone()),
-        Some(b"~~".to_vec())
+        Some(b"! \t~".to_vec())
     );
 }
 
