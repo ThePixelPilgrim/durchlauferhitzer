@@ -15,8 +15,10 @@
 //! upstream ids allocated sequentially from 1, each `Connect` during an
 //! event of its client and for a listed backend; at most one open upstream
 //! per client; no upstream left open after its client closed; upstream
-//! buffers within their capacities; no `Read` interest with nothing to read
-//! into; and during a body, a read offered only into a drained buffer and
+//! buffers within their capacities; no `Read` or `ReadWrite` interest with
+//! nothing to read into and no `Write` or `ReadWrite` interest with nothing
+//! to write (`ReadWrite` is for upstreams only; a client `ReadWrite` is a
+//! violation); and during a body, a read offered only into a drained buffer and
 //! always with its full capacity (fill, drain, refill). Capacities are
 //! recomputed from the config by the documented formulas, not taken from
 //! the core. Which phase an upstream is in (and how many body bytes are
