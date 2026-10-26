@@ -3,11 +3,11 @@
 //! fill, drain, refill (NFR-RES-04), its framing and limit errors
 //! (FR-PROXY-19, -23) and a client that stalls it (FR-PROXY-26).
 
-use super::proxy::{BACKEND_RESPONSE_TIMEOUT, BODY_IDLE_TIMEOUT};
+use super::proxy::{BACKEND_RESPONSE_TIMEOUT, BODY_IDLE_TIMEOUT, body_mode};
 use super::{Action, ConnId, Core};
 use crate::conn::{ConnState, UnreadBody};
 use crate::http::request::{Method, Persistence};
-use crate::http::response::{BodyMode, render_fixed};
+use crate::http::response::render_fixed;
 use crate::http::status::Status;
 use crate::log::{Log, RejectReason, RequestBodyError, TimeoutKind};
 use crate::request_body::{RequestBody, Stage};
@@ -108,10 +108,7 @@ impl Core {
         };
         match error {
             RequestBodyError::Chunked(_) => {
-                let body = match method {
-                    Method::Head => BodyMode::HeadOnly,
-                    Method::Get | Method::Other(_) => BodyMode::Full,
-                };
+                let body = body_mode(method);
                 render_fixed(Status::BadRequest, Persistence::Close, body, &mut c.send);
                 actions.push(Action::Log(Log::Rejected {
                     conn,
@@ -153,13 +150,14 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        let Some(up) = c.state.upstream() else {
+        let ConnState::AwaitingResponse { up, request, .. } = &c.state else {
             return;
         };
+        let (up, body) = (*up, body_mode(&request.summary.method));
         render_fixed(
             Status::RequestTimeout,
             Persistence::Close,
-            BodyMode::Full,
+            body,
             &mut c.send,
         );
         actions.push(Action::Log(Log::Rejected {

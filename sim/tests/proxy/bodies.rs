@@ -506,7 +506,7 @@ fn backend_not_reading_the_body_is_504() {
                 conn: c,
                 peer: peer(),
                 backend: BackendId(0),
-                kind: BackendFailure::ResponseTimeout,
+                kind: BackendFailure::BodyTimeout,
             },
             Log::Response {
                 conn: c,
@@ -679,4 +679,27 @@ fn early_response_after_the_whole_body_was_read_keeps_the_client() {
         sim.trace()
     );
     answer_ok_after(&mut sim, c, second);
+}
+
+/// A stalled body on a HEAD request is answered with a head-only 408, like
+/// every other response to HEAD.
+#[test]
+fn stalled_head_request_body_is_a_head_only_408() {
+    let mut sim = Sim::new(BODIES);
+    let c = request(
+        &mut sim,
+        b"HEAD /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 10\r\n\r\n012",
+    );
+    sim.advance(Duration::from_secs(30));
+    assert_eq!(
+        sim.take_received(c),
+        fixed(
+            Status::RequestTimeout,
+            Persistence::Close,
+            BodyMode::HeadOnly
+        ),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
 }

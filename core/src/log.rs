@@ -86,6 +86,9 @@ pub enum BackendFailure {
     /// The backend did not send its response head (or, after it, made no
     /// body progress) in time.
     ResponseTimeout,
+    /// The backend stopped taking the request body: body bytes waited for
+    /// it for the body idle timeout, and no response head came.
+    BodyTimeout,
 }
 
 /// The parts of a request worth logging. `host` and `path` come from the

@@ -212,7 +212,7 @@ pub(super) fn close_upstream(
     }
 }
 
-fn body_mode(method: &Method) -> BodyMode {
+pub(super) fn body_mode(method: &Method) -> BodyMode {
     match method {
         Method::Head => BodyMode::HeadOnly,
         Method::Get | Method::Other(_) => BodyMode::Full,
@@ -604,9 +604,9 @@ impl Core {
             BackendFailure::Refused | BackendFailure::Reset | BackendFailure::BadResponse(_) => {
                 Status::BadGateway
             }
-            BackendFailure::ConnectTimeout | BackendFailure::ResponseTimeout => {
-                Status::GatewayTimeout
-            }
+            BackendFailure::ConnectTimeout
+            | BackendFailure::ResponseTimeout
+            | BackendFailure::BodyTimeout => Status::GatewayTimeout,
         };
         actions.push(Action::Log(Log::BackendFailed {
             conn,
@@ -678,6 +678,12 @@ impl Core {
                 request, buffers, ..
             } if buffers.head.is_empty() && request.body.stage() == Stage::Receiving => {
                 self.body_stalled(now, conn, actions);
+            }
+            // Body bytes waited for a backend that stopped taking them.
+            ConnState::AwaitingResponse {
+                request, buffers, ..
+            } if buffers.head.is_empty() && request.body.stage() == Stage::Writing => {
+                self.fail_before_head(now, conn, BackendFailure::BodyTimeout, actions);
             }
             ConnState::AwaitingResponse { .. } => {
                 self.fail_before_head(now, conn, BackendFailure::ResponseTimeout, actions);

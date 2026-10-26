@@ -312,7 +312,8 @@
 //!   is fully written, then a 504 ([`BackendFailure::ResponseTimeout`]);
 //!   while a request body streams, the body idle timeout (30 s) instead,
 //!   reset on progress either way, then a 408 if the core waited for the
-//!   client's body bytes, a 504 if they waited for the backend; once the
+//!   client's body bytes, a 504 ([`BackendFailure::BodyTimeout`]) if they
+//!   waited for the backend; once the
 //!   whole request is written, the response timeout again;
 //! - relaying a response: the client's `send_idle_timeout` while the client
 //!   has bytes to take (or nothing more is due from the backend), the body

@@ -664,8 +664,10 @@ Failures, persistence, timeouts:
   (FR-PROXY-28); the body idle timeout before the response head is a 408
   (logged as `Rejected { Timeout(RequestBody) }`, then close) when the
   core waited for the client's body bytes, and a 504 (`BackendFailed {
-  ResponseTimeout }`) when body bytes waited for the backend: a backend
-  that stops taking the body is at fault. *Owner decision 2026-10-26:*
+  BodyTimeout }`, its own kind so the log says what stalled; owner policy
+  2026-10-26) when body bytes waited for the backend: a backend that
+  stops taking the body is at fault. A 408 or 504 to a HEAD request is
+  head-only, like every response to HEAD. *Owner decision 2026-10-26:*
   while body bytes wait for the backend, the upstream is read too (the
   driver contract's upstream-only `Interest::ReadWrite`), so a backend
   that stops taking the body and answers has its response relayed at once
@@ -698,7 +700,9 @@ Failures, persistence, timeouts:
   nothing after a framing error is written.
 - **FR-PROXY-31** [stage 3] Backend failures are logged
   (`BackendFailed`: refused, reset, bad response with its parse error,
-  connect timeout, response timeout); proxied responses are logged as
+  connect timeout, response timeout, body timeout: a backend that stopped
+  taking the request body [done in stage 3 Task 6]); proxied responses
+  are logged as
   `ProxiedResponse` with the backend's status (FR-LOG-02).
 - **FR-PROXY-32** [stage 8] Backend-directed file serving (an
   `X-Accel-Redirect`-like header): see Timeline.
@@ -764,9 +768,12 @@ Failures, persistence, timeouts:
   `Reset`, `FileAborted` (with the file error); [stage 3]
   `ProxiedResponse { status: u16, backend, request }` (a backend's
   response head was queued; its status is any 100–599, so a number rather
-  than one of the core's statuses) and `BackendFailed { backend, kind }`.
-  A 502 or 504 the core generates for a failed backend is a `Response`,
-  preceded by its `BackendFailed`.
+  than one of the core's statuses) and `BackendFailed { backend, kind }`
+  (`kind` per FR-PROXY-31, `BodyTimeout` included). A 502 or 504 the core
+  generates for a failed backend is a `Response`, preceded by its
+  `BackendFailed`. [Stage 3 Task 6:] `Rejected` also covers a request body
+  that broke a rule (`Body(Chunked(..) | TooLarge)`) and a stalled request
+  body (`Timeout(RequestBody)`).
 - **FR-LOG-03** [done] One entry per request: a routed request or route
   miss logs `Response`; a parse error logs `Rejected` only. A later failure
   of the same exchange (timeout, abort) adds its own entry.
