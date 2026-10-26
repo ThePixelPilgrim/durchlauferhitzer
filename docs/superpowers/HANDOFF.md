@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-26, after stage 3 Task 4 landed on `main`.
+Last updated 2026-10-26, after stage 3 Task 5 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -9,9 +9,9 @@ A new session should start from the latest `main`, read this file first, then `C
 |---|---|
 | 1 Foundations | done, merged to `main` (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done, merged to `main` (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
-| 3 Reverse proxy | **in progress** on `main` (Tasks 1–4 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
+| 3 Reverse proxy | **in progress** on `main` (Tasks 1–5 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
 
-Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ← **next**, 6 request bodies, 7 response bodies, 8 timeouts/failure matrix, 9 randomized sim. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
+Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ✅, 6 request bodies ← **next**, 7 response bodies, 8 timeouts/failure matrix, 9 randomized sim. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…, consolidated 2026-10-25); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -34,9 +34,10 @@ The abandoned branch `ccr-716d91b0-bff174` had redone Tasks 1–4. A comparison 
 
 Task 4 (done, `e05a468`..`4b8a681`): obs-text rejected in both parsers (FR-HTTP-05, FR-PROXY-13), `%3F` in paths → 400 (FR-HTTP-15a), `core/src/http/forward.rs` (seeded from the abandoned branch, adapted): `render_backend_request` / `render_client_response` with exact `*_len`, `is_hop_by_hop`, and `check_forwardable` for FR-PROXY-08's duplicate-`X-Forwarded-For` rule. Calls accepted in review: request line always HTTP/1.1; empty client XFF counts as absent; `Connection: x-forwarded-for` drops the client value; header names go out lowercased (values byte-exact); standard reasons = RFC 9110 + 103/428/429/431/511, else empty.
 
+Task 5 (done, `55f4e58`..`d538a95`): upstream contract (`core/src/upstream.rs`, `core/src/core/proxy.rs`, rules in `core/src/core/mod.rs` docs), scripted backends in `sim/src/backend.rs`, body-less requests end to end with `Content-Length`/no-body responses, 400/502/504, `Log::ProxiedResponse { status: u16, .. }` and `Log::BackendFailed`. Builder calls now in the spec: EOF before the head → 502 logged as `Reset`; a core 502/504 keeps the request's persistence; interim heads answer 501 until Task 7; buffer sizes in NFR-RES-01. The client's `send_idle_timeout` applies while relaying (FR-PROXY-29). No `too_many_arguments` allow left in core. The shared `Exchange` struct was judged not worth it. Sim test files split under `sim/tests/faults/` and `sim/tests/static_files/`.
+
 Still to carry into later tasks (`.superpowers/` notes are not in git, so listed here):
-- Task 5: call `forward::check_forwardable` before `Connect` (its `ForwardError::status()` is 400); map every `ResponseError` (incl. `BadHeaderValue` for obs-text, the FR-HTTP-09a variant) to 502.
-- Task 5: the abandoned branch's `Exchange { persistence, buffered }` struct shared by the responding states (removes repeated fields); statuses 417/502/504 and a 502 mapping for every `ResponseError`.
+- Waiting states still use named default-timeout constants (`BODY_IDLE_TIMEOUT` etc.); Task 8 replaces them with `Limits` keys. Task 8 may also add `BackendFailure` kinds for "closed before head" and "body stalled".
 - Task 6: the abandoned branch's `Expect` parsing (with D3) as a starting point.
 
 ## Branches
