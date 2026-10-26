@@ -219,6 +219,11 @@ mod tests {
                 Ok(Chunked::Done { used: 20 }),
                 10,
             ),
+            (
+                b"4\r\n\r\n;x\r\n0\r\n\r\n",
+                Ok(Chunked::Done { used: 14 }),
+                4,
+            ),
             (b"a\r\n", Ok(Chunked::More), 0),
             (b"000000000000000F\r\n", Ok(Chunked::More), 0),
             (
@@ -242,6 +247,10 @@ mod tests {
             (b"5\r\nhelloX\r\n", ChunkError::BadLineEnding),
             (b"0\r\n\n", ChunkError::BadLineEnding),
             (b"0\r\nX", ChunkError::Trailer),
+            (b"5\rX", ChunkError::BadLineEnding),
+            (b"5\r5", ChunkError::BadLineEnding),
+            (b"5\r\nhello\rX", ChunkError::BadLineEnding),
+            (b"0\r\n\rX", ChunkError::BadLineEnding),
         ]
     }
 
@@ -262,10 +271,68 @@ mod tests {
         }
     }
 
+    /// `size` (hex text) announcing `n` data bytes, then the last chunk.
+    fn one_chunk_body(size: &str, n: usize) -> Vec<u8> {
+        let mut v = format!("{size}\r\n").into_bytes();
+        v.extend(std::iter::repeat_n(b'x', n));
+        v.extend_from_slice(b"\r\n0\r\n\r\n");
+        v
+    }
+
+    #[test]
+    fn chunk_size_value_is_exact() {
+        let sizes = [
+            ("1f", 31),
+            ("1F", 31),
+            ("10", 16),
+            ("aB", 171),
+            ("Ab", 171),
+            ("ab", 171),
+            ("AB", 171),
+            ("cD", 205),
+            ("eE", 238),
+            ("ff", 255),
+            ("100", 256),
+            ("fFfF", 65535),
+            ("0000000000000100", 256),
+        ];
+        for (size, n) in sizes {
+            let input = one_chunk_body(size, n);
+            let mut body = ChunkedBody::new();
+            let header = size.len() + 2;
+            assert_eq!(
+                body.advance(&input),
+                Ok(Chunked::Done {
+                    used: header + n + 2 + 5
+                }),
+                "{size}"
+            );
+            assert_eq!(body.data_len(), n as u64, "{size}");
+            // One data byte fewer than announced must not end the body.
+            let mut short = one_chunk_body(size, n - 1);
+            short.truncate(header + n - 1 + 2);
+            let mut body = ChunkedBody::new();
+            assert_eq!(
+                body.advance(&short),
+                Err(ChunkError::BadLineEnding),
+                "{size}"
+            );
+        }
+    }
+
     #[test]
     fn size_overflow_is_too_long() {
         let mut body = ChunkedBody::new();
         assert_eq!(body.advance(b"FFFFFFFFFFFFFFFF\r\n"), Ok(Chunked::More));
+        assert_eq!(body.state, State::Data { left: u64::MAX });
+        let mut high = ChunkedBody::new();
+        assert_eq!(high.advance(b"1000000000000000\r\n"), Ok(Chunked::More));
+        assert_eq!(
+            high.state,
+            State::Data {
+                left: 0x1000_0000_0000_0000
+            }
+        );
         // The validator now wants u64::MAX data bytes; it counts them without
         // overflowing and does not finish.
         assert_eq!(body.advance(b"abc"), Ok(Chunked::More));
