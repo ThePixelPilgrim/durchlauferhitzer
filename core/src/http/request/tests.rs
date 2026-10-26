@@ -383,6 +383,7 @@ fn connection_naming_framing_headers_is_rejected() {
         "Connection: keep-alive\r\nConnection: host\r\n",
         "Connection:\tclose ,\tTransfer-Encoding \t\r\n",
         "Connection: ,content-length,\r\n",
+        "cOnNeCtIoN: Host\r\n",
     ];
     for tail in rejected {
         assert_eq!(with(tail), Err(ConnectionNamesFraming), "{tail:?}");

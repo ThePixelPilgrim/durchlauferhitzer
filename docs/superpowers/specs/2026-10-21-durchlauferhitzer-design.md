@@ -559,9 +559,11 @@ Backend response parsing:
   `Transfer-Encoding` in an HTTP/1.0 response are errors); these checks
   also apply to 1xx, 204, 304 and responses to HEAD, and so does
   FR-HTTP-09a (a `Connection` listing `content-length`,
-  `transfer-encoding` or `host` → 502). `Content-Length: 0`
-  means no body (the header is kept). No framing header means the body ends
-  when the backend closes.
+  `transfer-encoding` or `host` → 502). After all line checks, the
+  FR-HTTP-09a check runs first, then `Transfer-Encoding` in an HTTP/1.0
+  response, then the other framing checks, so the reported error is
+  deterministic. `Content-Length: 0` means no body (the header is kept).
+  No framing header means the body ends when the backend closes.
 - **FR-PROXY-17** [done] A head is judged line by line as its LF arrives;
   the parser is resumable and split-independent (NFR-ROB-02).
 - **FR-PROXY-18** Interim responses: a 1xx other than 101 is dropped and

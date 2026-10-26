@@ -215,6 +215,7 @@ fn connection_naming_framing_headers_is_rejected() {
         "Connection: HOST\r\n",
         "Connection: keep-alive\r\nConnection: host\r\n",
         "Connection: ,\tTransfer-Encoding \t\r\n",
+        "cOnNeCtIoN: Host\r\n",
         // Wins over the framing checks.
         "Content-Length: 1\r\nTransfer-Encoding: chunked\r\nConnection: content-length\r\n",
         "Transfer-Encoding: gzip\r\nConnection: transfer-encoding\r\n",
@@ -223,7 +224,9 @@ fn connection_naming_framing_headers_is_rejected() {
     let accepted = [
         "Connection: keep-alive, x-foo\r\n",
         "Connection: ,, close ,\r\n",
-        "Connection: content-length-x, xhost\r\n",
+        "Connection: content-length-x, xhost, transfer-encodings\r\n",
+        "X-Connection: host\r\n",
+        "Connection:\r\n",
     ];
     for &(start, kind) in starts {
         for tail in rejected {
