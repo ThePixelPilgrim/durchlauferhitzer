@@ -387,12 +387,12 @@ proptest! {
         let mut input = b"5\r\nhello\r\n".to_vec();
         input.extend_from_slice(&tail);
         let (whole, _) = feed(&input, &[]);
-        let (split, tail) = feed(&input, &cuts);
+        let (split, split_tail) = feed(&input, &cuts);
         let all: Vec<usize> = (0..input.len()).collect();
         let (bytewise, bytewise_tail) = feed(&input, &all);
         prop_assert_eq!(split, whole);
         prop_assert_eq!(bytewise, whole);
-        prop_assert!(tail <= MAX_UNCONSUMED, "tail {}", tail);
+        prop_assert!(split_tail <= MAX_UNCONSUMED, "tail {}", split_tail);
         prop_assert!(bytewise_tail <= MAX_UNCONSUMED, "tail {}", bytewise_tail);
     }
 
