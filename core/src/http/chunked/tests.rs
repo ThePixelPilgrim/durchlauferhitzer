@@ -316,6 +316,14 @@ fn errors_are_sticky() {
     assert_eq!(v.advance(b"5\r\nhelloX"), Err(ChunkedError::BadLineEnd));
     assert_eq!(v.advance(b"\r\n0\r\n\r\n"), Err(ChunkedError::BadLineEnd));
     assert_eq!(v.advance(b""), Err(ChunkedError::BadLineEnd));
+    // And when the data was consumed by an earlier call: the bad byte
+    // where the CRLF belongs fails the call it arrives in, and every
+    // later one.
+    let mut v = ChunkedValidator::new();
+    assert_eq!(v.advance(b"5\r\nhel"), progress(6, 3, Done::No));
+    assert_eq!(v.advance(b"loX\r\n"), Err(ChunkedError::BadLineEnd));
+    assert_eq!(v.advance(b"\r\n0\r\n\r\n"), Err(ChunkedError::BadLineEnd));
+    assert_eq!(v.advance(b"0\r\n\r\n"), Err(ChunkedError::BadLineEnd));
 }
 
 #[test]

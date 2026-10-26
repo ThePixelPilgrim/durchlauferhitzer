@@ -38,9 +38,11 @@
 //! the CRLF after data once complete, and the last chunk `0\r\n\r\n` once
 //! complete. After [`Done::Yes`] every further call consumes nothing: what
 //! follows the body belongs to the next message. An error reports no
-//! consumed bytes: nothing from the failing call may be forwarded (bytes
-//! consumed by earlier calls stay valid). After an error every further
-//! call returns the same error.
+//! consumed bytes: nothing from the failing call may be forwarded. Bytes
+//! consumed by earlier calls were already forwarded, so an error after the
+//! head was forwarded cannot be answered any more: the caller cuts both
+//! connections (FR-PROXY-19). After an error every further call returns
+//! the same error.
 
 /// The most characters a chunk size may have, leading zeros included.
 pub const MAX_SIZE_CHARS: usize = 32;
