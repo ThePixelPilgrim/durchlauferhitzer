@@ -1,7 +1,7 @@
 # Handoff — where work stands and how to continue
 
-Last updated after commit `8ef0d15` on branch `claude/magical-dijkstra-2eoh4y`.
-A new session should read this file first, then `CLAUDE.md`.
+Last updated 2026-10-26, when stage 3 Tasks 1–3 were fast-forwarded to `main`.
+A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
 
@@ -9,9 +9,9 @@ A new session should read this file first, then `CLAUDE.md`.
 |---|---|
 | 1 Foundations | done, merged to `main` (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done, merged to `main` (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
-| 3 Reverse proxy | **in progress** on `claude/magical-dijkstra-2eoh4y` — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
+| 3 Reverse proxy | **in progress** on `main` (Tasks 1–3 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
 
-Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ← **next**, 5 upstream interface + scripted backends, 6 request bodies, 7 response bodies, 8 timeouts/failure matrix, 9 randomized sim. Then the stage 3 whole-branch review, fixes, review record, merge to `main` (owner approves merges and pushes to `main`).
+Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ← **next**, 5 upstream interface + scripted backends, 6 request bodies, 7 response bodies, 8 timeouts/failure matrix, 9 randomized sim. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…, consolidated 2026-10-25); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -21,15 +21,21 @@ Key documents: spec `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.
 
 Obs-text in header values is rejected (FR-HTTP-05, FR-PROXY-13); `%3F` in paths → 400 (FR-HTTP-15a); response `Content-Length` passes through (FR-PROXY-12); a client stalling its body → 408 (FR-PROXY-26). Task 4 implements the first three (see the note in Task 4 of the stage 3 plan). Also decided since: half-close keeps the upstream (Task 8), `Expect` outside proxy routes (Task 6), shutdown modes / exit codes / `Date` (stage 4), interim cap 8 and empty reason kept (Task 7) — all in the spec.
 
-To start: `git checkout claude/magical-dijkstra-2eoh4y && git pull`, run the gate once, recreate the SDD workspace and its `progress.md` from the ledger snapshot below, then run Task 4 as described in "How a task is run". Remaining open questions: the spec's "Open decisions (owner)" section.
+To start: `git fetch origin && git checkout -B <work-branch> origin/main`, run the gate once, recreate the SDD workspace and its `progress.md` from the ledger snapshot below, then run Task 4 as described in "How a task is run". Remaining open questions: the spec's "Open decisions (owner)" section.
+
+## Branches
+
+- `main` holds all verified work; from now on each task is fast-forwarded to `main` once it passes review (CLAUDE.md, "Branches and main").
+- `claude/magical-dijkstra-2eoh4y`: the branch stage 3 Tasks 1–3 were built on; now identical to `main`.
+- `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A later session (2026-10-25/26) missed this branch and wrote a second stage 3 plan (`2026-10-25-stage-3-reverse-proxy.md`) from the pre-consolidation spec, then redid Tasks 1–4 there. It contradicts owner decisions (allows obs-text, resume-at-half backpressure, no interim cap). Kept only as a record; its `core/src/http/forward.rs` (head rewriting, tested) may be consulted when running Task 4 here, adapted to FR-HTTP-05 / FR-PROXY-13. The owner decides whether to delete it.
 
 ## Owner's way of working (mandatory, see CLAUDE.md)
 
 - **Subagent-driven development** (`.claude/skills/subagent-driven-development`), one plan task at a time; **stop and report after each task**, wait for "Go". Tiny doc-only changes may be done inline.
 - Strict red/green TDD; implementers write the failing test first and paste real RED output.
-- Commit **and push** after every step; report the pushed **SHAs** and the **GitHub URL of every changed Markdown file** (`https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/claude/magical-dijkstra-2eoh4y/<path>`).
+- Commit **and push** after every step; report the pushed **SHAs** and the **GitHub URL of every changed Markdown file** (`https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/main/<path>`).
 - Commit trailer lines (from the session's attribution reminder) end every commit message.
-- Never push to `main` without explicit permission; merges to `main` are fast-forward after the stage's final review.
+- Fast-forward `main` after every task that passes review and the gate (standing permission, 2026-10-26); never rewrite `main`.
 - Pure Rust, zero product dependencies, no `unsafe`, exhaustive enums (no `_ =>` on enums), enums over bools, bounded memory, illegal states unrepresentable. Fable must not implement (delegate to Opus/Sonnet).
 - The owner prefers asking before inventing; give a recommendation, list every decision taken on their behalf ("calls I made") in the report.
 

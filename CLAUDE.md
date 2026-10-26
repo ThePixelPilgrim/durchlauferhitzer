@@ -1,6 +1,6 @@
 # durchlauferhitzer
 
-New session? Read `docs/superpowers/HANDOFF.md` first — it says where work stands and what is next.
+New session? Start from the latest `main` and read `docs/superpowers/HANDOFF.md` first — it says where work stands and what is next. See "Branches and main" below before doing anything else.
 
 Requirements live in the design spec (`docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md`) with stable IDs (FR-…, NFR-…, DRV-…); plans and reviews cite those IDs, and a new owner decision is written into the spec before it is cited.
 
@@ -30,6 +30,25 @@ Requirements live in the design spec (`docs/superpowers/specs/2026-10-21-durchla
   test.
 - Work one plan task at a time (or two tightly linked tasks, if that is
   cheaper), then stop and report before starting the next.
+
+## Branches and main (mandatory)
+
+- `main` is the single source of truth. Every session begins with
+  `git fetch origin` and works from the latest `origin/main`, whatever
+  branch the session was assigned.
+- Before any other work, list the remote branches
+  (`git ls-remote --heads origin`). If any branch carries commits that are
+  not on `main`, stop and report it to the owner before planning or
+  implementing anything: it may be unmerged work from an earlier session.
+- Work on one short-lived branch cut from `main`. As soon as a plan task
+  has passed its task review and the full gate, fast-forward `main` to it
+  and push `main` (standing owner permission, 2026-10-26). Doc-only
+  commits (plans, spec, handoff) go to `main` the same way. Never rewrite
+  `main`; if a fast-forward is impossible, stop and report.
+- Update `docs/superpowers/HANDOFF.md` and land it on `main` at the end of
+  every task, so the next session finds the current state there.
+- The stage's whole-branch review still runs at the end of each stage, over
+  the stage's range on `main`; its fixes land on `main` the same way.
 
 ## Rust only (mandatory)
 
