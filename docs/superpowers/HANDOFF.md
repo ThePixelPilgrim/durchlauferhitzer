@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-26, when stage 3 Tasks 1–3 were fast-forwarded to `main`.
+Last updated 2026-10-26, after the unification with the abandoned branch landed on `main` (see "Unification" below).
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -23,11 +23,26 @@ Obs-text in header values is rejected (FR-HTTP-05, FR-PROXY-13); `%3F` in paths 
 
 To start: `git fetch origin && git checkout -B <work-branch> origin/main`, run the gate once, recreate the SDD workspace and its `progress.md` from the ledger snapshot below, then run Task 4 as described in "How a task is run". Remaining open questions: the spec's "Open decisions (owner)" section.
 
+## Unification (2026-10-26)
+
+The abandoned branch `ccr-716d91b0-bff174` had redone Tasks 1–4. A comparison (keep `main` in all three parts) ported its stronger tests and one fix onto `main`:
+- U1: teardown order Log → CloseFile → Close for abort and socket reset (stage-2 M7), with tests and contract docs.
+- U3–U8: response-head tests (interim-head checks, first bad line wins, byte-by-byte interim + final, early limit errors, linear scan); U11–U15: chunked tests (exact size values, CR/LF arms, largest sizes, deep-state proptest, spent verdicts).
+- U17: FR-HTTP-09a (new) — `Connection` listing `content-length`, `transfer-encoding` or `host` → 400 / 502, shared in `head_line.rs`.
+- Owner decisions D1–D5 written into the spec: FR-HTTP-09a; FR-PROXY-08 (more than one `X-Forwarded-For` line → 400); FR-PROXY-12 (one hop-by-hop list both ways, `Expect` included; empty reason for a code with no standard reason); FR-PROXY-25 (duplicate `Expect` or a list → 417); FR-PROXY-16 states the response check order.
+- MIT license declared in the manifests and README.
+
+Still to carry into later tasks (from the comparison, `.superpowers/` notes are not in git, so listed here):
+- Task 4: seed it from the abandoned branch's `core/src/http/forward.rs` and tests (`git show origin/ccr-716d91b0-bff174:core/src/http/forward.rs`), adapted to FR-PROXY-06…13 (request line always HTTP/1.1 per this plan, one merged `X-Forwarded-For` value, re-rendered `Content-Length`, reason substitution, `head_line.rs` reuse, obs-text rejected, D2/D4/D5).
+- Task 5: the abandoned branch's `Exchange { persistence, buffered }` struct shared by the responding states (removes repeated fields); statuses 417/502/504 and a 502 mapping for every `ResponseError`.
+- Task 6: the abandoned branch's `Expect` parsing (with D3) as a starting point.
+
 ## Branches
 
 - `main` holds all verified work; from now on each task is fast-forwarded to `main` once it passes review (CLAUDE.md, "Branches and main").
-- `claude/magical-dijkstra-2eoh4y`: the branch stage 3 Tasks 1–3 were built on; now identical to `main`.
-- `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A later session (2026-10-25/26) missed this branch and wrote a second stage 3 plan (`2026-10-25-stage-3-reverse-proxy.md`) from the pre-consolidation spec, then redid Tasks 1–4 there. It contradicts owner decisions (allows obs-text, resume-at-half backpressure, no interim cap). Kept only as a record; its `core/src/http/forward.rs` (head rewriting, tested) may be consulted when running Task 4 here, adapted to FR-HTTP-05 / FR-PROXY-13. The owner decides whether to delete it.
+- `claude/magical-dijkstra-2eoh4y`: the branch stage 3 Tasks 1–3 were built on; fully contained in `main`.
+- `unify`: the unification work; fully contained in `main`.
+- `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A later session (2026-10-25/26) missed this branch and wrote a second stage 3 plan (`2026-10-25-stage-3-reverse-proxy.md`) from the pre-consolidation spec, then redid Tasks 1–4 there. It contradicts owner decisions (allows obs-text, resume-at-half backpressure, no interim cap). Kept only as a record until Task 4 has used its `forward.rs`; the owner decides whether to delete it then.
 
 ## Owner's way of working (mandatory, see CLAUDE.md)
 
