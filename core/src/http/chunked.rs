@@ -242,6 +242,9 @@ mod tests {
             (b"5 \r\n", ChunkError::BadSize),
             (SEVENTEEN_DIGITS, ChunkError::SizeTooLong),
             (b"5;x=y\r\n", ChunkError::Extension),
+            // No digits before the `;`: still an extension marker, not a
+            // bad size.
+            (b";x\r\n", ChunkError::Extension),
             (b"0\r\nX-T: 1\r\n\r\n", ChunkError::Trailer),
             (b"5\nhello\r\n", ChunkError::BadLineEnding),
             (b"5\r\nhelloX\r\n", ChunkError::BadLineEnding),
@@ -290,6 +293,7 @@ mod tests {
             ("ab", 171),
             ("AB", 171),
             ("cD", 205),
+            ("Cd", 205),
             ("eE", 238),
             ("ff", 255),
             ("100", 256),
@@ -407,14 +411,21 @@ mod tests {
             }
         }
 
+        /// After a valid chunk, arbitrary bytes reach the deeper states (size,
+        /// data, terminator, trailer); however the input is cut, verdict and
+        /// data length match the whole feed, and nothing panics.
         #[test]
-        fn never_panics_on_arbitrary_bytes(
-            bytes in proptest::collection::vec(any::<u8>(), 0..512),
+        fn arbitrary_bytes_after_a_chunk_split_like_the_whole(
+            tail in proptest::collection::vec(any::<u8>(), 0..512),
             cuts in proptest::collection::vec(0..512usize, 0..8),
         ) {
-            let whole = ChunkedBody::new().advance(&bytes);
-            let (split, _) = feed_split(&bytes, &cuts);
+            let mut bytes = b"5\r\nhello\r\n".to_vec();
+            bytes.extend_from_slice(&tail);
+            let mut body = ChunkedBody::new();
+            let whole = body.advance(&bytes);
+            let (split, split_len) = feed_split(&bytes, &cuts);
             prop_assert_eq!(split, whole);
+            prop_assert_eq!(split_len, body.data_len());
         }
     }
 }
