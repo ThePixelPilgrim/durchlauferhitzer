@@ -24,7 +24,7 @@ use durchlauferhitzer_core::http::target::TargetError;
 use durchlauferhitzer_core::{
     ConnId, FileError, FileStamp, LimitKind, Log, RejectReason, RequestSummary, TimeoutKind,
 };
-use durchlauferhitzer_sim::{Sim, SimConnState, Window};
+use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test { path / { static /srv/www; } }";
@@ -331,7 +331,7 @@ fn http10_request_closes_after_response() {
 const SEEDS: u64 = 1500;
 
 /// Every status the core can send; each must be seen across the seeds.
-const STATUSES: [Status; 12] = [
+const STATUSES: [Status; 13] = [
     Status::Ok,
     Status::MovedPermanently,
     Status::BadRequest,
@@ -342,6 +342,7 @@ const STATUSES: [Status; 12] = [
     Status::UriTooLong,
     Status::RequestHeaderFieldsTooLarge,
     Status::NotImplemented,
+    Status::BadGateway,
     Status::ServiceUnavailable,
     Status::HttpVersionNotSupported,
 ];
@@ -353,9 +354,11 @@ const REQUESTS: &[&[u8]] = &[
     b"GET /x HTTP/1.1\r\nHost: other.test\r\n\r\n",
     b"GET /y HTTP/1.1\r\nHost: other.test\r\n\r\n",
     b"HEAD / HTTP/1.1\r\nHost: other.test\r\n\r\n",
-    // Matched proxy route: 501, close.
+    // Matched proxy route, whose backend refuses every connect: 502,
+    // keep-alive; with a request body (not forwarded yet): 501, close.
     b"GET /api/v HTTP/1.1\r\nHost: example.test\r\n\r\n",
     b"HEAD /api/v HTTP/1.1\r\nHost: example.test\r\n\r\n",
+    b"POST /api/v HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\nhi",
     // Explicit close and HTTP/1.0.
     b"GET /c HTTP/1.1\r\nHost: other.test\r\nConnection: close\r\n\r\n",
     b"GET /old HTTP/1.0\r\n\r\n",
@@ -934,7 +937,12 @@ impl Tree {
     /// `example.test` must get.
     fn expected_status(&self, method: &Method, path: &str) -> Status {
         if path.starts_with("/api/") {
-            return Status::NotImplemented;
+            // The proxy templates: body-less GET and HEAD (the backend
+            // refuses), POST with a body.
+            return match method {
+                Method::Get | Method::Head => Status::BadGateway,
+                Method::Other(_) => Status::NotImplemented,
+            };
         }
         match method {
             Method::Get | Method::Head => {}
@@ -1153,7 +1161,13 @@ fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announced<'t>>, Str
                 file: None,
             }));
         }
-        Log::Reset { .. } | Log::FileAborted { .. } => return Ok(None),
+        // The 502 that follows announces the response.
+        Log::Reset { .. } | Log::FileAborted { .. } | Log::BackendFailed { .. } => {
+            return Ok(None);
+        }
+        Log::ProxiedResponse { .. } => {
+            return Err(format!("{log:?}, but every backend refuses"));
+        }
     };
     let body = match request.map(|r| &r.method) {
         Some(Method::Head) => BodyMode::HeadOnly,
@@ -1248,7 +1262,9 @@ fn log_conn(log: &Log) -> ConnId {
         Log::Response { conn, .. }
         | Log::Rejected { conn, .. }
         | Log::Reset { conn, .. }
-        | Log::FileAborted { conn, .. } => *conn,
+        | Log::FileAborted { conn, .. }
+        | Log::ProxiedResponse { conn, .. }
+        | Log::BackendFailed { conn, .. } => *conn,
     }
 }
 
@@ -1559,6 +1575,9 @@ fn run_seed(seed: u64, coverage: &mut Coverage) {
     } else {
         RANDOM_CONFIG
     });
+    // Proxying in the random runs is Task 9's; until then the backend
+    // refuses, so every forwarded request is a 502.
+    sim.set_connect("127.0.0.1:3000", ConnectBehaviour::Refuse);
     // One seed in three serves files up to 1 MiB.
     let big = rng.u8(0..3) == 0;
     let tree = Tree::random(&mut sim, &mut rng, big, long);
@@ -1674,7 +1693,11 @@ fn run_seed(seed: u64, coverage: &mut Coverage) {
                 reason: RejectReason::Http(HttpError::BadTarget(TargetError::EncodedUnreserved)),
                 ..
             } => coverage.encoded_unreserved += 1,
-            Log::Rejected { .. } | Log::Reset { .. } | Log::FileAborted { .. } => {}
+            Log::Rejected { .. }
+            | Log::Reset { .. }
+            | Log::FileAborted { .. }
+            | Log::ProxiedResponse { .. }
+            | Log::BackendFailed { .. } => {}
         }
         if let Log::Rejected { reason, .. } = log {
             match reason {

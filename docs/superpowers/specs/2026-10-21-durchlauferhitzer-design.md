@@ -495,7 +495,7 @@ Forwarding and identity:
 - **FR-PROXY-02** [stage 3] One fresh backend connection per request, with
   `Connection: close` toward the backend; a client has at most one upstream
   at a time. (Pooling: stage 7.)
-- **FR-PROXY-03** [stage 3] `Core::backends()` lists the distinct
+- **FR-PROXY-03** [done] `Core::backends()` lists the distinct
   `host:port` backends in config order (`BackendId` = index); the driver
   resolves each once at startup and connects by id (DRV-10). Upstream ids
   are core-allocated, from 1, never reused.
@@ -1050,7 +1050,7 @@ sim implements and checks it; the epoll driver is [stage 4].
   returning 0 mid-segment is `Truncated`; `EPIPE`/`ECONNRESET` are the
   socket's (`Failed`); other file-side errors are `FileFailed { Other }`.
   Known limit: `sendfile` may still block on evicted pages (stage 7).
-- **DRV-10** [stage 3] Upstreams: `backends()` resolved once at startup;
+- **DRV-10** [done] Upstreams: `backends()` resolved once at startup;
   `Connect` is a non-blocking connect answered by exactly one
   `UpstreamConnected` or `UpstreamFailed` unless `CloseUpstream` comes
   first (then nothing more for that id); upstream buffers follow DRV-02…04;

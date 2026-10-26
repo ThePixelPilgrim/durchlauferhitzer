@@ -69,12 +69,17 @@ fn unknown_host_gets_404_and_keeps_connection() {
     );
 }
 
+/// Request bodies are not forwarded yet (stage 3 Task 6): 501, and the
+/// connection closes.
 #[test]
-fn matched_route_gets_501_and_closes() {
+fn matched_proxy_route_with_body_gets_501_and_closes() {
     let mut sim = Sim::new(CONFIG);
     let p = peer();
     let c = sim.connect(p);
-    sim.send(c, b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n");
+    sim.send(
+        c,
+        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\nhi",
+    );
     sim.run_until_idle();
     assert_eq!(
         sim.take_received(c),
@@ -89,7 +94,7 @@ fn matched_route_gets_501_and_closes() {
             conn: c,
             peer: p,
             status: Status::NotImplemented,
-            request: summary(Method::Get, "example.test", "/api/x"),
+            request: summary(Method::Other("POST".to_owned()), "example.test", "/api/x"),
         }],
         "{}",
         sim.trace()

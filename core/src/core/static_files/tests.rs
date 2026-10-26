@@ -556,11 +556,6 @@ fn static_rules_decided_before_opening() {
             b"GET /x/f HTTP/1.1\r\nHost: a.test\r\nContent-Length: 1\r\n\r\nx",
             Some(Status::ContentTooLarge),
         ),
-        (
-            5,
-            b"GET /p/f HTTP/1.1\r\nHost: b.test\r\n\r\n",
-            Some(Status::NotImplemented),
-        ),
     ] {
         let actions = request(&mut core, now, id, req);
         let opened = actions.iter().any(|a| matches!(a, Action::OpenFile { .. }));

@@ -14,8 +14,9 @@ impl Core {
     /// Handle every connection whose deadline is at or before `now`, in
     /// `ConnId` order, until none is left.
     pub(super) fn timer_fired(&mut self, now: Instant, actions: &mut Vec<Action>) {
-        // Each pass closes a connection or moves it from reading a head to
-        // responding (which can only expire once more), so this terminates.
+        // Each pass closes a connection or moves it from reading a head or
+        // waiting on a backend to responding (which can only expire once
+        // more), so this terminates.
         loop {
             let expired: Vec<ConnId> = self
                 .conns
@@ -60,6 +61,10 @@ impl Core {
                 };
                 self.sync_interest(conn, actions);
             }
+            // The backend took too long, or the relayed response stalled.
+            ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Relaying { .. } => self.expire_proxy(now, conn, actions),
             // Nothing arrived, or nothing is left to say: close silently.
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
@@ -86,6 +91,9 @@ impl Core {
                     | ConnState::Responding { .. }
                     | ConnState::ReadingHead { .. }
                     | ConnState::Idle { .. }
+                    | ConnState::Connecting { .. }
+                    | ConnState::AwaitingResponse { .. }
+                    | ConnState::Relaying { .. }
                     | ConnState::Lingering { .. } => TimeoutKind::Send,
                 };
                 actions.push(Action::Log(Log::Rejected {

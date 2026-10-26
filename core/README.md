@@ -29,15 +29,20 @@ src/
   lib.rs              crate root and re-exports
   core/               the state machine behind `Core::handle`
     mod.rs              Core, buffers API, event dispatch; driver contract docs
-    contract.rs         Event, Action, Interest, ConnId, ConnError
+    contract.rs         Event, Action, Interest, ConnId, ConnError (client,
+                        file and upstream events and actions)
     request.rs          reading request heads, routing, fixed responses,
                         keep-alive, pipelining, lingering close
     static_files.rs     static routes: open, index.html, send, abort
+    proxy.rs            proxy routes: connect, forward the request head,
+                        judge the response head, relay it and its body
     limits.rs           connection counting, refusals (503), orphaned opens
     timers.rs           deadlines and TimerFired
     test_support.rs     helpers shared by the unit tests
   conn.rs             per-connection state (ConnState) and buffers
   file.rs             file ids, file metadata/stamps, change policy
+  upstream.rs         upstream and backend ids, open upstreams, the
+                      fixed-size buffers of a proxied exchange
   time.rs             Instant: monotonic time supplied by the driver
   log.rs              structured log entries (the driver formats them)
   routing.rs          virtual hosts and segment-based route matching

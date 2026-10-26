@@ -4,7 +4,7 @@
 //!
 //! The core never touches sockets, clocks or files. A *driver* (the
 //! simulation in tests, the epoll driver in production) owns all I/O and talks
-//! to the core through exactly four channels:
+//! to the core through exactly five channels:
 //!
 //! 1. **Events in.** The driver calls [`Core::handle`] with the current time
 //!    and one [`Event`]. The core appends zero or more [`Action`]s to the
@@ -25,6 +25,13 @@
 //!    [`Event::ChunkReady`] or [`Event::FileFailed`]. Once a chunk is ready
 //!    the driver `sendfile`s the range [`Core::send_file`] returns and
 //!    reports how many bytes the socket accepted with [`Event::FileSent`].
+//! 5. **Upstreams.** For a proxy route the core asks the driver to connect
+//!    to a backend ([`Action::Connect`]); the driver answers with
+//!    [`Event::UpstreamConnected`] or [`Event::UpstreamFailed`], then reads
+//!    into [`Core::upstream_recv_buffer`] and writes from
+//!    [`Core::upstream_send_buffer`] exactly as for clients, reporting with
+//!    [`Event::UpstreamReceived`], [`Event::UpstreamSent`] and
+//!    [`Event::UpstreamReadClosed`], until [`Action::CloseUpstream`].
 //!
 //! Rules every driver follows:
 //!
@@ -36,7 +43,9 @@
 //!   `send_buffer` is only valid until the next `handle` call (the borrow
 //!   checker enforces this).
 //! - A connection that ends emits, in this order: its [`Action::Log`] (if
-//!   any), [`Action::CloseFile`] (if a file is open), then [`Action::Close`].
+//!   any), [`Action::CloseFile`] (if a file is open),
+//!   [`Action::CloseUpstream`] (if an upstream is open), then
+//!   [`Action::Close`].
 //! - After [`Action::Close`] the core forgets the connection; the driver
 //!   closes the socket and delivers no further events for that id. The core
 //!   emits no further actions for it. Stray I/O events for a forgotten id are
@@ -175,6 +184,65 @@
 //!   send buffer: then 414. The send buffer never holds more than its
 //!   capacity.
 //!
+//! Rules for upstreams:
+//!
+//! - The driver resolves every entry of [`Core::backends`] (`host:port`,
+//!   distinct, in config order) once at startup; a [`BackendId`] is an
+//!   index into that list, and `Connect` names the backend by id, never by
+//!   name. Resolution failures are a startup error, not a runtime event.
+//! - The core allocates [`UpstreamId`]s, sequentially from 1, and never
+//!   reuses one. A connection holds at most one upstream at a time (one
+//!   fresh backend connection per request, FR-PROXY-02).
+//! - `Connect { up, backend }` is a non-blocking `connect` (`SOCK_NONBLOCK
+//!   | SOCK_CLOEXEC`). It is answered by exactly one `UpstreamConnected`
+//!   (the socket became writable and `SO_ERROR` is 0) or `UpstreamFailed`
+//!   (any connect error; reported as `ConnError::Other`, since the core
+//!   treats every failed connect alike), unless `CloseUpstream { up }`
+//!   comes first: then nothing more is delivered for that id.
+//! - A new upstream's interest is `Interest::None`; the core sets it with
+//!   [`Action::SetUpstreamInterest`] once connected. The buffer, readiness
+//!   and reporting rules of client sockets apply unchanged: reads go
+//!   straight into `upstream_recv_buffer(up)` and are reported by
+//!   `UpstreamReceived { up, .. }` as the very next `handle` call; writes
+//!   go straight from `upstream_send_buffer(up)` and are reported by
+//!   `UpstreamSent` as the very next call; readiness is level-triggered
+//!   (read until the buffer is empty or the socket would block, write until
+//!   the buffer is empty or the socket would block); `EAGAIN` is not
+//!   reported and neither count is ever 0; an empty buffer means "do not
+//!   read now" or "nothing to write". End of stream is
+//!   `UpstreamReadClosed`; a socket error after the connect (`ECONNRESET`,
+//!   `EPIPE` as `Reset`, anything else as `Other`) is `UpstreamFailed`.
+//! - `CloseUpstream { up }` means: close the socket, also while its connect
+//!   is pending, and deliver no further event for that id. The core emits it
+//!   exactly once per upstream on every path (response complete, backend
+//!   failure, client reset or close, timeout), never after its
+//!   connection's `Close`. Stray events for unknown or closed upstreams are
+//!   ignored.
+//! - Body bytes are never copied by the core: the bytes [`Core::send_buffer`]
+//!   hands out for a relayed response body are the region of the upstream's
+//!   receive buffer the backend's bytes landed in. That buffer is offered
+//!   for a body read only once every byte of the previous read was sent,
+//!   and then with its full capacity, from offset 0 (fill, drain, refill;
+//!   NFR-RES-04). Its capacity is `max(16 KiB, max_head)`
+//!   ([`UPSTREAM_RECV_MIN`]). The upstream's send buffer holds the
+//!   rewritten request head; once that is written, the same buffer holds
+//!   the rewritten response head for the client, which `send_buffer`
+//!   hands out before the body. Its capacity, `max_head + max_headers +
+//!   128`, holds any rewrite of a head within the limits.
+//! - Descriptor budget: at most one upstream socket is open or connecting
+//!   per counted connection, so at most `max_connections` at once; refused
+//!   connections never connect. The driver's `RLIMIT_NOFILE` check at
+//!   startup adds them to the budget above.
+//! - Failures (FR-PROXY-26): before the response head was queued, a failed
+//!   or refused connect is answered 502 ([`BackendFailure::Refused`]), a
+//!   reset or early end of stream 502 ([`BackendFailure::Reset`]), a
+//!   malformed or oversized response head 502
+//!   ([`BackendFailure::BadResponse`]), a connect or response timeout 504.
+//!   Each is logged as [`Log::BackendFailed`] before the response's
+//!   [`Log::Response`], and the client connection stays as the request
+//!   asked. After the head was queued, any failure cuts the client
+//!   connection at once (logged, then `CloseUpstream`, then `Close`).
+//!
 //! # Deadlines
 //!
 //! Every connection state carries one deadline, set on entry:
@@ -194,6 +262,17 @@
 //!   flight becomes an orphaned open, an open file is closed with it. (A
 //!   readahead in flight counts as waiting on the disk even while the send
 //!   buffer still holds part of the head.)
+//! - connecting to a backend: the backend connect timeout (5 s), then a
+//!   504 ([`BackendFailure::ConnectTimeout`]);
+//! - writing the request to a backend and waiting for its response head:
+//!   the backend response timeout (60 s), restarted once the request head
+//!   is fully written, then a 504 ([`BackendFailure::ResponseTimeout`]);
+//! - relaying a response: the body idle timeout (30 s) while body bytes are
+//!   still due from the backend, the client's `send_idle_timeout` once the
+//!   upstream is closed, both reset on progress; on expiry the connection
+//!   is cut (logged as a send timeout when the client had bytes to take,
+//!   as a backend response timeout otherwise). The three backend timeouts
+//!   are the spec's defaults (FR-PROXY-29) until they become limits;
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
 //!
@@ -227,13 +306,15 @@
 //!   waits for the answer rather than lying about it.)
 //!
 //! The core tolerates driver mistakes without panicking: events for unknown
-//! connections or files are ignored, a duplicate `Accepted` is ignored, a
-//! file event that does not fit the file's state is ignored, and a
-//! `Received`/`Sent`/`FileSent` length larger than the space or segment
-//! offered is clamped.
+//! connections, files or upstreams are ignored, a duplicate `Accepted` is
+//! ignored, a file or upstream event that does not fit its state is
+//! ignored, and a `Received`/`Sent`/`FileSent`/`UpstreamReceived`/
+//! `UpstreamSent` length larger than the space, bytes or segment offered is
+//! clamped.
 
 mod contract;
 mod limits;
+mod proxy;
 mod request;
 mod static_files;
 #[cfg(test)]
@@ -246,17 +327,22 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use crate::config::{Config, RouteAction};
+use crate::config::{BackendAddr, Config, RouteAction};
 #[cfg(doc)]
 use crate::conn::LINGER_TIMEOUT;
-use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY};
+use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY, Source};
 use crate::file::{Chunk, FileSegment, FileTable};
 #[cfg(doc)]
 use crate::file::{FileError, FileId, RootId};
 use crate::http::request::HeadLimits;
+#[cfg(doc)]
+use crate::log::BackendFailure;
 use crate::log::Log;
 use crate::routing::Router;
 use crate::time::Instant;
+#[cfg(doc)]
+use crate::upstream::{BackendId, UPSTREAM_RECV_MIN};
+use crate::upstream::{UpstreamId, UpstreamTable, head_capacity, recv_capacity};
 
 pub use contract::{Action, ConnError, ConnId, Event, Interest};
 
@@ -279,12 +365,20 @@ pub struct Core {
     /// Distinct static roots in config order; a `RootId` indexes it.
     static_roots: Vec<PathBuf>,
     files: FileTable,
+    /// Distinct backends in config order; a `BackendId` indexes it.
+    backends: Vec<BackendAddr>,
+    upstreams: UpstreamTable,
+    /// Capacity of each exchange's upstream receive buffer.
+    upstream_recv_capacity: usize,
+    /// Capacity of each exchange's head buffer.
+    head_capacity: usize,
 }
 
 impl Core {
     /// A core serving `config`, with no connections.
     pub fn new(config: Config) -> Core {
         let mut static_roots: Vec<PathBuf> = Vec::new();
+        let mut backends: Vec<BackendAddr> = Vec::new();
         for route in config.hosts.iter().flat_map(|h| &h.routes) {
             match &route.action {
                 RouteAction::Static { root, .. } => {
@@ -292,9 +386,16 @@ impl Core {
                         static_roots.push(root.clone());
                     }
                 }
-                RouteAction::Proxy(_) => {}
+                RouteAction::Proxy(proxy) => {
+                    if !backends.contains(&proxy.backend) {
+                        backends.push(proxy.backend.clone());
+                    }
+                }
             }
         }
+        let limits = &config.limits;
+        let upstream_recv_capacity = recv_capacity(limits.max_head);
+        let head_capacity = head_capacity(limits.max_head, limits.max_headers);
         Core {
             router: Router::new(&config.hosts),
             head_limits: HeadLimits::from(&config.limits),
@@ -306,7 +407,18 @@ impl Core {
             scratch: vec![0; LINGER_SCRATCH].into_boxed_slice(),
             static_roots,
             files: FileTable::new(),
+            backends,
+            upstreams: UpstreamTable::new(),
+            upstream_recv_capacity,
+            head_capacity,
         }
+    }
+
+    /// Every distinct backend (`host:port`) in config order (identical
+    /// addresses once). A [`BackendId`] is an index into it; the driver
+    /// resolves each once at startup.
+    pub fn backends(&self) -> &[BackendAddr] {
+        &self.backends
     }
 
     /// Every distinct static root in config order (identical paths once).
@@ -351,7 +463,10 @@ impl Core {
                     | ConnState::Idle { .. }
                     | ConnState::Responding { .. }
                     | ConnState::OpeningFile { .. }
-                    | ConnState::SendingFile { .. } => {
+                    | ConnState::SendingFile { .. }
+                    | ConnState::Connecting { .. }
+                    | ConnState::AwaitingResponse { .. }
+                    | ConnState::Relaying { .. } => {
                         actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
                     }
                 }
@@ -363,10 +478,16 @@ impl Core {
             Event::FileFailed { file, error } => self.file_failed(now, file, error, actions),
             Event::ChunkReady { file, stamp } => self.chunk_ready(now, file, stamp, actions),
             Event::FileSent { conn, len } => self.file_sent(now, conn, len, actions),
+            Event::UpstreamConnected { up } => self.upstream_connected(now, up, actions),
+            Event::UpstreamFailed { up, error: _ } => self.upstream_failed(now, up, actions),
+            Event::UpstreamReceived { up, len } => self.upstream_received(now, up, len, actions),
+            Event::UpstreamReadClosed { up } => self.upstream_read_closed(now, up, actions),
+            Event::UpstreamSent { up, len } => self.upstream_sent(now, up, len, actions),
         }
     }
 
-    /// Tell the driver if the interest the connection needs has changed.
+    /// Tell the driver if the interest the connection (or its upstream)
+    /// needs has changed.
     fn sync_interest(&mut self, conn: ConnId, actions: &mut Vec<Action>) {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
@@ -379,6 +500,11 @@ impl Core {
             "send buffer holds {} bytes, beyond its capacity",
             c.send.len()
         );
+        if let Some((up, interest)) = c.state.upstream_interest() {
+            if self.upstreams.set_interest(up, interest) {
+                actions.push(Action::SetUpstreamInterest { up, interest });
+            }
+        }
         let interest = c.wanted_interest();
         if interest != c.interest {
             c.interest = interest;
@@ -400,17 +526,43 @@ impl Core {
                 | ConnState::Idle { .. }
                 | ConnState::Responding { .. }
                 | ConnState::OpeningFile { .. }
-                | ConnState::SendingFile { .. } => c.recv_spare(),
+                | ConnState::SendingFile { .. }
+                | ConnState::Connecting { .. }
+                | ConnState::AwaitingResponse { .. }
+                | ConnState::Relaying { .. } => c.recv_spare(),
             },
             None => &mut [],
         }
     }
 
     /// Bytes waiting to be written to `conn`. Empty when there are none or
-    /// the connection is unknown.
+    /// the connection is unknown. While a proxied response is relayed they
+    /// are its rewritten head, then its body bytes straight out of the
+    /// upstream's receive buffer.
     pub fn send_buffer(&self, conn: ConnId) -> &[u8] {
         match self.conns.get(&conn) {
-            Some(c) => &c.send,
+            Some(c) => match &c.state {
+                ConnState::Relaying {
+                    buffers,
+                    start,
+                    end,
+                    ..
+                } => {
+                    if buffers.head.is_empty() {
+                        buffers.recv.get(*start..*end).unwrap_or_default()
+                    } else {
+                        &buffers.head
+                    }
+                }
+                ConnState::ReadingHead { .. }
+                | ConnState::Idle { .. }
+                | ConnState::Responding { .. }
+                | ConnState::OpeningFile { .. }
+                | ConnState::SendingFile { .. }
+                | ConnState::Connecting { .. }
+                | ConnState::AwaitingResponse { .. }
+                | ConnState::Lingering { .. } => &c.send,
+            },
             None => &[],
         }
     }
@@ -428,7 +580,10 @@ impl Core {
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }
             | ConnState::OpeningFile { .. }
-            | ConnState::SendingFile { .. } => c.recv.len(),
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Relaying { .. } => c.recv.len(),
         })
     }
 
@@ -459,11 +614,135 @@ impl Core {
         }
     }
 
-    /// Capacity of `conn`'s send buffer; 0 for unknown connections.
-    /// For drivers' invariant checks (the simulation), not for I/O.
+    /// The most [`Core::send_buffer`] can currently hand out for `conn`:
+    /// its own send buffer's capacity, or while a proxied response is
+    /// relayed, the capacity of the exchange buffer it writes from (the
+    /// head buffer, then the upstream's receive buffer); 0 for unknown
+    /// connections. It can change with the connection's state. For
+    /// drivers' invariant checks (the simulation), not for I/O.
     #[doc(hidden)]
     pub fn send_capacity(&self, conn: ConnId) -> usize {
-        self.conns.get(&conn).map_or(0, |_| SEND_CAPACITY)
+        self.conns.get(&conn).map_or(0, |c| match &c.state {
+            ConnState::Relaying { buffers, .. } => {
+                if buffers.head.is_empty() {
+                    buffers.recv.len()
+                } else {
+                    self.head_capacity
+                }
+            }
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Lingering { .. } => SEND_CAPACITY,
+        })
+    }
+
+    /// Writable space for upstream `up`'s next read. Empty when the
+    /// upstream is unknown, not reading, or (in a body) still holds body
+    /// bytes not yet sent to the client; a body read is always offered the
+    /// whole buffer.
+    ///
+    /// If the driver writes any bytes into it, it reports them with
+    /// [`Event::UpstreamReceived`] for `up` as the very next `handle` call.
+    pub fn upstream_recv_buffer(&mut self, up: UpstreamId) -> &mut [u8] {
+        let Some(conn) = self.upstreams.conn(up) else {
+            return &mut [];
+        };
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return &mut [];
+        };
+        if c.state.upstream_interest() != Some((up, Interest::Read)) {
+            return &mut [];
+        }
+        match &mut c.state {
+            ConnState::AwaitingResponse {
+                buffers, filled, ..
+            } => buffers.recv.get_mut(*filled..).unwrap_or_default(),
+            ConnState::Relaying { buffers, .. } => &mut buffers.recv,
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::Lingering { .. } => &mut [],
+        }
+    }
+
+    /// Bytes waiting to be written to upstream `up` (the rewritten request
+    /// head). Empty when there are none or the upstream is unknown.
+    pub fn upstream_send_buffer(&self, up: UpstreamId) -> &[u8] {
+        let Some(c) = self
+            .upstreams
+            .conn(up)
+            .and_then(|conn| self.conns.get(&conn))
+        else {
+            return &[];
+        };
+        match &c.state {
+            ConnState::AwaitingResponse {
+                up: own, buffers, ..
+            } if *own == up => &buffers.head,
+            ConnState::AwaitingResponse { .. }
+            | ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::Relaying { .. }
+            | ConnState::Lingering { .. } => &[],
+        }
+    }
+
+    /// Capacity of upstream `up`'s receive buffer; 0 for unknown or closed
+    /// upstreams. For drivers' invariant checks (the simulation), not for
+    /// I/O.
+    #[doc(hidden)]
+    pub fn upstream_recv_capacity(&self, up: UpstreamId) -> usize {
+        self.upstreams
+            .conn(up)
+            .map_or(0, |_| self.upstream_recv_capacity)
+    }
+
+    /// Capacity of upstream `up`'s send buffer; 0 for unknown or closed
+    /// upstreams. For drivers' invariant checks, not for I/O.
+    #[doc(hidden)]
+    pub fn upstream_send_capacity(&self, up: UpstreamId) -> usize {
+        self.upstreams.conn(up).map_or(0, |_| self.head_capacity)
+    }
+
+    /// While upstream `up` is relaying a body: how many body bytes of its
+    /// receive buffer are not yet sent to the client. `None` outside a
+    /// body. For drivers' invariant checks (fill, drain, refill), not for
+    /// I/O.
+    #[doc(hidden)]
+    pub fn upstream_body_pending(&self, up: UpstreamId) -> Option<usize> {
+        let c = self
+            .upstreams
+            .conn(up)
+            .and_then(|conn| self.conns.get(&conn))?;
+        match c.state {
+            ConnState::Relaying {
+                source: Source::Open { up: own, .. },
+                start,
+                end,
+                ..
+            } if own == up => Some(end.saturating_sub(start)),
+            ConnState::Relaying { .. }
+            | ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Lingering { .. } => None,
+        }
     }
 
     /// The earliest instant at which the core wants [`Event::TimerFired`],

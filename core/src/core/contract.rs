@@ -8,17 +8,20 @@ use std::net::IpAddr;
 use super::Core;
 use crate::file::{FileError, FileId, FileMeta, FileStamp, RootId};
 use crate::log::Log;
+use crate::upstream::{BackendId, UpstreamId};
 
 /// Opaque connection id, allocated by the driver and never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnId(pub u64);
 
-/// Transport-level failure reported by the driver.
+/// Transport-level failure reported by the driver, for a client
+/// connection or an upstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnError {
     /// The peer reset the connection (`ECONNRESET`, `EPIPE`).
     Reset,
-    /// Any other socket error.
+    /// Any other socket error, including every reason a connect fails
+    /// (`ECONNREFUSED`, `ETIMEDOUT`, `ENETUNREACH`, ...).
     Other,
 }
 
@@ -57,19 +60,36 @@ pub enum Event {
     /// The socket accepted the first `len` bytes of the segment last
     /// returned by [`Core::send_file`] for `conn`.
     FileSent { conn: ConnId, len: u64 },
+    /// The non-blocking connect of [`Action::Connect`] for `up` completed.
+    UpstreamConnected { up: UpstreamId },
+    /// The connect for `up` failed, or (after `UpstreamConnected`) its
+    /// socket failed. The driver does no further I/O on it except what the
+    /// core's resulting actions ask for (`CloseUpstream`).
+    UpstreamFailed { up: UpstreamId, error: ConnError },
+    /// The driver wrote `len` bytes (never 0) into the slice returned by the
+    /// last [`Core::upstream_recv_buffer`] call for `up`, starting at its
+    /// first byte. Like [`Event::Received`], it is the very next `handle`
+    /// call after that read.
+    UpstreamReceived { up: UpstreamId, len: usize },
+    /// The backend closed its sending side (a read returned end of stream).
+    UpstreamReadClosed { up: UpstreamId },
+    /// The socket accepted the first `len` bytes (never 0) of
+    /// [`Core::upstream_send_buffer`] for `up`.
+    UpstreamSent { up: UpstreamId, len: usize },
 }
 
-/// Which readiness the driver should wait for on a connection. Replaces the
-/// previous interest entirely; a new connection starts at `None` until the
-/// core says otherwise.
+/// Which readiness the driver should wait for on a connection or an
+/// upstream. Replaces the previous interest entirely; a new connection or
+/// upstream starts at `None` until the core says otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interest {
     /// Wait for nothing (e.g. receive buffer full: backpressure).
     None,
-    /// Read into [`Core::recv_buffer`] when readable.
+    /// Read into [`Core::recv_buffer`] (an upstream: into
+    /// [`Core::upstream_recv_buffer`]) when readable.
     Read,
-    /// Write from [`Core::send_buffer`], then from [`Core::send_file`],
-    /// when writable.
+    /// Write from [`Core::send_buffer`], then from [`Core::send_file`]
+    /// (an upstream: from [`Core::upstream_send_buffer`]), when writable.
     Write,
 }
 
@@ -94,6 +114,15 @@ pub enum Action {
     Readahead { file: FileId, offset: u64, len: u64 },
     /// Close `file`; drop any completion still pending for it.
     CloseFile { file: FileId },
+    /// Start a non-blocking connect to backend `backend` (an index into
+    /// [`Core::backends`]) as upstream `up`; answer it with
+    /// [`Event::UpstreamConnected`] or [`Event::UpstreamFailed`].
+    Connect { up: UpstreamId, backend: BackendId },
+    /// Change what the driver waits for on upstream `up`.
+    SetUpstreamInterest { up: UpstreamId, interest: Interest },
+    /// Close upstream `up`'s socket (also while its connect is pending).
+    /// The last action the core emits for it.
+    CloseUpstream { up: UpstreamId },
     /// Emit a log entry.
     Log(Log),
 }

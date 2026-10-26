@@ -17,6 +17,10 @@
 //! virtual time: with no delay inside `run_until_idle`, otherwise inside
 //! [`Sim::advance`], merged with the core's deadlines. `sendfile` copies
 //! straight from the file system into the client's received bytes.
+//!
+//! Backends are scripted per upstream (see `backend`): a connect is
+//! accepted, refused or left hanging by backend address; the test then
+//! reads what the backend received and makes it send bytes, close or reset.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,6 +29,8 @@
     clippy::indexing_slicing
 )]
 
+mod backend;
+mod disk;
 mod fs;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -35,17 +41,20 @@ use std::time::Duration;
 
 use durchlauferhitzer_core::config::load;
 use durchlauferhitzer_core::{
-    Action, ConnError, ConnId, Core, Event, FileError, FileId, FileSegment, FileStamp, Instant,
-    Interest, Log, RootId,
+    Action, ConnError, ConnId, Core, Event, FileId, Instant, Interest, Log, UpstreamId,
 };
 
-use crate::fs::{Fs, Key, SimFile};
+use crate::backend::Backends;
+pub use crate::backend::ConnectBehaviour;
+use crate::disk::{DiskOp, FileTrack};
+use crate::fs::Fs;
 
 /// Default bound on pump steps in one `run_until_idle` before the sim
 /// declares a livelock.
 const STEP_LIMIT: usize = 1_000_000;
 
-/// How many bytes the simulated client accepts per `Sent`.
+/// How many bytes the simulated client (or backend) accepts per `Sent`
+/// (`UpstreamSent`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Window {
     Unlimited,
@@ -54,6 +63,24 @@ pub enum Window {
     /// Accept at most this many more bytes in total, then stall (the budget
     /// shrinks with every `Sent`).
     Budget(usize),
+}
+
+impl Window {
+    /// How many bytes one write may hand over now.
+    fn size(self) -> usize {
+        match self {
+            Window::Unlimited => usize::MAX,
+            Window::Bytes(n) | Window::Budget(n) => n,
+            Window::Stalled => 0,
+        }
+    }
+
+    /// The window took `n` bytes (a budget shrinks).
+    fn take(&mut self, n: usize) {
+        if let Window::Budget(left) = self {
+            *left -= n;
+        }
+    }
 }
 
 /// Connection state as the simulated network sees it.
@@ -90,56 +117,13 @@ struct SimConn {
     window: Window,
     interest: Interest,
     state: SimConnState,
-    /// Send buffer capacity the core reported right after `Accepted`; it
-    /// must not change while the connection is open. (The receive capacity
-    /// may change with the connection's state, e.g. on entering a lingering
-    /// close, so it is checked against the core's current report instead.)
-    /// 0 until recorded.
-    send_capacity: usize,
 }
 
-/// A disk operation in flight.
-#[derive(Debug)]
-enum DiskOp {
-    Open { file: FileId },
-    Read { file: FileId, offset: u64, len: u64 },
-}
-
-impl DiskOp {
-    fn file(&self) -> FileId {
-        match *self {
-            DiskOp::Open { file } | DiskOp::Read { file, .. } => file,
-        }
-    }
-}
-
-/// Where a file id the core handed out is, as the driver sees it.
-#[derive(Debug)]
-enum Phase {
-    /// `OpenFile` not yet answered.
-    Opening,
-    /// `FileOpened` delivered; the driver holds a descriptor. `ready` are
-    /// the ranges whose `ChunkReady` was delivered. `handle` is the file as
-    /// it was opened (`None` for a directory): reads and `sendfile` go
-    /// through it, like through a descriptor, whatever later happens to the
-    /// path.
-    Open {
-        size: u64,
-        chunks: usize,
-        ready: Vec<(u64, u64)>,
-        handle: Option<SimFile>,
-    },
-    /// Closed by `CloseFile`, or its open failed.
-    Closed,
-}
-
-#[derive(Debug)]
-struct FileTrack {
-    /// The connection whose event led to the `OpenFile`.
-    conn: ConnId,
-    root: String,
-    key: Key,
-    phase: Phase,
+/// A read into a core buffer not yet reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Conn(ConnId),
+    Upstream(UpstreamId),
 }
 
 /// The simulated network, clock and client population.
@@ -152,9 +136,10 @@ pub struct Sim {
     logs: Vec<Log>,
     trace: String,
     actions: Vec<Action>,
-    /// Set while bytes written into a connection's `recv_buffer` have not yet
-    /// been reported with `Received`.
-    pending_read: Option<ConnId>,
+    /// Set while bytes written into a connection's `recv_buffer` (or an
+    /// upstream's) have not yet been reported with `Received`
+    /// (`UpstreamReceived`).
+    pending_read: Option<Pending>,
     step_limit: usize,
     fs: Fs,
     disk_delay: Duration,
@@ -163,6 +148,7 @@ pub struct Sim {
     files: BTreeMap<FileId, FileTrack>,
     /// The connection the event being handled belongs to, if any.
     context: Option<ConnId>,
+    backends: Backends,
 }
 
 impl Sim {
@@ -188,68 +174,8 @@ impl Sim {
             disk: VecDeque::new(),
             files: BTreeMap::new(),
             context: None,
+            backends: Backends::default(),
         }
-    }
-
-    /// A regular file `path` (relative, `/`-separated) under `root`, with
-    /// any missing parent directories.
-    pub fn add_file(&mut self, root: &str, path: &str, bytes: &[u8]) {
-        self.fs.add_file(root, path, bytes);
-    }
-
-    /// A directory `path` under `root`.
-    pub fn add_dir(&mut self, root: &str, path: &str) {
-        self.fs.add_dir(root, path);
-    }
-
-    /// A symlink `path` under `root`. It is never followed, so `target`
-    /// only documents the test.
-    pub fn add_symlink(&mut self, root: &str, path: &str, target: &str) {
-        let _ = target;
-        self.fs.add_symlink(root, path);
-    }
-
-    /// A FIFO, socket or device `path` under `root`: it opens as
-    /// `FileKind::Other`.
-    pub fn add_special(&mut self, root: &str, path: &str) {
-        self.fs.add_special(root, path);
-    }
-
-    /// Opening `path` under `root`, or anything beneath it, fails with
-    /// permission denied.
-    pub fn deny(&mut self, root: &str, path: &str) {
-        self.fs.deny(root, path);
-    }
-
-    /// Every later open and readahead completes after `d` of virtual time.
-    pub fn set_disk_delay(&mut self, d: Duration) {
-        self.disk_delay = d;
-    }
-
-    /// `sendfile` of `path` hits end of file at offset `at`.
-    pub fn shrink_on_send(&mut self, root: &str, path: &str, at: u64) {
-        self.fs.shrink_on_send(root, path, at);
-    }
-
-    /// After `after_chunks` chunks of an open `path` were read, later
-    /// chunks report the stamp `new`.
-    pub fn change_during_send(
-        &mut self,
-        root: &str,
-        path: &str,
-        after_chunks: usize,
-        new: FileStamp,
-    ) {
-        self.fs.change_during_send(root, path, after_chunks, new);
-    }
-
-    /// Files the driver currently holds open (`FileOpened` delivered, no
-    /// `CloseFile` yet).
-    pub fn open_files(&self) -> usize {
-        self.files
-            .values()
-            .filter(|t| matches!(t.phase, Phase::Open { .. }))
-            .count()
     }
 
     /// The core's static roots.
@@ -272,12 +198,9 @@ impl Sim {
                 window: Window::Unlimited,
                 interest: Interest::None,
                 state: SimConnState::Open,
-                send_capacity: 0,
             },
         );
         self.deliver(Event::Accepted { conn, peer });
-        let send_capacity = self.core.send_capacity(conn);
-        self.conn_mut(conn).send_capacity = send_capacity;
         conn
     }
 
@@ -334,6 +257,7 @@ impl Sim {
                 ));
             }
         }
+        self.check_upstreams_not_stuck();
         let stuck = self.conns.iter().find(|(id, c)| {
             c.state != SimConnState::Closed
                 && c.interest != Interest::Write
@@ -350,6 +274,7 @@ impl Sim {
     /// One pass over all connections; returns whether anything moved.
     fn pump_once(&mut self) -> bool {
         let mut progress = self.pump_disk();
+        progress |= self.pump_upstreams();
         let ids: Vec<ConnId> = self.conns.keys().copied().collect();
         for conn in ids {
             let c = &self.conns[&conn];
@@ -390,121 +315,18 @@ impl Sim {
         for (dst, src) in spare.iter_mut().zip(c.to_server.drain(..n)) {
             *dst = src;
         }
-        self.pending_read = Some(conn);
+        self.pending_read = Some(Pending::Conn(conn));
         self.deliver(Event::Received { conn, len: n });
         true
     }
 
-    /// Deliver every disk completion that is due.
-    fn pump_disk(&mut self) -> bool {
-        let mut progress = false;
-        while self.disk.front().is_some_and(|(due, _)| *due <= self.now) {
-            let (_, op) = self.disk.pop_front().unwrap();
-            progress = true;
-            self.complete(op);
-        }
-        progress
-    }
-
-    fn complete(&mut self, op: DiskOp) {
-        let file = op.file();
-        let Some(track) = self.files.get_mut(&file) else {
-            self.violation(&format!("disk completion for unknown file={}", file.0));
-        };
-        let event = match op {
-            DiskOp::Open { .. } => match self.fs.open(&track.root, &track.key) {
-                Ok(meta) => {
-                    track.phase = Phase::Open {
-                        size: meta.stamp.size,
-                        chunks: 0,
-                        ready: Vec::new(),
-                        handle: self.fs.file(&track.root, &track.key).cloned(),
-                    };
-                    Event::FileOpened { file, meta }
-                }
-                Err(error) => {
-                    track.phase = Phase::Closed;
-                    Event::FileFailed { file, error }
-                }
-            },
-            DiskOp::Read { offset, len, .. } => {
-                let Phase::Open {
-                    chunks,
-                    ready,
-                    handle,
-                    ..
-                } = &mut track.phase
-                else {
-                    panic!("readahead completion for file={} not open", file.0);
-                };
-                let Some(f) = handle else {
-                    panic!("readahead of file={}, which is not a regular file", file.0);
-                };
-                let stamp = match f.change {
-                    Some((after, new)) if *chunks >= after => new,
-                    Some(_) | None => f.stamp,
-                };
-                *chunks += 1;
-                ready.push((offset, offset + len));
-                Event::ChunkReady { file, stamp }
-            }
-        };
-        self.deliver(event);
-    }
-
     fn window(&self, conn: ConnId) -> usize {
-        match self.conn(conn).window {
-            Window::Unlimited => usize::MAX,
-            Window::Bytes(n) => n,
-            Window::Stalled => 0,
-            Window::Budget(n) => n,
-        }
+        self.conn(conn).window.size()
     }
 
     /// The client's window took `n` bytes.
     fn take_window(&mut self, conn: ConnId, n: usize) {
-        let c = self.conn_mut(conn);
-        if let Window::Budget(left) = c.window {
-            c.window = Window::Budget(left - n);
-        }
-    }
-
-    /// `sendfile` of `segment` to `conn`, as far as the window and the
-    /// file's end allow.
-    fn pump_sendfile(&mut self, conn: ConnId, segment: FileSegment) -> bool {
-        let window = self.window(conn) as u64;
-        if window == 0 {
-            return false;
-        }
-        if self.conn(conn).state == SimConnState::WriteShutdown {
-            self.violation(&format!("conn={} sendfile after ShutdownWrite", conn.0));
-        }
-        let file = segment.file;
-        let Some(FileTrack {
-            phase: Phase::Open {
-                handle: Some(f), ..
-            },
-            ..
-        }) = self.files.get(&file)
-        else {
-            self.violation(&format!("sendfile of file={}, not an open file", file.0));
-        };
-        let eof = (f.bytes.len() as u64).min(f.shrink_at.unwrap_or(u64::MAX));
-        let available = eof.saturating_sub(segment.offset).min(segment.len);
-        if available == 0 {
-            self.deliver(Event::FileFailed {
-                file,
-                error: FileError::Truncated,
-            });
-            return true;
-        }
-        let n = available.min(window);
-        let start = segment.offset as usize;
-        let bytes = f.bytes[start..start + n as usize].to_vec();
-        self.take_window(conn, n as usize);
-        self.conn_mut(conn).received.extend_from_slice(&bytes);
-        self.deliver(Event::FileSent { conn, len: n });
-        true
+        self.conn_mut(conn).window.take(n);
     }
 
     fn pump_write(&mut self, conn: ConnId) -> bool {
@@ -524,9 +346,7 @@ impl Sim {
         if c.state == SimConnState::WriteShutdown {
             self.violation(&format!("conn={} writes after ShutdownWrite", conn.0));
         }
-        if let Window::Budget(left) = c.window {
-            c.window = Window::Budget(left - n);
-        }
+        c.window.take(n);
         c.received.extend_from_slice(&pending[..n]);
         self.deliver(Event::Sent { conn, len: n });
         true
@@ -640,8 +460,9 @@ impl Sim {
     fn deliver(&mut self, event: Event) {
         self.line(&event_text(&event));
         if let Some(pending) = self.pending_read.take() {
-            let matches = match &event {
-                Event::Received { conn, .. } => *conn == pending,
+            let reported = match &event {
+                Event::Received { conn, .. } => Some(Pending::Conn(*conn)),
+                Event::UpstreamReceived { up, .. } => Some(Pending::Upstream(*up)),
                 Event::Accepted { .. }
                 | Event::ReadClosed { .. }
                 | Event::Sent { .. }
@@ -650,13 +471,19 @@ impl Sim {
                 | Event::FileOpened { .. }
                 | Event::FileFailed { .. }
                 | Event::ChunkReady { .. }
-                | Event::FileSent { .. } => false,
+                | Event::FileSent { .. }
+                | Event::UpstreamConnected { .. }
+                | Event::UpstreamFailed { .. }
+                | Event::UpstreamReadClosed { .. }
+                | Event::UpstreamSent { .. } => None,
             };
-            if !matches {
+            if reported != Some(pending) {
+                let what = match pending {
+                    Pending::Conn(conn) => format!("recv_buffer of conn={}", conn.0),
+                    Pending::Upstream(up) => format!("upstream_recv_buffer of up={}", up.0),
+                };
                 self.violation(&format!(
-                    "read into recv_buffer of conn={} not reported by its Received \
-                     before the next event",
-                    pending.0
+                    "read into {what} not reported by its Received before the next event"
                 ));
             }
         }
@@ -670,6 +497,11 @@ impl Sim {
             Event::FileOpened { file, .. }
             | Event::FileFailed { file, .. }
             | Event::ChunkReady { file, .. } => self.files.get(file).map(|t| t.conn),
+            Event::UpstreamConnected { up }
+            | Event::UpstreamFailed { up, .. }
+            | Event::UpstreamReceived { up, .. }
+            | Event::UpstreamReadClosed { up }
+            | Event::UpstreamSent { up, .. } => self.backends.conn_of(*up),
             Event::TimerFired => None,
         };
         let mut actions = std::mem::take(&mut self.actions);
@@ -682,89 +514,7 @@ impl Sim {
         self.context = None;
         self.check_buffers();
         self.check_files();
-    }
-
-    /// Queue a disk completion, ordered by due time (after any already
-    /// queued for the same instant).
-    fn queue_disk(&mut self, due: Instant, op: DiskOp) {
-        let at = self.disk.partition_point(|(d, _)| *d <= due);
-        self.disk.insert(at, (due, op));
-    }
-
-    /// Perform a file action: start the disk operation or close the file.
-    fn apply_file(&mut self, action: Action) {
-        let due = self.now.saturating_add(self.disk_delay);
-        match action {
-            Action::OpenFile { file, root, path } => {
-                let Some(conn) = self.context else {
-                    self.violation(&format!(
-                        "OpenFile file={} outside a connection's event",
-                        file.0
-                    ));
-                };
-                let expected = self.files.keys().next_back().map_or(1, |f| f.0 + 1);
-                if file.0 != expected {
-                    self.violation(&format!(
-                        "OpenFile file={} but the next id is {expected}",
-                        file.0
-                    ));
-                }
-                let RootId(index) = root;
-                let Some(root) = self.core.static_roots().get(index as usize) else {
-                    self.violation(&format!(
-                        "OpenFile file={} for unknown root={index}",
-                        file.0
-                    ));
-                };
-                let Some(root) = root.to_str().map(str::to_owned) else {
-                    self.violation(&format!("root {root:?} is not UTF-8"));
-                };
-                self.files.insert(
-                    file,
-                    FileTrack {
-                        conn,
-                        root,
-                        key: path,
-                        phase: Phase::Opening,
-                    },
-                );
-                self.queue_disk(due, DiskOp::Open { file });
-            }
-            Action::Readahead { file, offset, len } => {
-                let size = match self.files.get(&file).map(|t| &t.phase) {
-                    Some(Phase::Open { size, .. }) => *size,
-                    Some(Phase::Opening | Phase::Closed) | None => {
-                        self.violation(&format!("Readahead for unknown or closed file={}", file.0))
-                    }
-                };
-                if len == 0 || offset.checked_add(len).is_none_or(|end| end > size) {
-                    self.violation(&format!(
-                        "Readahead file={} offset={offset} len={len} beyond the size {size} \
-                         seen at open",
-                        file.0
-                    ));
-                }
-                self.queue_disk(due, DiskOp::Read { file, offset, len });
-            }
-            Action::CloseFile { file } => {
-                match self.files.get_mut(&file).map(|t| &mut t.phase) {
-                    Some(phase @ Phase::Open { .. }) => *phase = Phase::Closed,
-                    Some(Phase::Closed) => {
-                        self.violation(&format!("second CloseFile for file={}", file.0))
-                    }
-                    Some(Phase::Opening) => {
-                        self.violation(&format!("CloseFile before FileOpened for file={}", file.0))
-                    }
-                    None => self.violation(&format!("CloseFile for unknown file={}", file.0)),
-                }
-                // Nothing more is delivered for a closed file.
-                self.disk.retain(|(_, op)| op.file() != file);
-            }
-            Action::SetInterest { .. }
-            | Action::ShutdownWrite { .. }
-            | Action::Close { .. }
-            | Action::Log(_) => unreachable!("not a file action"),
-        }
+        self.check_upstreams();
     }
 
     fn apply(&mut self, action: Action) {
@@ -777,6 +527,9 @@ impl Sim {
             Action::OpenFile { .. } | Action::Readahead { .. } | Action::CloseFile { .. } => {
                 return self.apply_file(action);
             }
+            Action::Connect { .. }
+            | Action::SetUpstreamInterest { .. }
+            | Action::CloseUpstream { .. } => return self.apply_upstream(action),
         };
         let state = match self.conns.get(&conn) {
             Some(c) => c.state,
@@ -794,73 +547,29 @@ impl Sim {
                 c.interest = Interest::None;
             }
             Action::Log(log) => self.logs.push(log),
-            Action::OpenFile { .. } | Action::Readahead { .. } | Action::CloseFile { .. } => {}
+            Action::OpenFile { .. }
+            | Action::Readahead { .. }
+            | Action::CloseFile { .. }
+            | Action::Connect { .. }
+            | Action::SetUpstreamInterest { .. }
+            | Action::CloseUpstream { .. } => {}
         }
     }
 
-    /// No file stays open once its connection is closed, and a segment is
-    /// offered only for an open file of that connection, within a range
-    /// whose `ChunkReady` was delivered, while the send buffer is empty.
-    fn check_files(&self) {
-        for (file, track) in &self.files {
-            if matches!(track.phase, Phase::Open { .. })
-                && self.conn(track.conn).state == SimConnState::Closed
-            {
-                self.violation(&format!(
-                    "file={} left open after conn={} closed",
-                    file.0, track.conn.0
-                ));
-            }
-        }
-        for (conn, c) in &self.conns {
-            if c.state == SimConnState::Closed {
-                continue;
-            }
-            let Some(segment) = self.core.send_file(*conn) else {
-                continue;
-            };
-            if !self.core.send_buffer(*conn).is_empty() {
-                self.violation(&format!(
-                    "conn={} send_file returns a segment while send_buffer is non-empty",
-                    conn.0
-                ));
-            }
-            let file = segment.file;
-            let ready = match self.files.get(&file) {
-                Some(FileTrack {
-                    conn: owner,
-                    phase: Phase::Open { ready, .. },
-                    ..
-                }) if owner == conn => ready,
-                Some(_) | None => self.violation(&format!(
-                    "conn={} send_file names file={}, not an open file of it",
-                    conn.0, file.0
-                )),
-            };
-            let end = segment.offset + segment.len;
-            if segment.len == 0 || !ready.iter().any(|&(a, b)| a <= segment.offset && end <= b) {
-                self.violation(&format!(
-                    "conn={} send_file segment {}..{end} of file={} before its ChunkReady",
-                    conn.0, segment.offset, file.0
-                ));
-            }
-        }
-    }
-
+    /// Buffers stay within the capacities the core reports for the
+    /// connection's current state (both can change with it: the receive
+    /// buffer on entering a lingering close, the send side while a proxied
+    /// response is written from the exchange's buffers).
     fn check_buffers(&mut self) {
-        let open: Vec<(ConnId, usize, Interest)> = self
+        let open: Vec<(ConnId, Interest)> = self
             .conns
             .iter()
-            .filter(|(_, c)| c.state != SimConnState::Closed && c.send_capacity > 0)
-            .map(|(id, c)| (*id, c.send_capacity, c.interest))
+            .filter(|(_, c)| c.state != SimConnState::Closed)
+            .map(|(id, c)| (*id, c.interest))
+            .filter(|(id, _)| self.core.send_capacity(*id) > 0)
             .collect();
-        for (conn, send_cap, interest) in open {
-            if self.core.send_capacity(conn) != send_cap {
-                self.violation(&format!(
-                    "conn={} send buffer capacity changed while open",
-                    conn.0
-                ));
-            }
+        for (conn, interest) in open {
+            let send_cap = self.core.send_capacity(conn);
             let recv_cap = self.core.recv_capacity(conn);
             let recv = self.core.recv_buffer(conn).len();
             if recv > recv_cap {
@@ -891,7 +600,9 @@ fn log_conn(log: &Log) -> ConnId {
         Log::Response { conn, .. }
         | Log::Rejected { conn, .. }
         | Log::Reset { conn, .. }
-        | Log::FileAborted { conn, .. } => *conn,
+        | Log::FileAborted { conn, .. }
+        | Log::ProxiedResponse { conn, .. }
+        | Log::BackendFailed { conn, .. } => *conn,
     }
 }
 
@@ -915,6 +626,13 @@ fn event_text(event: &Event) -> String {
             file.0, stamp.size, stamp.modified_ns
         ),
         Event::FileSent { conn, len } => format!("conn={} FileSent len={len}", conn.0),
+        Event::UpstreamConnected { up } => format!("up={} UpstreamConnected", up.0),
+        Event::UpstreamFailed { up, error } => {
+            format!("up={} UpstreamFailed error={error:?}", up.0)
+        }
+        Event::UpstreamReceived { up, len } => format!("up={} UpstreamReceived len={len}", up.0),
+        Event::UpstreamReadClosed { up } => format!("up={} UpstreamReadClosed", up.0),
+        Event::UpstreamSent { up, len } => format!("up={} UpstreamSent len={len}", up.0),
     }
 }
 
@@ -937,157 +655,15 @@ fn action_text(action: &Action) -> String {
             format!("file={} -> Readahead offset={offset} len={len}", file.0)
         }
         Action::CloseFile { file } => format!("file={} -> CloseFile", file.0),
+        Action::Connect { up, backend } => {
+            format!("up={} -> Connect backend={}", up.0, backend.0)
+        }
+        Action::SetUpstreamInterest { up, interest } => {
+            format!("up={} -> SetUpstreamInterest {interest:?}", up.0)
+        }
+        Action::CloseUpstream { up } => format!("up={} -> CloseUpstream", up.0),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::Ipv4Addr;
-
-    const CONFIG: &str = "listen 127.0.0.1:8080; host a.test { path / { static /srv; } }";
-
-    #[test]
-    #[should_panic(expected = "read into recv_buffer of conn=1 not reported")]
-    fn unreported_read_is_a_violation() {
-        let mut sim = Sim::new(CONFIG);
-        let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        // Simulate a driver bug: bytes written into conn 1's receive buffer,
-        // then a different event handled before the matching `Received`.
-        sim.pending_read = Some(c);
-        sim.deliver(Event::TimerFired);
-    }
-
-    fn track(sim: &mut Sim, conn: ConnId, file: u64, phase: Phase) {
-        sim.files.insert(
-            FileId(file),
-            FileTrack {
-                conn,
-                root: "/srv".to_owned(),
-                key: Vec::new(),
-                phase,
-            },
-        );
-    }
-
-    fn open(size: u64) -> Phase {
-        Phase::Open {
-            size,
-            chunks: 0,
-            ready: Vec::new(),
-            handle: None,
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "second CloseFile for file=1")]
-    fn second_close_file_is_a_violation() {
-        let mut sim = Sim::new(CONFIG);
-        let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        track(&mut sim, c, 1, open(5));
-        sim.apply(Action::CloseFile { file: FileId(1) });
-        sim.apply(Action::CloseFile { file: FileId(1) });
-    }
-
-    #[test]
-    #[should_panic(expected = "Readahead for unknown or closed file=9")]
-    fn action_for_unknown_file_is_a_violation() {
-        let mut sim = Sim::new(CONFIG);
-        sim.apply(Action::Readahead {
-            file: FileId(9),
-            offset: 0,
-            len: 1,
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "beyond the size 5 seen at open")]
-    fn readahead_beyond_size_is_a_violation() {
-        let mut sim = Sim::new(CONFIG);
-        let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        track(&mut sim, c, 1, open(5));
-        sim.apply(Action::Readahead {
-            file: FileId(1),
-            offset: 2,
-            len: 4,
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "file=1 left open after conn=1 closed")]
-    fn file_left_open_is_a_violation() {
-        let mut sim = Sim::new(CONFIG);
-        let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        track(&mut sim, c, 1, open(5));
-        sim.conn_mut(c).state = SimConnState::Closed;
-        sim.check_files();
-    }
-
-    #[test]
-    #[should_panic(expected = "send_file segment 0..5 of file=1 before its ChunkReady")]
-    fn segment_before_chunk_ready_is_a_violation() {
-        let mut sim = Sim::new(CONFIG);
-        sim.add_file("/srv", "f", b"hello");
-        sim.set_disk_delay(Duration::from_secs(1));
-        let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        sim.send(c, b"GET /f HTTP/1.1\r\nHost: a.test\r\n\r\n");
-        sim.run_until_idle();
-        // Open completes, then the head is written; the readahead is still
-        // in flight when the core is handed its ChunkReady behind the sim's
-        // back, so the sim never saw that range become ready.
-        sim.advance(Duration::from_secs(1));
-        sim.run_until_idle();
-        let stamp = FileStamp {
-            size: 5,
-            modified_ns: 1,
-        };
-        let mut actions = Vec::new();
-        let now = sim.now;
-        sim.core.handle(
-            now,
-            Event::ChunkReady {
-                file: FileId(1),
-                stamp,
-            },
-            &mut actions,
-        );
-        sim.check_files();
-    }
-
-    #[test]
-    #[should_panic(expected = "OpenFile file=1 outside a connection's event")]
-    fn open_file_outside_a_connection_event_is_a_violation() {
-        let mut sim = Sim::new(CONFIG);
-        sim.apply(Action::OpenFile {
-            file: FileId(1),
-            root: RootId(0),
-            path: Vec::new(),
-        });
-    }
-
-    #[test]
-    fn disk_queue_is_ordered_by_due_time() {
-        let mut sim = Sim::new(CONFIG);
-        let at = |n| Instant::from_nanos(n);
-        for (due, file) in [(5, 1), (3, 2), (5, 3), (1, 4), (3, 5)] {
-            sim.queue_disk(at(due), DiskOp::Open { file: FileId(file) });
-        }
-        let order: Vec<(u64, u64)> = sim
-            .disk
-            .iter()
-            .map(|(due, op)| (due.as_nanos(), op.file().0))
-            .collect();
-        assert_eq!(order, [(1, 4), (3, 2), (3, 5), (5, 1), (5, 3)]);
-    }
-
-    #[test]
-    #[should_panic(expected = "run_until_idle exceeded 5 steps")]
-    fn runaway_pump_is_a_violation() {
-        let mut sim = Sim::new(CONFIG);
-        sim.step_limit = 5;
-        let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        sim.set_read_chunk(c, 1);
-        sim.send(c, b"0123456789");
-        sim.run_until_idle();
-    }
-}
+mod tests;

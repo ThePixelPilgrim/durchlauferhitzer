@@ -21,9 +21,12 @@ fn every_rendered_head_fits_the_send_buffer() {
         S::RequestTimeout,
         S::ContentTooLarge,
         S::UriTooLong,
+        S::ExpectationFailed,
         S::RequestHeaderFieldsTooLarge,
         S::NotImplemented,
+        S::BadGateway,
         S::ServiceUnavailable,
+        S::GatewayTimeout,
         S::HttpVersionNotSupported,
     ];
     for persistence in [Persistence::KeepAlive, Persistence::Close] {

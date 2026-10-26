@@ -12,10 +12,10 @@ use durchlauferhitzer_core::http::response::{
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::http::target::TargetError;
 use durchlauferhitzer_core::{
-    ConnId, FileError, FileStamp, Interest, LimitKind, Log, RejectReason, RequestSummary,
-    TimeoutKind,
+    BackendFailure, BackendId, ConnId, FileError, FileStamp, Interest, LimitKind, Log,
+    RejectReason, RequestSummary, TimeoutKind,
 };
-use durchlauferhitzer_sim::{Sim, SimConnState};
+use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState};
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test {
@@ -691,7 +691,9 @@ fn log_conn(log: &Log) -> ConnId {
         Log::Response { conn, .. }
         | Log::Rejected { conn, .. }
         | Log::Reset { conn, .. }
-        | Log::FileAborted { conn, .. } => *conn,
+        | Log::FileAborted { conn, .. }
+        | Log::ProxiedResponse { conn, .. }
+        | Log::BackendFailed { conn, .. } => *conn,
     }
 }
 
@@ -1175,34 +1177,38 @@ host example.test {
   path /api/ { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body unlimited; }
 }";
 
-/// Every response to a HEAD is head only, also the proxy route's 501. A
-/// HEAD itself is never answered 405 (GET and HEAD are the allowed
-/// methods), so the 405 keeps its body and a HEAD of the same path gets
-/// the head of that path's answer.
+/// Every response to a HEAD is head only, also the 502 of a proxy route
+/// whose backend refuses. A HEAD itself is never answered 405 (GET and HEAD
+/// are the allowed methods), so the 405 keeps its body and a HEAD of the
+/// same path gets the head of that path's answer.
 #[test]
-fn head_on_405_path_and_proxy_501_is_head_only() {
+fn head_on_405_path_and_proxy_502_is_head_only() {
     let mut sim = Sim::new(WITH_PROXY);
+    sim.set_connect("127.0.0.1:3000", ConnectBehaviour::Refuse);
     sim.add_file("/srv/www", "a.txt", b"hello");
     let (c, received) = exchange(&mut sim, &head_req("/api/x"));
     assert_eq!(
         received,
         fixed(
-            Status::NotImplemented,
-            Persistence::Close,
+            Status::BadGateway,
+            Persistence::KeepAlive,
             BodyMode::HeadOnly
         ),
         "{}",
         sim.trace()
     );
-    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     assert_eq!(
         sim.logs(),
-        &[response_log(
-            c,
-            Status::NotImplemented,
-            Method::Head,
-            "/api/x"
-        )],
+        &[
+            Log::BackendFailed {
+                conn: c,
+                peer: peer(),
+                backend: BackendId(0),
+                kind: BackendFailure::Refused,
+            },
+            response_log(c, Status::BadGateway, Method::Head, "/api/x")
+        ],
         "{}",
         sim.trace()
     );

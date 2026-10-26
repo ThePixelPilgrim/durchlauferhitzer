@@ -3,6 +3,7 @@
 
 use std::net::IpAddr;
 
+use super::proxy::close_upstream;
 use super::{Action, ConnId, Core};
 use crate::conn::{Conn, ConnState, Counted, UnreadBody};
 use crate::file::{FileId, OrphanSlots, Owner};
@@ -13,8 +14,10 @@ use crate::log::{LimitKind, Log, RejectReason};
 use crate::time::Instant;
 
 impl Core {
-    /// Remove `conn` from the map and release its share of the limits and
-    /// its file: an open file is closed, an open in flight is orphaned.
+    /// Remove `conn` from the map and release its share of the limits, its
+    /// file and its upstream: an open file is closed, an open in flight is
+    /// orphaned, an open upstream is closed (`CloseFile` and
+    /// `CloseUpstream` come in that order).
     pub(super) fn forget(&mut self, conn: ConnId, actions: &mut Vec<Action>) -> Option<Conn> {
         let c = self.conns.remove(&conn)?;
         let peer = c.peer.to_canonical();
@@ -33,7 +36,13 @@ impl Core {
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Relaying { .. }
             | ConnState::Lingering { .. } => {}
+        }
+        if let Some(up) = c.state.upstream() {
+            close_upstream(&mut self.upstreams, up, actions);
         }
         match c.counted {
             Counted::Yes => match c.state {
@@ -43,6 +52,9 @@ impl Core {
                 | ConnState::Idle { .. }
                 | ConnState::Responding { .. }
                 | ConnState::SendingFile { .. }
+                | ConnState::Connecting { .. }
+                | ConnState::AwaitingResponse { .. }
+                | ConnState::Relaying { .. }
                 | ConnState::Lingering { .. } => self.release_slots(peer),
             },
             Counted::No => self.refused = self.refused.saturating_sub(1),

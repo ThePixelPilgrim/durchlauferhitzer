@@ -1,0 +1,217 @@
+//! Unit tests of proxy routes at the core level: the upstream side of the
+//! contract (end-to-end behaviour is tested in `sim/tests/proxy.rs`).
+
+use std::net::{IpAddr, Ipv6Addr};
+
+use crate::core::test_support::{PEER, files_core, request, secs};
+use crate::core::{Action, ConnError, ConnId, Core, Event, Interest};
+use crate::log::{BackendFailure, Log};
+use crate::upstream::{BackendId, UPSTREAM_RECV_MIN, UpstreamId};
+
+const GET_P: &[u8] = b"GET /p/f HTTP/1.1\r\nHost: b.test\r\n\r\n";
+
+const UP: UpstreamId = UpstreamId(1);
+const CONN: ConnId = ConnId(1);
+
+fn handle(core: &mut Core, secs_now: u64, event: Event) -> Vec<Action> {
+    let mut actions = Vec::new();
+    core.handle(secs(secs_now), event, &mut actions);
+    actions
+}
+
+/// Upstream 1 connected for conn 1 and its request head written.
+fn awaiting_response() -> Core {
+    let mut core = files_core();
+    request(&mut core, secs(0), 1, GET_P);
+    handle(&mut core, 0, Event::UpstreamConnected { up: UP });
+    let len = core.upstream_send_buffer(UP).len();
+    handle(&mut core, 0, Event::UpstreamSent { up: UP, len });
+    core
+}
+
+#[test]
+fn proxy_request_connects_and_waits() {
+    let mut core = files_core();
+    let actions = request(&mut core, secs(0), 1, GET_P);
+    assert_eq!(
+        actions,
+        [
+            Action::Connect {
+                up: UP,
+                backend: BackendId(0)
+            },
+            Action::SetInterest {
+                conn: CONN,
+                interest: Interest::None
+            }
+        ]
+    );
+    // Nothing is offered before the connect completed.
+    assert!(core.upstream_send_buffer(UP).is_empty());
+    assert!(core.upstream_recv_buffer(UP).is_empty());
+    assert!(core.recv_buffer(CONN).is_empty());
+    assert_eq!(core.upstreams.len(), 1);
+    assert_eq!(core.next_deadline(), Some(secs(5)));
+}
+
+#[test]
+fn connected_upstream_writes_the_head_then_reads() {
+    let mut core = files_core();
+    request(&mut core, secs(0), 1, GET_P);
+    let actions = handle(&mut core, 1, Event::UpstreamConnected { up: UP });
+    assert_eq!(
+        actions,
+        [Action::SetUpstreamInterest {
+            up: UP,
+            interest: Interest::Write
+        }]
+    );
+    let head = core.upstream_send_buffer(UP).to_vec();
+    assert!(head.starts_with(b"GET /p/f HTTP/1.1\r\nhost: b.test\r\n"));
+    assert_eq!(core.upstream_send_capacity(UP), core.head_capacity);
+    // A partial write keeps the rest; a length beyond it is clamped.
+    assert!(handle(&mut core, 2, Event::UpstreamSent { up: UP, len: 4 }).is_empty());
+    assert_eq!(core.upstream_send_buffer(UP), head.get(4..).unwrap());
+    let actions = handle(&mut core, 3, Event::UpstreamSent { up: UP, len: 9999 });
+    assert_eq!(
+        actions,
+        [Action::SetUpstreamInterest {
+            up: UP,
+            interest: Interest::Read
+        }]
+    );
+    assert!(core.upstream_send_buffer(UP).is_empty());
+    assert_eq!(core.upstream_recv_buffer(UP).len(), UPSTREAM_RECV_MIN);
+    assert_eq!(core.upstream_recv_capacity(UP), UPSTREAM_RECV_MIN);
+    // The response timeout runs from the head being fully written.
+    assert_eq!(core.next_deadline(), Some(secs(63)));
+}
+
+#[test]
+fn received_beyond_the_offer_is_clamped() {
+    let mut core = awaiting_response();
+    // A full buffer (of zeros) without a complete head is a bad head.
+    let actions = handle(
+        &mut core,
+        0,
+        Event::UpstreamReceived {
+            up: UP,
+            len: 1 << 30,
+        },
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Log(Log::BackendFailed {
+                kind: BackendFailure::BadResponse(_),
+                ..
+            })
+        )),
+        "{actions:?}"
+    );
+    assert!(actions.contains(&Action::CloseUpstream { up: UP }));
+}
+
+/// Review Focus 5: once the client is gone, the upstream is closed exactly
+/// once and its late events (and events for ids never handed out) change
+/// nothing.
+#[test]
+fn late_and_stray_upstream_events_are_ignored() {
+    let mut core = files_core();
+    request(&mut core, secs(0), 1, GET_P);
+    let error = ConnError::Reset;
+    let actions = handle(&mut core, 0, Event::Failed { conn: CONN, error });
+    assert_eq!(
+        actions,
+        [
+            Action::Log(Log::Reset {
+                conn: CONN,
+                peer: PEER
+            }),
+            Action::CloseUpstream { up: UP },
+            Action::Close { conn: CONN }
+        ]
+    );
+    for up in [UP, UpstreamId(9)] {
+        for event in [
+            Event::UpstreamConnected { up },
+            Event::UpstreamReceived { up, len: 5 },
+            Event::UpstreamSent { up, len: 5 },
+            Event::UpstreamReadClosed { up },
+            Event::UpstreamFailed { up, error },
+        ] {
+            assert!(handle(&mut core, 1, event).is_empty());
+        }
+        assert!(core.upstream_recv_buffer(up).is_empty());
+        assert!(core.upstream_send_buffer(up).is_empty());
+        assert_eq!(core.upstream_recv_capacity(up), 0);
+        assert_eq!(core.upstream_body_pending(up), None);
+    }
+    assert_eq!(core.upstreams.len(), 0);
+    assert_eq!(core.next_deadline(), None);
+}
+
+/// The head buffer's capacity holds the rewrite of any head within the
+/// limits, in the worst case of each direction: as many header lines as
+/// allowed, each as short as possible (`a:b`, which re-renders one byte
+/// longer), an IPv6 peer, and `connection: close` toward the client.
+#[test]
+fn rewritten_heads_at_the_limits_fit_the_head_buffer() {
+    let config = "listen 127.0.0.1:8080; limits { max_request_line 256; max_head 512; max_headers 40; } \
+        host b.test { path /p { proxy 127.0.0.1:3000; \
+        max_request_body 1MiB; max_response_body 1MiB; } }";
+    let mut core = Core::new(crate::config::load(config).unwrap());
+    let mut req = b"GET /p HTTP/1.1\r\nHost: b.test\r\nConnection: close\r\n".to_vec();
+    for _ in 0..38 {
+        req.extend_from_slice(b"a:b\r\n");
+    }
+    req.extend_from_slice(b"\r\n");
+    assert!(req.len() <= 512);
+    let peer = IpAddr::V6(Ipv6Addr::new(
+        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xfffe,
+    ));
+    let mut actions = Vec::new();
+    core.handle(secs(0), Event::Accepted { conn: CONN, peer }, &mut actions);
+    core.recv_buffer(CONN)
+        .get_mut(..req.len())
+        .unwrap()
+        .copy_from_slice(&req);
+    let len = req.len();
+    actions.clear();
+    core.handle(secs(0), Event::Received { conn: CONN, len }, &mut actions);
+    assert!(
+        actions.contains(&Action::Connect {
+            up: UP,
+            backend: BackendId(0)
+        }),
+        "{actions:?}"
+    );
+    handle(&mut core, 0, Event::UpstreamConnected { up: UP });
+    let sent = core.upstream_send_buffer(UP).len();
+    assert!(sent > req.len() + 38, "{sent}");
+    handle(&mut core, 0, Event::UpstreamSent { up: UP, len: sent });
+
+    let mut response = b"HTTP/1.1 511 \r\nContent-Length:0\r\n".to_vec();
+    for _ in 0..39 {
+        response.extend_from_slice(b"a:b\r\n");
+    }
+    response.extend_from_slice(b"\r\n");
+    assert!(response.len() <= 512);
+    core.upstream_recv_buffer(UP)
+        .get_mut(..response.len())
+        .unwrap()
+        .copy_from_slice(&response);
+    let len = response.len();
+    let actions = handle(&mut core, 0, Event::UpstreamReceived { up: UP, len });
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::Log(Log::ProxiedResponse { status: 511, .. }))),
+        "{actions:?}"
+    );
+    let head = core.send_buffer(CONN).len();
+    assert!(
+        head > response.len() + 40 && head <= core.head_capacity,
+        "{head}"
+    );
+}

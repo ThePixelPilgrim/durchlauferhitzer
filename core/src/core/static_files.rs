@@ -2,11 +2,11 @@
 //! a directory's index), sending the file chunk by chunk, and aborting a
 //! transfer that fails.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::request::finish;
 use super::{Action, ConnId, Core};
-use crate::config::{OnFileChange, Route, RouteAction};
+use crate::config::{OnFileChange, Route};
 use crate::conn::{Conn, ConnState, OpenStep, SEND_CAPACITY, StaticRequest, UnreadBody};
 use crate::file::{
     Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileStamp, FileTable, Owner, RootId,
@@ -244,6 +244,9 @@ impl Core {
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Relaying { .. }
             | ConnState::Lingering { .. } => {}
         }
     }
@@ -423,12 +426,9 @@ struct Opening {
 
 /// If `c` is opening `file`, take that state out so its request can move
 /// on; the caller then sets `c`'s next state. Any other state stays.
+#[must_use]
 fn take_opening(c: &mut Conn, file: FileId) -> Option<Opening> {
-    // Holds the place only until the caller sets the next state.
-    let placeholder = ConnState::Lingering {
-        deadline: c.state.deadline(),
-    };
-    match std::mem::replace(&mut c.state, placeholder) {
+    match c.take_state() {
         ConnState::OpeningFile {
             file: opening,
             slash,
@@ -451,6 +451,9 @@ fn take_opening(c: &mut Conn, file: FileId) -> Option<Opening> {
         | ConnState::Idle { .. }
         | ConnState::Responding { .. }
         | ConnState::SendingFile { .. }
+        | ConnState::Connecting { .. }
+        | ConnState::AwaitingResponse { .. }
+        | ConnState::Relaying { .. }
         | ConnState::Lingering { .. }) => {
             c.state = other;
             None
@@ -532,16 +535,15 @@ pub(super) struct StaticOpen {
     on_change: OnFileChange,
 }
 
-/// The static route rules that need no file: method, body, path.
-pub(super) fn plan(route: &Route, head: &RequestHead, static_roots: &[PathBuf]) -> Plan {
-    let (root, on_change) = match &route.action {
-        RouteAction::Static {
-            root,
-            on_file_change,
-        } => (root, *on_file_change),
-        // Not implemented yet in this stage: answered 501 and closed.
-        RouteAction::Proxy(_) => return Plan::Respond(Status::NotImplemented, Persistence::Close),
-    };
+/// The rules of static `route` (serving `root` under `on_change`) that
+/// need no file: method, body, path.
+pub(super) fn plan(
+    route: &Route,
+    root: &Path,
+    on_change: OnFileChange,
+    head: &RequestHead,
+    static_roots: &[PathBuf],
+) -> Plan {
     match &head.method {
         Method::Get | Method::Head => {}
         Method::Other(_) => return Plan::Respond(Status::MethodNotAllowed, head.persistence),

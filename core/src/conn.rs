@@ -9,9 +9,11 @@ use crate::core::Interest;
 use crate::file::{Chunk, FileId, FileStamp, RootId};
 use crate::http::request::{HeadParser, Persistence};
 use crate::http::response::BodyMode;
+use crate::http::response_head::{RequestKind, ResponseParser};
 use crate::http::static_path::TrailingSlash;
 use crate::log::RequestSummary;
 use crate::time::Instant;
+use crate::upstream::{BackendId, ExchangeBuffers, UpstreamId};
 
 /// Capacity of each connection's send buffer.
 pub(crate) const SEND_CAPACITY: usize = 1024;
@@ -110,9 +112,75 @@ pub(crate) enum ConnState {
         buffered: usize,
         deadline: Instant,
     },
+    /// A body-less request on a proxy route: the `Connect` for `up` is in
+    /// flight and the rewritten request head waits in `buffers.head`.
+    /// `deadline` is the backend connect timeout.
+    Connecting {
+        up: UpstreamId,
+        request: ProxyRequest,
+        buffers: ExchangeBuffers,
+        deadline: Instant,
+    },
+    /// Connected to `up`: the request head is written from `buffers.head`
+    /// while it holds bytes, then the response head is read into
+    /// `buffers.recv`, whose first `filled` bytes `parser` has judged so far.
+    /// `deadline` is the backend response timeout, restarted once the
+    /// request head is fully written.
+    AwaitingResponse {
+        up: UpstreamId,
+        request: ProxyRequest,
+        buffers: ExchangeBuffers,
+        filled: usize,
+        parser: ResponseParser,
+        deadline: Instant,
+    },
+    /// The backend's response head was queued: what is left of its rewrite
+    /// is in `buffers.head`, then the body bytes `buffers.recv[start..end]`
+    /// go out, straight from where the backend's bytes landed. `source` says
+    /// whether more body bytes are due from the upstream. `persistence` and
+    /// `buffered` as in `Responding`. `deadline` is the body idle timeout
+    /// while the upstream is open, the send idle timeout once it is closed;
+    /// reset on progress.
+    Relaying {
+        source: Source,
+        buffers: ExchangeBuffers,
+        start: usize,
+        end: usize,
+        persistence: Persistence,
+        buffered: usize,
+        deadline: Instant,
+    },
     /// The sending side is shut down; input is read and discarded until the
     /// peer closes or `deadline` passes.
     Lingering { deadline: Instant },
+}
+
+/// Where the body of a relayed response comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// `remaining` (more than 0) body bytes are still due from upstream
+    /// `up` of `backend`.
+    Open {
+        up: UpstreamId,
+        backend: BackendId,
+        remaining: u64,
+    },
+    /// Every body byte arrived (or there is no body); the upstream is
+    /// closed.
+    Done,
+}
+
+/// A request being forwarded to a backend, kept until its response head
+/// (or the failure that replaces it) is logged.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ProxyRequest {
+    pub(crate) summary: RequestSummary,
+    pub(crate) backend: BackendId,
+    /// A response to HEAD never has a body.
+    pub(crate) kind: RequestKind,
+    pub(crate) persistence: Persistence,
+    /// Pipelined input waiting at the front of `Conn::recv`.
+    pub(crate) buffered: usize,
 }
 
 impl ConnState {
@@ -124,12 +192,15 @@ impl ConnState {
             | ConnState::Responding { deadline, .. }
             | ConnState::OpeningFile { deadline, .. }
             | ConnState::SendingFile { deadline, .. }
+            | ConnState::Connecting { deadline, .. }
+            | ConnState::AwaitingResponse { deadline, .. }
+            | ConnState::Relaying { deadline, .. }
             | ConnState::Lingering { deadline } => deadline,
         }
     }
 
     /// Reset the deadline of a state that responds or waits on the disk;
-    /// other states keep theirs.
+    /// other states keep theirs (proxy states set theirs themselves).
     pub(crate) fn set_deadline(&mut self, new: Instant) {
         match self {
             ConnState::Responding { deadline, .. }
@@ -137,6 +208,9 @@ impl ConnState {
             | ConnState::SendingFile { deadline, .. } => *deadline = new,
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Relaying { .. }
             | ConnState::Lingering { .. } => {}
         }
     }
@@ -148,6 +222,79 @@ impl ConnState {
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Relaying { .. }
+            | ConnState::Lingering { .. } => None,
+        }
+    }
+
+    /// The open upstream this state holds an id for, if any.
+    pub(crate) fn upstream(&self) -> Option<UpstreamId> {
+        match *self {
+            ConnState::Connecting { up, .. }
+            | ConnState::AwaitingResponse { up, .. }
+            | ConnState::Relaying {
+                source: Source::Open { up, .. },
+                ..
+            } => Some(up),
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Relaying {
+                source: Source::Done,
+                ..
+            }
+            | ConnState::Lingering { .. } => None,
+        }
+    }
+
+    /// The open upstream of this state and the interest it calls for:
+    /// nothing while connecting; writing the request head, then reading
+    /// the response head; reading body bytes only once every earlier one
+    /// was sent (fill, drain, refill).
+    pub(crate) fn upstream_interest(&self) -> Option<(UpstreamId, Interest)> {
+        match self {
+            ConnState::Connecting { up, .. } => Some((*up, Interest::None)),
+            ConnState::AwaitingResponse {
+                up,
+                buffers,
+                filled,
+                ..
+            } => {
+                let interest = if !buffers.head.is_empty() {
+                    Interest::Write
+                } else if *filled < buffers.recv.len() {
+                    Interest::Read
+                } else {
+                    Interest::None
+                };
+                Some((*up, interest))
+            }
+            ConnState::Relaying {
+                source: Source::Open { up, .. },
+                start,
+                end,
+                ..
+            } => {
+                let interest = if start >= end {
+                    Interest::Read
+                } else {
+                    Interest::None
+                };
+                Some((*up, interest))
+            }
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Relaying {
+                source: Source::Done,
+                ..
+            }
             | ConnState::Lingering { .. } => None,
         }
     }
@@ -212,8 +359,21 @@ impl Conn {
             ConnState::Responding { .. }
             | ConnState::OpeningFile { .. }
             | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Relaying { .. }
             | ConnState::Lingering { .. } => &mut [],
         }
+    }
+
+    /// Take the state out so its owned data can move on; the caller sets
+    /// the next state. Until then a placeholder with the same deadline
+    /// holds the place.
+    pub(crate) fn take_state(&mut self) -> ConnState {
+        let placeholder = ConnState::Lingering {
+            deadline: self.state.deadline(),
+        };
+        std::mem::replace(&mut self.state, placeholder)
     }
 
     /// The interest the connection's state calls for.
@@ -221,9 +381,9 @@ impl Conn {
         if !self.send.is_empty() {
             return Interest::Write;
         }
-        match self.state {
+        match &self.state {
             ConnState::ReadingHead { buffered, .. } => {
-                if buffered >= self.recv.len() {
+                if *buffered >= self.recv.len() {
                     Interest::None
                 } else {
                     Interest::Read
@@ -239,6 +399,20 @@ impl Conn {
                 Chunk::Ready { .. } => Interest::Write,
                 Chunk::Reading { .. } | Chunk::Done => Interest::None,
             },
+            // Waiting on the backend.
+            ConnState::Connecting { .. } | ConnState::AwaitingResponse { .. } => Interest::None,
+            ConnState::Relaying {
+                buffers,
+                start,
+                end,
+                ..
+            } => {
+                if !buffers.head.is_empty() || start < end {
+                    Interest::Write
+                } else {
+                    Interest::None
+                }
+            }
         }
     }
 }

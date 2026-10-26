@@ -8,8 +8,10 @@ pub mod http;
 mod log;
 pub mod routing;
 mod time;
+mod upstream;
 
 pub use crate::core::{Action, ConnError, ConnId, Core, Event, Interest};
 pub use crate::file::{FileError, FileId, FileKind, FileMeta, FileSegment, FileStamp, RootId};
-pub use crate::log::{LimitKind, Log, RejectReason, RequestSummary, TimeoutKind};
+pub use crate::log::{BackendFailure, LimitKind, Log, RejectReason, RequestSummary, TimeoutKind};
 pub use crate::time::Instant;
+pub use crate::upstream::{BackendId, UpstreamId};
