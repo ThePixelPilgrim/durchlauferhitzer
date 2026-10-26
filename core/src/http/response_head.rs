@@ -2,9 +2,10 @@
 //! sends.
 //!
 //! It follows the request parser's rule, "when in doubt, reject": the head
-//! must be CRLF-framed, header lines are checked as for requests, and the
-//! body framing is decided from the status, the request method and the
-//! `Content-Length` / `Transfer-Encoding` headers.
+//! must be CRLF-framed, header lines are checked as for requests (interim
+//! heads included; the first bad line wins), and the body framing is
+//! decided from the status, the request method and the `Content-Length` /
+//! `Transfer-Encoding` headers.
 //!
 //! [`ResponseParser`] looks for the blank line that ends the head
 //! incrementally, so no byte is searched twice however the head is split.
@@ -193,27 +194,26 @@ fn parse_complete(head: &[u8], request: BodyMode) -> Result<ResponseStatus, Resp
             .ok_or(ResponseError::BareLf)
     });
     let (version, status, reason) = parse_status_line(lines.next().unwrap_or(Ok(b""))?)?;
-    let mut raw_headers = Vec::new();
+    // Header syntax is checked line by line, so the first bad line wins (as
+    // in the request parser), for interim heads as for final ones.
+    let mut headers = Vec::new();
     for line in lines {
         let line = line?;
         if line.is_empty() {
             break;
         }
-        raw_headers.push(line);
+        work::judged(line.len());
+        headers.push(parse_header(line)?);
     }
     match status {
         101 => return Err(ResponseError::SwitchingProtocols),
+        // Interim heads get the syntax checks above, but no framing rules.
         100..=199 => {
             return Ok(ResponseStatus::Interim {
                 consumed: head.len(),
             });
         }
         _ => {}
-    }
-    let mut headers = Vec::new();
-    for line in raw_headers {
-        work::judged(line.len());
-        headers.push(parse_header(line)?);
     }
     if connection_names_framing(&headers) {
         return Err(ResponseError::BadConnection);
@@ -288,7 +288,6 @@ fn parse_status_line(line: &[u8]) -> Result<(Version, u16, &[u8]), ResponseError
 mod tests {
     use super::*;
     use crate::config::model::Limits;
-    use crate::http::request::work;
     use proptest::prelude::*;
 
     fn defaults() -> HeadLimits {
@@ -473,6 +472,87 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Interim heads are parsed as strictly as final ones (header syntax),
+    /// but no framing rule applies to them.
+    #[test]
+    fn interim_heads_get_header_syntax_checks() {
+        use ResponseError::*;
+        let rows: Vec<(&[u8], ResponseError)> = vec![
+            (b"HTTP/1.1 100 Continue\r\nA : b\r\n\r\n", BadHeaderName),
+            (b"HTTP/1.1 103 Early\r\nNoColon\r\n\r\n", BadHeaderName),
+            (b"HTTP/1.1 100 Continue\r\nA: b\r\n c\r\n\r\n", ObsFold),
+            (b"HTTP/1.1 100 Continue\r\nA: a\0b\r\n\r\n", BadHeaderValue),
+            (b"HTTP/1.1 100 Continue\r\nA: b\n\r\n", BareLf),
+            (b"HTTP/1.1 101 Switch\r\nA : b\r\n\r\n", BadHeaderName),
+        ];
+        for (input, expected) in rows {
+            assert_eq!(
+                parse(input),
+                Err(expected),
+                "input {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+        // Framing headers mean nothing on an interim head.
+        let odd = b"HTTP/1.1 103 Early\r\nContent-Length: x\r\nContent-Length: 1\r\n\
+            Transfer-Encoding: gzip\r\nConnection: host\r\n\r\n";
+        assert_eq!(
+            parse(odd),
+            Ok(ResponseStatus::Interim {
+                consumed: odd.len()
+            })
+        );
+    }
+
+    /// The first bad line wins, as in the request parser: a line-ending
+    /// fault later in the head does not mask an earlier header fault.
+    #[test]
+    fn first_bad_line_wins() {
+        assert_eq!(
+            parse(b"HTTP/1.1 200 OK\r\nA : b\r\nC: d\n\r\n"),
+            Err(ResponseError::BadHeaderName)
+        );
+        assert_eq!(
+            parse(b"HTTP/1.1 200 OK\r\nA: b\nC : d\r\n\r\n"),
+            Err(ResponseError::BareLf)
+        );
+        assert_eq!(
+            parse(b"HTTP/1.1 200 OK\nA : b\r\n\r\n"),
+            Err(ResponseError::BareLf)
+        );
+    }
+
+    /// The interim reset works however the bytes arrive: fed one byte at
+    /// a time to one parser, dropping consumed bytes.
+    #[test]
+    fn interim_then_final_head_byte_by_byte() {
+        let cont = b"HTTP/1.1 100 Continue\r\nX: y\r\n\r\n";
+        let fin = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n";
+        let input = [cont.as_slice(), fin].concat();
+        let limits = defaults();
+        let mut parser = ResponseParser::new();
+        let mut pending: Vec<u8> = Vec::new();
+        let mut verdicts = Vec::new();
+        for &byte in &input {
+            pending.push(byte);
+            match parser.advance(&pending, &limits, BodyMode::Full) {
+                Ok(ResponseStatus::Incomplete) => {}
+                Ok(ResponseStatus::Interim { consumed }) => {
+                    verdicts.push(("interim", consumed));
+                    pending.drain(..consumed);
+                }
+                Ok(ResponseStatus::Complete { consumed, head }) => {
+                    assert_eq!(head.framing, ResponseFraming::Length(2));
+                    verdicts.push(("complete", consumed));
+                    pending.drain(..consumed);
+                }
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+        assert_eq!(verdicts, [("interim", cont.len()), ("complete", fin.len())]);
+        assert!(pending.is_empty());
     }
 
     #[test]

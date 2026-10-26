@@ -1081,6 +1081,21 @@ mod tests {
         assert_eq!(HttpError::BadConnection.status().code(), 400);
     }
 
+    /// `Connection` is judged before the Host rule: with no Host at all on
+    /// HTTP/1.1, `Connection: host` is reported as `BadConnection`, not
+    /// `MissingHost`.
+    #[test]
+    fn bad_connection_wins_over_missing_host() {
+        assert_eq!(
+            parse(b"GET / HTTP/1.1\r\nConnection: host\r\n\r\n").map(|_| ()),
+            Err(HttpError::BadConnection)
+        );
+        assert_eq!(
+            parse(b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n").map(|_| ()),
+            Err(HttpError::MissingHost)
+        );
+    }
+
     #[test]
     fn expect_rules() {
         let e = |version: &str, lines: &str| {
