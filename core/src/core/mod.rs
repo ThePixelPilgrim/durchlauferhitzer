@@ -199,8 +199,20 @@
 //!   (any connect error; reported as `ConnError::Other`, since the core
 //!   treats every failed connect alike), unless `CloseUpstream { up }`
 //!   comes first: then nothing more is delivered for that id.
-//! - A new upstream's interest is `Interest::None`; the core sets it with
-//!   [`Action::SetUpstreamInterest`] once connected. The buffer, readiness
+//! - While a `Connect` is pending the upstream's interest is
+//!   `Interest::None`, yet the driver itself waits for the socket to become
+//!   writable (`EPOLLOUT`) to learn that the connect completed, then reads
+//!   `SO_ERROR`; that wait is the driver's, not an interest. The core sets
+//!   the interest with [`Action::SetUpstreamInterest`] once connected.
+//! - Socket errors and hang-ups (`EPOLLERR`, `EPOLLHUP`) are reported
+//!   whatever the interest: [`Event::Failed`] for a client,
+//!   [`Event::UpstreamFailed`] for an upstream. End of stream, by contrast,
+//!   is only learnt from a read, so [`Event::ReadClosed`] and
+//!   [`Event::UpstreamReadClosed`] come only while the interest is `Read`.
+//! - While a request is proxied the client connection is not read (its
+//!   interest is `None` or `Write`), so a client that half-closes after its
+//!   request is noticed only after the exchange, when the connection reads
+//!   again (consistent with FR-PROXY-26's half-close rule). The buffer, readiness
 //!   and reporting rules of client sockets apply unchanged: reads go
 //!   straight into `upstream_recv_buffer(up)` and are reported by
 //!   `UpstreamReceived { up, .. }` as the very next `handle` call; writes
