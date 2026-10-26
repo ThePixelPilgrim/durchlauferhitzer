@@ -212,8 +212,9 @@
 //! - While a request is proxied the client connection is not read (its
 //!   interest is `None` or `Write`), so a client that half-closes after its
 //!   request is noticed only after the exchange, when the connection reads
-//!   again (consistent with FR-PROXY-26's half-close rule). The buffer, readiness
-//!   and reporting rules of client sockets apply unchanged: reads go
+//!   again (consistent with FR-PROXY-26's half-close rule).
+//! - The buffer, readiness and reporting rules of client sockets apply
+//!   unchanged to upstreams: reads go
 //!   straight into `upstream_recv_buffer(up)` and are reported by
 //!   `UpstreamReceived { up, .. }` as the very next `handle` call; writes
 //!   go straight from `upstream_send_buffer(up)` and are reported by
