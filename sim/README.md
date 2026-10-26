@@ -44,7 +44,9 @@ tests/
     transfer.rs         chunks, slow disks and clients, changing files, resets
     rules.rs            methods, bodies, 404s, redirects, index files, HEAD
     edge.rs             index opens in flight, long redirects, encodings
-  proxy.rs            proxy routes end to end, with scripted backends
+  proxy/              proxy routes end to end, with scripted backends
+    main.rs             heads, failures, timeouts; shared helpers
+    expect.rs           `Expect` on every route
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers
     split.rs            deterministic split, byte-by-byte and pipelined runs

@@ -69,6 +69,16 @@ pub enum Persistence {
     Close,
 }
 
+/// What the client expects before it sends the body (FR-PROXY-25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    /// No `Expect` header, or an HTTP/1.0 request (which has none).
+    None,
+    /// Exactly one `Expect: 100-continue` (any case) on an HTTP/1.1
+    /// request.
+    Continue,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestHead {
     pub method: Method,
@@ -79,6 +89,7 @@ pub struct RequestHead {
     pub headers: Vec<Header>,
     pub body: BodyFraming,
     pub persistence: Persistence,
+    pub expect: Expect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +117,9 @@ pub enum HttpError {
     /// A `Connection` header names `content-length`, `transfer-encoding`
     /// or `host` (FR-HTTP-09a).
     ConnectionNamesFraming,
+    /// An HTTP/1.1 `Expect` other than exactly one `100-continue`: another
+    /// value, a list, or more than one `Expect` line (FR-PROXY-25) → 417.
+    BadExpect,
 }
 
 impl From<LineError> for HttpError {
@@ -305,7 +319,7 @@ impl HeadParser {
 /// Those run after every per-line check, in this order, so the reported
 /// error is deterministic: `Connection` naming a framing header or `Host`
 /// (FR-HTTP-09a), then Host (FR-HTTP-07), then framing (FR-HTTP-08, in its
-/// own order). The `Connection` check comes first because it says the
+/// own order), then `Expect` (FR-PROXY-25). The `Connection` check comes first because it says the
 /// header set itself is a smuggling attempt, which makes the Host and
 /// framing verdicts on those very headers beside the point.
 fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
@@ -316,6 +330,7 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
     check_connection(&headers)?;
     let host = check_host(&headers, version)?;
     let body = check_framing(&headers, version)?;
+    let expect = check_expect(&headers, version)?;
     let persistence = persistence(&headers, version);
     Ok(RequestHead {
         method,
@@ -325,6 +340,7 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
         headers,
         body,
         persistence,
+        expect,
     })
 }
 
@@ -428,6 +444,25 @@ fn check_framing(headers: &[Header], version: Version) -> Result<BodyFraming, Ht
         DeclaredFraming::Length(n) => BodyFraming::Length(n),
         DeclaredFraming::Chunked => BodyFraming::Chunked,
     })
+}
+
+/// FR-PROXY-25/25a: HTTP/1.0 ignores `Expect`; on HTTP/1.1 exactly one
+/// `Expect` line whose whole value is `100-continue` (case-insensitive) is
+/// `Continue`, anything else is an error ("when in doubt, reject").
+fn check_expect(headers: &[Header], version: Version) -> Result<Expect, HttpError> {
+    match version {
+        Version::Http10 => Ok(Expect::None),
+        Version::Http11 => {
+            let mut expects = values(headers, "expect");
+            match (expects.next(), expects.next()) {
+                (None, _) => Ok(Expect::None),
+                (Some(one), None) if one.eq_ignore_ascii_case(b"100-continue") => {
+                    Ok(Expect::Continue)
+                }
+                (Some(_), _) => Err(HttpError::BadExpect),
+            }
+        }
+    }
 }
 
 fn persistence(headers: &[Header], version: Version) -> Persistence {

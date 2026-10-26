@@ -1,5 +1,8 @@
 //! Proxy routes end to end: the upstream interface between core and
-//! driver, with scripted backends behind it.
+//! driver, with scripted backends behind it. Heads, failures and timeouts
+//! here; `Expect` in `expect.rs`.
+
+mod expect;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::http::status::Status;
 use proptest::prelude::*;
 
 fn defaults() -> HeadLimits {
@@ -54,6 +55,7 @@ fn parses_simple_get() {
             ],
             body: BodyFraming::None,
             persistence: Persistence::KeepAlive,
+            expect: Expect::None,
         }
     );
 }
@@ -509,6 +511,60 @@ fn body_framing() {
     assert_eq!(
         err_of(b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: \r\n\r\n"),
         HttpError::UnsupportedTransferEncoding
+    );
+}
+
+/// FR-PROXY-25/25a: exactly one `Expect: 100-continue` (any case) on
+/// HTTP/1.1 is `Continue`; any other value, a second `Expect` line or a
+/// list is an error (417 on every route); HTTP/1.0 ignores `Expect`.
+#[test]
+fn expect_header() {
+    let e = |version: &str, h: &str| {
+        parse(format!("POST / {version}\r\nHost: a\r\n{h}\r\n").as_bytes()).map(|s| match s {
+            ParseStatus::Complete { head, .. } => head.expect,
+            ParseStatus::Incomplete => panic!("incomplete"),
+        })
+    };
+    assert_eq!(e("HTTP/1.1", ""), Ok(Expect::None));
+    assert_eq!(
+        e("HTTP/1.1", "Expect: 100-continue\r\n"),
+        Ok(Expect::Continue)
+    );
+    assert_eq!(
+        e("HTTP/1.1", "expect:  100-Continue \r\n"),
+        Ok(Expect::Continue)
+    );
+    for bad in [
+        "Expect: foo\r\n",
+        "Expect:\r\n",
+        "Expect: 100-continue, foo\r\n",
+        "Expect: 100-continue,\r\n",
+        "Expect: \"100-continue\"\r\n",
+        "Expect: 100-continue\r\nExpect: 100-continue\r\n",
+        "Expect: 100-continue\r\nExpect: foo\r\n",
+    ] {
+        assert_eq!(e("HTTP/1.1", bad), Err(HttpError::BadExpect), "{bad:?}");
+    }
+    assert_eq!(HttpError::BadExpect.status(), Status::ExpectationFailed);
+    // HTTP/1.0 has no `Expect`: ignored, whatever its value.
+    assert_eq!(e("HTTP/1.0", "Expect: 100-continue\r\n"), Ok(Expect::None));
+    assert_eq!(
+        e("HTTP/1.0", "Expect: foo\r\nExpect: bar\r\n"),
+        Ok(Expect::None)
+    );
+}
+
+/// The `Expect` check runs after every other head check, so a framing
+/// error wins over a bad `Expect`.
+#[test]
+fn expect_is_checked_last() {
+    assert_eq!(
+        err_of(b"POST / HTTP/1.1\r\nHost: a\r\nExpect: foo\r\nContent-Length: x\r\n\r\n"),
+        HttpError::BadContentLength
+    );
+    assert_eq!(
+        err_of(b"POST / HTTP/1.1\r\nExpect: foo\r\n\r\n"),
+        HttpError::MissingHost
     );
 }
 

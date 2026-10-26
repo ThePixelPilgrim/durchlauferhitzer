@@ -89,6 +89,7 @@ impl HttpError {
             | HttpError::UnsupportedTransferEncoding
             | HttpError::TransferEncodingInHttp10
             | HttpError::ConnectionNamesFraming => Status::BadRequest,
+            HttpError::BadExpect => Status::ExpectationFailed,
         }
     }
 }

@@ -610,7 +610,11 @@ Bodies:
   `100 Continue` itself once the request head passed all checks (route,
   limits) and strips `Expect` toward the backend; any other `Expect` value,
   more than one `Expect` header, or a list such as `100-continue, foo` → 417
-  (owner decision 2026-10-26: when in doubt, reject).
+  (owner decision 2026-10-26: when in doubt, reject). *Builder call (stage
+  3 Task 6):* the `Expect` check is a request-head check like those of
+  FR-HTTP-08: it runs last, after the FR-HTTP-09a, Host and framing checks
+  (so their errors win), and its 417 is a parse error: logged as rejected
+  and closed (FR-HTTP-10).
 - **FR-PROXY-25a** [stage 3] Outside proxy routes (static routes, route
   misses) `Expect: 100-continue` is never answered with `100 Continue`: the
   normal final response (413, 404, …) is sent at once. Any other `Expect`
