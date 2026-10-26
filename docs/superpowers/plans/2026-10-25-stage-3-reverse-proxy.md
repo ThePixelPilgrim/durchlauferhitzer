@@ -61,7 +61,7 @@
     Every response the core generates on a proxy route closes the connection, and a HEAD request gets it head-only. A client that stalls the response releases the backend when its `send_idle_timeout` fires.
 12. **Buffers.**
     - The request body flows through the client's existing receive buffer, with no new allocation.
-    - The response flows through one buffer per exchange of `proxy_capacity = max(PROXY_BUFFER, max_head + 128)` bytes, with `PROXY_BUFFER = 64 KiB`. It is allocated at `Connect` and freed when the exchange ends. The rendered response head and the forwarded request head are bounded by the same capacity.
+    - The response flows through one buffer per exchange of `proxy_capacity = max(PROXY_BUFFER, max_head + max_headers + 128)` bytes (each forwarded header line may gain one byte, the space after its colon), with `PROXY_BUFFER = 64 KiB`. It is allocated at `Connect` and freed when the exchange ends. The rendered response head and the forwarded request head are bounded by the same capacity.
     - Backpressure: a buffer that fills stops being read until it has drained to half (hysteresis).
 13. **Logs.**
     - `Log::Proxied { conn, peer, status: u16, request }` when a response head is queued for the client.
@@ -364,7 +364,7 @@ connection: close\r\n
     - `PURGE` with an empty query `?` → `PURGE /p? HTTP/1.1`. Check what `Target.query` holds for a trailing `?` and keep it byte-exact.
   - `response_head_is_rewritten`: backend `HTTP/1.0 404 Nope` with `Connection: keep-alive`, `Keep-Alive: 1`, `Content-Length: 2`, `X-A: b` → with `Persistence::KeepAlive`, the expected bytes are `HTTP/1.1 404 Nope\r\ncontent-length: 2\r\nx-a: b\r\n\r\n`; with `Close`, the same plus `connection: close\r\n` before the blank line.
   - `empty_reason_is_kept`: `HTTP/1.1 200 \r\n…` → `HTTP/1.1 200 \r\n…`.
-  - `slack_bounds_the_growth` (proptest): for any parseable request head of at most `max_head` bytes and any peer, the rendered length is at most the raw head's length plus `FORWARD_SLACK`. Likewise for response heads.
+  - `slack_bounds_the_growth` (proptest): for any parseable request head of at most `max_head` bytes and any peer, the rendered length is at most the raw head's length plus its header count plus `FORWARD_SLACK` (every header is rendered `name: value`, so a header sent as `a:b` gains one byte). Likewise for response heads. Include heads whose headers have no space after the colon.
 - [ ] **Step 2: Run** `cargo test -p durchlauferhitzer-core forward`. Expected: FAIL (does not compile).
 - [ ] **Step 3: Implement** both renderers and a private `fn is_hop_by_hop(name: &str, listed: &[&[u8]]) -> bool`, where `listed` holds the tokens of every `connection` header, trimmed and lowercased.
 - [ ] **Step 4: Run** the tests. Expected: PASS.
@@ -471,7 +471,7 @@ CloseUpstream { upstream: UpstreamId },
 pub fn backends(&self) -> &[BackendAddr];
 pub fn upstream_recv_buffer(&mut self, upstream: UpstreamId) -> &mut [u8];
 pub fn upstream_send_buffer(&self, upstream: UpstreamId) -> &[u8];
-#[doc(hidden)] pub fn proxy_capacity(&self) -> usize; // max(PROXY_BUFFER, max_head + FORWARD_SLACK)
+#[doc(hidden)] pub fn proxy_capacity(&self) -> usize; // max(PROXY_BUFFER, max_head + max_headers + FORWARD_SLACK)
 // Log additions
 Log::Proxied { conn: ConnId, peer: IpAddr, status: u16, request: RequestSummary },
 Log::Backend { conn: ConnId, peer: IpAddr, error: BackendError },
