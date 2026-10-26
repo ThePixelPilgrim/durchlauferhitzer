@@ -323,7 +323,7 @@ Request head:
   `Connection` contains the token `close` (comma-separated,
   case-insensitive); HTTP/1.0 always closes (`Connection: keep-alive` is
   ignored).
-- **FR-HTTP-09a** [stage 3] A `Connection` header that lists
+- **FR-HTTP-09a** [done] A `Connection` header that lists
   `content-length`, `transfer-encoding` or `host` (case-insensitive, in any
   `Connection` line) → 400, on every route. It is the first check on the
   whole head (after all line checks), before the Host and framing checks,
@@ -926,9 +926,12 @@ Failures, persistence, timeouts:
   [Request bodies done in stage 3 Task 6.] *Builder calls (stage 3 Task
   6):* body bytes that arrive in the same read as the request head are
   forwarded where they landed, not moved; only what follows the body
-  moves. The client's receive buffer is `max(max_head, max_request_line +
-  2)` bytes, which a config can set below 36: a chunked tail can then fill
-  it, and the body stalls into its idle timeout (408).
+  moves. The client's receive buffer (`max(max_head, max_request_line +
+  2)` bytes) always exceeds 35 bytes when it carries a chunked body: such
+  a request has an HTTP/1.1 head with `Host` and `Transfer-Encoding:
+  chunked`, at least 51 bytes (`X / HTTP/1.1`, `Host:a`,
+  `Transfer-Encoding:chunked`, the blank line), and that head had to fit
+  in the buffer.
 - **NFR-RES-05** [core bound done; startup check stage 4] File-descriptor
   budget: at most `max_connections` files are open or being opened
   (orphans included, FR-CONN-11); at most 2 × `max_connections` client

@@ -438,9 +438,9 @@ impl Conn {
                 Chunk::Reading { .. } | Chunk::Done => Interest::None,
             },
             // Reading the request body, once the head was written and every
-            // earlier body byte too, if there is room (a buffer of at most
-            // 35 bytes can be full of a chunked tail: the body then stalls
-            // into its idle timeout).
+            // earlier body byte too. There is always room behind a chunked
+            // tail (at most 35 bytes): a chunked request's head is at least
+            // 51 bytes and fit in this buffer. The check stays as defence.
             ConnState::AwaitingResponse {
                 request, buffers, ..
             } if buffers.head.is_empty()

@@ -703,3 +703,96 @@ fn stalled_head_request_body_is_a_head_only_408() {
     );
     assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
 }
+
+/// FR-PROXY-23: a chunked body already over the limit in the bytes that
+/// came with the head is cut before any connect, with no response.
+#[test]
+fn chunked_over_limit_with_the_head_is_cut_before_connect() {
+    let mut sim = Sim::new(BODIES);
+    let c = request(
+        &mut sim,
+        b"POST /small HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n\
+          b\r\nhello world\r\n",
+    );
+    assert!(sim.upstreams().is_empty(), "{}", sim.trace());
+    assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Body(RequestBodyError::TooLarge),
+        }],
+        "{}",
+        sim.trace()
+    );
+}
+
+const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+
+/// No `100 Continue` for a request without a body: there is nothing to
+/// continue with (FR-PROXY-25).
+#[test]
+fn expect_100_continue_without_a_body_gets_no_100() {
+    let mut sim = Sim::new(BODIES);
+    let c = request(
+        &mut sim,
+        b"GET /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\r\n",
+    );
+    let up = only_upstream(&sim);
+    assert_eq!(sim.take_backend_request(up), forwarded("GET", "/x", ""));
+    assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+    answer_ok(&mut sim, c, up);
+}
+
+/// The `100 Continue` is sent also when the whole body came with the
+/// head, before the relayed response.
+#[test]
+fn expect_100_continue_with_the_body_already_there() {
+    let mut sim = Sim::new(BODIES);
+    let c = request(
+        &mut sim,
+        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+          Content-Length: 5\r\n\r\nhello",
+    );
+    let up = only_upstream(&sim);
+    let mut expected = forwarded("POST", "/x", "content-length: 5\r\n");
+    expected.extend_from_slice(b"hello");
+    assert_eq!(sim.take_backend_request(up), expected, "{}", sim.trace());
+    sim.backend_send(up, OK);
+    sim.run_until_idle();
+    let mut both = CONTINUE.to_vec();
+    both.extend_from_slice(OK_RELAYED);
+    assert_eq!(sim.take_received(c), both, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+}
+
+/// A `100 Continue` followed by a failure of the backend while the body is
+/// still due: one well-ordered stream, the 100 then a closing 502.
+#[test]
+fn expect_100_continue_then_backend_failure() {
+    let mut sim = Sim::new(BODIES);
+    let c = sim.connect(peer());
+    // The client takes 10 bytes, so the 100 is still being written when
+    // the backend fails.
+    sim.set_client_window(c, Window::Budget(10));
+    sim.send(
+        c,
+        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+          Content-Length: 5\r\n\r\n",
+    );
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.backend_reset(up);
+    sim.set_client_window(c, Window::Unlimited);
+    sim.run_until_idle();
+    let mut both = CONTINUE.to_vec();
+    both.extend_from_slice(&fixed(
+        Status::BadGateway,
+        Persistence::Close,
+        BodyMode::Full,
+    ));
+    assert_eq!(sim.take_received(c), both, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+}

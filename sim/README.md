@@ -22,8 +22,9 @@ What it checks: after every step the sim verifies the driver contract
 documented in [`../core/src/core/mod.rs`](../core/src/core/mod.rs) from the
 core's side — no actions for closed connections, files or upstreams, buffers
 within their capacities, every file and upstream closed exactly once and never
-left open after its connection, at most one upstream per client, `ReadWrite` interest only on upstreams (and only with bytes to write and room to read), body reads
-only into a drained buffer and with its full capacity (fill, drain, refill;
+left open after its connection, at most one upstream per client, `ReadWrite`
+interest only on upstreams (and only with bytes to write and room to read),
+body reads only into a drained buffer and with its full capacity (fill, drain, refill;
 for request bodies, behind a chunked tail of at most 35 bytes), every backend
 receiving exactly one well-framed request and nothing after its body, no
 stalled output, no deadline left in the past, and more. A violation fails the test with a replayable trace.
