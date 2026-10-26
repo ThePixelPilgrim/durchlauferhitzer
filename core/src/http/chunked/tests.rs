@@ -102,6 +102,8 @@ fn extension_rejected() {
 #[test]
 fn trailer_rejected() {
     assert_eq!(once(b"0\r\nX: y\r\n\r\n"), Err(ChunkedError::Trailer));
+    // Judged at its first byte, before the trailer line ends.
+    assert_eq!(once(b"0\r\nX"), Err(ChunkedError::Trailer));
     assert_eq!(
         once(b"5\r\nhello\r\n0\r\nX: y\r\n\r\n"),
         Err(ChunkedError::Trailer)
@@ -138,6 +140,30 @@ fn overflow_rejected() {
     // 16 digits fit, also behind leading zeros.
     assert_eq!(once(b"ffffffffffffffff\r\n"), progress(18, 0, Done::No));
     assert_eq!(once(b"0000ffffffffffffffff\r\n"), progress(22, 0, Done::No));
+    // The largest sizes are read exactly.
+    let mut v = ChunkedValidator::new();
+    assert_eq!(
+        v.advance(b"FFFFFFFFFFFFFFFF\r\n"),
+        progress(18, 0, Done::No)
+    );
+    assert_eq!(
+        v.state,
+        State::Data {
+            remaining: u64::MAX
+        }
+    );
+    assert_eq!(v.advance(b"abc"), progress(3, 3, Done::No));
+    let mut v = ChunkedValidator::new();
+    assert_eq!(
+        v.advance(b"1000000000000000\r\n"),
+        progress(18, 0, Done::No)
+    );
+    assert_eq!(
+        v.state,
+        State::Data {
+            remaining: 0x1000_0000_0000_0000
+        }
+    );
 }
 
 #[test]
@@ -168,7 +194,13 @@ fn bare_lf_rejected() {
 
 #[test]
 fn cr_without_lf_rejected() {
-    for bad in [&b"5\rhello"[..], b"5\r\nhello\rx", b"0\r\n\rx"] {
+    for bad in [
+        &b"5\rhello"[..],
+        b"5\r5",
+        b"5\rX",
+        b"5\r\nhello\rx",
+        b"0\r\n\rx",
+    ] {
         assert_eq!(once(bad), Err(ChunkedError::BadLineEnd), "{bad:?}");
     }
 }
@@ -179,6 +211,68 @@ fn data_longer_than_declared_rejected() {
         once(b"5\r\nhello!\r\n0\r\n\r\n"),
         Err(ChunkedError::BadLineEnd)
     );
+    assert_eq!(once(b"5\r\nhelloX\r\n"), Err(ChunkedError::BadLineEnd));
+}
+
+/// Data bytes are data, whatever they look like; sizes with leading zeros
+/// are sizes.
+#[test]
+fn data_that_looks_like_framing_is_data() {
+    assert_eq!(
+        once(b"4\r\n\r\n;x\r\n0\r\n\r\n"),
+        progress(14, 4, Done::Yes)
+    );
+    assert_eq!(
+        once(b"0005\r\nhello\r\n0\r\n\r\n"),
+        progress(18, 5, Done::Yes)
+    );
+    assert_eq!(once(b"a\r\n"), progress(3, 0, Done::No));
+    assert_eq!(once(b"000000000000000F\r\n"), progress(18, 0, Done::No));
+}
+
+/// `size` (hex text) announcing `n` data bytes, then the last chunk.
+fn one_chunk_body(size: &str, n: usize) -> Vec<u8> {
+    let mut v = format!("{size}\r\n").into_bytes();
+    v.extend(std::iter::repeat_n(b'x', n));
+    v.extend_from_slice(b"\r\n0\r\n\r\n");
+    v
+}
+
+/// Every hex digit has its exact value in either case: the split
+/// proptests compare the validator with itself, so only fixed sizes catch
+/// a wrong digit value.
+#[test]
+fn chunk_size_value_is_exact() {
+    let sizes = [
+        ("1f", 31),
+        ("1F", 31),
+        ("10", 16),
+        ("aB", 171),
+        ("Ab", 171),
+        ("ab", 171),
+        ("AB", 171),
+        ("cD", 205),
+        ("Cd", 205),
+        ("eE", 238),
+        ("ff", 255),
+        ("100", 256),
+        ("fFfF", 65535),
+        ("0000000000000100", 256),
+        ("00000000000000000000000000000100", 256),
+    ];
+    for (size, n) in sizes {
+        let input = one_chunk_body(size, n);
+        assert_eq!(
+            once(&input),
+            progress(input.len(), n as u64, Done::Yes),
+            "{size}"
+        );
+        // One data byte fewer than announced must not end the body.
+        let header = size.len() + 2;
+        let mut short = one_chunk_body(size, n - 1);
+        short.truncate(header + n - 1 + 2);
+        assert_eq!(once(&short), Err(ChunkedError::BadLineEnd), "{size}");
+    }
 }
 
 #[test]
@@ -193,6 +287,7 @@ fn stops_at_end() {
     let rest = input.get(body.len()..).unwrap_or_default();
     assert_eq!(v.advance(rest), progress(0, 0, Done::Yes));
     assert_eq!(v.advance(b"0\r\n\r\n"), progress(0, 0, Done::Yes));
+    assert_eq!(v.advance(b""), progress(0, 0, Done::Yes));
 }
 
 #[test]
@@ -214,6 +309,13 @@ fn errors_are_sticky() {
     let mut v = ChunkedValidator::new();
     assert_eq!(v.advance(b"5;x"), Err(ChunkedError::Extension));
     assert_eq!(v.advance(b"0\r\n\r\n"), Err(ChunkedError::Extension));
+    assert_eq!(v.advance(b""), Err(ChunkedError::Extension));
+    // Also after a fault in the CRLF behind chunk data: the bytes that
+    // follow never make the body valid again.
+    let mut v = ChunkedValidator::new();
+    assert_eq!(v.advance(b"5\r\nhelloX"), Err(ChunkedError::BadLineEnd));
+    assert_eq!(v.advance(b"\r\n0\r\n\r\n"), Err(ChunkedError::BadLineEnd));
+    assert_eq!(v.advance(b""), Err(ChunkedError::BadLineEnd));
 }
 
 #[test]
@@ -275,14 +377,38 @@ proptest! {
         prop_assert!(bytewise_tail <= MAX_UNCONSUMED, "tail {}", bytewise_tail);
     }
 
+    /// After a valid chunk, random bytes reach the deeper states (size,
+    /// data, the CRLF after data, the last chunk, trailers).
+    #[test]
+    fn arbitrary_bytes_after_a_chunk_split_like_the_whole(
+        tail in proptest::collection::vec(any::<u8>(), 0..512),
+        cuts in proptest::collection::vec(0..512usize, 0..8),
+    ) {
+        let mut input = b"5\r\nhello\r\n".to_vec();
+        input.extend_from_slice(&tail);
+        let (whole, _) = feed(&input, &[]);
+        let (split, tail) = feed(&input, &cuts);
+        let all: Vec<usize> = (0..input.len()).collect();
+        let (bytewise, bytewise_tail) = feed(&input, &all);
+        prop_assert_eq!(split, whole);
+        prop_assert_eq!(bytewise, whole);
+        prop_assert!(tail <= MAX_UNCONSUMED, "tail {}", tail);
+        prop_assert!(bytewise_tail <= MAX_UNCONSUMED, "tail {}", bytewise_tail);
+    }
+
     #[test]
     fn never_panics_and_never_overreaches(
         bytes in proptest::collection::vec(any::<u8>(), 0..512),
     ) {
-        let mut v = ChunkedValidator::new();
-        if let Ok(p) = v.advance(&bytes) {
-            prop_assert!(p.consumed <= bytes.len());
-            prop_assert!(p.data <= p.consumed as u64);
+        // Raw, and behind a valid chunk to reach the deeper states.
+        let mut deep = b"5\r\nhello\r\n".to_vec();
+        deep.extend_from_slice(&bytes);
+        for input in [&bytes, &deep] {
+            let mut v = ChunkedValidator::new();
+            if let Ok(p) = v.advance(input) {
+                prop_assert!(p.consumed <= input.len());
+                prop_assert!(p.data <= p.consumed as u64);
+            }
         }
     }
 }
