@@ -12,9 +12,12 @@ pub enum Status {
     RequestTimeout,
     ContentTooLarge,
     UriTooLong,
+    ExpectationFailed,
     RequestHeaderFieldsTooLarge,
     NotImplemented,
+    BadGateway,
     ServiceUnavailable,
+    GatewayTimeout,
     HttpVersionNotSupported,
 }
 
@@ -29,9 +32,12 @@ impl Status {
             Status::RequestTimeout => 408,
             Status::ContentTooLarge => 413,
             Status::UriTooLong => 414,
+            Status::ExpectationFailed => 417,
             Status::RequestHeaderFieldsTooLarge => 431,
             Status::NotImplemented => 501,
+            Status::BadGateway => 502,
             Status::ServiceUnavailable => 503,
+            Status::GatewayTimeout => 504,
             Status::HttpVersionNotSupported => 505,
         }
     }
@@ -46,9 +52,12 @@ impl Status {
             Status::RequestTimeout => "Request Timeout",
             Status::ContentTooLarge => "Content Too Large",
             Status::UriTooLong => "URI Too Long",
+            Status::ExpectationFailed => "Expectation Failed",
             Status::RequestHeaderFieldsTooLarge => "Request Header Fields Too Large",
             Status::NotImplemented => "Not Implemented",
+            Status::BadGateway => "Bad Gateway",
             Status::ServiceUnavailable => "Service Unavailable",
+            Status::GatewayTimeout => "Gateway Timeout",
             Status::HttpVersionNotSupported => "HTTP Version Not Supported",
         }
     }
@@ -62,6 +71,7 @@ impl HttpError {
                 Status::RequestHeaderFieldsTooLarge
             }
             HttpError::UnsupportedVersion => Status::HttpVersionNotSupported,
+            HttpError::BadExpect => Status::ExpectationFailed,
             HttpError::BadRequestLine
             | HttpError::BadMethod
             | HttpError::BadVersion
@@ -77,7 +87,9 @@ impl HttpError {
             | HttpError::BadContentLength
             | HttpError::DuplicateContentLength
             | HttpError::UnsupportedTransferEncoding
-            | HttpError::TransferEncodingInHttp10 => Status::BadRequest,
+            | HttpError::TransferEncodingInHttp10
+            | HttpError::BadConnection
+            | HttpError::BadChunk(_) => Status::BadRequest,
         }
     }
 }
@@ -85,6 +97,7 @@ impl HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::chunked::ChunkError;
     use crate::http::target::TargetError;
 
     #[test]
@@ -98,13 +111,16 @@ mod tests {
             (Status::RequestTimeout, 408, "Request Timeout"),
             (Status::ContentTooLarge, 413, "Content Too Large"),
             (Status::UriTooLong, 414, "URI Too Long"),
+            (Status::ExpectationFailed, 417, "Expectation Failed"),
             (
                 Status::RequestHeaderFieldsTooLarge,
                 431,
                 "Request Header Fields Too Large",
             ),
             (Status::NotImplemented, 501, "Not Implemented"),
+            (Status::BadGateway, 502, "Bad Gateway"),
             (Status::ServiceUnavailable, 503, "Service Unavailable"),
+            (Status::GatewayTimeout, 504, "Gateway Timeout"),
             (
                 Status::HttpVersionNotSupported,
                 505,
@@ -149,6 +165,9 @@ mod tests {
             (HttpError::DuplicateContentLength, Status::BadRequest),
             (HttpError::UnsupportedTransferEncoding, Status::BadRequest),
             (HttpError::TransferEncodingInHttp10, Status::BadRequest),
+            (HttpError::BadConnection, Status::BadRequest),
+            (HttpError::BadExpect, Status::ExpectationFailed),
+            (HttpError::BadChunk(ChunkError::BadSize), Status::BadRequest),
         ];
         for (err, status) in cases {
             assert_eq!(err.status(), status, "{err:?}");

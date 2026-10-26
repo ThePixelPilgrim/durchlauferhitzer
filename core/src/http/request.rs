@@ -12,6 +12,7 @@
 //! stateless form for a buffer parsed in one go.
 
 use crate::config::model::Limits;
+use crate::http::chunked::ChunkError;
 use crate::http::target::{Target, TargetError, parse_target};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +59,14 @@ pub enum Persistence {
     Close,
 }
 
+/// What the client expects before sending the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    None,
+    /// Exactly one `Expect: 100-continue` on an HTTP/1.1 request.
+    Continue,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestHead {
     pub method: Method,
@@ -68,6 +77,7 @@ pub struct RequestHead {
     pub headers: Vec<Header>,
     pub body: BodyFraming,
     pub persistence: Persistence,
+    pub expect: Expect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +102,13 @@ pub enum HttpError {
     DuplicateContentLength,
     UnsupportedTransferEncoding,
     TransferEncodingInHttp10,
+    /// A `Connection` token naming `content-length`, `transfer-encoding` or
+    /// `host`: a proxy would strip that header, changing the framing.
+    BadConnection,
+    /// An `Expect` other than a single `100-continue` on HTTP/1.1.
+    BadExpect,
+    /// A malformed chunked request body.
+    BadChunk(ChunkError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,7 +178,7 @@ pub(crate) mod work {
 
 /// No-op stand-ins outside tests.
 #[cfg(not(test))]
-mod work {
+pub(crate) mod work {
     pub(crate) fn scanned(_: usize) {}
     pub(crate) fn judged(_: usize) {}
     pub(crate) fn built(_: usize) {}
@@ -350,9 +367,13 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
     for line in lines.take_while(|line| !line.is_empty()) {
         headers.push(parse_header(line)?);
     }
+    if connection_names_framing(&headers) {
+        return Err(HttpError::BadConnection);
+    }
     let host = check_host(&headers, version)?;
     let body = check_framing(&headers, version)?;
     let persistence = persistence(&headers, version);
+    let expect = check_expect(&headers, version)?;
     Ok(RequestHead {
         method,
         target,
@@ -361,6 +382,7 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
         headers,
         body,
         persistence,
+        expect,
     })
 }
 
@@ -442,29 +464,47 @@ fn trim_ows(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
+/// Why a header line is not valid; shared by request and response heads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeaderError {
+    BadName,
+    BadValue,
+    ObsFold,
+}
+
+impl From<HeaderError> for HttpError {
+    fn from(error: HeaderError) -> Self {
+        match error {
+            HeaderError::BadName => HttpError::BadHeaderName,
+            HeaderError::BadValue => HttpError::BadHeaderValue,
+            HeaderError::ObsFold => HttpError::ObsFold,
+        }
+    }
+}
+
 /// Validates a header line and splits it into name and raw value, without
 /// allocating.
-fn split_header(line: &[u8]) -> Result<(&[u8], &[u8]), HttpError> {
+pub(crate) fn split_header(line: &[u8]) -> Result<(&[u8], &[u8]), HeaderError> {
     if line.first().is_some_and(|&b| is_ows(b)) {
-        return Err(HttpError::ObsFold);
+        return Err(HeaderError::ObsFold);
     }
     let colon = line
         .iter()
         .position(|&b| b == b':')
-        .ok_or(HttpError::BadHeaderName)?;
+        .ok_or(HeaderError::BadName)?;
     let name = line.get(..colon).unwrap_or_default();
     let value = line.get(colon + 1..).unwrap_or_default();
     if !is_token(name) {
-        return Err(HttpError::BadHeaderName);
+        return Err(HeaderError::BadName);
     }
     let valid_value = |&b: &u8| b == b'\t' || b == b' ' || (0x21..=0x7E).contains(&b) || b >= 0x80;
     if !value.iter().all(valid_value) {
-        return Err(HttpError::BadHeaderValue);
+        return Err(HeaderError::BadValue);
     }
     Ok((name, value))
 }
 
-fn parse_header(line: &[u8]) -> Result<Header, HttpError> {
+pub(crate) fn parse_header(line: &[u8]) -> Result<Header, HeaderError> {
     let (name, value) = split_header(line)?;
     Ok(Header {
         name: to_string(name).to_ascii_lowercase(),
@@ -472,7 +512,7 @@ fn parse_header(line: &[u8]) -> Result<Header, HttpError> {
     })
 }
 
-fn values<'a>(headers: &'a [Header], name: &'a str) -> impl Iterator<Item = &'a [u8]> {
+pub(crate) fn values<'a>(headers: &'a [Header], name: &'a str) -> impl Iterator<Item = &'a [u8]> {
     headers
         .iter()
         .filter(move |h| h.name == name)
@@ -541,35 +581,99 @@ fn validate_host(value: &[u8]) -> Result<String, HttpError> {
     }
 }
 
-fn check_framing(headers: &[Header], version: Version) -> Result<BodyFraming, HttpError> {
+/// The body framing a head's `Content-Length` and `Transfer-Encoding`
+/// headers declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Declared {
+    Absent,
+    Length(u64),
+    Chunked,
+}
+
+/// Why the framing headers are not acceptable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FramingError {
+    ContentLengthWithTransferEncoding,
+    BadContentLength,
+    DuplicateContentLength,
+    UnsupportedTransferEncoding,
+}
+
+impl From<FramingError> for HttpError {
+    fn from(error: FramingError) -> Self {
+        match error {
+            FramingError::ContentLengthWithTransferEncoding => {
+                HttpError::ContentLengthWithTransferEncoding
+            }
+            FramingError::BadContentLength => HttpError::BadContentLength,
+            FramingError::DuplicateContentLength => HttpError::DuplicateContentLength,
+            FramingError::UnsupportedTransferEncoding => HttpError::UnsupportedTransferEncoding,
+        }
+    }
+}
+
+/// Reads the framing headers strictly: one decimal `Content-Length` or
+/// exactly `chunked`, never both.
+pub(crate) fn framing_headers(headers: &[Header]) -> Result<Declared, FramingError> {
     let lengths: Vec<&[u8]> = values(headers, "content-length").collect();
     let encodings: Vec<&[u8]> = values(headers, "transfer-encoding").collect();
-    if version == Version::Http10 && !encodings.is_empty() {
-        return Err(HttpError::TransferEncodingInHttp10);
-    }
     if !lengths.is_empty() && !encodings.is_empty() {
-        return Err(HttpError::ContentLengthWithTransferEncoding);
+        return Err(FramingError::ContentLengthWithTransferEncoding);
     }
     if let Some(&first) = lengths.first() {
         if lengths.len() > 1 {
-            return Err(HttpError::DuplicateContentLength);
+            return Err(FramingError::DuplicateContentLength);
         }
         if first.is_empty() || !first.iter().all(u8::is_ascii_digit) {
-            return Err(HttpError::BadContentLength);
+            return Err(FramingError::BadContentLength);
         }
         let n: u64 = to_string(first)
             .parse()
-            .map_err(|_| HttpError::BadContentLength)?;
-        return Ok(if n == 0 {
-            BodyFraming::None
-        } else {
-            BodyFraming::Length(n)
-        });
+            .map_err(|_| FramingError::BadContentLength)?;
+        return Ok(Declared::Length(n));
     }
     match encodings.as_slice() {
-        [] => Ok(BodyFraming::None),
-        [one] if one.eq_ignore_ascii_case(b"chunked") => Ok(BodyFraming::Chunked),
-        _ => Err(HttpError::UnsupportedTransferEncoding),
+        [] => Ok(Declared::Absent),
+        [one] if one.eq_ignore_ascii_case(b"chunked") => Ok(Declared::Chunked),
+        _ => Err(FramingError::UnsupportedTransferEncoding),
+    }
+}
+
+fn check_framing(headers: &[Header], version: Version) -> Result<BodyFraming, HttpError> {
+    if version == Version::Http10 && values(headers, "transfer-encoding").next().is_some() {
+        return Err(HttpError::TransferEncodingInHttp10);
+    }
+    Ok(match framing_headers(headers)? {
+        Declared::Absent | Declared::Length(0) => BodyFraming::None,
+        Declared::Length(n) => BodyFraming::Length(n),
+        Declared::Chunked => BodyFraming::Chunked,
+    })
+}
+
+/// Whether a `Connection` token names `content-length`, `transfer-encoding`
+/// or `host`.
+pub(crate) fn connection_names_framing(headers: &[Header]) -> bool {
+    values(headers, "connection").any(|v| {
+        v.split(|&b| b == b',').any(|token| {
+            let token = trim_ows(token);
+            [&b"content-length"[..], b"transfer-encoding", b"host"]
+                .iter()
+                .any(|name| token.eq_ignore_ascii_case(name))
+        })
+    })
+}
+
+/// `Continue` for exactly one `Expect: 100-continue` on HTTP/1.1; anything
+/// else the server does not know is an error. HTTP/1.0 ignores `Expect`.
+fn check_expect(headers: &[Header], version: Version) -> Result<Expect, HttpError> {
+    if version == Version::Http10 {
+        return Ok(Expect::None);
+    }
+    let mut expects = values(headers, "expect");
+    match (expects.next(), expects.next()) {
+        (None, _) => Ok(Expect::None),
+        (Some(one), None) if one.eq_ignore_ascii_case(b"100-continue") => Ok(Expect::Continue),
+        (Some(_), _) => Err(HttpError::BadExpect),
     }
 }
 
@@ -648,6 +752,7 @@ mod tests {
                 ],
                 body: BodyFraming::None,
                 persistence: Persistence::KeepAlive,
+                expect: Expect::None,
             }
         );
     }
@@ -961,6 +1066,61 @@ mod tests {
             p(b"GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"),
             Persistence::Close
         );
+    }
+
+    #[test]
+    fn connection_naming_framing_headers_is_rejected() {
+        let c = |v: &str| {
+            parse(format!("GET / HTTP/1.1\r\nHost: a\r\nConnection: {v}\r\n\r\n").as_bytes())
+                .map(|s| matches!(s, ParseStatus::Complete { .. }))
+        };
+        assert_eq!(c("close, Content-Length"), Err(HttpError::BadConnection));
+        assert_eq!(c("transfer-encoding"), Err(HttpError::BadConnection));
+        assert_eq!(c("HOST"), Err(HttpError::BadConnection));
+        assert_eq!(c("keep-alive, x-foo"), Ok(true));
+        assert_eq!(HttpError::BadConnection.status().code(), 400);
+    }
+
+    #[test]
+    fn expect_rules() {
+        let e = |version: &str, lines: &str| {
+            parse(format!("GET / {version}\r\nHost: a\r\n{lines}\r\n").as_bytes()).map(
+                |s| match s {
+                    ParseStatus::Complete { head, .. } => Some(head.expect),
+                    ParseStatus::Incomplete => None,
+                },
+            )
+        };
+        let v11 = "HTTP/1.1";
+        assert_eq!(e(v11, ""), Ok(Some(Expect::None)));
+        assert_eq!(
+            e(v11, "Expect: 100-continue\r\n"),
+            Ok(Some(Expect::Continue))
+        );
+        assert_eq!(
+            e(v11, "Expect: 100-Continue\r\n"),
+            Ok(Some(Expect::Continue))
+        );
+        assert_eq!(
+            e(v11, "expect:  100-CONTINUE \r\n"),
+            Ok(Some(Expect::Continue))
+        );
+        assert_eq!(
+            e(v11, "Expect: 100-continue\r\nExpect: 100-continue\r\n"),
+            Err(HttpError::BadExpect)
+        );
+        assert_eq!(e(v11, "Expect: foo\r\n"), Err(HttpError::BadExpect));
+        assert_eq!(e(v11, "Expect: \r\n"), Err(HttpError::BadExpect));
+        assert_eq!(
+            e(v11, "Expect: 100-continue, foo\r\n"),
+            Err(HttpError::BadExpect)
+        );
+        assert_eq!(e("HTTP/1.0", "Expect: foo\r\n"), Ok(Some(Expect::None)));
+        assert_eq!(
+            e("HTTP/1.0", "Expect: 100-continue\r\n"),
+            Ok(Some(Expect::None))
+        );
+        assert_eq!(HttpError::BadExpect.status().code(), 417);
     }
 
     #[test]

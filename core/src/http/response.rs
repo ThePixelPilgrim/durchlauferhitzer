@@ -30,9 +30,12 @@ pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, ou
         | Status::RequestTimeout
         | Status::ContentTooLarge
         | Status::UriTooLong
+        | Status::ExpectationFailed
         | Status::RequestHeaderFieldsTooLarge
         | Status::NotImplemented
+        | Status::BadGateway
         | Status::ServiceUnavailable
+        | Status::GatewayTimeout
         | Status::HttpVersionNotSupported => {}
     }
     match persistence {
