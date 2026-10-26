@@ -121,6 +121,16 @@ pub(crate) enum ConnState {
 }
 
 impl ConnState {
+    /// Writing a response that is already rendered into the send buffer,
+    /// with no request body left to discard.
+    pub(crate) fn responding(exchange: Exchange, deadline: Instant) -> Self {
+        ConnState::Responding {
+            exchange,
+            unread_body: UnreadBody::None,
+            deadline,
+        }
+    }
+
     /// The instant at which this state times out.
     pub(crate) fn deadline(&self) -> Instant {
         match *self {

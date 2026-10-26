@@ -35,6 +35,8 @@
 //!   delivering the next event. A slice obtained from `recv_buffer` or
 //!   `send_buffer` is only valid until the next `handle` call (the borrow
 //!   checker enforces this).
+//! - A connection that ends emits, in this order: its [`Action::Log`] (if
+//!   any), [`Action::CloseFile`] (if a file is open), then [`Action::Close`].
 //! - After [`Action::Close`] the core forgets the connection; the driver
 //!   closes the socket and delivers no further events for that id. The core
 //!   emits no further actions for it. Stray I/O events for a forgotten id are
@@ -321,21 +323,25 @@ impl Core {
             }
             Event::Sent { conn, len } => self.sent(now, conn, len, actions),
             Event::Failed { conn, error: _ } => {
-                if let Some(c) = self.forget(conn, actions) {
-                    match c.state {
-                        // A reset while discarding input after our response is
-                        // the expected end of a lingering close, not news.
-                        ConnState::Lingering { .. } => {}
-                        ConnState::ReadingHead { .. }
-                        | ConnState::Idle { .. }
-                        | ConnState::Responding { .. }
-                        | ConnState::OpeningFile { .. }
-                        | ConnState::SendingFile { .. } => {
-                            actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
-                        }
+                // Log first (peek at the state), then forget, which closes
+                // an open file; the order is Log, CloseFile, Close.
+                let Some(c) = self.conns.get(&conn) else {
+                    return;
+                };
+                match c.state {
+                    // A reset while discarding input after our response is
+                    // the expected end of a lingering close, not news.
+                    ConnState::Lingering { .. } => {}
+                    ConnState::ReadingHead { .. }
+                    | ConnState::Idle { .. }
+                    | ConnState::Responding { .. }
+                    | ConnState::OpeningFile { .. }
+                    | ConnState::SendingFile { .. } => {
+                        actions.push(Action::Log(Log::Reset { conn, peer: c.peer }));
                     }
-                    actions.push(Action::Close { conn });
                 }
+                self.forget(conn, actions);
+                actions.push(Action::Close { conn });
             }
             Event::TimerFired => self.timer_fired(now, actions),
             Event::FileOpened { file, meta } => self.file_opened(now, file, meta, actions),
@@ -769,6 +775,9 @@ impl Core {
             },
         };
         let Some(c) = self.conns.get_mut(&conn) else {
+            // `try_parse` just found this connection: a miss is a core bug,
+            // and with no connection there is nothing left to answer.
+            debug_assert!(false, "respond for unknown {conn:?}");
             return;
         };
         // An unread body leaves the stream unframed: it cannot be reused.

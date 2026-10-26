@@ -795,3 +795,29 @@ fn abort_and_timeout_emit_log_close_file_close() {
     assert!(core.conns.is_empty());
     assert_eq!(core.files.len(), 0);
 }
+
+/// A reset while sending a file ends like the other teardowns: the reason is
+/// logged, then the file and the connection are closed.
+#[test]
+fn reset_while_sending_a_file_emits_log_close_file_close() {
+    let mut core = files_core();
+    let now = secs(0);
+    let (conn, file) = (ConnId(1), FileId(1));
+    request(&mut core, now, 1, GET_F);
+    let mut actions = Vec::new();
+    let meta = regular(3);
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    actions.clear();
+    let error = ConnError::Reset;
+    core.handle(now, Event::Failed { conn, error }, &mut actions);
+    assert_eq!(
+        actions,
+        [
+            Action::Log(Log::Reset { conn, peer: PEER }),
+            Action::CloseFile { file },
+            Action::Close { conn }
+        ]
+    );
+    assert!(core.conns.is_empty());
+    assert_eq!(core.files.len(), 0);
+}

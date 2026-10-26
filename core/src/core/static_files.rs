@@ -142,6 +142,9 @@ impl Core {
         actions: &mut Vec<Action>,
     ) {
         let Some(c) = self.conns.get_mut(&conn) else {
+            // `try_parse` just found this connection: a miss is a core bug,
+            // and with no connection there is nothing left to answer.
+            debug_assert!(false, "open_static for unknown {conn:?}");
             return;
         };
         let slash = trailing_slash(&request.summary.path);
@@ -264,11 +267,7 @@ impl Core {
                         BodyMode::HeadOnly => {
                             self.files.release(file);
                             actions.push(Action::CloseFile { file });
-                            ConnState::Responding {
-                                exchange,
-                                unread_body: UnreadBody::None,
-                                deadline,
-                            }
+                            ConnState::responding(exchange, deadline)
                         }
                     }
                 }
@@ -305,11 +304,7 @@ impl Core {
                         exchange.persistence,
                         actions,
                     );
-                    ConnState::Responding {
-                        exchange,
-                        unread_body: UnreadBody::None,
-                        deadline,
-                    }
+                    ConnState::responding(exchange, deadline)
                 }
             },
             // Checked above: unreachable, and left as it was.
@@ -374,11 +369,7 @@ impl Core {
                                 exchange.persistence,
                                 actions,
                             );
-                            ConnState::Responding {
-                                exchange,
-                                unread_body: UnreadBody::None,
-                                deadline,
-                            }
+                            ConnState::responding(exchange, deadline)
                         }
                         // Matched above: unreachable, and left as it was.
                         state @ (ConnState::ReadingHead { .. }
