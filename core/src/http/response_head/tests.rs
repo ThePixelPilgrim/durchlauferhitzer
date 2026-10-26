@@ -153,6 +153,99 @@ fn switching_protocols_is_an_error() {
     );
 }
 
+/// Interim heads are judged like final ones: header syntax line by line,
+/// and the framing headers too, although a 1xx has no body. A 101 is
+/// rejected at its status line, before any header is looked at.
+#[test]
+fn interim_heads_are_judged_like_final_ones() {
+    use ResponseError::*;
+    let rows: Vec<(&[u8], ResponseError)> = vec![
+        (b"HTTP/1.1 100 Continue\r\nA : b\r\n\r\n", BadHeaderName),
+        (b"HTTP/1.1 103 Early\r\nNoColon\r\n\r\n", BadHeaderName),
+        (b"HTTP/1.1 100 Continue\r\nA: b\r\n c\r\n\r\n", ObsFold),
+        (b"HTTP/1.1 100 Continue\r\nA: a\0b\r\n\r\n", BadHeaderValue),
+        (b"HTTP/1.1 100 Continue\r\nA: b\n\r\n", BareLf),
+        (b"HTTP/1.1 101 Switch\r\nA : b\r\n\r\n", SwitchingProtocols),
+        (
+            b"HTTP/1.1 103 Early\r\nContent-Length: x\r\n\r\n",
+            BadContentLength,
+        ),
+        (
+            b"HTTP/1.1 103 Early\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n",
+            DuplicateContentLength,
+        ),
+        (
+            b"HTTP/1.1 103 Early\r\nTransfer-Encoding: gzip\r\n\r\n",
+            UnsupportedTransferEncoding,
+        ),
+        (
+            b"HTTP/1.1 103 Early\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            ContentLengthWithTransferEncoding,
+        ),
+    ];
+    for (input, expected) in rows {
+        for kind in [RequestKind::Other, RequestKind::Head] {
+            assert_eq!(
+                parse_with(input, &defaults(), kind),
+                Err(expected),
+                "input {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+}
+
+/// The first bad line wins: a line-ending fault later in the head does not
+/// mask an earlier header fault, nor the other way round.
+#[test]
+fn first_bad_line_wins() {
+    assert_eq!(
+        parse(b"HTTP/1.1 200 OK\r\nA : b\r\nC: d\n\r\n"),
+        Err(ResponseError::BadHeaderName)
+    );
+    assert_eq!(
+        parse(b"HTTP/1.1 200 OK\r\nA: b\nC : d\r\n\r\n"),
+        Err(ResponseError::BareLf)
+    );
+    assert_eq!(
+        parse(b"HTTP/1.1 200 OK\nA : b\r\n\r\n"),
+        Err(ResponseError::BareLf)
+    );
+}
+
+/// An interim head followed by the final one, fed one byte at a time into
+/// one buffer that drops consumed bytes; a fresh parser starts after the
+/// interim head, as the contract requires.
+#[test]
+fn interim_then_final_head_byte_by_byte() {
+    let cont = b"HTTP/1.1 100 Continue\r\nX: y\r\n\r\n";
+    let fin = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n";
+    let input = [cont.as_slice(), fin].concat();
+    let limits = defaults();
+    let mut parser = ResponseParser::new();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut verdicts = Vec::new();
+    for &byte in &input {
+        pending.push(byte);
+        match parser.advance(&pending, &limits, RequestKind::Other) {
+            Ok(ResponseStatus::Incomplete) => {}
+            Ok(ResponseStatus::Interim { consumed }) => {
+                verdicts.push(("interim", consumed));
+                pending.drain(..consumed);
+                parser = ResponseParser::new();
+            }
+            Ok(ResponseStatus::Complete { consumed, head }) => {
+                assert_eq!(head.body, ResponseBody::Length(2));
+                verdicts.push(("complete", consumed));
+                pending.drain(..consumed);
+            }
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+    assert_eq!(verdicts, [("interim", cont.len()), ("complete", fin.len())]);
+    assert!(pending.is_empty());
+}
+
 #[test]
 fn rejects_malformed_responses() {
     use ResponseError::*;
@@ -197,6 +290,37 @@ fn rejects_malformed_responses() {
         (b"HTTP/1.1 200 OK\r\n\n", d, BareLf),
         (b"HTTP/1.1 200 OK\r\nX: a\r\n Y: b\r\n\r\n", d, ObsFold),
         (b"HTTP/1.1 200 OK\r\n\tY: b\r\n\r\n", d, ObsFold),
+        (b"HTTP/1.1 200 OK\r\nA: b\r\n\tc\r\n\r\n", d, ObsFold),
+        (b"HTTP/2 200 OK\r\n\r\n", d, BadVersion),
+        (b"HTTP/1.1 \r\n\r\n", d, BadStatusLine),
+        (b"HTTP/1.1 200\tOK\r\n\r\n", d, BadStatusLine),
+        (b"\r\n", d, BadStatusLine),
+        (b"HTTP/1.1 200 OK\x01\r\n\r\n", d, BadStatusLine),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length : 5\r\n\r\n",
+            d,
+            BadHeaderName,
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\n",
+            d,
+            BadContentLength,
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length: \r\n\r\n",
+            d,
+            BadContentLength,
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\n",
+            d,
+            BadContentLength,
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n",
+            d,
+            UnsupportedTransferEncoding,
+        ),
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n",
             d,
@@ -314,6 +438,44 @@ fn limits_are_enforced() {
         parse_with(
             b"HTTP/1.1 200 OK\r\nA: 1\r\nBad Name\r\n\r\n",
             &l,
+            RequestKind::Other
+        ),
+        Err(ResponseError::TooManyHeaders)
+    );
+
+    // Reported as soon as certain, also fed one byte at a time to one
+    // parser, and with no blank line yet.
+    let t = HeadLimits {
+        max_request_line: 40,
+        max_head: 40,
+        max_headers: 2,
+    };
+    let mut parser = ResponseParser::new();
+    let mut big = b"HTTP/1.1 200 OK\r\nA: ".to_vec();
+    big.resize(41, b'x');
+    for n in 1..=40 {
+        assert_eq!(
+            parser.advance(big.get(..n).unwrap_or_default(), &t, RequestKind::Other),
+            Ok(ResponseStatus::Incomplete),
+            "prefix of {n} bytes"
+        );
+    }
+    assert_eq!(
+        parser.advance(&big, &t, RequestKind::Other),
+        Err(ResponseError::HeadTooLarge)
+    );
+    assert!(matches!(
+        parse_with(
+            b"HTTP/1.1 200 OK\r\nA: 1\r\nB: 2\r\n\r\n",
+            &t,
+            RequestKind::Other
+        ),
+        Ok(ResponseStatus::Complete { .. })
+    ));
+    assert_eq!(
+        parse_with(
+            b"HTTP/1.1 200 OK\r\nA: 1\r\nB: 2\r\nC: 3\r\n",
+            &t,
             RequestKind::Other
         ),
         Err(ResponseError::TooManyHeaders)
@@ -471,6 +633,31 @@ fn parser_fed_line_by_line_does_linear_work() {
         used.scanned <= n && used.judged <= n && used.built <= n,
         "{used:?} for {n} bytes"
     );
+}
+
+#[test]
+fn parser_fed_byte_by_byte_does_linear_work() {
+    let l = HeadLimits {
+        max_request_line: 64 * 1024,
+        max_head: 64 * 1024,
+        max_headers: 10_000,
+    };
+    let mut head = b"HTTP/1.1 200 OK\r\n".to_vec();
+    while head.len() < 16 * 1024 {
+        head.extend_from_slice(b"X-Filler: 0123456789012345678901234567\r\n");
+    }
+    head.extend_from_slice(b"\r\n");
+    let cuts: Vec<usize> = (1..head.len()).collect();
+    work::take();
+    let (result, _) = feed(&head, &cuts, &l, RequestKind::Other);
+    let used = work::take();
+    assert!(matches!(result, Ok(ResponseStatus::Complete { .. })));
+    let n = head.len();
+    assert!(
+        used.scanned <= n && used.judged <= n && used.built <= n,
+        "{used:?} for {n} bytes"
+    );
+    assert!(used.scanned >= n - 1, "{used:?} for {n} bytes");
 }
 
 fn limits_for(which: usize) -> HeadLimits {
