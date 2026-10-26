@@ -4,13 +4,12 @@
 
 use std::path::{Path, PathBuf};
 
-use super::request::finish;
+use super::request::{AfterResponse, finish};
 use super::{Action, ConnId, Core};
 use crate::config::{OnFileChange, Route};
 use crate::conn::{Conn, ConnState, OpenStep, SEND_CAPACITY, StaticRequest, UnreadBody};
 use crate::file::{
-    Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileStamp, FileTable, Owner, RootId,
-    check_stamp,
+    Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileStamp, Owner, RootId, check_stamp,
 };
 use crate::http::mime::content_type;
 use crate::http::request::{BodyFraming, Method, Persistence, RequestHead};
@@ -158,10 +157,12 @@ impl Core {
                     c,
                     conn,
                     reason,
-                    request,
-                    body,
-                    persistence,
-                    buffered,
+                    Reply {
+                        request,
+                        body,
+                        persistence,
+                        buffered,
+                    },
                     deadline,
                     actions,
                 )
@@ -216,10 +217,12 @@ impl Core {
                         c,
                         conn,
                         NotServed::NotFound,
-                        request,
-                        body,
-                        persistence,
-                        buffered,
+                        Reply {
+                            request,
+                            body,
+                            persistence,
+                            buffered,
+                        },
                         deadline,
                         actions,
                     );
@@ -365,9 +368,11 @@ impl Core {
                 c.state = finish(
                     conn,
                     c,
-                    persistence,
-                    UnreadBody::None,
-                    buffered,
+                    AfterResponse {
+                        persistence,
+                        unread_body: UnreadBody::None,
+                        buffered,
+                    },
                     now,
                     limits,
                     actions,
@@ -461,24 +466,32 @@ fn take_opening(c: &mut Conn, file: FileId) -> Option<Opening> {
     }
 }
 
-/// Close out the static `request` on `c` without a file: a 301 to the
-/// slash form of its path (query kept), or a 404. Logged once, with the raw
-/// path. Returns the connection's next state.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the state fields of the connection being answered"
-)]
-fn not_served(
-    c: &mut Conn,
-    conn: ConnId,
-    reason: NotServed,
+/// What answering a static request without a file needs: the request and
+/// how its connection responds.
+struct Reply {
     request: StaticRequest,
     body: BodyMode,
     persistence: Persistence,
     buffered: usize,
+}
+
+/// Close out the static request of `reply` on `c` without a file: a 301 to
+/// the slash form of its path (query kept), or a 404. Logged once, with the
+/// raw path. Returns the connection's next state.
+fn not_served(
+    c: &mut Conn,
+    conn: ConnId,
+    reason: NotServed,
+    reply: Reply,
     deadline: Instant,
     actions: &mut Vec<Action>,
 ) -> ConnState {
+    let Reply {
+        request,
+        body,
+        persistence,
+        buffered,
+    } = reply;
     let status = match reason {
         NotServed::Redirect => {
             let mut location = format!("{}/", request.summary.path);
@@ -574,56 +587,62 @@ pub(super) fn plan(
     }
 }
 
-/// Start answering `head` from a static root: open the requested path.
-/// `c` then waits on the disk until `send_deadline`; `leftover` bytes at the
-/// front of `c.recv` wait for the next request.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "free function over disjoint borrows of the core's fields"
-)]
-pub(super) fn open_static(
-    c: &mut Conn,
-    files: &mut FileTable,
-    conn: ConnId,
-    head: RequestHead,
-    open: StaticOpen,
-    body: BodyMode,
-    leftover: usize,
-    send_deadline: Instant,
-    actions: &mut Vec<Action>,
-) {
-    let StaticOpen {
-        root,
-        path,
-        on_change,
-    } = open;
-    let slash = trailing_slash(&head.target.path);
-    let file = files.allocate(conn);
-    actions.push(Action::OpenFile {
-        file,
-        root,
-        path: path.clone(),
-    });
-    c.state = ConnState::OpeningFile {
-        file,
-        slash,
-        step: OpenStep::Requested,
-        body,
-        persistence: head.persistence,
-        buffered: leftover,
-        deadline: send_deadline,
-        request: StaticRequest {
-            summary: RequestSummary {
-                method: head.method,
-                host: head.host,
-                path: head.target.path,
-            },
-            query: head.target.query,
+impl Core {
+    /// Start answering `head` on `conn` from a static root: open the
+    /// requested path. The connection then waits on the disk until the send
+    /// idle deadline; `leftover` bytes at the front of its receive buffer
+    /// wait for the next request.
+    pub(super) fn open_static(
+        &mut self,
+        now: Instant,
+        conn: ConnId,
+        head: RequestHead,
+        open: StaticOpen,
+        leftover: usize,
+        actions: &mut Vec<Action>,
+    ) {
+        let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        // Every response to a HEAD request is head only.
+        let body = match head.method {
+            Method::Head => BodyMode::HeadOnly,
+            Method::Get | Method::Other(_) => BodyMode::Full,
+        };
+        let StaticOpen {
             root,
-            on_change,
             path,
-        },
-    };
+            on_change,
+        } = open;
+        let slash = trailing_slash(&head.target.path);
+        let file = self.files.allocate(conn);
+        actions.push(Action::OpenFile {
+            file,
+            root,
+            path: path.clone(),
+        });
+        c.state = ConnState::OpeningFile {
+            file,
+            slash,
+            step: OpenStep::Requested,
+            body,
+            persistence: head.persistence,
+            buffered: leftover,
+            deadline: send_deadline,
+            request: StaticRequest {
+                summary: RequestSummary {
+                    method: head.method,
+                    host: head.host,
+                    path: head.target.path,
+                },
+                query: head.target.query,
+                root,
+                on_change,
+                path,
+            },
+        };
+    }
 }
 
 #[cfg(test)]

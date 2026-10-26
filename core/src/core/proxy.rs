@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use super::request::finish;
+use super::request::{AfterResponse, finish};
 use super::{Action, ConnId, Core, Interest};
 use crate::config::{BackendAddr, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, Source, UnreadBody};
@@ -41,13 +41,6 @@ pub(super) const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a relayed body may make no progress while the upstream is open
 /// (the default of `body_idle_timeout`).
 pub(super) const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The capacities of an exchange's buffers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Capacities {
-    pub(super) recv: usize,
-    pub(super) head: usize,
-}
 
 /// How a request on a proxy route is answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,74 +95,75 @@ pub(super) fn plan(
     ProxyPlan::Forward(Forward { backend, path })
 }
 
-/// Start forwarding `head` on `c`: render the rewritten request head into
-/// a fresh exchange's head buffer and connect. `leftover` bytes at the
-/// front of `c.recv` wait for the next request.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "free function over disjoint borrows of the core's fields"
-)]
-pub(super) fn forward(
-    c: &mut Conn,
-    upstreams: &mut UpstreamTable,
-    capacities: Capacities,
-    conn: ConnId,
-    head: RequestHead,
-    forward: Forward,
-    leftover: usize,
-    now: Instant,
-    send_deadline: Instant,
-    actions: &mut Vec<Action>,
-) {
-    let Forward { backend, path } = forward;
-    let summary = RequestSummary {
-        method: head.method.clone(),
-        host: head.host.clone(),
-        path: head.target.path.clone(),
-    };
-    // Never beyond the head buffer's capacity. A head within the limits
-    // always fits (see `head_capacity`); this guards that bound.
-    if backend_request_len(&head, &path, c.peer) > capacities.head {
-        let status = Status::RequestHeaderFieldsTooLarge;
-        render_fixed(
-            status,
-            Persistence::Close,
-            body_mode(&head.method),
-            &mut c.send,
-        );
-        actions.push(Action::Log(Log::Response {
-            conn,
-            peer: c.peer,
-            status,
-            request: Some(summary),
-        }));
-        c.state = ConnState::Responding {
-            persistence: Persistence::Close,
-            unread_body: UnreadBody::None,
-            buffered: leftover,
-            deadline: send_deadline,
+impl Core {
+    /// Start forwarding `head` on `conn`: render the rewritten request head
+    /// into a fresh exchange's head buffer and connect. `leftover` bytes at
+    /// the front of the connection's receive buffer wait for the next
+    /// request.
+    pub(super) fn forward(
+        &mut self,
+        now: Instant,
+        conn: ConnId,
+        head: RequestHead,
+        forward: Forward,
+        leftover: usize,
+        actions: &mut Vec<Action>,
+    ) {
+        let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let (recv_capacity, head_capacity) = (self.upstream_recv_capacity, self.head_capacity);
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
         };
-        return;
-    }
-    let mut buffers = ExchangeBuffers::new(capacities.recv, capacities.head);
-    render_backend_request(&head, &path, c.peer, &mut buffers.head);
-    let up = upstreams.allocate(conn);
-    actions.push(Action::Connect { up, backend });
-    c.state = ConnState::Connecting {
-        up,
-        request: ProxyRequest {
-            summary,
-            backend,
-            kind: match head.method {
-                Method::Head => RequestKind::Head,
-                Method::Get | Method::Other(_) => RequestKind::Other,
+        let Forward { backend, path } = forward;
+        let summary = RequestSummary {
+            method: head.method.clone(),
+            host: head.host.clone(),
+            path: head.target.path.clone(),
+        };
+        // Never beyond the head buffer's capacity. A head within the limits
+        // always fits (see `head_capacity`); this guards that bound.
+        if backend_request_len(&head, &path, c.peer) > head_capacity {
+            let status = Status::RequestHeaderFieldsTooLarge;
+            render_fixed(
+                status,
+                Persistence::Close,
+                body_mode(&head.method),
+                &mut c.send,
+            );
+            actions.push(Action::Log(Log::Response {
+                conn,
+                peer: c.peer,
+                status,
+                request: Some(summary),
+            }));
+            c.state = ConnState::Responding {
+                persistence: Persistence::Close,
+                unread_body: UnreadBody::None,
+                buffered: leftover,
+                deadline: send_deadline,
+            };
+            return;
+        }
+        let mut buffers = ExchangeBuffers::new(recv_capacity, head_capacity);
+        render_backend_request(&head, &path, c.peer, &mut buffers.head);
+        let up = self.upstreams.allocate(conn);
+        actions.push(Action::Connect { up, backend });
+        c.state = ConnState::Connecting {
+            up,
+            request: ProxyRequest {
+                summary,
+                backend,
+                kind: match head.method {
+                    Method::Head => RequestKind::Head,
+                    Method::Get | Method::Other(_) => RequestKind::Other,
+                },
+                persistence: head.persistence,
+                buffered: leftover,
             },
-            persistence: head.persistence,
-            buffered: leftover,
-        },
-        buffers,
-        deadline: now.saturating_add(BACKEND_CONNECT_TIMEOUT),
-    };
+            buffers,
+            deadline: now.saturating_add(BACKEND_CONNECT_TIMEOUT),
+        };
+    }
 }
 
 /// Emit `CloseUpstream` for `up` if it is still open: the table entry is
@@ -378,7 +372,6 @@ impl Core {
                 let remaining = remaining.saturating_sub(body as u64);
                 if remaining == 0 {
                     *source = Source::Done;
-                    *deadline = now.saturating_add(send_idle_timeout);
                     close_upstream(&mut self.upstreams, up, actions);
                 } else {
                     *source = Source::Open {
@@ -386,8 +379,9 @@ impl Core {
                         backend,
                         remaining,
                     };
-                    *deadline = now.saturating_add(BODY_IDLE_TIMEOUT);
                 }
+                // The client has these bytes to take now.
+                *deadline = relay_deadline(now, true, *source, send_idle_timeout);
             }
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
@@ -490,15 +484,7 @@ impl Core {
             self.fail_before_head(now, conn, error, actions);
             return;
         }
-        let ConnState::AwaitingResponse {
-            up,
-            request,
-            mut buffers,
-            filled,
-            parser: _,
-            deadline: _,
-        } = c.take_state()
-        else {
+        let Some((up, request, mut buffers, filled)) = take_awaiting(c) else {
             return;
         };
         actions.push(Action::Log(Log::ProxiedResponse {
@@ -524,10 +510,8 @@ impl Core {
                 remaining,
             }
         };
-        let deadline = match source {
-            Source::Open { .. } => now.saturating_add(BODY_IDLE_TIMEOUT),
-            Source::Done => now.saturating_add(send_idle_timeout),
-        };
+        // The rewritten head is for the client to take now.
+        let deadline = relay_deadline(now, true, source, send_idle_timeout);
         c.state = ConnState::Relaying {
             source,
             buffers,
@@ -671,7 +655,7 @@ impl Core {
                 end,
                 ..
             } => {
-                let client_stalled = !buffers.head.is_empty() || start < end;
+                let client_stalled = !c.send.is_empty() || !buffers.head.is_empty() || start < end;
                 match source {
                     Source::Open { .. } if !client_stalled => {
                         self.cut(conn, BackendFailure::ResponseTimeout, actions);
@@ -697,7 +681,8 @@ impl Core {
     }
 
     /// The client's socket accepted `len` bytes of the relayed response:
-    /// first of its head, then of the body bytes in the upstream's buffer.
+    /// first of the connection's own send buffer (if it holds any), then of
+    /// the response's head, then of the body bytes in the upstream's buffer.
     /// Once the buffer is drained the upstream is read again; once the
     /// whole response is out the exchange ends (keep-alive or close).
     pub(super) fn relay_sent(
@@ -723,7 +708,11 @@ impl Core {
         else {
             return;
         };
-        let sent = if buffers.head.is_empty() {
+        let sent = if !c.send.is_empty() {
+            let sent = len.min(c.send.len());
+            c.send.drain(..sent);
+            sent
+        } else if buffers.head.is_empty() {
             let sent = len.min(end.saturating_sub(*start));
             *start = start.saturating_add(sent);
             sent
@@ -735,20 +724,19 @@ impl Core {
         if sent == 0 {
             return;
         }
-        let done = buffers.head.is_empty() && start >= end;
-        *deadline = match source {
-            Source::Open { .. } => now.saturating_add(BODY_IDLE_TIMEOUT),
-            Source::Done => now.saturating_add(limits.send_idle_timeout),
-        };
+        let done = c.send.is_empty() && buffers.head.is_empty() && start >= end;
+        *deadline = relay_deadline(now, !done, *source, limits.send_idle_timeout);
         match (*source, done) {
             (Source::Done, true) => {
                 let (persistence, buffered) = (*persistence, *buffered);
                 c.state = finish(
                     conn,
                     c,
-                    persistence,
-                    UnreadBody::None,
-                    buffered,
+                    AfterResponse {
+                        persistence,
+                        unread_body: UnreadBody::None,
+                        buffered,
+                    },
                     now,
                     limits,
                     actions,
@@ -758,6 +746,50 @@ impl Core {
             (Source::Done, false) | (Source::Open { .. }, true | false) => {}
         }
         self.sync_interest(conn, actions);
+    }
+}
+
+/// The deadline of a relaying connection after progress at `now`: the
+/// client's `send_idle_timeout` while it has bytes to take (`pending`) or
+/// nothing more is due from the backend, the body idle timeout while it
+/// waits for the backend's next bytes (FR-PROXY-29).
+fn relay_deadline(
+    now: Instant,
+    pending: bool,
+    source: Source,
+    send_idle_timeout: Duration,
+) -> Instant {
+    match (pending, source) {
+        (true, Source::Open { .. } | Source::Done) | (false, Source::Done) => {
+            now.saturating_add(send_idle_timeout)
+        }
+        (false, Source::Open { .. }) => now.saturating_add(BODY_IDLE_TIMEOUT),
+    }
+}
+
+/// Take the parts of `c`'s `AwaitingResponse` state that relaying keeps
+/// (upstream, request, buffers, filled bytes); the caller sets the next
+/// state. Any other state stays.
+fn take_awaiting(c: &mut Conn) -> Option<(UpstreamId, ProxyRequest, ExchangeBuffers, usize)> {
+    match c.take_state() {
+        ConnState::AwaitingResponse {
+            up,
+            request,
+            buffers,
+            filled,
+            ..
+        } => Some((up, request, buffers, filled)),
+        other @ (ConnState::ReadingHead { .. }
+        | ConnState::Idle { .. }
+        | ConnState::Responding { .. }
+        | ConnState::OpeningFile { .. }
+        | ConnState::SendingFile { .. }
+        | ConnState::Connecting { .. }
+        | ConnState::Relaying { .. }
+        | ConnState::Lingering { .. }) => {
+            c.state = other;
+            None
+        }
     }
 }
 

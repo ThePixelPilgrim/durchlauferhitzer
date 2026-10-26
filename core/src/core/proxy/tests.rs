@@ -215,3 +215,45 @@ fn rewritten_heads_at_the_limits_fit_the_head_buffer() {
         "{head}"
     );
 }
+
+/// While relaying, the connection's own send buffer goes out first (Task
+/// 6's `100 Continue` will use it), then the rewritten head, then the body.
+#[test]
+fn own_send_buffer_goes_out_before_the_relayed_response() {
+    let mut core = awaiting_response();
+    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+    core.upstream_recv_buffer(UP)
+        .get_mut(..response.len())
+        .unwrap()
+        .copy_from_slice(response);
+    let len = response.len();
+    handle(&mut core, 0, Event::UpstreamReceived { up: UP, len });
+    let head = core.send_buffer(CONN).to_vec();
+    assert!(head.starts_with(b"HTTP/1.1 200 OK\r\n"), "{head:?}");
+    core.conns
+        .get_mut(&CONN)
+        .unwrap()
+        .send
+        .extend_from_slice(b"own");
+    assert_eq!(core.send_buffer(CONN), b"own");
+    assert_eq!(core.send_capacity(CONN), crate::conn::SEND_CAPACITY);
+    // A length beyond the own bytes is clamped to them.
+    handle(
+        &mut core,
+        0,
+        Event::Sent {
+            conn: CONN,
+            len: 99,
+        },
+    );
+    assert_eq!(core.send_buffer(CONN), head.as_slice());
+    let len = head.len();
+    handle(&mut core, 0, Event::Sent { conn: CONN, len });
+    assert_eq!(core.send_buffer(CONN), b"ok");
+    let actions = handle(&mut core, 0, Event::Sent { conn: CONN, len: 2 });
+    assert!(core.send_buffer(CONN).is_empty(), "{actions:?}");
+    assert!(
+        !core.recv_buffer(CONN).is_empty(),
+        "back to reading: {actions:?}"
+    );
+}

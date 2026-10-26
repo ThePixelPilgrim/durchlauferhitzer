@@ -138,9 +138,10 @@ pub(crate) enum ConnState {
     /// is in `buffers.head`, then the body bytes `buffers.recv[start..end]`
     /// go out, straight from where the backend's bytes landed. `source` says
     /// whether more body bytes are due from the upstream. `persistence` and
-    /// `buffered` as in `Responding`. `deadline` is the body idle timeout
-    /// while the upstream is open, the send idle timeout once it is closed;
-    /// reset on progress.
+    /// `buffered` as in `Responding`. `deadline` is the send idle timeout
+    /// while the client has bytes to take or nothing more is due, the body
+    /// idle timeout while it waits for the backend's next bytes; reset on
+    /// progress.
     Relaying {
         source: Source,
         buffers: ExchangeBuffers,

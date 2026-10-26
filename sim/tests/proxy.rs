@@ -10,7 +10,8 @@ use durchlauferhitzer_core::http::response::{BodyMode, render_fixed};
 use durchlauferhitzer_core::http::response_head::ResponseError;
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::{
-    BackendFailure, BackendId, ConnId, Interest, Log, RequestSummary, UpstreamId,
+    BackendFailure, BackendId, ConnId, Interest, Log, RejectReason, RequestSummary, TimeoutKind,
+    UpstreamId,
 };
 use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
 
@@ -587,5 +588,175 @@ fn stalled_body_after_head_cuts_the_connection() {
         }),
         "{}",
         sim.trace()
+    );
+}
+
+/// As `CONFIG`, with a short client send idle timeout.
+const SHORT_SEND_IDLE: &str = "listen 127.0.0.1:8080;
+limits { send_idle_timeout 5s; }
+host example.test {
+  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+}";
+
+/// The head and the first `n` body bytes of a 10-byte `Content-Length`
+/// response as the client receives them.
+fn head_and(n: usize) -> Vec<u8> {
+    let mut out = b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n".to_vec();
+    out.extend_from_slice(b"0123456789".get(..n).unwrap_or_default());
+    out
+}
+
+/// FR-PROXY-29: the client's `send_idle_timeout` applies while a response
+/// is relayed, also while the upstream is still open: a client that takes
+/// nothing is cut after 5 s, not after the 30 s body idle timeout.
+#[test]
+fn client_send_timeout_while_relaying_cuts_the_connection() {
+    let mut sim = Sim::new(SHORT_SEND_IDLE);
+    let c = request(&mut sim, GET_X);
+    sim.set_client_window(c, Window::Stalled);
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n012");
+    sim.run_until_idle();
+    assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
+    sim.advance(Duration::from_millis(4999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
+}
+
+/// Review Focus 5: a client reset while the response is relayed closes the
+/// upstream at once, between the log and the client's close.
+#[test]
+fn client_reset_while_relaying_closes_upstream() {
+    let mut sim = Sim::new(CONFIG);
+    let c = request(&mut sim, GET_X);
+    sim.set_client_window(c, Window::Stalled);
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n012");
+    sim.run_until_idle();
+    let before = sim.trace().len();
+    sim.reset(c);
+    let trace = sim.trace().get(before..).unwrap_or_default().to_owned();
+    let lines: Vec<&str> = trace
+        .lines()
+        .filter(|l| l.contains(" -> "))
+        .map(|l| l.split_once(" -> ").map_or(l, |(_, a)| a))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "Log Reset { conn: ConnId(1), peer: 192.0.2.1 }",
+            "CloseUpstream",
+            "Close"
+        ],
+        "{trace}"
+    );
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Closed);
+}
+
+/// FR-PROXY-26: a backend failing mid-body cuts the client at once (no
+/// lingering close): it holds the head and the bytes relayed so far.
+#[test]
+fn backend_reset_or_eof_mid_body_cuts_the_connection() {
+    for eof in [false, true] {
+        let mut sim = Sim::new(CONFIG);
+        let c = request(&mut sim, GET_X);
+        let up = only_upstream(&sim);
+        sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n012");
+        sim.run_until_idle();
+        if eof {
+            sim.backend_eof(up);
+            sim.run_until_idle();
+        } else {
+            sim.backend_reset(up);
+        }
+        assert_eq!(
+            sim.state(c),
+            SimConnState::Closed,
+            "eof={eof}\n{}",
+            sim.trace()
+        );
+        assert_eq!(sim.take_received(c), head_and(3), "eof={eof}");
+        assert_eq!(sim.open_upstreams(), 0, "eof={eof}");
+        assert_eq!(
+            sim.logs().last(),
+            Some(&Log::BackendFailed {
+                conn: c,
+                peer: peer(),
+                backend: BackendId(0),
+                kind: BackendFailure::Reset,
+            }),
+            "eof={eof}\n{}",
+            sim.trace()
+        );
+    }
+}
+
+/// A pipelined second request waits until the first response is fully
+/// sent; then it gets its own upstream, and each backend sees exactly its
+/// own request.
+#[test]
+fn pipelined_request_after_proxied_response_is_answered() {
+    let mut sim = Sim::new(CONFIG);
+    let mut both = GET_X.to_vec();
+    both.extend_from_slice(b"GET /api/y HTTP/1.1\r\nHost: example.test\r\n\r\n");
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(c, &both);
+    sim.run_until_idle();
+    let first = only_upstream(&sim);
+    assert_eq!(sim.take_backend_request(first), GET_X_FORWARDED);
+    sim.backend_send(first, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    sim.run_until_idle();
+    // The first response is not out yet: no second upstream.
+    assert_eq!(sim.upstreams(), [first], "{}", sim.trace());
+    sim.set_client_window(c, Window::Unlimited);
+    sim.run_until_idle();
+    assert_eq!(sim.upstreams(), [first, UpstreamId(2)], "{}", sim.trace());
+    let second = UpstreamId(2);
+    assert_eq!(
+        sim.take_backend_request(second),
+        b"GET /y HTTP/1.1\r\nhost: example.test\r\nx-forwarded-for: 192.0.2.1\r\n\
+          x-forwarded-proto: http\r\nconnection: close\r\n\r\n"
+    );
+    sim.backend_send(second, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nyy");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok\
+          HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nyy"
+    );
+    assert_eq!(sim.open_upstreams(), 0);
+    assert_eq!(sim.state(c), SimConnState::Open);
+}
+
+/// FR-PROXY-14: a response head beyond `max_head` is a 502.
+#[test]
+fn head_too_large_response_is_502() {
+    let mut sim = Sim::new(CONFIG);
+    let c = request(&mut sim, GET_X);
+    let up = only_upstream(&sim);
+    let mut response = b"HTTP/1.1 200 OK\r\nX-Pad: ".to_vec();
+    response.resize(20 * 1024, b'a');
+    sim.backend_send(up, &response);
+    sim.run_until_idle();
+    let received = sim.take_received(c);
+    assert_502(
+        &sim,
+        c,
+        BackendFailure::BadResponse(ResponseError::HeadTooLarge),
+        received,
     );
 }

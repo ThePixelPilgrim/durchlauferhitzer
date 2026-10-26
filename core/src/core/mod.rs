@@ -267,11 +267,12 @@
 //! - writing the request to a backend and waiting for its response head:
 //!   the backend response timeout (60 s), restarted once the request head
 //!   is fully written, then a 504 ([`BackendFailure::ResponseTimeout`]);
-//! - relaying a response: the body idle timeout (30 s) while body bytes are
-//!   still due from the backend, the client's `send_idle_timeout` once the
-//!   upstream is closed, both reset on progress; on expiry the connection
-//!   is cut (logged as a send timeout when the client had bytes to take,
-//!   as a backend response timeout otherwise). The three backend timeouts
+//! - relaying a response: the client's `send_idle_timeout` while the client
+//!   has bytes to take (or nothing more is due from the backend), the body
+//!   idle timeout (30 s) while it waits for the backend's next body bytes;
+//!   reset on progress either way. On expiry the connection is cut, logged
+//!   as a send timeout when the client had bytes to take, as a backend
+//!   response timeout otherwise. The three backend timeouts
 //!   are the spec's defaults (FR-PROXY-29) until they become limits;
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
@@ -537,7 +538,9 @@ impl Core {
 
     /// Bytes waiting to be written to `conn`. Empty when there are none or
     /// the connection is unknown. While a proxied response is relayed they
-    /// are its rewritten head, then its body bytes straight out of the
+    /// are any bytes of the connection's own send buffer first (none in
+    /// this task; an interim response of the core's own later), then the
+    /// response's rewritten head, then its body bytes straight out of the
     /// upstream's receive buffer.
     pub fn send_buffer(&self, conn: ConnId) -> &[u8] {
         match self.conns.get(&conn) {
@@ -548,7 +551,9 @@ impl Core {
                     end,
                     ..
                 } => {
-                    if buffers.head.is_empty() {
+                    if !c.send.is_empty() {
+                        &c.send
+                    } else if buffers.head.is_empty() {
                         buffers.recv.get(*start..*end).unwrap_or_default()
                     } else {
                         &buffers.head
@@ -624,7 +629,9 @@ impl Core {
     pub fn send_capacity(&self, conn: ConnId) -> usize {
         self.conns.get(&conn).map_or(0, |c| match &c.state {
             ConnState::Relaying { buffers, .. } => {
-                if buffers.head.is_empty() {
+                if !c.send.is_empty() {
+                    SEND_CAPACITY
+                } else if buffers.head.is_empty() {
                     buffers.recv.len()
                 } else {
                     self.head_capacity

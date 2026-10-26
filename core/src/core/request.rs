@@ -2,7 +2,7 @@
 //! responses, and what follows a response: keep-alive or a lingering close.
 
 use super::proxy::{self, ProxyPlan};
-use super::static_files::{Plan, open_static, plan};
+use super::static_files::{Plan, plan};
 use super::{Action, ConnId, Core};
 use crate::config::{Limits, RouteAction};
 use crate::conn::{Conn, ConnState, LINGER_TIMEOUT, UnreadBody};
@@ -106,9 +106,11 @@ impl Core {
                     c.state = finish(
                         conn,
                         c,
-                        persistence,
-                        unread_body,
-                        buffered,
+                        AfterResponse {
+                            persistence,
+                            unread_body,
+                            buffered,
+                        },
                         now,
                         limits,
                         actions,
@@ -126,9 +128,11 @@ impl Core {
                     c.state = finish(
                         conn,
                         c,
-                        persistence,
-                        UnreadBody::None,
-                        buffered,
+                        AfterResponse {
+                            persistence,
+                            unread_body: UnreadBody::None,
+                            buffered,
+                        },
                         now,
                         limits,
                         actions,
@@ -217,22 +221,30 @@ impl Core {
     }
 }
 
+/// How a connection goes on once its response is fully written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AfterResponse {
+    pub(super) persistence: Persistence,
+    pub(super) unread_body: UnreadBody,
+    /// Pipelined input waiting at the front of `Conn::recv`.
+    pub(super) buffered: usize,
+}
+
 /// The response on `conn` is fully written: keep the connection for the
 /// next request, or shut down its sending side and linger.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "free function over disjoint borrows of the core's fields"
-)]
 pub(super) fn finish(
     conn: ConnId,
     c: &mut Conn,
-    persistence: Persistence,
-    unread_body: UnreadBody,
-    buffered: usize,
+    after: AfterResponse,
     now: Instant,
     limits: &Limits,
     actions: &mut Vec<Action>,
 ) -> ConnState {
+    let AfterResponse {
+        persistence,
+        unread_body,
+        buffered,
+    } = after;
     match (persistence, unread_body) {
         (Persistence::KeepAlive, UnreadBody::None) => {
             if buffered > 0 {
@@ -296,17 +308,7 @@ impl Core {
                     on_file_change,
                 } => match plan(route, root, *on_file_change, &head, &self.static_roots) {
                     Plan::Open(open) => {
-                        open_static(
-                            c,
-                            &mut self.files,
-                            conn,
-                            head,
-                            open,
-                            body,
-                            leftover,
-                            send_deadline,
-                            actions,
-                        );
+                        self.open_static(now, conn, head, open, leftover, actions);
                         return;
                     }
                     Plan::Respond(status, persistence) => (status, persistence),
@@ -314,21 +316,7 @@ impl Core {
                 RouteAction::Proxy(target) => {
                     match proxy::plan(route, target, &head, &self.backends) {
                         ProxyPlan::Forward(forward) => {
-                            proxy::forward(
-                                c,
-                                &mut self.upstreams,
-                                proxy::Capacities {
-                                    recv: self.upstream_recv_capacity,
-                                    head: self.head_capacity,
-                                },
-                                conn,
-                                head,
-                                forward,
-                                leftover,
-                                now,
-                                send_deadline,
-                                actions,
-                            );
+                            self.forward(now, conn, head, forward, leftover, actions);
                             return;
                         }
                         ProxyPlan::Respond(status, persistence) => (status, persistence),
