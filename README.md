@@ -10,3 +10,7 @@ See [`examples/durchlauferhitzer.conf`](examples/durchlauferhitzer.conf) for a d
 - [`examples/`](examples) — documented example configuration.
 - [`docs/superpowers/`](docs/superpowers) — design spec, implementation plans per stage, and review records.
 - [`scripts/`](scripts) — CI helpers (product dependency check).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
