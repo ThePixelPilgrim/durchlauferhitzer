@@ -42,7 +42,9 @@ stalled output, no deadline left in the past, and more. A violation fails the te
 
 ```
 src/
-  lib.rs              Sim: the driver, the clock, client-side invariants
+  lib.rs              Sim: the driver, client-side invariants
+  clock.rs            `advance`, `next_due` and `TimerOrder`: on-time
+                      and late timers (NFR-TEST-07)
   disk.rs             file ids, disk operations, sendfile, file invariants
   backend.rs          scripted backends, upstream pumping and invariants
   fs.rs               the in-memory file system
