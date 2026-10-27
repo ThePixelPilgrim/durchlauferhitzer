@@ -23,7 +23,6 @@ fn every_rendered_head_fits_the_send_buffer() {
         S::UriTooLong,
         S::ExpectationFailed,
         S::RequestHeaderFieldsTooLarge,
-        S::NotImplemented,
         S::BadGateway,
         S::ServiceUnavailable,
         S::GatewayTimeout,

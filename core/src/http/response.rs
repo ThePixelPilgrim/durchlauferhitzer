@@ -32,7 +32,6 @@ pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, ou
         | Status::UriTooLong
         | Status::ExpectationFailed
         | Status::RequestHeaderFieldsTooLarge
-        | Status::NotImplemented
         | Status::BadGateway
         | Status::ServiceUnavailable
         | Status::GatewayTimeout
@@ -228,7 +227,7 @@ mod tests {
         for status in [
             Status::NotFound,
             Status::ContentTooLarge,
-            Status::NotImplemented,
+            Status::BadGateway,
         ] {
             let mut out = Vec::new();
             render_fixed(status, Persistence::Close, BodyMode::Full, &mut out);

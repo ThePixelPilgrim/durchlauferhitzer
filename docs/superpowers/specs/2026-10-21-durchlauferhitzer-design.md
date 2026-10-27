@@ -379,7 +379,8 @@ Core-generated responses:
 - **FR-HTTP-21** [done] Every response to a request whose method was parsed
   as `HEAD` carries the head only (with the full `Content-Length`), errors
   included: missing `Host`, header and framing errors after the request
-  line, 301, 404, 405, 413, the 414 for an oversized redirect, 501. An error in the request line itself is
+  line, 301, 404, 405, 413, the 414 for an oversized redirect, and the
+  408, 502 and 504 of proxy routes. An error in the request line itself is
   answered with a body, since no method was accepted. *(since stage 2;
   supersedes the stage 2 Task 3 ruling "parse errors keep a body")*
 - **FR-HTTP-22** [done] Core-generated responses carry no `Server` header.
@@ -409,8 +410,10 @@ Core-generated responses:
   match → 404.
 - **FR-ROUTE-07** [done] A 404 for an unknown host or path keeps the
   request's persistence.
-- **FR-ROUTE-08** [done, interim] Until stage 3 Task 5, a matched proxy
-  route answers 501 with `Connection: close`.
+- **FR-ROUTE-08** [retired in stage 3 Task 8] Until stage 3 Task 5, a
+  matched proxy route answered 501 with `Connection: close`. Proxy routes
+  forward since Task 5, the last 501 went in Task 7, and Task 8 removed
+  the 501 status from the core.
 
 ### FR-STATIC — Static routes
 
