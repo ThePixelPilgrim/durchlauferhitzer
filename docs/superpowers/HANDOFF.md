@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-26, after stage 3 Task 6 landed on `main`.
+Last updated 2026-10-26, after stage 3 Task 7 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -9,9 +9,9 @@ A new session should start from the latest `main`, read this file first, then `C
 |---|---|
 | 1 Foundations | done, merged to `main` (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done, merged to `main` (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
-| 3 Reverse proxy | **in progress** on `main` (Tasks 1–6 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
+| 3 Reverse proxy | **in progress** on `main` (Tasks 1–7 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
 
-Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ✅, 6 request bodies ✅, 7 response bodies ← **next**, 8 timeouts/failure matrix, 9 randomized sim. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
+Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ✅, 6 request bodies ✅, 7 response bodies ✅, 8 timeouts/failure matrix ← **next**, 9 randomized sim. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…, consolidated 2026-10-25); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -38,8 +38,11 @@ Task 5 (done, `55f4e58`..`d538a95`): upstream contract (`core/src/upstream.rs`, 
 
 Task 6 (done, `be4f8e8`..`acc0ec0` + doc nit): `Expect` parsing (FR-PROXY-25/25a, owner decision D3), request bodies (`Content-Length` and chunked, zero-copy from the client's receive buffer, fill-drain-refill with the ≤35-byte tail), 413 before connect, chunked over limit → cut, 408 for a stalled client body, `BackendFailure::BodyTimeout` (504) for a backend that stops taking the body, early responses (FR-PROXY-27). Owner decision 2026-10-26: `Interest::ReadWrite` (upstreams only) so an early response is seen while body bytes wait for the backend. Builder calls are in the spec.
 
+Task 7 (done, `5fdcf65`..`bfcb69c`): response bodies — chunked passed through verbatim, close-delimited with `connection: close`, HEAD/204/304 never carry a body, bytes after a body end dropped, `max_response_body` (502 up front, cut once passed; body bytes arriving with the head are judged before the head is sent, so errors there are a 502), fill-drain-refill toward a slow client with the chunked tail, interim heads dropped with a cap of 8, `not_implemented` removed. Owner decisions 2026-10-27 (FR-PROXY-04): the request line mirrors the client's version; any `Transfer-Encoding` toward an HTTP/1.0 client → 502 (`TransferEncodingToHttp10`), also on body-less replies. New `BackendFailure` kinds `BadChunk`, `BodyTooLarge`.
+
 Still to carry into later tasks (`.superpowers/` notes are not in git, so listed here):
-- Task 7: `not_implemented` (proxy.rs) sets `UnreadBody::None` without `body.end`, so an early 501 during an upload (an interim head, which `ReadWrite` now sees sooner, or a chunked / close-delimited head) closes without lingering; Task 7 replaces these 501s, make sure the unread-body close lingers. A partial response head under `ReadWrite` does not restart the body idle deadline (label only).
+- A partial response head under `ReadWrite` does not restart the body idle deadline (log label only).
+- `Status::NotImplemented` is no longer sent by the core; remove it when convenient.
 - Waiting states still use named default-timeout constants (`BODY_IDLE_TIMEOUT` etc.); Task 8 replaces them with `Limits` keys. Task 8 may also add `BackendFailure` kinds for "closed before head" and "body stalled".
 
 ## Branches
