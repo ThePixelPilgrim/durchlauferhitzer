@@ -895,6 +895,10 @@ fn reset_or_eof_mid_body_after_the_head_cuts_both() {
             "{}",
             sim.trace()
         );
-        assert_cut(&sim, c, before, BackendFailure::Reset);
+        let kind = match end {
+            End::Reset => BackendFailure::Reset,
+            End::Eof => BackendFailure::ClosedEarly,
+        };
+        assert_cut(&sim, c, before, kind);
     }
 }

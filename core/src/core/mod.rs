@@ -283,7 +283,8 @@
 //!   startup adds them to the budget above.
 //! - Failures (FR-PROXY-26): before the response head was queued, a failed
 //!   or refused connect is answered 502 ([`BackendFailure::Refused`]), a
-//!   reset or early end of stream 502 ([`BackendFailure::Reset`]), a
+//!   reset 502 ([`BackendFailure::Reset`]), an early end of stream 502
+//!   ([`BackendFailure::ClosedEarly`]), a
 //!   malformed or oversized response head 502
 //!   ([`BackendFailure::BadResponse`], also for `101` and too many interim
 //!   heads), a body over `max_response_body` 502
@@ -298,8 +299,9 @@
 //!   [`Log::Response`], and the client connection stays as the request
 //!   asked if its body was fully read (else it closes). After the head was
 //!   queued, any failure cuts the client connection at once (logged, then
-//!   `CloseUpstream`, then `Close`, no lingering close): a reset, an end of
-//!   stream before a `Content-Length` or chunked body is complete, bad
+//!   `CloseUpstream`, then `Close`, no lingering close): a reset (`Reset`),
+//!   an end of stream before a `Content-Length` or chunked body is complete
+//!   (`ClosedEarly`), bad
 //!   chunked framing, a chunked or close-delimited body passing
 //!   `max_response_body`, a stalled body. A request body with invalid chunked
 //!   framing is answered 400 if it came with the head, else both
@@ -330,11 +332,13 @@
 //! - writing the request to a backend and waiting for its response head:
 //!   `backend_response_timeout`, restarted once the request head is fully
 //!   written, then a 504 ([`BackendFailure::ResponseTimeout`]); while a
-//!   request body streams, `body_idle_timeout` instead,
-//!   reset on progress either way, then a 408 if the core waited for the
-//!   client's body bytes, a 504 ([`BackendFailure::BodyTimeout`]) if they
-//!   waited for the backend; once the
-//!   whole request is written, the response timeout again;
+//!   request body streams, `body_idle_timeout` instead, reset on progress
+//!   either way (a body byte read from the client or written to the
+//!   backend, or response head bytes read from the backend), then a 408 if
+//!   the core waited for the client's body bytes, a 504
+//!   ([`BackendFailure::BodyTimeout`]) if they waited for the backend; once
+//!   the whole request is written, the response timeout again, a total
+//!   deadline that response head bytes do not extend;
 //! - relaying a response: the client's `send_idle_timeout` while the client
 //!   has bytes to take (or nothing more is due from the backend),
 //!   `body_idle_timeout` while it waits for the backend's next body bytes;

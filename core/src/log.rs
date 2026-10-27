@@ -76,9 +76,12 @@ pub enum BackendFailure {
     /// The connect failed (refused, unreachable, or any other error before
     /// `UpstreamConnected`).
     Refused,
-    /// The connected socket failed, or the backend closed it before its
-    /// response was complete.
+    /// The connected socket failed (a reset or another socket error).
     Reset,
+    /// The backend ended its stream before its response was complete:
+    /// before the response head (a 502), or before a `Content-Length` or
+    /// chunked body was complete (the connection is cut).
+    ClosedEarly,
     /// The response head was malformed or oversized.
     BadResponse(ResponseError),
     /// The connect did not complete within the connect timeout.

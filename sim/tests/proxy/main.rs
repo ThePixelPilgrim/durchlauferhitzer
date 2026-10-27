@@ -246,7 +246,7 @@ fn backend_reset_before_head_is_502() {
 }
 
 /// A backend that closes before its head is complete is a failed backend
-/// too (logged as a reset: the connection ended early).
+/// too, logged as having closed early (not as a reset).
 #[test]
 fn backend_eof_before_head_is_502() {
     let mut sim = Sim::new(CONFIG);
@@ -256,7 +256,7 @@ fn backend_eof_before_head_is_502() {
     sim.backend_eof(up);
     sim.run_until_idle();
     let received = sim.take_received(c);
-    assert_502(&sim, c, BackendFailure::Reset, received);
+    assert_502(&sim, c, BackendFailure::ClosedEarly, received);
 }
 
 #[test]
@@ -665,7 +665,11 @@ fn backend_reset_or_eof_mid_body_cuts_the_connection() {
                 conn: c,
                 peer: peer(),
                 backend: BackendId(0),
-                kind: BackendFailure::Reset,
+                kind: if eof {
+                    BackendFailure::ClosedEarly
+                } else {
+                    BackendFailure::Reset
+                },
             }),
             "eof={eof}\n{}",
             sim.trace()

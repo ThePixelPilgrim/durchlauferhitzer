@@ -266,7 +266,8 @@ impl Core {
     }
 
     /// `up`'s connect or socket failed: before the response head that is a
-    /// 502, after it the connection is cut.
+    /// 502 (`Refused` while connecting, `Reset` after), after it the
+    /// connection is cut (`Reset`).
     pub(super) fn upstream_failed(
         &mut self,
         now: Instant,
@@ -297,17 +298,37 @@ impl Core {
     }
 
     /// The backend closed its sending side: the end of a close-delimited
-    /// body; before its response was complete otherwise, which is the same
-    /// as a reset. (After any other complete body the upstream is already
-    /// closed and no event comes.)
+    /// body; otherwise it closed before its response was complete, a 502
+    /// before the response head and a cut after it, logged as
+    /// [`BackendFailure::ClosedEarly`]. (After any other complete body the
+    /// upstream is already closed and no event comes; while connecting no
+    /// read is offered, so none can come then either.)
     pub(super) fn upstream_read_closed(
         &mut self,
         now: Instant,
         up: UpstreamId,
         actions: &mut Vec<Action>,
     ) {
-        if !self.relay_read_closed(now, up, actions) {
-            self.upstream_failed(now, up, actions);
+        if self.relay_read_closed(now, up, actions) {
+            return;
+        }
+        let Some(conn) = self.upstreams.conn(up) else {
+            return;
+        };
+        let Some(c) = self.conns.get(&conn) else {
+            return;
+        };
+        let kind = BackendFailure::ClosedEarly;
+        match c.state {
+            ConnState::AwaitingResponse { .. } => self.fail_before_head(now, conn, kind, actions),
+            ConnState::Relaying { .. } => self.cut(conn, kind, actions),
+            ConnState::Connecting { .. }
+            | ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Lingering { .. } => {}
         }
     }
 
@@ -320,6 +341,7 @@ impl Core {
         len: usize,
         actions: &mut Vec<Action>,
     ) {
+        let body_idle_timeout = self.config.limits.body_idle_timeout;
         let Some(conn) = self.upstreams.conn(up) else {
             return;
         };
@@ -332,13 +354,27 @@ impl Core {
         }
         match &mut c.state {
             ConnState::AwaitingResponse {
-                buffers, filled, ..
+                request,
+                buffers,
+                filled,
+                deadline,
+                ..
             } => {
                 let added = len.min(buffers.recv.len().saturating_sub(*filled));
                 if added == 0 {
                     return;
                 }
                 *filled = filled.saturating_add(added);
+                // While the body streams, backend bytes are progress too
+                // (FR-PROXY-29: no progress in either direction); once the
+                // whole request is written, the response timeout is a total
+                // deadline and runs on.
+                match request.body.stage() {
+                    Stage::Receiving | Stage::Writing => {
+                        *deadline = now.saturating_add(body_idle_timeout);
+                    }
+                    Stage::Written => {}
+                }
                 self.judge_head(now, conn, actions);
             }
             ConnState::Relaying { .. } => self.relay_received(now, conn, len, actions),
@@ -433,6 +469,7 @@ impl Core {
         let status = match kind {
             BackendFailure::Refused
             | BackendFailure::Reset
+            | BackendFailure::ClosedEarly
             | BackendFailure::BadResponse(_)
             | BackendFailure::BadChunk(_)
             | BackendFailure::BodyTooLarge

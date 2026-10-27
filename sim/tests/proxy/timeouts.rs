@@ -163,3 +163,71 @@ fn configured_body_idle_timeout_cuts_a_stalled_response() {
         sim.trace()
     );
 }
+
+/// FR-PROXY-29: while the request body streams, response head bytes from
+/// the backend are progress too ("no body progress in either direction"):
+/// they restart `body_idle_timeout`. Who is blamed on expiry still follows
+/// what the core waited for: the client's body bytes (408) or a backend
+/// that stopped taking them (504).
+#[test]
+fn partial_response_head_during_upload_restarts_body_idle_timeout() {
+    for backend_stalls in [false, true] {
+        let mut sim = Sim::new(TIMEOUTS);
+        let head = b"POST /x HTTP/1.1\r\nhost: example.test\r\ncontent-length: 10\r\n\
+            x-forwarded-for: 192.0.2.1\r\nx-forwarded-proto: http\r\nconnection: close\r\n\r\n";
+        sim.set_default_backend_window(Window::Budget(head.len() + 3));
+        let c = sim.connect(peer());
+        sim.send(c, POST_10);
+        if backend_stalls {
+            sim.send(c, b"0123456789");
+        } else {
+            sim.send(c, b"012");
+        }
+        sim.run_until_idle();
+        let up = only_upstream(&sim);
+        sim.advance(Duration::from_millis(1500));
+        sim.backend_send(up, b"HTTP/1.1 200 OK\r\n");
+        sim.run_until_idle();
+        // 2 s after the head bytes, not after the last body byte.
+        sim.advance(Duration::from_millis(1999));
+        assert!(
+            sim.take_received(c).is_empty(),
+            "backend_stalls={backend_stalls}\n{}",
+            sim.trace()
+        );
+        assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
+        sim.advance(Duration::from_millis(1));
+        // The whole body was read when only the backend stalls, so that
+        // 504 keeps the client (FR-PROXY-26, -28).
+        let (status, persistence, log) = if backend_stalls {
+            (
+                Status::GatewayTimeout,
+                Persistence::KeepAlive,
+                Log::BackendFailed {
+                    conn: c,
+                    peer: peer(),
+                    backend: BackendId(0),
+                    kind: BackendFailure::BodyTimeout,
+                },
+            )
+        } else {
+            (
+                Status::RequestTimeout,
+                Persistence::Close,
+                Log::Rejected {
+                    conn: c,
+                    peer: peer(),
+                    reason: RejectReason::Timeout(TimeoutKind::RequestBody),
+                },
+            )
+        };
+        assert_eq!(
+            sim.take_received(c),
+            fixed(status, persistence, BodyMode::Full),
+            "backend_stalls={backend_stalls}\n{}",
+            sim.trace()
+        );
+        assert_eq!(sim.logs().first(), Some(&log), "{}", sim.trace());
+        assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    }
+}
