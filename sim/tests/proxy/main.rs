@@ -2,10 +2,12 @@
 //! driver, with scripted backends behind it. Heads, failures and timeouts
 //! here; request bodies in `bodies.rs`, `Expect` in `expect.rs`, response
 //! bodies in `responses.rs`, configured timeouts and the client's
-//! half-close in `timeouts.rs`.
+//! half-close in `timeouts.rs`, backend resets behind readable bytes in
+//! `resets.rs`.
 
 mod bodies;
 mod expect;
+mod resets;
 mod responses;
 mod timeouts;
 
@@ -650,10 +652,10 @@ fn backend_reset_or_eof_mid_body_cuts_the_connection() {
         sim.run_until_idle();
         if eof {
             sim.backend_eof(up);
-            sim.run_until_idle();
         } else {
             sim.backend_reset(up);
         }
+        sim.run_until_idle();
         assert_eq!(
             sim.state(c),
             SimConnState::Closed,

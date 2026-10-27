@@ -779,11 +779,9 @@ fn reset_or_eof_mid_body_after_the_head_cuts_both() {
         let before = sim.trace().len();
         match end {
             End::Reset => sim.backend_reset(up),
-            End::Eof => {
-                sim.backend_eof(up);
-                sim.run_until_idle();
-            }
+            End::Eof => sim.backend_eof(up),
         }
+        sim.run_until_idle();
         assert_eq!(
             sim.take_received(c),
             cat(&[relayed_head, relayed]),

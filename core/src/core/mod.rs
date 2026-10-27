@@ -204,12 +204,32 @@
 //!   writable (`EPOLLOUT`) to learn that the connect completed, then reads
 //!   `SO_ERROR`; that wait is the driver's, not an interest. The core sets
 //!   the interest with [`Action::SetUpstreamInterest`] once connected.
-//! - Socket errors and hang-ups (`EPOLLERR`, `EPOLLHUP`) are reported
-//!   whatever the interest: [`Event::Failed`] for a client,
-//!   [`Event::UpstreamFailed`] for an upstream. End of stream, by contrast,
-//!   is only learnt from a read, so [`Event::ReadClosed`] and
-//!   [`Event::UpstreamReadClosed`] come only while the interest is `Read`
-//!   (for an upstream, `Read` or `ReadWrite`).
+//! - A client's socket errors and hang-ups (`EPOLLERR`, `EPOLLHUP`) are
+//!   reported whatever the interest, as [`Event::Failed`]: a client error
+//!   means the client is gone.
+//! - An upstream's socket error is reported as [`Event::UpstreamFailed`]
+//!   only when a read or a write hits it (or, for a connect, from
+//!   `SO_ERROR`), and never ahead of bytes the backend sent before it.
+//!   A backend that closes with unread input (say, a 413 to an upload it
+//!   did not read) makes its kernel send RST instead of FIN; the response
+//!   it wrote first is still readable until the read that returns
+//!   `ECONNRESET`. So: under `Read` or `ReadWrite` the driver reads every
+//!   readable byte (each read reported as usual) before it reports the
+//!   error. A write that fails under `ReadWrite` is not reported by
+//!   itself: the driver stops writing and goes on reading, and reports
+//!   what the reads return (bytes, end of stream, then the error); under
+//!   `Write` alone a failed write is reported at once. While the
+//!   upstream's interest is `None` (the client is still taking relayed
+//!   bytes, say) an error is not reported at all until the core asks to
+//!   read or write again: then the reads above report it. (epoll reports
+//!   `EPOLLERR` and `EPOLLHUP` whatever the events asked for, so the
+//!   driver keeps such an upstream out of its poll set, or ignores those
+//!   bits for it, until then.) `CloseUpstream` supersedes an error not
+//!   yet reported. This keeps an early answer (FR-PROXY-27) and the last
+//!   bytes of a relayed body from being lost to a reset.
+//! - End of stream is only learnt from a read, so [`Event::ReadClosed`]
+//!   and [`Event::UpstreamReadClosed`] come only while the interest is
+//!   `Read` (for an upstream, `Read` or `ReadWrite`).
 //! - While a request is proxied the client connection is not read (its
 //!   interest is `None` or `Write`), except for the request's body, so a
 //!   client that half-closes after its complete request is noticed only
@@ -232,7 +252,8 @@
 //!   either may have become empty or the interest may have changed. A
 //!   client connection never gets it. End of stream is
 //!   `UpstreamReadClosed`; a socket error after the connect (`ECONNRESET`,
-//!   `EPIPE` as `Reset`, anything else as `Other`) is `UpstreamFailed`.
+//!   `EPIPE` as `Reset`, anything else as `Other`) is `UpstreamFailed`,
+//!   reported by the rule above (after the readable bytes).
 //! - `CloseUpstream { up }` means: close the socket, also while its connect
 //!   is pending, and deliver no further event for that id. The core emits it
 //!   exactly once per upstream on every path (response complete, backend

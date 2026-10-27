@@ -1281,7 +1281,19 @@ sim implements and checks it; the epoll driver is [stage 4].
   `Interest::ReadWrite`: the driver then reads and writes as readiness
   allows, reports each read and write as the very next call, and asks for
   both buffers afresh after every call (owner decision 2026-10-26, for
-  FR-PROXY-27).
+  FR-PROXY-27). An upstream's readable bytes are reported before its
+  socket error: a socket error is reported only when a read or write hits
+  it (a failed connect via `SO_ERROR`); under `Read`/`ReadWrite` every
+  readable byte is read and reported first, and a write that fails under
+  `ReadWrite` is reported only through the reads that follow it (bytes,
+  end of stream, then the error); while the upstream's interest is `None`
+  the error waits until the core asks to read or write again. A client's
+  errors are still reported whatever the interest. *(Stage 3 final
+  review I1: otherwise a backend's early 413 followed by the RST its
+  kernel sends over an unread upload becomes our 502. Sim:
+  `backend_reset_after`; tests
+  `early_413_then_reset_during_the_upload_is_relayed`,
+  `reset_after_a_complete_close_delimited_tail_while_the_client_drains`.)*
 - **DRV-11** [stage 4] Sockets are non-blocking on `epoll`, with
   `TCP_NODELAY` (NFR-PERF-04); `RLIMIT_NOFILE` is checked against
   NFR-RES-05 at startup.

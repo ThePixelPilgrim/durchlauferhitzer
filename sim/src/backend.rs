@@ -76,11 +76,24 @@ struct Upstream {
     /// Bytes the backend has sent, not yet read by the driver.
     to_core: VecDeque<u8>,
     eof: Eof,
+    /// A reset queued behind `to_core` ([`Sim::backend_reset_after`]).
+    reset: Reset,
     /// Bytes the backend has received (taken by `take_backend_request`).
     received: Vec<u8>,
     /// Every byte the backend has received, judged as one request.
     forwarded: Forwarded,
     window: Window,
+}
+
+/// Whether a backend reset waits behind the bytes it sent before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reset {
+    No,
+    /// Delivered as `UpstreamFailed { Reset }` once a read finds `to_core`
+    /// drained; a write meanwhile is held back (the contract reports a
+    /// failed write under `ReadWrite` only after the reads), and nothing is
+    /// delivered while the interest is `None`.
+    Queued,
 }
 
 /// What a backend has been sent, judged as exactly one request: its head
@@ -260,31 +273,55 @@ impl Sim {
             Eof::NotSent,
             "backend_send after backend_eof on {up:?}"
         );
+        assert_eq!(
+            u.reset,
+            Reset::No,
+            "backend_send after backend_reset_after on {up:?}"
+        );
         u.to_core.extend(bytes);
     }
 
     /// Queue end of stream from backend `up`, after any queued bytes.
     pub fn backend_eof(&mut self, up: UpstreamId) {
         let u = self.upstream_mut(up);
-        if u.eof == Eof::NotSent {
+        if u.eof == Eof::NotSent && u.reset == Reset::No {
             u.eof = Eof::Queued;
         }
     }
 
-    /// Backend `up` resets the connection; delivers `UpstreamFailed` at
-    /// once (unless the upstream is not connected, or already failed or
-    /// closed).
+    /// Backend `up` resets the connection, and any bytes it queued that
+    /// the driver has not read yet are lost (the stack discarded them).
+    /// `UpstreamFailed { Reset }` comes on the next pump that reads or
+    /// writes, as with [`Sim::backend_reset_after`]: not while the interest
+    /// is `None` (DRV-10). Nothing happens unless the upstream is connected
+    /// (and not already failed or closed).
     pub fn backend_reset(&mut self, up: UpstreamId) {
         let u = self.upstream_mut(up);
         if u.phase != Phase::Connected {
             return;
         }
-        u.phase = Phase::Failed;
         u.to_core.clear();
-        self.deliver(Event::UpstreamFailed {
-            up,
-            error: ConnError::Reset,
-        });
+        u.eof = Eof::NotSent;
+        u.reset = Reset::Queued;
+    }
+
+    /// Backend `up` sends `bytes`, then resets the connection (a backend
+    /// that closes with unread input: its kernel sends RST, not FIN). As
+    /// the contract demands (DRV-10), the driver reads and reports every
+    /// queued byte first; `UpstreamFailed { Reset }` comes from the read
+    /// that finds them drained. A write the core wants meanwhile is not
+    /// made under `ReadWrite` (it would fail, and that is reported only
+    /// after the reads); under `Write` alone it fails at once. While the
+    /// interest is `None` nothing is delivered.
+    pub fn backend_reset_after(&mut self, up: UpstreamId, bytes: &[u8]) {
+        let u = self.upstream_mut(up);
+        assert_eq!(
+            u.eof,
+            Eof::NotSent,
+            "backend_reset_after after backend_eof on {up:?}"
+        );
+        u.to_core.extend(bytes);
+        u.reset = Reset::Queued;
     }
 
     /// A connect left hanging (`ConnectBehaviour::Hang`) completes on the
@@ -390,6 +427,14 @@ impl Sim {
             self.violation(&format!("read from unknown up={}", up.0));
         };
         if u.to_core.is_empty() {
+            if u.reset == Reset::Queued {
+                u.phase = Phase::Failed;
+                self.deliver(Event::UpstreamFailed {
+                    up,
+                    error: ConnError::Reset,
+                });
+                return true;
+            }
             if u.eof == Eof::Queued {
                 u.eof = Eof::Delivered;
                 self.deliver(Event::UpstreamReadClosed { up });
@@ -413,6 +458,20 @@ impl Sim {
     /// Write from `upstream_send_buffer` as far as the backend's window
     /// allows.
     fn pump_upstream_write(&mut self, up: UpstreamId) -> bool {
+        let u = self.upstream(up);
+        match (u.reset, u.interest) {
+            (Reset::No, _) => {}
+            // The write fails; under `ReadWrite` the reads report it.
+            (Reset::Queued, Interest::ReadWrite | Interest::Read | Interest::None) => return false,
+            (Reset::Queued, Interest::Write) => {
+                self.upstream_mut(up).phase = Phase::Failed;
+                self.deliver(Event::UpstreamFailed {
+                    up,
+                    error: ConnError::Reset,
+                });
+                return true;
+            }
+        }
         let window = self.upstream(up).window.size();
         let pending = self.core.upstream_send_buffer(up);
         let n = pending.len().min(window);
@@ -483,6 +542,7 @@ impl Sim {
                         interest: Interest::None,
                         to_core: VecDeque::new(),
                         eof: Eof::NotSent,
+                        reset: Reset::No,
                         received: Vec::new(),
                         forwarded: Forwarded::new(),
                         window,

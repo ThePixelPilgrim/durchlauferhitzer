@@ -17,7 +17,10 @@ What it simulates:
   servers: connects accepted, refused or left hanging per backend address
   (and a hanging one let through later, a slow accept);
   the test reads what a backend received and makes it send bytes, close,
-  reset or read slowly (`Window`).
+  reset (also behind bytes it sent first, `backend_reset_after`; a reset
+  is delivered by the next read or write the core asks for, never while
+  the upstream's interest is `None`, as the contract demands) or read
+  slowly (`Window`).
 
 What it checks: after every step the sim verifies the driver contract
 documented in [`../core/src/core/mod.rs`](../core/src/core/mod.rs) from the
@@ -59,6 +62,7 @@ tests/
     responses.rs        response bodies: chunked, close-delimited, none,
                         limits, interim heads, cuts
     responses/http10.rs   HTTP/1.0 clients: request line, Transfer-Encoding
+    resets.rs           backend resets behind readable bytes (DRV-10)
     timeouts.rs         the backend timeouts as configured `limits`, the
                         client's half-close, the failure log kinds
   faults/             fault injection and randomized runs (see below)
