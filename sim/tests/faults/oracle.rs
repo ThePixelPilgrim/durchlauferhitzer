@@ -196,10 +196,9 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
         } => (*status, request.as_ref()),
         Log::Rejected { reason, .. } => {
             let status = match reason {
-                RejectReason::Http { error, request } => {
-                    check_request_line(error, request.as_ref())?;
-                    model_http_status(error)
-                }
+                // Its request line is checked against the request it
+                // answers (`check_request_line`).
+                RejectReason::Http { error, .. } => model_http_status(error),
                 RejectReason::Timeout(TimeoutKind::Header | TimeoutKind::RequestBody) => {
                     Status::RequestTimeout
                 }
@@ -326,9 +325,24 @@ enum Found {
     Either,
 }
 
-/// FR-LOG-07: a parse error carries the request line exactly when it was
-/// found after a valid one; its path is raw, from `/`, without the query.
-fn check_request_line(error: &HttpError, request: Option<&RequestLine>) -> Result<(), String> {
+/// The raw path of `template`'s request target, without the query.
+fn template_path(template: &[u8]) -> String {
+    let line = String::from_utf8_lossy(template);
+    let target = line.split(' ').nth(1).unwrap_or_default();
+    target.split('?').next().unwrap_or_default().to_owned()
+}
+
+/// FR-LOG-07: a parse error of `template` carries the request line
+/// exactly when it was found after a valid one, with the template's raw
+/// path. An error that can be in either place is placed by the template:
+/// after the request line if that line ended with CRLF (a bare LF ending
+/// it is the error itself; a head over its limit with a valid request
+/// line is found in the headers).
+fn check_request_line(
+    error: &HttpError,
+    request: Option<&RequestLine>,
+    template: &[u8],
+) -> Result<(), String> {
     let found = match error {
         HttpError::RequestLineTooLong
         | HttpError::BadRequestLine
@@ -352,26 +366,27 @@ fn check_request_line(error: &HttpError, request: Option<&RequestLine>) -> Resul
         | HttpError::BadExpect => Found::Headers,
         HttpError::HeadTooLarge | HttpError::BareLf => Found::Either,
     };
-    match (found, request) {
-        (Found::RequestLine, Some(line)) => {
-            return Err(format!(
-                "{error:?} is in the request line, but {line:?} was logged"
-            ));
-        }
-        (Found::Headers, None) => {
-            return Err(format!(
-                "{error:?} follows a valid request line, which was not logged"
-            ));
-        }
-        (Found::RequestLine, None)
-        | (Found::Headers | Found::Either, Some(_))
-        | (Found::Either, None) => {}
-    }
-    match request {
-        Some(line) if !line.path.starts_with('/') || line.path.contains('?') => Err(format!(
-            "{line:?}: the logged path is not a raw path without query"
+    let crlf_line = template
+        .iter()
+        .position(|&b| b == b'\n')
+        .is_some_and(|lf| lf > 0 && template.get(lf - 1) == Some(&b'\r'));
+    let after_line = match found {
+        Found::RequestLine => false,
+        Found::Headers => true,
+        Found::Either => crlf_line,
+    };
+    match (after_line, request) {
+        (false, Some(line)) => Err(format!(
+            "{error:?} is in the request line, but {line:?} was logged"
         )),
-        Some(_) | None => Ok(()),
+        (true, None) => Err(format!(
+            "{error:?} follows a valid request line, which was not logged"
+        )),
+        (true, Some(line)) if line.path != template_path(template) => Err(format!(
+            "{line:?} logged for request {:?}",
+            template_path(template)
+        )),
+        (false, None) | (true, Some(_)) => Ok(()),
     }
 }
 
@@ -448,13 +463,19 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
                     let Some(template) = templates.next() else {
                         fail(format!("{log:?} answers no request sent"));
                     };
+                    if let Log::Rejected {
+                        reason: RejectReason::Http { error, request },
+                        ..
+                    } = log
+                        && let Err(e) = check_request_line(error, request.as_ref(), template)
+                    {
+                        fail(e);
+                    }
                     // Rejections always close (their renderings already do).
                     if let Log::Response { request, .. } = log {
                         // The pairing holds: the logged path is the
                         // template's.
-                        let line = String::from_utf8_lossy(template);
-                        let target = line.split(' ').nth(1).unwrap_or_default();
-                        let path = target.split('?').next().unwrap_or_default();
+                        let path = template_path(template);
                         if let Some(r) = request.as_ref().filter(|r| r.path != path) {
                             fail(format!(
                                 "{log:?} paired with request {path:?}, not {:?}",
