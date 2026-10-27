@@ -676,8 +676,9 @@ Bodies:
   504, each with the upstream closed. Ties follow FR-PROXY-29's order
   (the send timeout first). *Controller ruling:* any response queued behind
   an unread `100` (a 408, 502, 504 or a proxied response) does not
-  restart the send idle deadline: the remaining one carries over, so a client that still takes
-  nothing is closed when the deadline started with the `100` runs out.
+  restart the send idle deadline: the remaining one carries over, so a
+  client that still takes nothing is closed when the deadline started with
+  the `100` runs out.
   Tests `unread_100_continue_hits_the_send_idle_timeout_first`,
   `slowly_read_100_continue_restarts_the_send_idle_timeout`,
   `continue_taken_stops_the_send_idle_timeout`,

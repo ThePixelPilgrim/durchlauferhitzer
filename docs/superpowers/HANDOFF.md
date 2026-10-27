@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-26, after stage 3 Task 8 landed on `main`.
+Last updated 2026-10-26, after stage 3 Task 9 landed on `main`; next is the stage 3 whole-branch review.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -9,9 +9,9 @@ A new session should start from the latest `main`, read this file first, then `C
 |---|---|
 | 1 Foundations | done, merged to `main` (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done, merged to `main` (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
-| 3 Reverse proxy | **in progress** on `main` (Tasks 1–8 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
+| 3 Reverse proxy | **in progress** on `main` (Tasks 1–9 landed; whole-branch review next) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
 
-Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ✅, 6 request bodies ✅, 7 response bodies ✅, 8 timeouts/failure matrix ✅, 9 randomized sim ← **next**. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
+Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ✅, 6 request bodies ✅, 7 response bodies ✅, 8 timeouts/failure matrix ✅, 9 randomized sim ✅ — **next: the stage 3 whole-branch review** over `576a77c..main`. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…, consolidated 2026-10-25); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -42,8 +42,9 @@ Task 7 (done, `5fdcf65`..`bfcb69c`): response bodies — chunked passed through 
 
 Task 8 (done, `b5cf7e0`..`21cfb80`): `backend_connect_timeout`, `backend_response_timeout`, `body_idle_timeout` are `limits` keys (all constants gone, each tested at a non-default value); half-close keeps the upstream (FR-PROXY-26); `BackendFailure::ClosedEarly` for an end of stream before the head or mid-body; response-head bytes during an upload count as body progress; owner decisions 2026-10-27 (FR-PROXY-29): every response head, interim or final, must be complete within `backend_response_timeout` of its own first byte (a completed interim head ends its cap), expiry → 504; `Status::NotImplemented` removed; `LimitKey::ALL` is the single key list; example config documents the proxy behaviour; stale `[stage 3]` markers fixed.
 
+Task 9 (done, `eced59f`..`d5d39ee`): randomized proxy net in `sim/tests/faults/proxy/` (400 seeds, ~5 s, every coverage bucket required; independent model in `sim/tests/support/model_http.rs` shared by every test binary, so no expected bytes come from core renderers; static net now models file heads, redirects and per-request persistence too). NFR-SEC-02/-03 `[done]`. It found one core bug, fixed red/green: the client's `send_idle_timeout` was not applied while a response was awaited (an unread `100 Continue`). Controller rulings in the spec (FR-PROXY-25/-29): the send timeout wins any deadline tie (then head cap, then body idle / response timeout); a response queued behind an unread `100` keeps the send deadline that started with the `100`.
+
 Still to carry into later tasks (`.superpowers/` notes are not in git, so listed here):
-- Task 9: NFR-SEC-02 / -03 stay `[stage 3]` until the randomized proxy net proves them; mark them `[done]` then.
 
 ## Branches
 
