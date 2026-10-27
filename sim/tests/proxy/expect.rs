@@ -2,10 +2,10 @@
 
 use std::time::Duration;
 
-use durchlauferhitzer_core::http::request::{HttpError, Persistence};
+use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
-use durchlauferhitzer_core::{Log, RejectReason, TimeoutKind};
+use durchlauferhitzer_core::{Log, RejectReason, RequestLine, TimeoutKind};
 use durchlauferhitzer_sim::{Sim, SimConnState, Window};
 
 use super::{fixed, only_upstream, peer, request};
@@ -51,7 +51,13 @@ fn other_expect_is_417() {
                     &[Log::Rejected {
                         conn: c,
                         peer: peer(),
-                        reason: RejectReason::Http(HttpError::BadExpect),
+                        reason: RejectReason::Http {
+                            error: HttpError::BadExpect,
+                            request: Some(RequestLine {
+                                method: Method::Other("POST".to_owned()),
+                                path: target.to_owned(),
+                            }),
+                        },
                     }],
                     "{context}"
                 );

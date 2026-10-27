@@ -150,7 +150,15 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
         Verdict::Parse(e) => vec![Alt {
             bytes: fixed(model_http_status(e), Persistence::Close, mode(req)),
             cut: false,
-            logs: vec![rejected(RejectReason::Http(*e))],
+            // FR-LOG-07: every parse error of this net comes after a
+            // valid request line, so it is logged with it.
+            logs: vec![rejected(RejectReason::Http {
+                error: *e,
+                request: Some(RequestLine {
+                    method: req.summary.method.clone(),
+                    path: req.summary.path.clone(),
+                }),
+            })],
             closes: true,
             upstream: None,
             tags,

@@ -12,7 +12,7 @@ use crate::http::request::{
 };
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::status::Status;
-use crate::log::{Log, RejectReason, RequestSummary};
+use crate::log::{Log, RejectReason, RequestLine, RequestSummary};
 use crate::time::Instant;
 
 impl Core {
@@ -206,6 +206,14 @@ impl Core {
                 // Once the request line is valid the method is known: a HEAD
                 // request's error is head-only too. An error in the request
                 // line itself keeps its body.
+                // FR-LOG-07: an error after a valid request line is logged
+                // with it.
+                let request = parser
+                    .request_line(filled)
+                    .map(|(method, target)| RequestLine {
+                        method,
+                        path: target.path,
+                    });
                 let body = match parser.method() {
                     KnownMethod::Head => BodyMode::HeadOnly,
                     KnownMethod::Unknown | KnownMethod::Get | KnownMethod::Other => BodyMode::Full,
@@ -220,7 +228,7 @@ impl Core {
                 actions.push(Action::Log(Log::Rejected {
                     conn,
                     peer: c.peer,
-                    reason: RejectReason::Http(error),
+                    reason: RejectReason::Http { error, request },
                 }));
                 c.state = ConnState::Responding {
                     persistence: Persistence::Close,
@@ -406,7 +414,10 @@ mod tests {
                 Action::Log(Log::Rejected {
                     conn,
                     peer: PEER,
-                    reason: RejectReason::Http(HttpError::RequestLineTooLong),
+                    reason: RejectReason::Http {
+                        error: HttpError::RequestLineTooLong,
+                        request: None,
+                    },
                 }),
                 Action::SetInterest {
                     conn,
@@ -418,6 +429,65 @@ mod tests {
         actions.clear();
         core.handle(now, Event::Received { conn, len: 5 }, &mut actions);
         assert!(actions.is_empty());
+    }
+
+    /// FR-LOG-07: a parse error after a valid request line is logged with
+    /// the request's method and raw path; an error in the request line
+    /// itself carries none.
+    #[test]
+    fn late_parse_errors_log_the_request_line() {
+        use crate::core::test_support::{files_core, request, secs};
+        use crate::http::request::Method;
+        use crate::log::RequestLine;
+        let rejected = |actions: &[Action]| {
+            actions.iter().find_map(|a| {
+                if let Action::Log(Log::Rejected { reason, .. }) = a {
+                    Some(reason.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        let mut core = files_core();
+        let actions = request(
+            &mut core,
+            secs(0),
+            1,
+            b"HEAD /a%20b?q=1 HTTP/1.1\r\nHost: a.test\r\nBad Header: x\r\n\r\n",
+        );
+        assert_eq!(
+            rejected(&actions),
+            Some(RejectReason::Http {
+                error: HttpError::BadHeaderName,
+                request: Some(RequestLine {
+                    method: Method::Head,
+                    path: "/a%20b".to_owned(),
+                }),
+            }),
+            "{actions:?}"
+        );
+        // A head error found only once the whole head is there (no Host).
+        let actions = request(&mut core, secs(0), 2, b"PURGE / HTTP/1.1\r\n\r\n");
+        assert_eq!(
+            rejected(&actions),
+            Some(RejectReason::Http {
+                error: HttpError::MissingHost,
+                request: Some(RequestLine {
+                    method: Method::Other("PURGE".to_owned()),
+                    path: "/".to_owned(),
+                }),
+            }),
+            "{actions:?}"
+        );
+        let actions = request(&mut core, secs(0), 3, b"HEAD / HTTP/1.1 x\r\n\r\n");
+        assert_eq!(
+            rejected(&actions),
+            Some(RejectReason::Http {
+                error: HttpError::BadRequestLine,
+                request: None,
+            }),
+            "{actions:?}"
+        );
     }
 
     /// A maximal head sent one line per read costs linear parser work: every

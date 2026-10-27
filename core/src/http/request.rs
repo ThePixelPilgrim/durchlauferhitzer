@@ -243,6 +243,21 @@ impl HeadParser {
         }
     }
 
+    /// The method and target of the request line at the start of `buf`
+    /// (the bytes passed to [`HeadParser::advance`]) once the parser judged
+    /// it valid, also after a later error; `None` before that, or after an
+    /// error in the request line itself (FR-LOG-07).
+    pub fn request_line(&self, buf: &[u8]) -> Option<(Method, Target)> {
+        match self.stage {
+            Stage::RequestLine => None,
+            Stage::Headers { .. } => {
+                let (method, target, _) =
+                    parse_request_line(head_lines(buf).next().unwrap_or_default()).ok()?;
+                Some((method, target))
+            }
+        }
+    }
+
     /// Continues parsing `buf`, all bytes of the head received so far.
     ///
     /// `buf` must start with the bytes passed on earlier calls. Returns

@@ -128,7 +128,11 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
                 }
             }
             Log::Rejected {
-                reason: RejectReason::Http(HttpError::BadTarget(TargetError::EncodedUnreserved)),
+                reason:
+                    RejectReason::Http {
+                        error: HttpError::BadTarget(TargetError::EncodedUnreserved),
+                        ..
+                    },
                 ..
             } => coverage.encoded_unreserved += 1,
             Log::Rejected { .. }
@@ -139,7 +143,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
         }
         if let Log::Rejected { reason, .. } = log {
             match reason {
-                RejectReason::Http(_) => coverage.http += 1,
+                RejectReason::Http { .. } => coverage.http += 1,
                 RejectReason::Timeout(TimeoutKind::Header) => coverage.header_timeout += 1,
                 RejectReason::Timeout(TimeoutKind::Send) => coverage.send_timeout += 1,
                 RejectReason::Timeout(TimeoutKind::Disk) => coverage.disk_timeout += 1,

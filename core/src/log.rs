@@ -113,10 +113,27 @@ pub struct RequestSummary {
     pub path: String,
 }
 
+/// The request line of a head that failed to parse after it (FR-LOG-07):
+/// its method and its raw path (validated ASCII, never decoded,
+/// FR-LOG-04), both from the client and untrusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestLine {
+    pub method: Method,
+    pub path: String,
+}
+
 /// Why something was rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RejectReason {
-    Http(HttpError),
+    /// The request head broke a rule of the parser (or outgrew
+    /// `max_head`). `request` is the head's request line when the error
+    /// came after a valid one (a header, framing or `Host` error, a head
+    /// too large); `None` for an error in the request line itself
+    /// (FR-LOG-07).
+    Http {
+        error: HttpError,
+        request: Option<RequestLine>,
+    },
     Route(RouteMiss),
     Timeout(TimeoutKind),
     Limit(LimitKind),

@@ -272,7 +272,7 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
         let status = match log {
             Log::Response { status, .. } => Some(model_code(*status)),
             Log::Rejected { reason, .. } => match reason {
-                RejectReason::Http(e) => Some(model_code(model_http_status(e))),
+                RejectReason::Http { error, .. } => Some(model_code(model_http_status(error))),
                 RejectReason::Body(RequestBodyError::Chunked(_)) => Some(400),
                 RejectReason::Timeout(TimeoutKind::RequestBody) => Some(408),
                 RejectReason::Body(RequestBodyError::TooLarge | RequestBodyError::ClosedEarly)
@@ -286,7 +286,11 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
             | Log::BackendFailed { .. } => None,
         };
         if let Log::Rejected {
-            reason: RejectReason::Http(HttpError::ConnectionNamesFraming),
+            reason:
+                RejectReason::Http {
+                    error: HttpError::ConnectionNamesFraming,
+                    ..
+                },
             ..
         } = log
         {

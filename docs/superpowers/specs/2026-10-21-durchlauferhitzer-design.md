@@ -982,7 +982,8 @@ Failures, persistence, timeouts:
   per kind; tests assert on them directly.
 - **FR-LOG-02** [done] Kinds: `Response` (status and a request summary of
   method, host and raw path; emitted when the response is queued),
-  `Rejected` (parse error, header/send/disk timeout, connection limits),
+  `Rejected` (parse error, with the method and raw path once the request
+  line was valid, FR-LOG-07; header/send/disk timeout, connection limits),
   `Reset`, `FileAborted` (with the file error);
   `ProxiedResponse { status: u16, backend, request }` (a backend's
   response head was queued; its status is any 100–599, so a number rather
@@ -1004,9 +1005,17 @@ Failures, persistence, timeouts:
 - **FR-LOG-06** [stage 4] Logging never blocks: if stderr is backed up,
   entries are dropped and counted, and the count is logged once output
   catches up.
-- **FR-LOG-07** [stage 4] `Rejected` for a parse error after the request
-  line carries the method and path. The driver logs `EMFILE`/`ENFILE` and
-  driver-bug closes distinctly.
+- **FR-LOG-07** [core half done; the driver half: stage 4] `Rejected` for
+  a parse error after the request line carries the method and path. The
+  driver logs `EMFILE`/`ENFILE` and driver-bug closes distinctly. (Stage 4
+  amendment A5, owner-approved 2026-10-27:) the reason is
+  `RejectReason::Http { error, request }`; `request` is a `RequestLine {
+  method, path }` (the raw path, FR-LOG-04, without the query) when the
+  error was found after a valid request line (a header, `Host`, framing or
+  `Expect` error, or a head over `max_head`), and `None` for an error in the
+  request line itself (too long, malformed, bad method, version or
+  target). Driver-bug closes and `EMFILE`/`ENFILE` are driver log kinds,
+  not core `Log`s.
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 

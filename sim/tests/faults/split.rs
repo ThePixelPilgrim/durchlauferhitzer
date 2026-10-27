@@ -101,7 +101,13 @@ fn pipelined_bytes_beyond_head_limit() {
             Log::Rejected {
                 conn: c,
                 peer: peer(),
-                reason: RejectReason::Http(HttpError::HeadTooLarge),
+                reason: RejectReason::Http {
+                    error: HttpError::HeadTooLarge,
+                    request: Some(RequestLine {
+                        method: Method::Get,
+                        path: "/y".to_owned(),
+                    }),
+                },
             },
         ],
         "{}",

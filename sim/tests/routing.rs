@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
-use durchlauferhitzer_core::{Interest, Log, RejectReason, RequestSummary};
+use durchlauferhitzer_core::{Interest, Log, RejectReason, RequestLine, RequestSummary};
 use durchlauferhitzer_sim::{Sim, SimConnState, Window};
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
@@ -96,7 +96,13 @@ fn connection_naming_content_length_gets_400_and_closes() {
         &[Log::Rejected {
             conn: c,
             peer: p,
-            reason: RejectReason::Http(HttpError::ConnectionNamesFraming),
+            reason: RejectReason::Http {
+                error: HttpError::ConnectionNamesFraming,
+                request: Some(RequestLine {
+                    method: Method::Get,
+                    path: "/".to_owned()
+                }),
+            },
         }],
         "{}",
         sim.trace()
@@ -122,7 +128,10 @@ fn malformed_request_gets_400_and_closes() {
         &[Log::Rejected {
             conn: c,
             peer: p,
-            reason: RejectReason::Http(HttpError::BareLf),
+            reason: RejectReason::Http {
+                error: HttpError::BareLf,
+                request: None,
+            },
         }],
         "{}",
         sim.trace()
@@ -306,7 +315,13 @@ fn full_buffer_without_complete_head_gets_431() {
         &[Log::Rejected {
             conn: c,
             peer: p,
-            reason: RejectReason::Http(HttpError::HeadTooLarge),
+            reason: RejectReason::Http {
+                error: HttpError::HeadTooLarge,
+                request: Some(RequestLine {
+                    method: Method::Get,
+                    path: "/".to_owned()
+                }),
+            },
         }],
         "{}",
         sim.trace()
@@ -325,4 +340,53 @@ fn reset_while_lingering_closes_without_reset_log() {
     sim.run_until_idle();
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
     assert_eq!(sim.logs().len(), 1, "{}", sim.trace());
+}
+
+/// FR-LOG-07: a bad header after a valid `HEAD` request line is logged
+/// with the method and raw path (and answered head only, FR-HTTP-21); a
+/// bad request line is logged with neither.
+#[test]
+fn late_parse_errors_are_logged_with_method_and_path() {
+    let mut sim = Sim::new(CONFIG);
+    let p = peer();
+    let c = sim.connect(p);
+    sim.send(
+        c,
+        b"HEAD / HTTP/1.1\r\nHost: example.test\r\nBad Header: x\r\n\r\n",
+    );
+    let d = sim.connect(p);
+    sim.send(d, b"HEAD / HTTP/1.1 extra\r\nHost: example.test\r\n\r\n");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        fixed(Status::BadRequest, Persistence::Close, BodyMode::HeadOnly),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(
+        sim.logs(),
+        &[
+            Log::Rejected {
+                conn: c,
+                peer: p,
+                reason: RejectReason::Http {
+                    error: HttpError::BadHeaderName,
+                    request: Some(RequestLine {
+                        method: Method::Head,
+                        path: "/".to_owned(),
+                    }),
+                },
+            },
+            Log::Rejected {
+                conn: d,
+                peer: p,
+                reason: RejectReason::Http {
+                    error: HttpError::BadRequestLine,
+                    request: None,
+                },
+            },
+        ],
+        "{}",
+        sim.trace()
+    );
 }

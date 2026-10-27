@@ -301,7 +301,10 @@ fn encoded_unreserved_character_in_the_path_is_400() {
             [&Log::Rejected {
                 conn: c,
                 peer: peer(),
-                reason: RejectReason::Http(HttpError::BadTarget(TargetError::EncodedUnreserved)),
+                reason: RejectReason::Http {
+                    error: HttpError::BadTarget(TargetError::EncodedUnreserved),
+                    request: None,
+                },
             }],
             "{target}\n{}",
             sim.trace()
@@ -488,7 +491,10 @@ fn encoded_semicolon_in_the_path_is_400() {
             [&Log::Rejected {
                 conn: c,
                 peer: peer(),
-                reason: RejectReason::Http(HttpError::BadTarget(TargetError::Semicolon)),
+                reason: RejectReason::Http {
+                    error: HttpError::BadTarget(TargetError::Semicolon),
+                    request: None,
+                },
             }],
             "{target}\n{}",
             sim.trace()

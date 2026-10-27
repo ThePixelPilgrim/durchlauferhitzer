@@ -196,7 +196,7 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
         } => (*status, request.as_ref()),
         Log::Rejected { reason, .. } => {
             let status = match reason {
-                RejectReason::Http(e) => model_http_status(e),
+                RejectReason::Http { error, .. } => model_http_status(error),
                 RejectReason::Timeout(TimeoutKind::Header | TimeoutKind::RequestBody) => {
                     Status::RequestTimeout
                 }
