@@ -56,7 +56,7 @@ pub struct Limits {
 /// capacity functions, so the two cannot drift apart:
 ///
 /// - client receive buffer `max(max_head, max_request_line + 2)`
-///   ([`client_recv_capacity`]);
+///   (`client_recv_capacity`);
 /// - client send buffer 1 KiB (`conn::SEND_CAPACITY`);
 /// - only when `proxied` (the config has a proxy route) an active exchange
 ///   adds the upstream receive buffer `max(16 KiB, max_head)`
