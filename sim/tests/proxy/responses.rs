@@ -733,7 +733,7 @@ fn chunked_response_to_http10_client_is_502() {
     assert_eq!(
         sim.logs(),
         &[
-            failed(c, BackendFailure::ChunkedToHttp10),
+            failed(c, BackendFailure::TransferEncodingToHttp10),
             Log::Response {
                 conn: c,
                 peer: peer(),
@@ -746,4 +746,60 @@ fn chunked_response_to_http10_client_is_502() {
     );
     assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+}
+
+/// FR-PROXY-04 (owner decision 2026-10-27): any `Transfer-Encoding` toward
+/// an HTTP/1.0 client is a 502, also on a reply without a body (to HEAD, a
+/// 304): the backend is at fault. Nothing of the reply reaches the client.
+#[test]
+fn transfer_encoding_to_http10_client_is_502_also_without_a_body() {
+    for (request_bytes, method, response, mode) in [
+        (
+            b"HEAD /api/x HTTP/1.0\r\nHost: example.test\r\n\r\n".as_slice(),
+            Method::Head,
+            CHUNKED_HEAD,
+            BodyMode::HeadOnly,
+        ),
+        (
+            GET_10,
+            Method::Get,
+            b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+            BodyMode::Full,
+        ),
+        (
+            GET_10,
+            Method::Get,
+            b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+            BodyMode::Full,
+        ),
+    ] {
+        let mut sim = Sim::new(CONFIG);
+        let c = request(&mut sim, request_bytes);
+        let up = only_upstream(&sim);
+        sim.backend_send(up, response);
+        sim.run_until_idle();
+        assert_eq!(
+            sim.take_received(c),
+            fixed(Status::BadGateway, Persistence::Close, mode),
+            "{}",
+            sim.trace()
+        );
+        assert_eq!(
+            sim.logs(),
+            &[
+                failed(c, BackendFailure::TransferEncodingToHttp10),
+                Log::Response {
+                    conn: c,
+                    peer: peer(),
+                    status: Status::BadGateway,
+                    request: Some(summary(method, "/api/x")),
+                },
+            ],
+            "{}",
+            sim.trace()
+        );
+        assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+        let closes = sim.trace().matches("-> CloseUpstream").count();
+        assert_eq!(closes, 1, "{}", sim.trace());
+    }
 }

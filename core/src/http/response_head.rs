@@ -38,6 +38,15 @@ pub struct ResponseHead {
     pub body: ResponseBody,
 }
 
+impl ResponseHead {
+    /// Whether the head has a `Transfer-Encoding` header, whatever its
+    /// value and whether or not a body follows (an HTTP/1.0 client must
+    /// not get one, FR-PROXY-04).
+    pub fn names_transfer_encoding(&self) -> bool {
+        self.headers.iter().any(|h| h.name == "transfer-encoding")
+    }
+}
+
 /// How the response body is delimited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBody {

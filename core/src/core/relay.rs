@@ -24,7 +24,8 @@ impl Core {
     /// the upstream's receive buffer) for the client, followed by its body,
     /// the first bytes of which may already sit right after the head. Those
     /// are judged first: a framing error or a body over the limit is still
-    /// a 502, as is a chunked body for an HTTP/1.0 client (FR-PROXY-04).
+    /// a 502, as is any `Transfer-Encoding` for an HTTP/1.0 client
+    /// (FR-PROXY-04).
     pub(super) fn relay(
         &mut self,
         now: Instant,
@@ -58,14 +59,19 @@ impl Core {
                 ResponseBody::None | ResponseBody::Length(_) | ResponseBody::Chunked,
             ) => request.persistence,
         };
-        let checked = match (request.version, head.body) {
-            (Version::Http10, ResponseBody::Chunked) => Err(BackendFailure::ChunkedToHttp10),
-            (Version::Http10 | Version::Http11, _)
+        // An HTTP/1.0 client knows no `Transfer-Encoding`: a head naming
+        // it is refused whether or not a body follows (owner decision
+        // 2026-10-27).
+        let checked = match request.version {
+            Version::Http10 if head.names_transfer_encoding() => {
+                Err(BackendFailure::TransferEncodingToHttp10)
+            }
+            Version::Http10 | Version::Http11
                 if client_response_len(&head, persistence) > head_capacity =>
             {
                 Err(BackendFailure::BadResponse(ResponseError::HeadTooLarge))
             }
-            (Version::Http10 | Version::Http11, _) => RelayBody::new(
+            Version::Http10 | Version::Http11 => RelayBody::new(
                 head.body,
                 *up,
                 request.backend,

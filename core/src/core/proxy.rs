@@ -449,7 +449,7 @@ impl Core {
             | BackendFailure::BadResponse(_)
             | BackendFailure::BadChunk(_)
             | BackendFailure::BodyTooLarge
-            | BackendFailure::ChunkedToHttp10 => Status::BadGateway,
+            | BackendFailure::TransferEncodingToHttp10 => Status::BadGateway,
             BackendFailure::ConnectTimeout
             | BackendFailure::ResponseTimeout
             | BackendFailure::BodyTimeout => Status::GatewayTimeout,

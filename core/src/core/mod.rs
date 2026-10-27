@@ -289,9 +289,10 @@
 //!   heads), a body over `max_response_body` 502
 //!   ([`BackendFailure::BodyTooLarge`]: its `Content-Length`, or body bytes
 //!   that came with the head), bad chunked framing in the body bytes that
-//!   came with the head 502 ([`BackendFailure::BadChunk`]), a chunked
-//!   response to an HTTP/1.0 client (whose request went out as HTTP/1.0)
-//!   502 ([`BackendFailure::ChunkedToHttp10`]), a connect or response
+//!   came with the head 502 ([`BackendFailure::BadChunk`]), a head with
+//!   `Transfer-Encoding` (body or not) to an HTTP/1.0 client (whose
+//!   request went out as HTTP/1.0) 502
+//!   ([`BackendFailure::TransferEncodingToHttp10`]), a connect or response
 //!   timeout 504.
 //!   Each is logged as [`Log::BackendFailed`] before the response's
 //!   [`Log::Response`], and the client connection stays as the request

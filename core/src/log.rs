@@ -95,9 +95,10 @@ pub enum BackendFailure {
     /// its `Content-Length`, or the payload of a chunked or close-delimited
     /// body so far (FR-PROXY-24).
     BodyTooLarge,
-    /// A chunked response to an HTTP/1.0 client's request, which cannot
-    /// take one (FR-PROXY-04, owner decision 2026-10-27).
-    ChunkedToHttp10,
+    /// A response head with `Transfer-Encoding` (with or without a body)
+    /// to an HTTP/1.0 client's request, which cannot take one (FR-PROXY-04,
+    /// owner decisions 2026-10-27).
+    TransferEncodingToHttp10,
 }
 
 /// The parts of a request worth logging. `host` and `path` come from the

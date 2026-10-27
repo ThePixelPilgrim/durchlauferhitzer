@@ -842,3 +842,15 @@ proptest! {
         }
     }
 }
+
+/// FR-PROXY-04: the head says whether it names `Transfer-Encoding`, also
+/// where no body follows.
+#[test]
+fn names_transfer_encoding_also_without_a_body() {
+    let te = b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n";
+    assert!(head_of(te, RequestKind::Other).names_transfer_encoding());
+    let chunked = b"HTTP/1.1 200 OK\r\nTRANSFER-ENCODING: chunked\r\n\r\n";
+    assert!(head_of(chunked, RequestKind::Head).names_transfer_encoding());
+    let plain = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Encoding: x\r\n\r\n";
+    assert!(!head_of(plain, RequestKind::Other).names_transfer_encoding());
+}

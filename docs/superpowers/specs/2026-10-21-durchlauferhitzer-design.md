@@ -503,13 +503,14 @@ Forwarding and identity:
   `METHOD <path>[?query] HTTP/1.x`, where `<path>` is the raw path as
   received (after `strip_prefix`), the query is unchanged and the version
   mirrors the client's: `HTTP/1.0` for an HTTP/1.0 client, `HTTP/1.1`
-  otherwise. A backend that still answers an HTTP/1.0 client's request
-  with a chunked body → 502 before any byte reaches the client (logged as
-  `BackendFailed { ChunkedToHttp10 }`). *Owner decision 2026-10-27: an
-  HTTP/1.0 client cannot take a chunked body; this reverses stage 3 Task
-  4's "always HTTP/1.1".* (A body-less response to such a request — to
-  HEAD, a 204 or 304 — passes even if it names `chunked`: no chunked body
-  is sent.)
+  otherwise. A backend response head with any `Transfer-Encoding` to an
+  HTTP/1.0 client's request → 502 before any byte reaches the client
+  (logged as `BackendFailed { TransferEncodingToHttp10 }`), also when no
+  body follows (a response to HEAD, a 204 or 304): the backend is at
+  fault, so it is a 5xx. *Owner decisions 2026-10-27: an HTTP/1.0 client
+  cannot take a chunked body, which reverses stage 3 Task 4's "always
+  HTTP/1.1"; and no `Transfer-Encoding` header ever reaches an HTTP/1.0
+  client, body or not.*
 - **FR-PROXY-05** [stage 3; `strip_segments` done] `strip_prefix;` removes
   the route's own segments: on route `/api`, `/api/x` → `/x`, `/api/x/` →
   `/x/`, `/api` and `/api/` → `/`. An empty result is `/`. Partial
@@ -612,8 +613,8 @@ Bodies:
   streams as soon as its head is validated; chunked framing is validated
   chunk by chunk in flight.
 - **FR-PROXY-21** [done] Response framing to the client: backend
-  `Content-Length` and `chunked` pass through (`chunked` only to an
-  HTTP/1.1 client, FR-PROXY-04); a close-delimited response is
+  `Content-Length` and `chunked` pass through (`Transfer-Encoding` only
+  to an HTTP/1.1 client, FR-PROXY-04); a close-delimited response is
   forwarded with `Connection: close` and the client connection closes at
   its end (a lingering close: the response is complete). Responses to
   HEAD and 204/304 never carry a body, whatever the
@@ -731,8 +732,9 @@ Failures, persistence, timeouts:
   (`BackendFailed`: refused, reset, bad response with its parse error,
   connect timeout, response timeout, body timeout: a backend that stopped
   taking the request body [done in stage 3 Task 6]; bad chunked framing of
-  the response body, a response body over `max_response_body`, a chunked
-  response to an HTTP/1.0 client [done in stage 3 Task 7]); proxied responses
+  the response body, a response body over `max_response_body`, a
+  `Transfer-Encoding` toward an HTTP/1.0 client [done in stage 3 Task 7]);
+  proxied responses
   are logged as
   `ProxiedResponse` with the backend's status (FR-LOG-02).
 - **FR-PROXY-32** [stage 8] Backend-directed file serving (an
@@ -801,7 +803,7 @@ Failures, persistence, timeouts:
   response head was queued; its status is any 100–599, so a number rather
   than one of the core's statuses) and `BackendFailed { backend, kind }`
   (`kind` per FR-PROXY-31, `BodyTimeout`, `BadChunk`, `BodyTooLarge` and
-  `ChunkedToHttp10` included). A 502 or 504 the core
+  `TransferEncodingToHttp10` included). A 502 or 504 the core
   generates for a failed backend is a `Response`, preceded by its
   `BackendFailed`. [Stage 3 Task 6:] `Rejected` also covers a request body
   that broke a rule (`Body(Chunked(..) | TooLarge)`) and a stalled request
