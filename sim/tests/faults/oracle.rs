@@ -94,7 +94,7 @@ impl Coverage {
             self.grown
         );
         for (status, n) in STATUSES.iter().zip(self.statuses) {
-            assert!(n > 0, "no {} response in any seed", status.code());
+            assert!(n > 0, "no {} response in any seed", model_code(*status));
         }
         for (what, n) in named {
             assert!(n > 0, "no {what} in any seed");
@@ -138,8 +138,7 @@ pub(crate) fn fixed_renderings(
         .iter()
         .map(|&persistence| {
             let bytes = fixed(status, persistence, body);
-            let mut head = Vec::new();
-            render_fixed(status, persistence, BodyMode::HeadOnly, &mut head);
+            let head = fixed(status, persistence, BodyMode::HeadOnly);
             Rendering {
                 persistence,
                 with_query: false,
@@ -190,7 +189,7 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
         } => (*status, request.as_ref()),
         Log::Rejected { reason, .. } => {
             let status = match reason {
-                RejectReason::Http(e) => e.status(),
+                RejectReason::Http(e) => model_http_status(e),
                 RejectReason::Timeout(TimeoutKind::Header | TimeoutKind::RequestBody) => {
                     Status::RequestTimeout
                 }
@@ -241,8 +240,8 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
         return Err(format!(
             "{:?} {path} logged {} but the tree says {}",
             request.method,
-            status.code(),
-            expected.code()
+            model_code(status),
+            model_code(expected)
         ));
     }
     let announced = match (status, tree.resolve(path)) {
@@ -398,7 +397,7 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
             }
             None => fail(format!(
                 "unrecognised response bytes at offset {offset} (expected a {})",
-                a.status.code()
+                model_code(a.status)
             )),
         }
     }
@@ -458,7 +457,7 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
         let Some((f, policy)) = a.file.filter(|_| a.body == BodyMode::Full) else {
             fail(format!(
                 "FileAborted after a {} {:?}",
-                a.status.code(),
+                model_code(a.status),
                 a.body
             ));
         };

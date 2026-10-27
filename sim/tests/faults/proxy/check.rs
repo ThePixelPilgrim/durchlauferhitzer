@@ -100,7 +100,7 @@ fn lossy(bytes: &[u8]) -> String {
 fn describe(ex: &Exchange) -> String {
     let verdict = match &ex.req.verdict {
         Verdict::Parse(e) => format!("Parse({e:?})"),
-        Verdict::Answer(s, p) => format!("Answer({}, {p:?})", s.code()),
+        Verdict::Answer(s, p) => format!("Answer({}, {p:?})", model_code(*s)),
         Verdict::BadBody { errors, fwd, bound } => {
             format!(
                 "BadBody({errors:?}, bound {bound}, forwarded {:?})",
@@ -249,9 +249,9 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
     }
     for log in &logs {
         let status = match log {
-            Log::Response { status, .. } => Some(status.code()),
+            Log::Response { status, .. } => Some(model_code(*status)),
             Log::Rejected { reason, .. } => match reason {
-                RejectReason::Http(e) => Some(e.status().code()),
+                RejectReason::Http(e) => Some(model_code(model_http_status(e))),
                 RejectReason::Body(RequestBodyError::Chunked(_)) => Some(400),
                 RejectReason::Timeout(TimeoutKind::RequestBody) => Some(408),
                 RejectReason::Body(RequestBodyError::TooLarge)
@@ -277,6 +277,7 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
             Some(408) => coverage.add("status 408"),
             Some(413) => coverage.add("status 413"),
             Some(417) => coverage.add("status 417"),
+            Some(431) => coverage.add("status 431"),
             Some(502) => coverage.add("status 502"),
             Some(504) => coverage.add("status 504"),
             Some(_) | None => {}

@@ -173,6 +173,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "status 408",
     "status 413",
     "status 417",
+    "status 431",
     "status 502",
     "status 504",
     "100 Continue",

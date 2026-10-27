@@ -148,7 +148,7 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
     let tags: Vec<&'static str> = req.tag.into_iter().collect();
     match &req.verdict {
         Verdict::Parse(e) => vec![Alt {
-            bytes: fixed(e.status(), Persistence::Close, mode(req)),
+            bytes: fixed(model_http_status(e), Persistence::Close, mode(req)),
             cut: false,
             logs: vec![rejected(RejectReason::Http(*e))],
             closes: true,

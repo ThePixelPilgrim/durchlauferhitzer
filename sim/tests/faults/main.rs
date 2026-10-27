@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
 use durchlauferhitzer_core::http::response::{
-    BodyMode, redirect_len, render_file_head, render_fixed, render_redirect,
+    BodyMode, redirect_len, render_file_head, render_redirect,
 };
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::http::target::TargetError;
@@ -88,10 +88,9 @@ fn peer() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
 }
 
+/// A fixed response, by the model (`fixed.rs`), not the core's renderer.
 fn fixed(status: Status, persistence: Persistence, body: BodyMode) -> Vec<u8> {
-    let mut out = Vec::new();
-    render_fixed(status, persistence, body, &mut out);
-    out
+    model_fixed(status, persistence, body)
 }
 
 fn not_found_keep_alive() -> Vec<u8> {
@@ -135,6 +134,7 @@ fn deliver(config: &str, parts: &[&[u8]]) -> (Outcome, String) {
     (outcome, sim.trace().to_owned())
 }
 
+mod fixed;
 mod generator;
 mod model;
 mod oracle;
@@ -146,6 +146,7 @@ mod proxy;
 mod run;
 mod split;
 
+use fixed::*;
 use generator::*;
 use model::*;
 use oracle::*;
