@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Fails if a product package's dependency tree contains anything other than
-# workspace crates (durchlauferhitzer-*) and that package's allow-listed
-# crates (NFR-MAINT-04):
+# Fails if a product package's dependency tree, for every target platform,
+# contains anything other than workspace crates (path crates inside this
+# workspace, whatever their name) and that package's allow-listed crates
+# (NFR-MAINT-04):
 #   durchlauferhitzer-core  nothing else
 #   durchlauferhitzer       libc only (the driver; CLAUDE.md "Rust only")
 # PRODUCT_PACKAGE=<name> checks only that package (with its allow-list).
@@ -18,18 +19,24 @@ allowed_for() {
     esac
 }
 
+# The workspace root: a crate is a workspace crate when its source is a
+# path below it (registry and git crates have no path source).
+root=$(dirname "$(cargo locate-project --workspace --message-format plain)")
+
 check() {
-    local package=$1 allowed tree name a ok
+    local package=$1 allowed tree name source a ok
     # `check` runs under `||`, where `set -e` is off: every failure returns
     # explicitly. The tree is captured first because a failure inside
     # process substitution would go unseen.
     allowed=$(allowed_for "$package") || return 1
-    tree=$(cargo tree --locked -p "$package" -e normal,build --prefix none --format '{p}') || return 1
+    tree=$(cargo tree --locked -p "$package" -e normal,build --target all \
+        --prefix none --format '{p}') || return 1
     local bad=()
-    while read -r name _; do
+    # Each line is `name vX.Y.Z [(source)] [(*)]`.
+    while read -r name _ source _; do
         [[ -z "$name" ]] && continue
-        # The package itself and the workspace crates.
-        [[ "$name" == "$package" || "$name" == durchlauferhitzer-* ]] && continue
+        # The package itself and the other workspace crates.
+        [[ "$source" == "($root/"* ]] && continue
         ok=no
         for a in $allowed; do
             [[ "$name" == "$a" ]] && ok=yes
