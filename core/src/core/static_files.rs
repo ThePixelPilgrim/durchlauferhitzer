@@ -332,6 +332,7 @@ impl Core {
         actions: &mut Vec<Action>,
     ) {
         let limits = &self.config.limits;
+        let mode = self.mode;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -384,6 +385,7 @@ impl Core {
                     },
                     now,
                     limits,
+                    mode,
                     actions,
                 );
             }

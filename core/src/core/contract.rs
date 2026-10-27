@@ -421,20 +421,24 @@
 //!   its listeners. Idle keep-alive connections and connections without a
 //!   byte of their request are closed at once (`Close`, nothing logged); a
 //!   partly received head completes and is answered `503` with
-//!   `Connection: close`, as is any request completed later; exchanges in
-//!   flight finish (any head rendered from now on says `Connection:
-//!   close`), then take the normal close path (lingering close). An
-//!   `Accepted` after it is answered 503 and closed like a refused
-//!   connection (`Rejected` with `ShuttingDown`).
+//!   `Connection: close`, as is any request completed later, one
+//!   pipelined behind a response in flight included; exchanges in flight
+//!   finish (a head already queued keeps what it said, any head rendered
+//!   from now on says `Connection: close`), then take the normal close
+//!   path (lingering close). An `Accepted` after it is answered 503 and
+//!   closed like a refused connection (`Rejected` with `ShuttingDown`).
 //! - [`Core::is_drained`]: true once no connection, upstream, open file or
-//!   orphaned open is left; the driver polls it after every call and exits
-//!   when it is true.
+//!   orphaned open is left; during the drain the driver polls it after
+//!   every call and exits when it is true.
 //! - [`Core::abort_all`]: on a second SIGTERM, a SIGINT or when
 //!   `shutdown_timeout` expires. Every connection is closed at once, per
 //!   connection `CloseFile`, `CloseUpstream`, `Close` as usual, each
-//!   exactly once; nothing is logged. Unanswered opens become orphaned
-//!   opens and are answered as always; `is_drained` waits for them, though
-//!   the driver may also exit without waiting.
+//!   exactly once; each connection with an exchange in flight is logged
+//!   first as `Rejected` with `ShuttingDown`, idle, lingering and refused
+//!   connections are cut silently. Unanswered opens become orphaned opens
+//!   (the core would answer a late `FileOpened` with `CloseFile` as
+//!   always); the driver exits after this call without waiting for them
+//!   (DRV-14), so `is_drained` is not polled after it.
 //!
 //! # Connection limits
 //!

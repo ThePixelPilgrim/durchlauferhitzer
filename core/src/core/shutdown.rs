@@ -1,12 +1,13 @@
-//! Shutdown (FR-PROC-05, stage 4 amendment A4): the graceful drain, the
+//! Shutdown (FR-PROC-05, stage 4 amendment A4, with the owner decisions
+//! of 2026-10-27 in FR-PROC-05b to 05d): the graceful drain, the
 //! fast path, and the 503 that answers work arriving during the drain.
 
 use super::{Action, ConnId, Core, Mode};
-use crate::conn::{ConnState, UnreadBody};
+use crate::conn::{Conn, ConnState, Counted, UnreadBody};
 use crate::http::request::{BodyFraming, Persistence, RequestHead};
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::status::Status;
-use crate::log::{Log, RequestSummary};
+use crate::log::{Log, RejectReason, RequestSummary};
 use crate::time::Instant;
 
 impl Core {
@@ -23,16 +24,19 @@ impl Core {
     ///   Unavailable` with `Connection: close` (logged as its
     ///   [`Log::Response`]), as is every request completed later;
     /// - every exchange in flight (a fixed response, a static file, a
-    ///   proxied request) finishes, with `Connection: close` in any head
-    ///   rendered from now on, and then its connection takes the normal
-    ///   close path (shutdown of the sending side, lingering close); input
-    ///   pipelined behind it is not answered;
+    ///   proxied request) finishes. A head already queued keeps what it
+    ///   said; a head rendered from now on says `Connection: close`. Then
+    ///   the connection takes the normal close path (shutdown of the
+    ///   sending side, lingering close), unless a request was pipelined
+    ///   behind it: once complete, that request is answered 503 with
+    ///   `Connection: close` like the partly received head above
+    ///   (FR-PROC-05b, owner decision 2026-10-27);
     /// - a connection delivered by `Accepted` anyway is answered 503 and
     ///   closed like one over the limits, logged as
-    ///   [`RejectReason::ShuttingDown`](crate::log::RejectReason::ShuttingDown).
+    ///   [`RejectReason::ShuttingDown`].
     ///
-    /// It emits only `Close` (with the `CloseFile` or `CloseUpstream` a
-    /// closing connection never holds). [`Core::handle`] keeps working as
+    /// It emits only `Close`: the connections it closes hold no file or
+    /// upstream. [`Core::handle`] keeps working as
     /// before; the driver keeps running its loop until
     /// [`Core::is_drained`] or `shutdown_timeout`, then calls
     /// [`Core::abort_all`]. Deadlines are unchanged, so `now` is not
@@ -52,10 +56,14 @@ impl Core {
                 // A partly received head completes, then gets 503; a
                 // lingering connection is already closing.
                 ConnState::ReadingHead { .. } | ConnState::Lingering { .. } => {}
-                ConnState::Responding { persistence, .. }
-                | ConnState::OpeningFile { persistence, .. }
-                | ConnState::SendingFile { persistence, .. }
-                | ConnState::Relaying { persistence, .. } => *persistence = Persistence::Close,
+                // The head is queued: it keeps what it said, and `finish`
+                // ends the connection after it, or answers a request
+                // pipelined behind it 503 (owner decision 2026-10-27).
+                ConnState::Responding { .. }
+                | ConnState::SendingFile { .. }
+                | ConnState::Relaying { .. } => {}
+                // The head is rendered later: it says `Connection: close`.
+                ConnState::OpeningFile { persistence, .. } => *persistence = Persistence::Close,
                 ConnState::Connecting { request, .. }
                 | ConnState::AwaitingResponse { request, .. } => {
                     request.persistence = Persistence::Close;
@@ -65,23 +73,39 @@ impl Core {
     }
 
     /// The fast path: close every connection at once, each open upstream
-    /// and each open file exactly once (per connection, in `ConnId` order:
-    /// `CloseFile`, `CloseUpstream`, `Close`). The driver calls it on a
-    /// second SIGTERM, a SIGINT or when `shutdown_timeout` expires, with
-    /// or without a drain before it, between two [`Core::handle`] calls.
+    /// and each open file exactly once (per connection, in `ConnId`
+    /// order: its `Log`, if any, then `CloseFile`, `CloseUpstream`,
+    /// `Close`). The driver calls it on a second SIGTERM, a SIGINT or when
+    /// `shutdown_timeout` expires, with or without a drain before it,
+    /// between two [`Core::handle`] calls.
     ///
-    /// It emits no log entries: the cut exchanges are the shutdown the
-    /// operator asked for, not failures, and the driver logs the fast
-    /// shutdown once itself. An `OpenFile` still unanswered becomes an
-    /// orphaned open, as for any connection that closes: its `FileOpened`
-    /// is answered with `CloseFile` when it comes, and
-    /// [`Core::is_drained`] stays false until then. The core is draining
-    /// afterwards, and `handle` keeps working (a stray `Accepted` is
-    /// answered 503).
+    /// Each connection with an exchange in flight (a request read past its
+    /// first byte, a response being written, a file being opened or sent,
+    /// a backend being connected to, awaited or relayed) is logged first,
+    /// as [`Log::Rejected`] with [`RejectReason::ShuttingDown`]
+    /// (FR-PROC-05c, owner decision 2026-10-27). Idle and lingering
+    /// connections, those without a byte of their request, and those
+    /// refused with 503 (their refusal is logged already) are cut
+    /// silently. An `OpenFile` still unanswered becomes an orphaned open,
+    /// as for any connection that closes: its `FileOpened` is answered
+    /// with `CloseFile` if it comes, and [`Core::is_drained`] stays false
+    /// until then; the driver exits after this call without waiting for
+    /// orphaned opens (DRV-14). The core is draining afterwards, and
+    /// `handle` keeps working (a stray `Accepted` is answered 503).
     pub fn abort_all(&mut self, actions: &mut Vec<Action>) {
         self.mode = Mode::Draining;
         let ids: Vec<ConnId> = self.conns.keys().copied().collect();
         for conn in ids {
+            let Some(c) = self.conns.get(&conn) else {
+                continue;
+            };
+            if cuts_an_exchange(c) {
+                actions.push(Action::Log(Log::Rejected {
+                    conn,
+                    peer: c.peer,
+                    reason: RejectReason::ShuttingDown,
+                }));
+            }
             if self.forget(conn, actions).is_some() {
                 actions.push(Action::Close { conn });
             }
@@ -97,8 +121,9 @@ impl Core {
     }
 
     /// While draining, a complete request `head` on `conn` is answered 503
-    /// with `Connection: close` (FR-PROC-05 "target shutdown"), and logged
-    /// as its response; a body it announced is left unread.
+    /// with `Connection: close` (FR-PROC-05 "target shutdown",
+    /// FR-PROC-05b), and logged as its response; a body it announced is
+    /// left unread.
     pub(super) fn refuse_during_drain(
         &mut self,
         now: Instant,
@@ -139,5 +164,28 @@ impl Core {
             buffered: 0,
             deadline,
         };
+    }
+}
+
+/// Whether closing `c` now cuts an exchange in flight (FR-PROC-05c): a
+/// request read past its first byte, a response being written, a file
+/// being opened or sent, a backend being connected to, awaited or relayed.
+/// A connection refused with 503 never had one; its refusal is logged.
+fn cuts_an_exchange(c: &Conn) -> bool {
+    match c.counted {
+        Counted::No => return false,
+        Counted::Yes => {}
+    }
+    match c.state {
+        ConnState::Idle { .. }
+        | ConnState::ReadingHead { buffered: 0, .. }
+        | ConnState::Lingering { .. } => false,
+        ConnState::ReadingHead { .. }
+        | ConnState::Responding { .. }
+        | ConnState::OpeningFile { .. }
+        | ConnState::SendingFile { .. }
+        | ConnState::Connecting { .. }
+        | ConnState::AwaitingResponse { .. }
+        | ConnState::Relaying { .. } => true,
     }
 }

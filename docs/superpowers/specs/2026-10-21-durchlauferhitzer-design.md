@@ -984,7 +984,8 @@ Failures, persistence, timeouts:
   method, host and raw path; emitted when the response is queued),
   `Rejected` (parse error, with the method and raw path once the request
   line was valid, FR-LOG-07; header/send/disk timeout, connection limits,
-  a connection delivered during the shutdown drain, FR-PROC-05),
+  `ShuttingDown` for a connection delivered during the shutdown drain,
+  FR-PROC-05d, and for an exchange cut by the fast shutdown, FR-PROC-05c),
   `Reset`, `FileAborted` (with the file error);
   `ProxiedResponse { status: u16, backend, request }` (a backend's
   response head was queued; its status is any 100–599, so a number rather
@@ -1049,25 +1050,51 @@ Failures, persistence, timeouts:
     new process, so new connections wait in the kernel's accept queue
     until it accepts them; the old process only drains what it already
     holds.
-  - *Core half* (stage 4 amendment A4, owner-approved 2026-10-27;
+  - *Core half* (stage 4 amendment A4, owner-approved 2026-10-27, which
+    covers the three calls, the closing of idle and fresh connections,
+    the 503 for requests completed during the drain and the closing after
+    in-flight exchanges; the details marked FR-PROC-05b to 05d are owner
+    decisions of 2026-10-27 from the stage 4 Task 2 review;
     [done in the core]): `Core::begin_drain(now, actions)` starts the
     graceful drain once the driver closed its listeners: idle keep-alive
     connections and connections that have not received a byte are closed
     at once (silently); a partly received head completes and is answered
     503 with `Connection: close`, like every request completed during the
     drain; every exchange in flight (fixed, static, proxied) finishes,
-    with `Connection: close` in any head rendered after the drain began,
-    then the connection takes the normal close path (lingering close);
-    requests pipelined behind it are not answered. A connection delivered
-    after `begin_drain` anyway is answered 503 and closed, logged as
-    `Rejected` with `ShuttingDown`. `Core::is_drained()` is true once no
-    connection, upstream, open file or orphaned open is left.
+    with `Connection: close` in any head rendered after the drain began
+    (a head already queued keeps what it said), then the connection takes
+    the normal close path (lingering close), unless a request was
+    pipelined behind it (FR-PROC-05b). `Core::is_drained()` is true once
+    no connection, upstream, open file or orphaned open is left.
     `Core::abort_all(actions)` is the fast path: every connection is
-    closed at once, each upstream and each open file exactly once, with no
-    log entries (the shutdown is the operator's, not a failure; the driver
-    logs it once); orphaned opens stay until their answer arrives. The
-    core drains afterwards, and `handle` keeps working after all three
-    calls.
+    closed at once, each upstream and each open file exactly once, cut
+    exchanges logged per FR-PROC-05c; orphaned opens stay in the core
+    until their answer arrives, but the driver does not wait for them
+    (DRV-14). The core drains afterwards, and `handle` keeps working
+    after all three calls.
+- **FR-PROC-05b** [done in the core; the epoll driver: stage 4] (Owner
+  decision 2026-10-27, stage 4 Task 2 review D1.) During the drain, a
+  complete request pipelined behind the response in flight is answered
+  `503` with `Connection: close` after that response, not dropped. The
+  in-flight response keeps the persistence its queued head announced; if
+  it announced keep-alive, the connection then parses its buffered input
+  (a complete request gets the 503, a partial one completes within its
+  header deadline first) or, with none buffered, closes (lingering close)
+  instead of waiting for the next request.
+- **FR-PROC-05c** [done in the core; the epoll driver: stage 4] (Owner
+  decision 2026-10-27, stage 4 Task 2 review D2; it replaces A4's "`Log`
+  entries as for a reset".) `abort_all` logs one `Rejected { reason:
+  ShuttingDown }` for each connection that had an exchange in flight: a
+  request read past its first byte, a response being written, a file
+  being opened or sent, a backend being connected to, awaited or relayed.
+  Idle keep-alive connections, connections without a byte of their
+  request, lingering connections, and connections refused with 503
+  (whose refusal is logged already, builder call) are cut silently.
+- **FR-PROC-05d** [done in the core; the epoll driver: stage 4] (Owner
+  decision 2026-10-27.) A connection delivered after `begin_drain` anyway
+  (or after `abort_all`) is answered 503 and closed like one over the
+  connection limits, and logged as `Rejected` with the reason
+  `RejectReason::ShuttingDown`.
 - **FR-PROC-05a** [stage 4] Exit codes: 0 success (including `--check` on a
   valid config), 1 invalid config, 2 startup failure (e.g. a port in use,
   a missing static root).
@@ -1431,7 +1458,8 @@ sim implements and checks it; the epoll driver is [stage 4].
   `begin_drain`, runs its loop until `is_drained()` or `shutdown_timeout`,
   and calls `abort_all` on expiry, a second SIGTERM or SIGINT; each call
   comes between two `handle` calls, and `handle` keeps working after
-  them.
+  them. After `abort_all` the driver exits without waiting for orphaned
+  opens (it does not poll `is_drained` again).
 
 ---
 

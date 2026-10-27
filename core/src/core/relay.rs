@@ -283,6 +283,7 @@ impl Core {
     /// the client for its next request or close it (FR-PROXY-28).
     fn finish_relay(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
         let limits = &self.config.limits;
+        let mode = self.mode;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -305,7 +306,7 @@ impl Core {
             unread_body: UnreadBody::None,
             buffered: *buffered,
         };
-        c.state = finish(conn, c, after, now, limits, actions);
+        c.state = finish(conn, c, after, now, limits, mode, actions);
         self.try_parse(now, conn, actions);
     }
 }

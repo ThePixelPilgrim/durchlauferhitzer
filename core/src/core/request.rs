@@ -84,6 +84,7 @@ impl Core {
         actions: &mut Vec<Action>,
     ) {
         let limits = &self.config.limits;
+        let mode = self.mode;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -121,6 +122,7 @@ impl Core {
                         },
                         now,
                         limits,
+                        mode,
                         actions,
                     );
                 }
@@ -143,6 +145,7 @@ impl Core {
                         },
                         now,
                         limits,
+                        mode,
                         actions,
                     );
                 }
@@ -274,13 +277,17 @@ pub(super) struct AfterResponse {
 }
 
 /// The response on `conn` is fully written: keep the connection for the
-/// next request, or shut down its sending side and linger.
+/// next request, or shut down its sending side and linger. While the core
+/// drains (`mode`), a kept connection with no pipelined input closes
+/// instead of waiting; pipelined input is parsed as usual, so a complete
+/// request gets the drain's 503 (FR-PROC-05b).
 pub(super) fn finish(
     conn: ConnId,
     c: &mut Conn,
     after: AfterResponse,
     now: Instant,
     limits: &Limits,
+    mode: Mode,
     actions: &mut Vec<Action>,
 ) -> ConnState {
     let AfterResponse {
@@ -288,22 +295,26 @@ pub(super) fn finish(
         unread_body,
         buffered,
     } = after;
-    match (persistence, unread_body) {
-        (Persistence::KeepAlive, UnreadBody::None) => {
-            if buffered > 0 {
-                ConnState::ReadingHead {
-                    buffered,
-                    parser: HeadParser::new(),
-                    deadline: now.saturating_add(limits.header_timeout),
-                }
-            } else {
-                ConnState::Idle {
-                    deadline: now.saturating_add(limits.keepalive_timeout),
-                }
+    match (persistence, unread_body, mode) {
+        (Persistence::KeepAlive, UnreadBody::None, Mode::Serving | Mode::Draining)
+            if buffered > 0 =>
+        {
+            ConnState::ReadingHead {
+                buffered,
+                parser: HeadParser::new(),
+                deadline: now.saturating_add(limits.header_timeout),
             }
         }
-        (Persistence::Close, UnreadBody::None | UnreadBody::Pending)
-        | (Persistence::KeepAlive, UnreadBody::Pending) => {
+        (Persistence::KeepAlive, UnreadBody::None, Mode::Serving) => ConnState::Idle {
+            deadline: now.saturating_add(limits.keepalive_timeout),
+        },
+        (Persistence::KeepAlive, UnreadBody::None, Mode::Draining)
+        | (
+            Persistence::Close,
+            UnreadBody::None | UnreadBody::Pending,
+            Mode::Serving | Mode::Draining,
+        )
+        | (Persistence::KeepAlive, UnreadBody::Pending, Mode::Serving | Mode::Draining) => {
             actions.push(Action::ShutdownWrite { conn });
             // Lingering input goes to the shared scratch buffer.
             c.recv = Box::default();

@@ -80,7 +80,8 @@ enum Mode {
     Serving,
     /// [`Core::begin_drain`] or [`Core::abort_all`] was called: every
     /// request completed from now on is answered 503 with
-    /// `Connection: close`, every connection delivered refused with 503.
+    /// `Connection: close`, and every connection delivered afterwards is
+    /// refused with 503.
     Draining,
 }
 
