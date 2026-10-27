@@ -295,7 +295,7 @@ Request head:
 - **FR-HTTP-04** [done] A header line is `name ":" OWS value OWS CRLF`;
   the name is a token (whitespace before the colon → 400); a line starting
   with SP or HTAB (obs-fold) → 400.
-- **FR-HTTP-05** [stage 3] Header values consist of HTAB, SP and VCHAR
+- **FR-HTTP-05** [done] Header values consist of HTAB, SP and VCHAR
   only. CR, LF, NUL, other control bytes and obs-text (bytes ≥ 0x80) →
   400. (Owner decision: obs-text is rejected rather than forwarded, to make
   the ecosystem safer; previously accepted per RFC 9110. Backend side:
@@ -350,7 +350,7 @@ Request target:
   either hex case. *Static serving decodes the path; decoded controls would
   allow log injection and odd file names.*
 - **FR-HTTP-15** [done] The path rejects (400) `;`, raw or as `%3B`.
-- **FR-HTTP-15a** [stage 3] The path rejects (400) `%3F` (encoded `?`): a
+- **FR-HTTP-15a** [done] The path rejects (400) `%3F` (encoded `?`): a
   backend that decodes before splitting off the query would see a
   different path and query than the router did.
   *(since stage 2; blocks the Tomcat-style `..;/` bypass when the raw path
@@ -489,13 +489,13 @@ Core-generated responses:
 ### FR-PROXY — Proxy routes
 
 Implemented building blocks: response-head parser (FR-PROXY-14…18) and
-chunked validator (FR-PROXY-19) [done in stage 3 Tasks 2–3]. Everything
-else here is [stage 3] unless marked.
+chunked validator (FR-PROXY-19) [done in stage 3 Tasks 2–3]; the rest
+of the proxy in stage 3 Tasks 4–8. Each requirement carries its status.
 
 Forwarding and identity:
 
-- **FR-PROXY-01** [stage 3] Any method token is forwarded.
-- **FR-PROXY-02** [stage 3] One fresh backend connection per request, with
+- **FR-PROXY-01** [done] Any method token is forwarded.
+- **FR-PROXY-02** [done] One fresh backend connection per request, with
   `Connection: close` toward the backend; a client has at most one upstream
   at a time. (Pooling: stage 7.)
 - **FR-PROXY-03** [done] `Core::backends()` lists the distinct
@@ -514,34 +514,34 @@ Forwarding and identity:
   cannot take a chunked body, which reverses stage 3 Task 4's "always
   HTTP/1.1"; and no `Transfer-Encoding` header ever reaches an HTTP/1.0
   client, body or not.*
-- **FR-PROXY-05** [stage 3; `strip_segments` done] `strip_prefix;` removes
+- **FR-PROXY-05** [done] `strip_prefix;` removes
   the route's own segments: on route `/api`, `/api/x` → `/x`, `/api/x/` →
   `/x/`, `/api` and `/api/` → `/`. An empty result is `/`. Partial
   stripping is not supported.
 
 Request head toward the backend:
 
-- **FR-PROXY-06** [stage 3] Hop-by-hop headers are removed: `Connection`
+- **FR-PROXY-06** [done] Hop-by-hop headers are removed: `Connection`
   and every header it names, `Keep-Alive`, every `Proxy-*` (incl.
   `Proxy-Connection`, `Proxy-Authorization`), `TE`, `Trailer`, `Upgrade`,
   and `Expect`.
-- **FR-PROXY-07** [stage 3] `Host` is forwarded unchanged.
-- **FR-PROXY-08** [stage 3] `X-Forwarded-For` = the client's existing value
+- **FR-PROXY-07** [done] `Host` is forwarded unchanged.
+- **FR-PROXY-08** [done] `X-Forwarded-For` = the client's existing value
   (if any) + `, ` + the peer address in canonical form (IPv4-mapped IPv6
   shown as IPv4); set to the peer address when absent. A request with more
   than one `X-Forwarded-For` header line → 400 (owner decision
   2026-10-26: strict and simple; backends must trust only the last entry
   either way).
-- **FR-PROXY-09** [stage 3] `X-Forwarded-Proto: http` replaces any client
+- **FR-PROXY-09** [done] `X-Forwarded-Proto: http` replaces any client
   value.
-- **FR-PROXY-10** [stage 3] A request `Content-Length` is re-rendered
+- **FR-PROXY-10** [done] A request `Content-Length` is re-rendered
   without leading zeros; a chunked request keeps `Transfer-Encoding:
   chunked`.
-- **FR-PROXY-11** [stage 3] `Connection: close` is added.
+- **FR-PROXY-11** [done] `Connection: close` is added.
 
 Response head toward the client:
 
-- **FR-PROXY-12** [stage 3] The same hop-by-hop headers are removed (the
+- **FR-PROXY-12** [done] The same hop-by-hop headers are removed (the
   whole FR-PROXY-06 list, `Expect` included: one list for both directions,
   owner decision 2026-10-26); the
   status line is re-rendered as `HTTP/1.1 <code> <reason>` with the
@@ -553,7 +553,7 @@ Response head toward the client:
   FR-PROXY-15; the renderer still substitutes the standard reason for any
   other byte, as defence in depth, and an empty reason for a code that has
   no standard one, owner decision 2026-10-26.)
-- **FR-PROXY-13** [stage 3] Header values containing obs-text (bytes ≥
+- **FR-PROXY-13** [done] Header values containing obs-text (bytes ≥
   0x80) are never forwarded: from a client → 400 (FR-HTTP-05); from a
   backend → 502 (FR-PROXY-26). Owner decision.
 
@@ -669,7 +669,8 @@ Failures, persistence, timeouts:
 
 - **FR-PROXY-26** [done] Failure matrix. Before the response head was
   queued to the client: connect refused or reset, a reset before the
-  response head, a malformed or oversized response head, 101, too many
+  response head, an end of stream before the response head
+  (`ClosedEarly`), a malformed or oversized response head, 101, too many
   interim heads, an oversized `Content-Length` → 502;
   `backend_connect_timeout` or `backend_response_timeout` → 504. After the
   response head was queued: any failure (backend reset or EOF mid-body,
@@ -704,9 +705,11 @@ Failures, persistence, timeouts:
   client that ends its stream mid-body closes both connections at once.
   Builder calls (stage 3 Task 7): failures after the head are logged with
   precise kinds — `BadChunk(..)` for bad chunked framing, `BodyTooLarge`
-  for `max_response_body`, `Reset` for a reset, `ResponseTimeout` for a
-  body that stalls — and the cut is `Log`, `CloseUpstream`, `Close`, with
-  no lingering close. *Builder call (stage 3 Task 8):* an end of stream
+  for `max_response_body`, `Reset` for a reset or an end of stream before
+  a `Content-Length` or chunked body is complete (`ClosedEarly` for the
+  end of stream since stage 3 Task 8), `ResponseTimeout` for a body that
+  stalls — and the cut is `Log`, `CloseUpstream`, `Close`, with no
+  lingering close. *Builder call (stage 3 Task 8):* an end of stream
   (EOF) before the response is complete is logged as `ClosedEarly`, not
   `Reset`, both before the head (502) and before a `Content-Length` or
   chunked body is complete (cut): the log tells a backend that closed
@@ -829,7 +832,7 @@ Failures, persistence, timeouts:
 - **FR-LOG-02** [done] Kinds: `Response` (status and a request summary of
   method, host and raw path; emitted when the response is queued),
   `Rejected` (parse error, header/send/disk timeout, connection limits),
-  `Reset`, `FileAborted` (with the file error); [stage 3]
+  `Reset`, `FileAborted` (with the file error);
   `ProxiedResponse { status: u16, backend, request }` (a backend's
   response head was queued; its status is any 100–599, so a number rather
   than one of the core's statuses) and `BackendFailed { backend, kind }`
