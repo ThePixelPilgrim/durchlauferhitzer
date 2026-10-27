@@ -196,7 +196,10 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
         } => (*status, request.as_ref()),
         Log::Rejected { reason, .. } => {
             let status = match reason {
-                RejectReason::Http { error, .. } => model_http_status(error),
+                RejectReason::Http { error, request } => {
+                    check_request_line(error, request.as_ref())?;
+                    model_http_status(error)
+                }
                 RejectReason::Timeout(TimeoutKind::Header | TimeoutKind::RequestBody) => {
                     Status::RequestTimeout
                 }
@@ -313,6 +316,63 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
         },
     };
     Ok(Some(announced))
+}
+
+/// Where the parser finds an error: in the request line, after a valid
+/// one, or (a head over its limit, a bare LF) in either.
+enum Found {
+    RequestLine,
+    Headers,
+    Either,
+}
+
+/// FR-LOG-07: a parse error carries the request line exactly when it was
+/// found after a valid one; its path is raw, from `/`, without the query.
+fn check_request_line(error: &HttpError, request: Option<&RequestLine>) -> Result<(), String> {
+    let found = match error {
+        HttpError::RequestLineTooLong
+        | HttpError::BadRequestLine
+        | HttpError::BadMethod
+        | HttpError::BadVersion
+        | HttpError::UnsupportedVersion
+        | HttpError::BadTarget(_) => Found::RequestLine,
+        HttpError::TooManyHeaders
+        | HttpError::BadHeaderName
+        | HttpError::BadHeaderValue
+        | HttpError::ObsFold
+        | HttpError::MissingHost
+        | HttpError::DuplicateHost
+        | HttpError::BadHost
+        | HttpError::ContentLengthWithTransferEncoding
+        | HttpError::BadContentLength
+        | HttpError::DuplicateContentLength
+        | HttpError::UnsupportedTransferEncoding
+        | HttpError::TransferEncodingInHttp10
+        | HttpError::ConnectionNamesFraming
+        | HttpError::BadExpect => Found::Headers,
+        HttpError::HeadTooLarge | HttpError::BareLf => Found::Either,
+    };
+    match (found, request) {
+        (Found::RequestLine, Some(line)) => {
+            return Err(format!(
+                "{error:?} is in the request line, but {line:?} was logged"
+            ));
+        }
+        (Found::Headers, None) => {
+            return Err(format!(
+                "{error:?} follows a valid request line, which was not logged"
+            ));
+        }
+        (Found::RequestLine, None)
+        | (Found::Headers | Found::Either, Some(_))
+        | (Found::Either, None) => {}
+    }
+    match request {
+        Some(line) if !line.path.starts_with('/') || line.path.contains('?') => Err(format!(
+            "{line:?}: the logged path is not a raw path without query"
+        )),
+        Some(_) | None => Ok(()),
+    }
 }
 
 pub(crate) fn log_conn(log: &Log) -> ConnId {
