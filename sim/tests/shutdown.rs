@@ -591,7 +591,9 @@ fn a_request_pipelined_behind_an_awaited_response_is_not_answered() {
 }
 
 /// A download stalled mid-body with the start of a pipelined head behind
-/// it, then the drain.
+/// it, then the drain. The download stays stalled for 3s after the
+/// pipelined bytes arrived, so a header deadline counted from their arrival
+/// would differ from one counted from the end of the response.
 fn partial_pipelined_behind_a_download(sim: &mut Sim) -> durchlauferhitzer_core::ConnId {
     let c = sim.connect(peer());
     sim.set_client_window(c, Window::Budget(1000));
@@ -600,6 +602,7 @@ fn partial_pipelined_behind_a_download(sim: &mut Sim) -> durchlauferhitzer_core:
         &[GET_F, b"GET /f.txt HTTP/1.1\r\nHo".as_slice()].concat(),
     );
     sim.run_until_idle();
+    sim.advance(Duration::from_secs(3));
     sim.begin_drain();
     sim.set_client_window(c, Window::Unlimited);
     sim.run_until_idle();
