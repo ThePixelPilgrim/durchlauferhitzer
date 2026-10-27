@@ -422,10 +422,11 @@
 //!   byte of their request are closed at once (`Close`, nothing logged); a
 //!   partly received head completes and is answered `503` with
 //!   `Connection: close`, as is any request completed later, one
-//!   pipelined behind a response in flight included; exchanges in flight
-//!   finish (a head already queued keeps what it said, any head rendered
-//!   from now on says `Connection: close`), then take the normal close
-//!   path (lingering close). An `Accepted` after it is answered 503 and
+//!   pipelined behind a head queued keep-alive before the drain included;
+//!   exchanges in flight finish (a head already queued keeps what it said,
+//!   any head rendered from now on says `Connection: close`, and a request
+//!   pipelined behind such a head is not answered), then take the normal
+//!   close path (lingering close). An `Accepted` after it is answered 503 and
 //!   closed like a refused connection (`Rejected` with `ShuttingDown`).
 //! - [`Core::is_drained`]: true once no connection, upstream, open file or
 //!   orphaned open is left; during the drain the driver polls it after

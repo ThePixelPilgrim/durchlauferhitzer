@@ -28,9 +28,13 @@ impl Core {
     ///   said; a head rendered from now on says `Connection: close`. Then
     ///   the connection takes the normal close path (shutdown of the
     ///   sending side, lingering close), unless a request was pipelined
-    ///   behind it: once complete, that request is answered 503 with
-    ///   `Connection: close` like the partly received head above
-    ///   (FR-PROC-05b, owner decision 2026-10-27);
+    ///   behind a head queued keep-alive before the drain: once complete,
+    ///   that request is answered 503 with `Connection: close` like the
+    ///   partly received head above (FR-PROC-05b, owner decision
+    ///   2026-10-27). Behind a head rendered during the drain (a file
+    ///   being opened, a backend being connected to or awaited), which
+    ///   says `Connection: close`, it is not answered (controller ruling
+    ///   2026-10-27);
     /// - a connection delivered by `Accepted` anyway is answered 503 and
     ///   closed like one over the limits, logged as
     ///   [`RejectReason::ShuttingDown`].

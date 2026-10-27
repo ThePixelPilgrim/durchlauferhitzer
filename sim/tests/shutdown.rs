@@ -10,7 +10,7 @@ use std::time::Duration;
 use durchlauferhitzer_core::http::request::{Method, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
-use durchlauferhitzer_core::{Log, RejectReason, RequestSummary};
+use durchlauferhitzer_core::{Log, RejectReason, RequestSummary, TimeoutKind};
 use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
 
 #[allow(dead_code, reason = "shared by all test binaries; each uses part")]
@@ -514,4 +514,161 @@ fn the_core_still_answers_after_abort_all() {
         "{}",
         sim.trace()
     );
+}
+
+/// Controller ruling 2026-10-27 (FR-PROC-05b, reconciling A4 with D1): a
+/// head rendered after the drain began says `Connection: close`, and
+/// nothing may follow a closing response, so a request pipelined behind a
+/// file still being opened is not answered.
+#[test]
+fn a_request_pipelined_behind_an_open_in_flight_is_not_answered() {
+    let mut sim = sim();
+    sim.set_disk_delay(Duration::from_millis(5));
+    let c = sim.connect(peer());
+    sim.send(c, &[GET_F, MISSING].concat());
+    sim.run_until_idle();
+    sim.begin_drain();
+    sim.advance(Duration::from_millis(50));
+    let mut expected = model_file_head(TEXT, 3000, Persistence::Close, None);
+    expected.extend_from_slice(&[b'x'; 3000]);
+    assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[Log::Response {
+            conn: c,
+            peer: peer(),
+            status: Status::Ok,
+            request: summary(Method::Get, "/f.txt"),
+        }],
+        "no 503: {}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    finish_client(&mut sim, c);
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert!(sim.is_drained(), "{}", sim.trace());
+}
+
+/// The same ruling for a proxied request awaiting its response: the
+/// relayed head says `connection: close`, the pipelined request is not
+/// answered.
+#[test]
+fn a_request_pipelined_behind_an_awaited_response_is_not_answered() {
+    let mut sim = sim();
+    let c = sim.connect(peer());
+    sim.send(
+        c,
+        &[
+            b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n".as_slice(),
+            MISSING,
+        ]
+        .concat(),
+    );
+    sim.run_until_idle();
+    let up = *sim.upstreams().first().unwrap();
+    sim.begin_drain();
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+        "{}",
+        sim.trace()
+    );
+    let refused = sim.logs().iter().any(|log| {
+        matches!(
+            log,
+            Log::Response {
+                status: Status::ServiceUnavailable,
+                ..
+            }
+        )
+    });
+    assert!(!refused, "no 503: {}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    finish_client(&mut sim, c);
+    assert!(sim.is_drained(), "{}", sim.trace());
+}
+
+/// A download stalled mid-body with the start of a pipelined head behind
+/// it, then the drain.
+fn partial_pipelined_behind_a_download(sim: &mut Sim) -> durchlauferhitzer_core::ConnId {
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Budget(1000));
+    sim.send(
+        c,
+        &[GET_F, b"GET /f.txt HTTP/1.1\r\nHo".as_slice()].concat(),
+    );
+    sim.run_until_idle();
+    sim.begin_drain();
+    sim.set_client_window(c, Window::Unlimited);
+    sim.run_until_idle();
+    let mut expected = model_file_head(TEXT, 3000, Persistence::KeepAlive, None);
+    expected.extend_from_slice(&[b'x'; 3000]);
+    assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    c
+}
+
+/// A pipelined head partly received behind the in-flight response: after
+/// that response it completes within a fresh header deadline, then gets
+/// the drain's 503.
+#[test]
+fn a_partly_pipelined_head_completes_then_gets_503() {
+    let mut sim = sim();
+    let c = partial_pipelined_behind_a_download(&mut sim);
+    sim.advance(Duration::from_secs(9));
+    sim.send(c, b"st: example.test\r\n\r\n");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        model_fixed(
+            Status::ServiceUnavailable,
+            Persistence::Close,
+            BodyMode::Full,
+            None
+        ),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    finish_client(&mut sim, c);
+    assert!(sim.is_drained(), "{}", sim.trace());
+}
+
+/// The same head never completes: when its header deadline (10s from the
+/// end of the response before it) passes, it gets the usual 408.
+#[test]
+fn a_partly_pipelined_head_that_stalls_gets_408() {
+    let mut sim = sim();
+    let c = partial_pipelined_behind_a_download(&mut sim);
+    let logs = sim.logs().len();
+    sim.advance(Duration::from_millis(9999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(sim.logs().len(), logs, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(
+        sim.take_received(c),
+        model_fixed(
+            Status::RequestTimeout,
+            Persistence::Close,
+            BodyMode::Full,
+            None
+        ),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(
+        &sim.logs()[logs..],
+        &[Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Header),
+        }],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    finish_client(&mut sim, c);
+    assert!(sim.is_drained(), "{}", sim.trace());
 }

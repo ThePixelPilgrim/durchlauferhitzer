@@ -1064,7 +1064,9 @@ Failures, persistence, timeouts:
     with `Connection: close` in any head rendered after the drain began
     (a head already queued keeps what it said), then the connection takes
     the normal close path (lingering close), unless a request was
-    pipelined behind it (FR-PROC-05b). `Core::is_drained()` is true once
+    pipelined behind a head queued keep-alive before the drain began
+    (FR-PROC-05b; behind a head rendered during the drain it is not
+    answered). `Core::is_drained()` is true once
     no connection, upstream, open file or orphaned open is left.
     `Core::abort_all(actions)` is the fast path: every connection is
     closed at once, each upstream and each open file exactly once, cut
@@ -1080,7 +1082,12 @@ Failures, persistence, timeouts:
   it announced keep-alive, the connection then parses its buffered input
   (a complete request gets the 503, a partial one completes within its
   header deadline first) or, with none buffered, closes (lingering close)
-  instead of waiting for the next request.
+  instead of waiting for the next request. *Controller ruling
+  2026-10-27 (reconciling A4 with D1):* the exception is a head rendered
+  after the drain began (a file still being opened, a backend still being
+  connected to or awaited): it says `Connection: close` per A4, and
+  nothing may follow a closing response, so a request pipelined behind it
+  is not answered; the client sees the close and may retry.
 - **FR-PROC-05c** [done in the core; the epoll driver: stage 4] (Owner
   decision 2026-10-27, stage 4 Task 2 review D2; it replaces A4's "`Log`
   entries as for a reset".) `abort_all` logs one `Rejected { reason:
