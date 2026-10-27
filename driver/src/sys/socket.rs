@@ -357,6 +357,15 @@ mod tests {
     }
 
     #[test]
+    fn listeners_set_reuseaddr_and_not_reuseport() {
+        let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16).unwrap();
+        let fd = listener.as_raw_fd();
+        let reuseaddr = get_int_option(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).unwrap();
+        let reuseport = get_int_option(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT).unwrap();
+        assert_eq!((reuseaddr, reuseport), (1, 0));
+    }
+
+    #[test]
     fn ipv6_listeners_are_ipv6_only() {
         let listener = match tcp_listen("[::1]:0".parse().unwrap(), 16) {
             Ok(listener) => listener,

@@ -183,7 +183,7 @@ fn listening_stream_is_recognised() {
 }
 
 #[test]
-fn listen_sets_reuseaddr_and_reports_address_in_use() {
+fn listen_on_an_address_in_use_fails() {
     let first = tcp_listen("127.0.0.1:0".parse().unwrap(), 16).unwrap();
     let addr = local_addr(first.as_fd()).unwrap();
     let err = tcp_listen(addr, 16).unwrap_err();
@@ -235,12 +235,11 @@ fn finish_connect(fd: &OwnedFd) -> Option<std::io::Error> {
 
 #[test]
 fn connect_to_a_closed_port_fails_via_so_error() {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    // A port held by a socket that is bound but not listening (the client
+    // end of a connection) refuses connects, and no other test can take it
+    // while it is held.
+    let (held, _server) = loopback_pair();
+    let addr = held.local_addr().unwrap();
     let connecting = connect_nonblocking(addr).unwrap();
     match connecting.immediate {
         Ok(ConnectStart::InProgress) => {
@@ -276,7 +275,7 @@ fn connect_to_an_open_listener_completes() {
 }
 
 #[test]
-fn write_to_a_closed_peer_errors_without_sigpipe() {
+fn write_to_a_closed_peer_is_an_error() {
     let (client, server) = loopback_pair();
     server.set_nonblocking(true).unwrap();
     let fd: OwnedFd = server.into();
