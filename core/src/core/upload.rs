@@ -35,6 +35,7 @@ impl Core {
         let ConnState::AwaitingResponse {
             request,
             buffers,
+            head_deadline,
             deadline,
             ..
         } = &mut c.state
@@ -52,7 +53,7 @@ impl Core {
             return;
         }
         if buffers.head.is_empty() {
-            *deadline = awaiting_deadline(now, &request.body, limits);
+            *deadline = awaiting_deadline(now, &request.body, *head_deadline, limits);
         }
         self.sync_interest(conn, actions);
     }
@@ -72,6 +73,7 @@ impl Core {
         let ConnState::AwaitingResponse {
             request,
             buffers,
+            head_deadline,
             deadline,
             ..
         } = &mut c.state
@@ -86,7 +88,7 @@ impl Core {
         match request.body.received(len, &mut c.recv) {
             Ok(0) => {}
             Ok(_) => {
-                *deadline = awaiting_deadline(now, &request.body, limits);
+                *deadline = awaiting_deadline(now, &request.body, *head_deadline, limits);
                 self.sync_interest(conn, actions);
             }
             Err(error) => self.cut_body(conn, error, actions),
@@ -182,10 +184,17 @@ impl Core {
 /// The deadline of a connection awaiting its response once the request
 /// head was written, after progress at `now`: the body idle timeout while
 /// the body streams, the response timeout once the whole request is
-/// written (FR-PROXY-29).
-pub(super) fn awaiting_deadline(now: Instant, body: &RequestBody, limits: &Limits) -> Instant {
-    match body.stage() {
+/// written, but never later than the response head's total deadline
+/// `head_deadline`, if its first byte came (FR-PROXY-29).
+pub(super) fn awaiting_deadline(
+    now: Instant,
+    body: &RequestBody,
+    head_deadline: Option<Instant>,
+    limits: &Limits,
+) -> Instant {
+    let deadline = match body.stage() {
         Stage::Receiving | Stage::Writing => now.saturating_add(limits.body_idle_timeout),
         Stage::Written => now.saturating_add(limits.backend_response_timeout),
-    }
+    };
+    head_deadline.map_or(deadline, |cap| deadline.min(cap))
 }

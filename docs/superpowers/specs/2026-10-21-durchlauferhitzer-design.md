@@ -589,7 +589,9 @@ Backend response parsing:
   once, as after a request head; an interim head does not restart
   `backend_response_timeout` (it is not the response head); an interim
   head that arrives while the request body streams is dropped the same
-  way and the upload goes on.
+  way and the upload goes on. (Since the owner decision of 2026-10-27 in
+  FR-PROXY-29, its first byte starts the response head's total deadline,
+  which no later interim head restarts.)
 
 Bodies:
 
@@ -696,8 +698,12 @@ Failures, persistence, timeouts:
   core waited for the client's body bytes, and a 504 (`BackendFailed {
   BodyTimeout }`, its own kind so the log says what stalled; owner policy
   2026-10-26) when body bytes waited for the backend: a backend that
-  stops taking the body is at fault. A 408 or 504 to a HEAD request is
-  head-only, like every response to HEAD. *Owner decision 2026-10-26:*
+  stops taking the body is at fault. A backend that sent a first
+  response head byte but did not complete the head within
+  `backend_response_timeout` of it is at fault too: a 504 (`BackendFailed
+  { ResponseTimeout }`), even while the core waits for the client's body
+  bytes (owner decision 2026-10-27, FR-PROXY-29). A 408 or 504 to a HEAD
+  request is head-only, like every response to HEAD. *Owner decision 2026-10-26:*
   while body bytes wait for the backend, the upstream is read too (the
   driver contract's upstream-only `Interest::ReadWrite`), so a backend
   that stops taking the body and answers has its response relayed at once
@@ -751,25 +757,31 @@ Failures, persistence, timeouts:
   waited for (408 for the client's body bytes, 504 `BodyTimeout` for a
   backend that stopped taking them). Once the whole request is written,
   `backend_response_timeout` is a total deadline: head bytes do not
-  extend it. Known bound (for the owner to accept or cap): in that
-  streaming phase a backend that trickles response head bytes can
-  postpone the 408/504 by up to one `body_idle_timeout` per byte. The
-  bytes are bounded (at most `MAX_INTERIM_HEADS` + 1 = 9 heads, each
-  at most the upstream receive capacity, `max(16 KiB, max_head)`), but
-  there is no total time cap in that phase; a client trickling its body
-  has the same property.
+  extend it. *Owner decision 2026-10-27:* once the first response head
+  byte arrives (of an interim head too), `backend_response_timeout` also
+  runs from that byte as a total deadline for completing the response
+  head, even while the request body streams; it needs no config key of
+  its own. Later head bytes and new interim heads do not restart it. The
+  connection's deadline is the earlier of that total deadline and the one
+  that otherwise applies (`body_idle_timeout` while the body streams, the
+  response timeout from the fully written request), so of the two starts
+  of `backend_response_timeout` (first head byte, request fully written)
+  the earlier wins. Its expiry is a 504 (`BackendFailed {
+  ResponseTimeout }`), even while the core waits for the client's body
+  bytes; once the response head is queued it no longer applies. A backend
+  trickling response head bytes therefore holds the connection for at
+  most `backend_response_timeout` after its first byte.
 - **FR-PROXY-30** [done] Nothing from a backend reaches the client
   unvalidated: heads are parsed strictly, bodies framed strictly, and
   nothing after a framing error is written.
 - **FR-PROXY-31** [done] Backend failures are logged
-  (`BackendFailed`: refused, reset, closed early (an end of stream before
-  the response was complete) [done in stage 3 Task 8], bad response with its parse error,
-  connect timeout, response timeout, body timeout: a backend that stopped
-  taking the request body [done in stage 3 Task 6]; bad chunked framing of
-  the response body, a response body over `max_response_body`, a
-  `Transfer-Encoding` toward an HTTP/1.0 client [done in stage 3 Task 7]);
-  proxied responses
-  are logged as
+  (`BackendFailed`: refused, reset, closed early (an end of stream
+  before the response was complete) [done in stage 3 Task 8], bad
+  response with its parse error, connect timeout, response timeout, body
+  timeout: a backend that stopped taking the request body [done in stage
+  3 Task 6]; bad chunked framing of the response body, a response body
+  over `max_response_body`, a `Transfer-Encoding` toward an HTTP/1.0
+  client [done in stage 3 Task 7]); proxied responses are logged as
   `ProxiedResponse` with the backend's status (FR-LOG-02).
 - **FR-PROXY-32** [stage 8] Backend-directed file serving (an
   `X-Accel-Redirect`-like header): see Timeline.

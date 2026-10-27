@@ -134,7 +134,10 @@ pub(crate) enum ConnState {
     /// most [`MAX_INTERIM_HEADS`](crate::http::response_head::MAX_INTERIM_HEADS)).
     /// `deadline` is the backend response timeout while the head
     /// is written and once the whole request is; the body idle timeout,
-    /// reset on progress, while the body streams.
+    /// reset on progress, while the body streams; never later than
+    /// `head_deadline`. That is `None` until the first response head byte
+    /// (of an interim head too) arrives, then the backend response timeout
+    /// from that byte, a total deadline for the response head (FR-PROXY-29).
     AwaitingResponse {
         up: UpstreamId,
         request: ProxyRequest,
@@ -142,6 +145,7 @@ pub(crate) enum ConnState {
         filled: usize,
         parser: ResponseParser,
         interim: u8,
+        head_deadline: Option<Instant>,
         deadline: Instant,
     },
     /// The backend's response head was queued: what is left of its rewrite

@@ -20,6 +20,15 @@ host example.test {
   path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
+/// As `TIMEOUTS`, but the response timeout (10 s) is above the body idle
+/// timeout, so the response head's total deadline (FR-PROXY-29) passes
+/// only after body idle timeouts restarted by head bytes.
+const LONG_RESPONSE: &str = "listen 127.0.0.1:8080;
+limits { backend_connect_timeout 2s; backend_response_timeout 10s; body_idle_timeout 4s; }
+host example.test {
+  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+}";
+
 const POST_10: &[u8] = b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 10\r\n\r\n";
 
 /// `backend_connect_timeout 2s`: a hung connect is a 504 after exactly
@@ -169,11 +178,12 @@ fn configured_body_idle_timeout_cuts_a_stalled_response() {
 /// the backend are progress too ("no body progress in either direction"):
 /// they restart `body_idle_timeout`. Who is blamed on expiry still follows
 /// what the core waited for: the client's body bytes (408) or a backend
-/// that stopped taking them (504).
+/// that stopped taking them (504). (With `LONG_RESPONSE`, so the head's
+/// total deadline comes later.)
 #[test]
 fn partial_response_head_during_upload_restarts_body_idle_timeout() {
     for backend_stalls in [false, true] {
-        let mut sim = Sim::new(TIMEOUTS);
+        let mut sim = Sim::new(LONG_RESPONSE);
         let head = b"POST /x HTTP/1.1\r\nhost: example.test\r\ncontent-length: 10\r\n\
             x-forwarded-for: 192.0.2.1\r\nx-forwarded-proto: http\r\nconnection: close\r\n\r\n";
         sim.set_default_backend_window(Window::Budget(head.len() + 3));
@@ -373,6 +383,130 @@ fn client_half_close_still_gets_response() {
         assert!(
             matches!(sim.logs(), [Log::ProxiedResponse { status: 200, .. }]),
             "{when:?}\n{}",
+            sim.trace()
+        );
+    }
+}
+
+/// What happens at a given time (in ms) in
+/// `response_head_has_a_total_deadline_while_the_body_streams`.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// The client sends these body bytes.
+    Client(u64, &'static [u8]),
+    /// The backend sends these response head bytes.
+    Backend(u64, &'static [u8]),
+}
+
+/// FR-PROXY-29 (owner decision 2026-10-27): once the first response head
+/// byte arrives, `backend_response_timeout` is also a total deadline for
+/// completing the response head, even while the request body streams.
+/// Neither later head bytes, nor a new interim head, nor body progress
+/// restart it: the 504 comes exactly `backend_response_timeout` after the
+/// first head byte.
+#[test]
+fn response_head_has_a_total_deadline_while_the_body_streams() {
+    let cases: [(&str, &[Step], u64, Persistence); 3] = [
+        // TIMEOUTS (response 3 s): the client keeps its body streaming;
+        // the cap passes 3 s after the first head byte at 1 s.
+        (
+            TIMEOUTS,
+            &[
+                Step::Client(0, b"0"),
+                Step::Backend(1000, b"H"),
+                Step::Client(1000, b"1"),
+                Step::Client(2000, b"2"),
+                Step::Client(3000, b"3"),
+            ],
+            4000,
+            Persistence::Close,
+        ),
+        // The body completes after the first head byte: the response
+        // timeout from the first head byte (1 s) passes before the one
+        // from the fully written request (2 s), so it wins. The whole body
+        // was read, so the 504 keeps the client (FR-PROXY-26, -28).
+        (
+            TIMEOUTS,
+            &[
+                Step::Client(0, b"0"),
+                Step::Backend(1000, b"H"),
+                Step::Client(2000, b"123456789"),
+            ],
+            4000,
+            Persistence::KeepAlive,
+        ),
+        // Response 10 s: the client stalls, the backend trickles one piece
+        // every body idle timeout less 1 ms, finishing an interim head on
+        // the way, never the response head.
+        (
+            LONG_RESPONSE,
+            &[
+                Step::Client(0, b"012"),
+                Step::Backend(1000, b"H"),
+                Step::Backend(4999, b"TTP/1.1 100 Continue\r\n\r\n"),
+                Step::Backend(8998, b"H"),
+            ],
+            11_000,
+            Persistence::Close,
+        ),
+    ];
+    for (config, steps, expiry, persistence) in cases {
+        let mut sim = Sim::new(config);
+        let c = sim.connect(peer());
+        sim.send(c, POST_10);
+        let mut at = 0;
+        for &step in steps {
+            let (Step::Client(when, _) | Step::Backend(when, _)) = step;
+            sim.advance(Duration::from_millis(when - at));
+            at = when;
+            match step {
+                Step::Client(_, bytes) => sim.send(c, bytes),
+                Step::Backend(_, bytes) => sim.backend_send(only_upstream(&sim), bytes),
+            }
+            sim.run_until_idle();
+        }
+        sim.advance(Duration::from_millis(expiry - 1 - at));
+        assert!(
+            sim.take_received(c).is_empty(),
+            "expiry={expiry} {persistence:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(
+            sim.open_upstreams(),
+            1,
+            "expiry={expiry} {persistence:?}\n{}",
+            sim.trace()
+        );
+        sim.advance(Duration::from_millis(1));
+        assert_eq!(
+            sim.take_received(c),
+            fixed(Status::GatewayTimeout, persistence, BodyMode::Full),
+            "expiry={expiry} {persistence:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(
+            sim.logs(),
+            &[
+                Log::BackendFailed {
+                    conn: c,
+                    peer: peer(),
+                    backend: BackendId(0),
+                    kind: BackendFailure::ResponseTimeout,
+                },
+                Log::Response {
+                    conn: c,
+                    peer: peer(),
+                    status: Status::GatewayTimeout,
+                    request: Some(summary(Method::Other("POST".to_owned()), "/api/x")),
+                },
+            ],
+            "expiry={expiry} {persistence:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(
+            sim.open_upstreams(),
+            0,
+            "expiry={expiry} {persistence:?}\n{}",
             sim.trace()
         );
     }

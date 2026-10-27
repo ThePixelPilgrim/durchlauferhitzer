@@ -249,6 +249,7 @@ impl Core {
                     filled: 0,
                     parser: ResponseParser::new(),
                     interim: 0,
+                    head_deadline: None,
                     deadline: response_deadline,
                 }
             }
@@ -341,7 +342,7 @@ impl Core {
         len: usize,
         actions: &mut Vec<Action>,
     ) {
-        let body_idle_timeout = self.config.limits.body_idle_timeout;
+        let limits = &self.config.limits;
         let Some(conn) = self.upstreams.conn(up) else {
             return;
         };
@@ -357,6 +358,7 @@ impl Core {
                 request,
                 buffers,
                 filled,
+                head_deadline,
                 deadline,
                 ..
             } => {
@@ -365,16 +367,20 @@ impl Core {
                     return;
                 }
                 *filled = filled.saturating_add(added);
+                // The first head byte starts the head's total deadline
+                // (FR-PROXY-29); later ones do not restart it.
+                let cap = *head_deadline
+                    .get_or_insert_with(|| now.saturating_add(limits.backend_response_timeout));
                 // While the body streams, backend bytes are progress too
                 // (FR-PROXY-29: no progress in either direction); once the
                 // whole request is written, the response timeout is a total
                 // deadline and runs on.
-                match request.body.stage() {
+                *deadline = match request.body.stage() {
                     Stage::Receiving | Stage::Writing => {
-                        *deadline = now.saturating_add(body_idle_timeout);
+                        now.saturating_add(limits.body_idle_timeout).min(cap)
                     }
-                    Stage::Written => {}
-                }
+                    Stage::Written => (*deadline).min(cap),
+                };
                 self.judge_head(now, conn, actions);
             }
             ConnState::Relaying { .. } => self.relay_received(now, conn, len, actions),
@@ -507,9 +513,10 @@ impl Core {
     }
 
     /// A relaying connection's deadline passed. Before the head was queued
-    /// that is a 504; after it, the connection is cut: logged as a send
-    /// timeout when the client had bytes to take, as a backend timeout when
-    /// the body stalled on the backend's side.
+    /// that is a 504 (a 408 when the client stalled its body, unless the
+    /// head's total deadline passed); after it, the connection is cut:
+    /// logged as a send timeout when the client had bytes to take, as a
+    /// backend timeout when the body stalled on the backend's side.
     pub(super) fn expire_proxy(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
         let Some(c) = self.conns.get(&conn) else {
             return;
@@ -517,6 +524,14 @@ impl Core {
         match &c.state {
             ConnState::Connecting { .. } => {
                 self.fail_before_head(now, conn, BackendFailure::ConnectTimeout, actions);
+            }
+            // The backend did not finish its response head in time, even
+            // if the body streams (FR-PROXY-29).
+            ConnState::AwaitingResponse {
+                head_deadline: Some(cap),
+                ..
+            } if now >= *cap => {
+                self.fail_before_head(now, conn, BackendFailure::ResponseTimeout, actions);
             }
             // A client that stalls its body is at fault (408); anything
             // else waits on the backend (504).
