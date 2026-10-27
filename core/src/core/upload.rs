@@ -153,10 +153,19 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        let ConnState::AwaitingResponse { up, request, .. } = &c.state else {
+        let ConnState::AwaitingResponse {
+            up,
+            request,
+            send_deadline: unread_continue,
+            ..
+        } = &c.state
+        else {
             return;
         };
         let (up, body) = (*up, body_mode(&request.summary.method));
+        // Behind an unread `100 Continue` the send idle deadline runs on: it
+        // restarts only when the client takes a byte.
+        let send_deadline = unread_continue.unwrap_or(send_deadline);
         render_fixed(
             Status::RequestTimeout,
             Persistence::Close,

@@ -43,11 +43,13 @@ impl Core {
             request,
             buffers,
             filled,
+            send_deadline: unread_continue,
             ..
         } = &mut c.state
         else {
             return;
         };
+        let unread_continue = *unread_continue;
         // The persistence of the request, if its body was fully read (else
         // the backend answered early and the body stays unread, FR-PROXY-27);
         // a close-delimited response closes the client (FR-PROXY-28).
@@ -112,7 +114,9 @@ impl Core {
         }
         // The rewritten head is for the client to take now.
         c.state = ConnState::Relaying {
-            deadline: relay_deadline(now, true, &body, limits),
+            // Behind an unread `100 Continue` the send idle deadline runs
+            // on: it restarts only when the client takes a byte.
+            deadline: unread_continue.unwrap_or_else(|| relay_deadline(now, true, &body, limits)),
             body,
             buffers,
             persistence,

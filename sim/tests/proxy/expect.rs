@@ -91,9 +91,11 @@ host example.test {
 /// its `100 Continue` is not read either while it is queued, so its body
 /// stays unread; after `body_idle_timeout` without body progress the
 /// client is at fault: a 408 (queued behind the `100`), the upstream
-/// closed. A client that still takes nothing is then closed by
-/// `send_idle_timeout`. (Here the send idle timeout, 7 s, is the later
-/// one; see `unread_100_continue_hits_the_send_idle_timeout_first`.)
+/// closed. A client that still takes nothing is closed when the send idle
+/// timeout that started with the `100` runs out: it carries over to the
+/// 408, which restarts it only once the client takes a byte. (Here the
+/// send idle timeout, 7 s, is the later one; see
+/// `unread_100_continue_hits_the_send_idle_timeout_first`.)
 #[test]
 fn unread_100_continue_stalls_the_body_into_a_408() {
     let mut sim = Sim::new(SHORT);
@@ -127,7 +129,11 @@ fn unread_100_continue_stalls_the_body_into_a_408() {
     assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
     // No body byte reached the backend.
     assert!(sim.take_backend_request(up).is_empty(), "{}", sim.trace());
-    sim.advance(Duration::from_secs(7));
+    // The send idle deadline runs on from the `100` (queued at 0 s): the
+    // client has taken nothing, so it closes at 7 s, not 4 s + 7 s.
+    sim.advance(Duration::from_millis(2999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
     assert_eq!(
         sim.logs(),
@@ -212,4 +218,83 @@ fn slowly_read_100_continue_restarts_the_send_idle_timeout() {
     assert!(sim.logs().is_empty(), "{}", sim.trace());
     assert_eq!(sim.take_received(c), b"HT", "{}", sim.trace());
     assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
+}
+
+/// Send idle 7 s, a response head cap of 3 s, body idle 20 s.
+const CAP_FIRST: &str = "listen 127.0.0.1:8080;
+limits { send_idle_timeout 7s; body_idle_timeout 20s; backend_response_timeout 3s; }
+host example.test {
+  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+}";
+
+/// The send idle deadline of an unread `100 Continue` carries over to the
+/// 504 queued behind it (stage 3 Task 9 builder call): the backend's
+/// partial head runs out its 3 s cap, and the client, which has taken
+/// nothing since the `100` was queued, is closed at 7 s.
+#[test]
+fn unread_100_continue_carries_its_send_deadline_into_a_504() {
+    let mut sim = Sim::new(CAP_FIRST);
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(
+        c,
+        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+          Content-Length: 10\r\n\r\n",
+    );
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\n");
+    sim.run_until_idle();
+    sim.advance(Duration::from_secs(3));
+    assert_eq!(sim.logs().len(), 2, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    sim.advance(Duration::from_millis(3999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
+}
+
+/// The same carry-over when a proxied response is queued behind the
+/// unread `100 Continue`: the client is closed 7 s after the `100` was
+/// queued, though the response came at 2 s.
+#[test]
+fn unread_100_continue_carries_its_send_deadline_into_a_relay() {
+    let mut sim = Sim::new(CAP_FIRST);
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(
+        c,
+        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+          Content-Length: 10\r\n\r\n",
+    );
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.advance(Duration::from_secs(2));
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    sim.run_until_idle();
+    assert_eq!(sim.logs().len(), 1, "{}", sim.trace());
+    sim.advance(Duration::from_millis(4999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
 }

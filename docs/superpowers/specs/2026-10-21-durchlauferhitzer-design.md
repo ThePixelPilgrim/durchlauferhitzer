@@ -666,19 +666,27 @@ Bodies:
   *Builder call (stage 3 Task 9):* while a queued `100 Continue` waits for
   a client that does not read it, the client is not read either (its
   interest is to write), so its body stays unread. The client's
-  `send_idle_timeout` applies to the queued `100` (FR-PROXY-29), restarted
-  by every byte the client takes, and the earlier of it and
-  `body_idle_timeout` decides, both blaming the client: the send timeout
-  cuts the connection (logged `Rejected { Timeout(Send) }`, the upstream
-  closed, no response); the body idle timeout is a 408 queued behind the
-  `100` (logged `Rejected { Timeout(RequestBody) }`, the upstream closed),
-  and a client that still takes nothing is then closed after
-  `send_idle_timeout`. If both expire at the same instant the send
-  timeout wins. Tests `unread_100_continue_hits_the_send_idle_timeout_first`,
+  `send_idle_timeout` applies to the queued `100` (FR-PROXY-29) from the
+  moment it is queued, restarted only by a byte the client takes, and
+  stops once the whole `100` is out. Whichever deadline comes first
+  decides: the send timeout cuts the connection (logged `Rejected {
+  Timeout(Send) }`, the upstream closed, no response); the body idle
+  timeout is a 408 queued behind the `100` (`Rejected {
+  Timeout(RequestBody) }`), a head cap or `backend_response_timeout` a
+  504, each with the upstream closed. Ties follow FR-PROXY-29's order
+  (the send timeout first). *Controller ruling:* a 408, 504 or proxied
+  response queued behind an unread `100` does not restart the send idle
+  deadline: the remaining one carries over, so a client that still takes
+  nothing is closed when the deadline started with the `100` runs out.
+  Tests `unread_100_continue_hits_the_send_idle_timeout_first`,
   `slowly_read_100_continue_restarts_the_send_idle_timeout`,
-  `unread_100_continue_stalls_the_body_into_a_408`. *(Fixed in stage 3
-  Task 9, review round 2: the send idle timeout did not run while a
-  response was awaited.)*
+  `continue_taken_stops_the_send_idle_timeout`,
+  `unread_100_continue_stalls_the_body_into_a_408`,
+  `unread_100_continue_carries_its_send_deadline_into_a_504`,
+  `unread_100_continue_carries_its_send_deadline_into_a_relay`.
+  *(Fixed in stage 3 Task 9, review rounds 2 and 3: the send idle timeout
+  did not run while a response was awaited, and restarted when a 408 or
+  504 was queued behind the unread `100`.)*
 - **FR-PROXY-25a** [done] Outside proxy routes (static routes, route
   misses) `Expect: 100-continue` is never answered with `100 Continue`: the
   normal final response (413, 404, …) is sent at once. Any other `Expect`
@@ -792,10 +800,20 @@ Failures, persistence, timeouts:
   the earlier wins. Expiry of the cap is a 504 (`BackendFailed {
   ResponseTimeout }`), even while the core waits for the client's body
   bytes; once the response head is queued it no longer applies. *Builder
-  call (stage 3 Task 9, controller ruling):* when the cap and
-  `body_idle_timeout` expire at the same instant, the cap wins: a 504
-  (`ResponseTimeout`), not a 408 (test
-  `head_deadline_tied_with_body_idle_is_504`). A
+  call (stage 3 Task 9, controller rulings):* deadlines of a connection
+  awaiting its response that fall due at the same instant are taken in
+  this order: first the client's send idle timeout (while it has a `100
+  Continue` to take: a client that takes no bytes could not receive any
+  504 or 408 anyway), then the current head's cap, then the deadline
+  that otherwise applies (`body_idle_timeout` or
+  `backend_response_timeout`). So a send timeout tied with the cap, with
+  `backend_response_timeout` or with `body_idle_timeout` is `Rejected {
+  Timeout(Send) }`; a cap tied with `body_idle_timeout` is a 504
+  (`ResponseTimeout`), not a 408 (tests
+  `head_deadline_tied_with_body_idle_is_504`,
+  `send_timeout_tied_with_head_cap_wins`,
+  `three_way_tie_goes_to_the_send_timeout`,
+  `send_timeout_tied_with_response_timeout_wins`). A
   backend trickling response head bytes therefore holds the connection
   for at most `MAX_INTERIM_HEADS` + 1 = 9 heads, each at most
   `backend_response_timeout` from its first byte.

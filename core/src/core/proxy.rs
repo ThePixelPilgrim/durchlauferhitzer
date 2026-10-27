@@ -479,6 +479,23 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
+        // Behind an unread `100 Continue` the send idle deadline runs on: it
+        // restarts only when the client takes a byte.
+        let deadline = match c.state {
+            ConnState::AwaitingResponse {
+                send_deadline: Some(unread_continue),
+                ..
+            } => unread_continue,
+            ConnState::AwaitingResponse { .. }
+            | ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::Relaying { .. }
+            | ConnState::Lingering { .. } => deadline,
+        };
         let Some((up, mut request)) = take_request(c) else {
             return;
         };
