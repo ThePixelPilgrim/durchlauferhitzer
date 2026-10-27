@@ -907,7 +907,15 @@ Failures, persistence, timeouts:
   `tail_only_read_keeps_the_send_timeout_while_the_head_is_unsent`). A
   backend trickling response head bytes therefore holds the connection
   for at most `MAX_INTERIM_HEADS` + 1 = 9 heads, each at most
-  `backend_response_timeout` from its first byte.
+  `backend_response_timeout` from its first byte. *(Owner decision
+  2026-10-27, DRV-06: these deadlines, the total response timeout and a
+  head's cap included, are judged when `TimerFired` is handled; a body
+  byte or a completed head handled before an overdue `TimerFired` counts,
+  so each may be overrun by up to one loop wake. Tests
+  `last_body_byte_with_the_body_idle_deadline`,
+  `complete_response_head_with_the_response_timeout`; a head left
+  incomplete is still a 504,
+  `response_head_byte_with_the_response_timeout_is_504_either_way`.)*
 - **FR-PROXY-30** [done] Nothing from a backend reaches the client
   unvalidated: heads are parsed strictly, bodies framed strictly, and
   nothing after a framing error is written.
@@ -946,7 +954,10 @@ Failures, persistence, timeouts:
   request head, started at accept and on every entry into reading a head
   (first byte after idle, or pipelined leftover); trickling does not extend
   it. On expiry: 408 and close if any byte of the request arrived, else a
-  silent close.
+  silent close. *(Owner decision 2026-10-27, DRV-06: a head completed by
+  an event handled before the overdue `TimerFired` is served; the total
+  deadline may be overrun by up to one loop wake. Test
+  `head_completed_after_its_header_timeout`.)*
 - **FR-CONN-07** [done] `keepalive_timeout`: an idle keep-alive connection
   is closed silently.
 - **FR-CONN-08** [done] `send_idle_timeout`: reset whenever the client
@@ -954,6 +965,9 @@ Failures, persistence, timeouts:
   completes); on expiry the connection closes without further writes,
   logged as a send timeout (or disk timeout while waiting on the disk,
   also when a readahead is in flight while head bytes are still queued).
+  *(Owner decision 2026-10-27, DRV-06: a disk answer handled before the
+  overdue `TimerFired` counts, so the disk wait may be overrun by up to one
+  loop wake. Test `file_opened_with_its_disk_timeout`.)*
 - **FR-CONN-09** [done] A connection accepted while `max_connections`
   connections, or `max_connections_per_ip` from the same peer, are counted
   is answered 503 and closed (lingering), and logged. Refused connections
@@ -1411,7 +1425,16 @@ sim implements and checks it; the epoll driver is [stage 4].
 - **DRV-05** After `Close` the driver closes the socket and delivers no
   further events for that id.
 - **DRV-06** Timers are armed from `next_deadline` after every `handle`
-  call; `TimerFired` is delivered once that instant has passed.
+  call; `TimerFired` is delivered once that instant has passed. *Owner
+  decision 2026-10-27: delivery order decides.* Deadlines are judged only
+  when `TimerFired` is handled: an event handled before it counts (as
+  progress, a completed head, an open answered, …) even when `now` is
+  already past its connection's deadline. A loop that wakes late with I/O
+  and an overdue timer both ready may therefore overrun any deadline,
+  total ones included (`header_timeout`, `backend_response_timeout`, a
+  response head's cap, the disk wait), by up to one loop wake. The sim's
+  late-timer mode (NFR-TEST-07) pins both orders (tests in
+  `sim/tests/late_timers.rs`).
 - **DRV-07** Static roots are opened once at startup (`RootId` indexes
   `static_roots()`); an empty segment list means the root itself (open
   `"."`).

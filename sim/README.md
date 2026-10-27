@@ -59,7 +59,8 @@ tests/
   shutdown.rs         the graceful drain and the fast path (FR-PROC-05):
                       `Sim::begin_drain`, `abort_all`, `is_drained`
   late_timers.rs      the late-timer mode (NFR-TEST-07): I/O and disk
-                      completions before an overdue `TimerFired`
+                      completions before an overdue `TimerFired`, and
+                      the outcomes that differ by order (DRV-06)
   static_files/       static routes end to end (one test binary)
     main.rs             shared configs and helpers
     transfer.rs         chunks, slow disks and clients, changing files, resets

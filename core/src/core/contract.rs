@@ -411,6 +411,16 @@
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
 //!
+//! Deadlines are judged only when [`Event::TimerFired`] is handled
+//! (owner decision 2026-10-27, DRV-06: delivery order decides). An event
+//! handled before it counts even when `now` is already past its
+//! connection's deadline: a body byte is progress, a completed head is
+//! served, an answered open goes on. A driver that wakes late with I/O
+//! and an overdue timer both ready may deliver either first, so every
+//! deadline, the total ones (`header_timeout`, the response timeout, a
+//! response head's cap, the disk wait) included, may be overrun by up to
+//! one loop wake.
+//!
 //! # Shutdown
 //!
 //! Three calls serve FR-PROC-05; each is made between two `handle` calls
