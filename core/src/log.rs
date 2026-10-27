@@ -89,6 +89,15 @@ pub enum BackendFailure {
     /// The backend stopped taking the request body: body bytes waited for
     /// it for the body idle timeout, and no response head came.
     BodyTimeout,
+    /// The response body's chunked framing is invalid (FR-PROXY-19).
+    BadChunk(ChunkedError),
+    /// The response body is larger than the route's `max_response_body`:
+    /// its `Content-Length`, or the payload of a chunked or close-delimited
+    /// body so far (FR-PROXY-24).
+    BodyTooLarge,
+    /// A chunked response to an HTTP/1.0 client's request, which cannot
+    /// take one (FR-PROXY-04, owner decision 2026-10-27).
+    ChunkedToHttp10,
 }
 
 /// The parts of a request worth logging. `host` and `path` come from the

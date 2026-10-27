@@ -4,14 +4,15 @@ use std::net::IpAddr;
 
 use std::time::Duration;
 
-use crate::config::OnFileChange;
+use crate::config::{BodyLimit, OnFileChange};
 use crate::core::Interest;
 use crate::file::{Chunk, FileId, FileStamp, RootId};
-use crate::http::request::{Expect, HeadParser, Persistence};
+use crate::http::request::{Expect, HeadParser, Persistence, Version};
 use crate::http::response::BodyMode;
 use crate::http::response_head::{RequestKind, ResponseParser};
 use crate::http::static_path::TrailingSlash;
 use crate::log::RequestSummary;
+use crate::relay_body::RelayBody;
 use crate::request_body::{RequestBody, Stage};
 use crate::time::Instant;
 use crate::upstream::{BackendId, ExchangeBuffers, UpstreamId};
@@ -129,7 +130,9 @@ pub(crate) enum ConnState {
     /// (`request.body`). Whenever no request byte waits to be written, the
     /// response head is read into `buffers.recv`, whose first `filled` bytes
     /// `parser` has judged so far (a backend may answer before the body is
-    /// complete). `deadline` is the backend response timeout while the head
+    /// complete). `interim` interim (1xx) heads were dropped so far (at
+    /// most [`MAX_INTERIM_HEADS`](crate::http::response_head::MAX_INTERIM_HEADS)).
+    /// `deadline` is the backend response timeout while the head
     /// is written and once the whole request is; the body idle timeout,
     /// reset on progress, while the body streams.
     AwaitingResponse {
@@ -138,21 +141,20 @@ pub(crate) enum ConnState {
         buffers: ExchangeBuffers,
         filled: usize,
         parser: ResponseParser,
+        interim: u8,
         deadline: Instant,
     },
     /// The backend's response head was queued: what is left of its rewrite
-    /// is in `buffers.head`, then the body bytes `buffers.recv[start..end]`
-    /// go out, straight from where the backend's bytes landed. `source` says
-    /// whether more body bytes are due from the upstream. `persistence` and
-    /// `buffered` as in `Responding`. `deadline` is the send idle timeout
-    /// while the client has bytes to take or nothing more is due, the body
-    /// idle timeout while it waits for the backend's next bytes; reset on
-    /// progress.
+    /// is in `buffers.head`, then the body's unsent bytes go out, straight
+    /// from where the backend's bytes landed in `buffers.recv` (`body` says
+    /// where they are and whether more are due from the upstream).
+    /// `persistence` and `buffered` as in `Responding`. `deadline` is the
+    /// send idle timeout while the client has bytes to take or nothing more
+    /// is due, the body idle timeout while it waits for the backend's next
+    /// bytes; reset on progress.
     Relaying {
-        source: Source,
+        body: RelayBody,
         buffers: ExchangeBuffers,
-        start: usize,
-        end: usize,
         persistence: Persistence,
         buffered: usize,
         deadline: Instant,
@@ -160,21 +162,6 @@ pub(crate) enum ConnState {
     /// The sending side is shut down; input is read and discarded until the
     /// peer closes or `deadline` passes.
     Lingering { deadline: Instant },
-}
-
-/// Where the body of a relayed response comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Source {
-    /// `remaining` (more than 0) body bytes are still due from upstream
-    /// `up` of `backend`.
-    Open {
-        up: UpstreamId,
-        backend: BackendId,
-        remaining: u64,
-    },
-    /// Every body byte arrived (or there is no body); the upstream is
-    /// closed.
-    Done,
 }
 
 /// A request being forwarded to a backend, kept until its response head
@@ -185,7 +172,12 @@ pub(crate) struct ProxyRequest {
     pub(crate) backend: BackendId,
     /// A response to HEAD never has a body.
     pub(crate) kind: RequestKind,
+    /// The client's version: an HTTP/1.0 client cannot take a chunked
+    /// response (FR-PROXY-04).
+    pub(crate) version: Version,
     pub(crate) persistence: Persistence,
+    /// The route's `max_response_body` (FR-PROXY-24).
+    pub(crate) response_limit: BodyLimit,
     /// The body in `Conn::recv` (and, past its end, any pipelined input).
     pub(crate) body: RequestBody,
     /// `Continue` when the core answers `100 Continue` once connected: the
@@ -242,21 +234,13 @@ impl ConnState {
     /// The open upstream this state holds an id for, if any.
     pub(crate) fn upstream(&self) -> Option<UpstreamId> {
         match *self {
-            ConnState::Connecting { up, .. }
-            | ConnState::AwaitingResponse { up, .. }
-            | ConnState::Relaying {
-                source: Source::Open { up, .. },
-                ..
-            } => Some(up),
+            ConnState::Connecting { up, .. } | ConnState::AwaitingResponse { up, .. } => Some(up),
+            ConnState::Relaying { ref body, .. } => body.upstream(),
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }
             | ConnState::OpeningFile { .. }
             | ConnState::SendingFile { .. }
-            | ConnState::Relaying {
-                source: Source::Done,
-                ..
-            }
             | ConnState::Lingering { .. } => None,
         }
     }
@@ -305,28 +289,21 @@ impl ConnState {
                 };
                 Some((*up, interest))
             }
-            ConnState::Relaying {
-                source: Source::Open { up, .. },
-                start,
-                end,
-                ..
-            } => {
-                let interest = if start >= end {
+            // There is always room behind a chunked tail (at most 35 bytes
+            // of a buffer of at least 16 KiB).
+            ConnState::Relaying { body, .. } => body.upstream().map(|up| {
+                let interest = if body.unsent_len() == 0 {
                     Interest::Read
                 } else {
                     Interest::None
                 };
-                Some((*up, interest))
-            }
+                (up, interest)
+            }),
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }
             | ConnState::OpeningFile { .. }
             | ConnState::SendingFile { .. }
-            | ConnState::Relaying {
-                source: Source::Done,
-                ..
-            }
             | ConnState::Lingering { .. } => None,
         }
     }
@@ -451,13 +428,8 @@ impl Conn {
             }
             // Waiting on the backend.
             ConnState::Connecting { .. } | ConnState::AwaitingResponse { .. } => Interest::None,
-            ConnState::Relaying {
-                buffers,
-                start,
-                end,
-                ..
-            } => {
-                if !buffers.head.is_empty() || start < end {
+            ConnState::Relaying { body, buffers, .. } => {
+                if !buffers.head.is_empty() || body.unsent_len() > 0 {
                     Interest::Write
                 } else {
                     Interest::None

@@ -19,7 +19,8 @@
 //! nothing to read into and no `Write` or `ReadWrite` interest with nothing
 //! to write (`ReadWrite` is for upstreams only; a client `ReadWrite` is a
 //! violation); and during a body, a read offered only into a drained buffer and
-//! always with its full capacity (fill, drain, refill). Capacities are
+//! always with its full capacity but a chunked-framing tail of at most 35
+//! bytes kept at its front (fill, drain, refill). Capacities are
 //! recomputed from the config by the documented formulas, not taken from
 //! the core. Which phase an upstream is in (and how many body bytes are
 //! still unsent) the sim cannot tell from the bytes alone, since heads are
@@ -35,9 +36,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use durchlauferhitzer_core::config::{BackendAddr, Limits};
-use durchlauferhitzer_core::http::chunked::{ChunkedValidator, Done};
+use durchlauferhitzer_core::http::chunked::{ChunkedValidator, Done, MAX_UNCONSUMED};
 use durchlauferhitzer_core::http::request::{BodyFraming, HeadLimits, ParseStatus, parse_head};
-use durchlauferhitzer_core::{Action, BackendId, ConnError, ConnId, Event, Interest, UpstreamId};
+use durchlauferhitzer_core::{
+    Action, BackendId, BodyPending, ConnError, ConnId, Event, Interest, UpstreamId,
+};
 
 use crate::{Eof, Pending, Sim, SimConnState, Window};
 
@@ -173,8 +176,9 @@ pub(crate) struct UpstreamView {
     pub(crate) interest: Interest,
     pub(crate) recv: usize,
     pub(crate) send: usize,
-    /// The core's report of unsent body bytes (`None` outside a body).
-    pub(crate) body_pending: Option<usize>,
+    /// The core's report of unsent body bytes and the chunked tail kept
+    /// behind them (`None` outside a body).
+    pub(crate) body_pending: Option<BodyPending>,
 }
 
 /// The sim's scripted backends and the upstreams the core opened.
@@ -575,14 +579,20 @@ impl Sim {
             ));
         }
         match body_pending {
-            Some(unsent) if recv > 0 && unsent > 0 => self.violation(&format!(
+            Some(BodyPending { tail, .. }) if tail > MAX_UNCONSUMED => self.violation(&format!(
+                "up={} keeps a chunked tail of {tail} bytes, more than {MAX_UNCONSUMED}",
+                up.0
+            )),
+            Some(BodyPending { unsent, .. }) if recv > 0 && unsent > 0 => self.violation(&format!(
                 "up={} offers a read while {unsent} body bytes are unsent",
                 up.0
             )),
-            Some(_) if recv > 0 && recv != recv_cap => self.violation(&format!(
-                "up={} offers a body read of {recv} bytes, not its capacity {recv_cap}",
-                up.0
-            )),
+            Some(BodyPending { tail, .. }) if recv > 0 && recv + tail != recv_cap => self
+                .violation(&format!(
+                    "up={} offers a body read of {recv} bytes behind a {tail}-byte tail, \
+                     not the rest of its capacity {recv_cap}",
+                    up.0
+                )),
             Some(_) | None => {}
         }
     }

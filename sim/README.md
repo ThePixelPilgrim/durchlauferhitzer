@@ -25,7 +25,7 @@ within their capacities, every file and upstream closed exactly once and never
 left open after its connection, at most one upstream per client, `ReadWrite`
 interest only on upstreams (and only with bytes to write and room to read),
 body reads only into a drained buffer and with its full capacity (fill, drain, refill;
-for request bodies, behind a chunked tail of at most 35 bytes), every backend
+behind a chunked tail of at most 35 bytes, for request and response bodies), every backend
 receiving exactly one well-framed request and nothing after its body, no
 stalled output, no deadline left in the past, and more. A violation fails the test with a replayable trace.
 
@@ -51,6 +51,8 @@ tests/
     main.rs             heads, failures, timeouts; shared helpers
     bodies.rs           request bodies, `100 Continue`, early responses
     expect.rs           `Expect` on every route
+    responses.rs        response bodies: chunked, close-delimited, none,
+                        limits, interim heads, cuts, HTTP/1.0 clients
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers
     split.rs            deterministic split, byte-by-byte and pipelined runs

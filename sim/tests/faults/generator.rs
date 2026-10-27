@@ -8,8 +8,8 @@ use super::*;
 pub(crate) const SEEDS: u64 = 1500;
 
 /// Every status the core can send to these clients; each must be seen
-/// across the seeds. (501 is left: it now only answers backend responses
-/// Task 7 relays, and these backends refuse every connect.)
+/// across the seeds. (501 is left out: the core no longer sends it, and
+/// these backends refuse every connect.)
 pub(crate) const STATUSES: [Status; 12] = [
     Status::Ok,
     Status::MovedPermanently,

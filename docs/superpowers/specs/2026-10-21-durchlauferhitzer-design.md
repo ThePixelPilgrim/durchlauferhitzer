@@ -499,9 +499,17 @@ Forwarding and identity:
   `host:port` backends in config order (`BackendId` = index); the driver
   resolves each once at startup and connects by id (DRV-10). Upstream ids
   are core-allocated, from 1, never reused.
-- **FR-PROXY-04** [stage 3] The request line toward the backend is
-  `METHOD <path>[?query] HTTP/1.1`, where `<path>` is the raw path as
-  received (after `strip_prefix`) and the query is unchanged.
+- **FR-PROXY-04** [done] The request line toward the backend is
+  `METHOD <path>[?query] HTTP/1.x`, where `<path>` is the raw path as
+  received (after `strip_prefix`), the query is unchanged and the version
+  mirrors the client's: `HTTP/1.0` for an HTTP/1.0 client, `HTTP/1.1`
+  otherwise. A backend that still answers an HTTP/1.0 client's request
+  with a chunked body → 502 before any byte reaches the client (logged as
+  `BackendFailed { ChunkedToHttp10 }`). *Owner decision 2026-10-27: an
+  HTTP/1.0 client cannot take a chunked body; this reverses stage 3 Task
+  4's "always HTTP/1.1".* (A body-less response to such a request — to
+  HEAD, a 204 or 304 — passes even if it names `chunked`: no chunked body
+  is sent.)
 - **FR-PROXY-05** [stage 3; `strip_segments` done] `strip_prefix;` removes
   the route's own segments: on route `/api`, `/api/x` → `/x`, `/api/x/` →
   `/x/`, `/api` and `/api/` → `/`. An empty result is `/`. Partial
@@ -566,42 +574,51 @@ Backend response parsing:
   No framing header means the body ends when the backend closes.
 - **FR-PROXY-17** [done] A head is judged line by line as its LF arrives;
   the parser is resumable and split-independent (NFR-ROB-02).
-- **FR-PROXY-18** Interim responses: a 1xx other than 101 is dropped and
-  the next head is parsed afresh, with the limits applied anew [done in the
-  parser; forwarding stage 3]; `101 Switching Protocols` → 502 [done in the
-  parser]; more than 8 consecutive interim heads → 502 [stage 3, Task 7]. (The cap
+- **FR-PROXY-18** [done] Interim responses: a 1xx other than 101 is
+  dropped and the next head is parsed afresh, with the limits applied anew;
+  `101 Switching Protocols` → 502; more than 8 consecutive interim heads →
+  502 (`BadResponse(TooManyInterimHeads)`). (The cap
   of 8 is an owner-confirmed constant: real backends send at most a
   `100` and a `103`; a longer stream of 1xx heads would otherwise run
-  until `backend_response_timeout`.)
+  until `backend_response_timeout`.) *Builder calls (stage 3 Task 7):* the
+  bytes after an interim head move to the front of the upstream's buffer
+  once, as after a request head; an interim head does not restart
+  `backend_response_timeout` (it is not the response head); an interim
+  head that arrives while the request body streams is dropped the same
+  way and the upload goes on.
 
 Bodies:
 
-- **FR-PROXY-19** Chunked framing (both directions) is strict [validator
-  done]: chunk sizes are hex digits in either case, leading zeros allowed,
+- **FR-PROXY-19** [done] Chunked framing (both directions) is strict: chunk sizes are hex digits in either case, leading zeros allowed,
   at most 32 characters and 16 significant digits (fits `u64`), no sign,
   whitespace or empty size; no chunk extensions; no trailers (the last
   chunk is exactly `0` + CRLF + CRLF); CRLF only; data longer than its size
-  is an error. Valid bytes are forwarded verbatim [stage 3; requests done in
-  Task 6]. A violation
+  is an error. Valid bytes are forwarded verbatim. A violation
   from the client → 400 before the head was forwarded, else both
-  connections are cut [done in stage 3 Task 6]; from the backend → 502
-  before the response head was queued, else both are cut [stage 3].
+  connections are cut; from the backend → 502
+  before the response head was queued, else both are cut (logged as
+  `BackendFailed { BadChunk(..) }`).
   *Builder call (stage 3 Task 6):* the client's body is read only once the
   request head is fully written to the backend, so "before the head was
   forwarded" means the body bytes that arrived with the head, judged
   before the connect; a violation in any later byte cuts both. A body
   error is logged as `Rejected { Body(..) }`, the 400 like a parse error
-  (no `Response` entry).
-- **FR-PROXY-20** [stage 3] Bodies stream in both directions with bounded
+  (no `Response` entry). *Builder call (stage 3 Task 7):* likewise the
+  response body bytes that arrive with the response head are judged
+  before the head is queued, so a violation in them is a 502; a violation
+  in any later byte cuts both.
+- **FR-PROXY-20** [done] Bodies stream in both directions with bounded
   buffers and fill-drain-refill backpressure (NFR-RES-04). A response
   streams as soon as its head is validated; chunked framing is validated
   chunk by chunk in flight.
-- **FR-PROXY-21** [stage 3] Response framing to the client: backend
-  `Content-Length` and `chunked` pass through; a close-delimited response is
+- **FR-PROXY-21** [done] Response framing to the client: backend
+  `Content-Length` and `chunked` pass through (`chunked` only to an
+  HTTP/1.1 client, FR-PROXY-04); a close-delimited response is
   forwarded with `Connection: close` and the client connection closes at
-  its end. Responses to HEAD and 204/304 never carry a body, whatever the
+  its end (a lingering close: the response is complete). Responses to
+  HEAD and 204/304 never carry a body, whatever the
   backend sends (extra bytes are discarded and the upstream closed).
-- **FR-PROXY-22** [stage 3] Bytes after a `Content-Length` or chunked body
+- **FR-PROXY-22** [done] Bytes after a `Content-Length` or chunked body
   end are never forwarded, in either direction: from the backend they are
   dropped and the upstream closed; from the client they stay buffered as
   the next pipelined request.
@@ -612,11 +629,16 @@ Bodies:
   the limit (exactly the limit is fine); this holds also when the bytes
   that arrived with the head already pass it: then the client is cut
   before any connect, with no 413.
-- **FR-PROXY-24** [stage 3] `max_response_body`: a backend
+- **FR-PROXY-24** [done] `max_response_body`: a backend
   `Content-Length` over the limit → 502 before any response byte reaches
   the client; a chunked or close-delimited body passing it → both
   connections cut (the client sees an incomplete response, never a
-  silently truncated "complete" one).
+  silently truncated "complete" one). Both are logged as `BackendFailed {
+  BodyTooLarge }`. *Builder calls (stage 3 Task 7):* "passing" is more
+  payload bytes than the limit (exactly the limit is fine; chunked framing
+  does not count); body bytes that arrive with the head and already pass
+  it are judged before the head is queued, so that is a 502 too
+  (FR-PROXY-19's builder call).
 - **FR-PROXY-25** [done] `Expect: 100-continue`: the core answers
   `100 Continue` itself once the request head passed all checks (route,
   limits) and strips `Expect` toward the backend; any other `Expect` value,
@@ -657,8 +679,9 @@ Failures, persistence, timeouts:
   complete is answered 502 and logged as `BackendFailed { Reset }`; a
   502 or 504 generated by the core keeps the request's own persistence
   (controller ruling: the request had no unread body, so the client stays
-  usable); an interim (1xx) response head answers 501 *temporarily*, until
-  Task 7 drops interim heads (FR-PROXY-18). Builder calls (stage 3 Task
+  usable). (Until stage 3 Task 7 an interim head, a chunked and a
+  close-delimited response answered 501; Task 7 relays them and no 501 is
+  left.) Builder calls (stage 3 Task
   6): with a request body, such a 502/504 keeps the request's persistence
   only if the body was fully read from the client, else it closes
   (FR-PROXY-28); the body idle timeout before the response head is a 408
@@ -673,6 +696,12 @@ Failures, persistence, timeouts:
   that stops taking the body and answers has its response relayed at once
   (FR-PROXY-27); only one that neither reads nor answers gets the 504. A
   client that ends its stream mid-body closes both connections at once.
+  Builder calls (stage 3 Task 7): failures after the head are logged with
+  precise kinds — `BadChunk(..)` for bad chunked framing, `BodyTooLarge`
+  for `max_response_body`, `Reset` for a reset or an end of stream before
+  a `Content-Length` or chunked body is complete, `ResponseTimeout` for a
+  body that stalls — and the cut is `Log`, `CloseUpstream`, `Close`, with
+  no lingering close.
 - **FR-PROXY-27** [done] A backend that answers before the request body
   is complete: the response is forwarded, body forwarding stops, and the
   client closes after the response (its body is unread). This holds also
@@ -681,7 +710,7 @@ Failures, persistence, timeouts:
   owner decision 2026-10-26). *Builder call (stage 3 Task 6):* if the
   whole body was already read from the client, the unsent body bytes are
   dropped and the client keeps its persistence (FR-PROXY-28).
-- **FR-PROXY-28** [stage 3] After a proxied response the client stays
+- **FR-PROXY-28** [done] After a proxied response the client stays
   keep-alive only if the request asked for it, its body was fully read and
   the response was not close-delimited.
 - **FR-PROXY-29** [stage 3] Timeouts: `backend_connect_timeout`;
@@ -695,13 +724,15 @@ Failures, persistence, timeouts:
   applies, reset by every body byte read from the client or written to
   the backend. (Stage 3 Tasks 5–7 may use the defaults as named
   constants; Task 8 makes them `limits` keys.)
-- **FR-PROXY-30** [stage 3] Nothing from a backend reaches the client
+- **FR-PROXY-30** [done] Nothing from a backend reaches the client
   unvalidated: heads are parsed strictly, bodies framed strictly, and
   nothing after a framing error is written.
 - **FR-PROXY-31** [stage 3] Backend failures are logged
   (`BackendFailed`: refused, reset, bad response with its parse error,
   connect timeout, response timeout, body timeout: a backend that stopped
-  taking the request body [done in stage 3 Task 6]); proxied responses
+  taking the request body [done in stage 3 Task 6]; bad chunked framing of
+  the response body, a response body over `max_response_body`, a chunked
+  response to an HTTP/1.0 client [done in stage 3 Task 7]); proxied responses
   are logged as
   `ProxiedResponse` with the backend's status (FR-LOG-02).
 - **FR-PROXY-32** [stage 8] Backend-directed file serving (an
@@ -769,7 +800,8 @@ Failures, persistence, timeouts:
   `ProxiedResponse { status: u16, backend, request }` (a backend's
   response head was queued; its status is any 100–599, so a number rather
   than one of the core's statuses) and `BackendFailed { backend, kind }`
-  (`kind` per FR-PROXY-31, `BodyTimeout` included). A 502 or 504 the core
+  (`kind` per FR-PROXY-31, `BodyTimeout`, `BadChunk`, `BodyTooLarge` and
+  `ChunkedToHttp10` included). A 502 or 504 the core
   generates for a failed backend is a `Response`, preceded by its
   `BackendFailed`. [Stage 3 Task 6:] `Rejected` also covers a request body
   that broke a rule (`Body(Chunked(..) | TooLarge)`) and a stalled request
@@ -902,13 +934,13 @@ Failures, persistence, timeouts:
   So total buffer memory ≤ `max_connections` × (receive + send + upstream
   buffers) + `max_connections` × send + 4 KiB, plus small fixed per-entry
   state. A 50 GB transfer uses the same memory as a 5 KB one.
-- **NFR-RES-02** [done static; proxy stage 3] No body is ever held whole;
+- **NFR-RES-02** [done] No body is ever held whole;
   file bytes never pass through core memory (only heads go through the
   send buffer).
 - **NFR-RES-03** [done] No buffer grows beyond its capacity; a response
   that would not fit is answered differently (FR-STATIC-07) rather than
   growing the buffer.
-- **NFR-RES-04** [stage 3; validator done] Fill, drain, refill: a body
+- **NFR-RES-04** [done] Fill, drain, refill: a body
   buffer is filled by one read, sent until it is empty, and only then read
   into again, from offset 0 and offering its full capacity; while it holds
   unsent body bytes that side is not read. There is no partial compaction,

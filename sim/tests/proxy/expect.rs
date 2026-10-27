@@ -71,7 +71,7 @@ fn http10_ignores_expect() {
     let up = super::only_upstream(&sim);
     assert_eq!(
         sim.take_backend_request(up),
-        b"GET /x HTTP/1.1\r\nhost: example.test\r\nx-forwarded-for: 192.0.2.1\r\n\
+        b"GET /x HTTP/1.0\r\nhost: example.test\r\nx-forwarded-for: 192.0.2.1\r\n\
           x-forwarded-proto: http\r\nconnection: close\r\n\r\n",
         "{}",
         sim.trace()

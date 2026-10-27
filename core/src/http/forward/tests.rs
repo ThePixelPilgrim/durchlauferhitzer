@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::model::Limits;
-use crate::http::request::{HeadLimits, ParseStatus, parse_head};
+use crate::http::request::{HeadLimits, ParseStatus, Version, parse_head};
 use crate::http::response_head::{RequestKind, ResponseBody, ResponseParser, ResponseStatus};
 use crate::routing::strip_segments;
 use proptest::prelude::*;
@@ -88,12 +88,17 @@ fn query_is_kept_unchanged() {
     assert!(out.starts_with("GET /p? HTTP/1.1\r\n"));
 }
 
+/// FR-PROXY-04 (owner decision 2026-10-27): the request line mirrors the
+/// client's version, so a backend never answers an HTTP/1.0 client with a
+/// chunked body.
 #[test]
-fn request_line_is_always_http_1_1_and_keeps_the_method() {
+fn request_line_mirrors_the_client_version_and_keeps_the_method() {
     let out = rendered_request(b"GET /p HTTP/1.0\r\nHost: a\r\n\r\n", "/p", v4(1, 2, 3, 4));
-    assert!(out.starts_with("GET /p HTTP/1.1\r\nhost: a\r\n"));
+    assert!(out.starts_with("GET /p HTTP/1.0\r\nhost: a\r\n"));
     let out = rendered_request(b"HEAD /p HTTP/1.0\r\n\r\n", "/p", v4(1, 2, 3, 4));
-    assert!(out.starts_with("HEAD /p HTTP/1.1\r\nx-forwarded-for: "));
+    assert!(out.starts_with("HEAD /p HTTP/1.0\r\nx-forwarded-for: "));
+    let out = rendered_request(b"GET /p HTTP/1.1\r\nHost: a\r\n\r\n", "/p", v4(1, 2, 3, 4));
+    assert!(out.starts_with("GET /p HTTP/1.1\r\nhost: a\r\n"));
     let out = rendered_request(
         b"PURGE /p HTTP/1.1\r\nHost: a\r\n\r\n",
         "/p",
@@ -539,7 +544,10 @@ fn model_request(head: &RequestHead, path: &str, peer: IpAddr) -> String {
     if let Some(q) = &head.target.query {
         out += &format!("?{q}");
     }
-    out += " HTTP/1.1\r\n";
+    out += match head.version {
+        Version::Http10 => " HTTP/1.0\r\n",
+        Version::Http11 => " HTTP/1.1\r\n",
+    };
     let mut forwarded: Vec<String> = Vec::new();
     for h in &head.headers {
         let value = String::from_utf8(h.value.clone()).unwrap();

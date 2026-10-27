@@ -262,14 +262,22 @@ fn unreported_upstream_read_is_a_violation() {
     sim.deliver(Event::TimerFired);
 }
 
-/// What a correct core offers for an upstream in a body: a full, drained
-/// buffer.
+/// What the core offers for an upstream in a body: `recv` bytes to read
+/// into, with `pending` body bytes unsent and a chunked tail of `tail`.
 fn body_view(recv: usize, pending: usize) -> crate::backend::UpstreamView {
+    tail_view(recv, pending, 0)
+}
+
+fn tail_view(recv: usize, unsent: usize, tail: usize) -> crate::backend::UpstreamView {
     crate::backend::UpstreamView {
-        interest: Interest::Read,
+        interest: if recv > 0 {
+            Interest::Read
+        } else {
+            Interest::None
+        },
         recv,
         send: 0,
-        body_pending: Some(pending),
+        body_pending: Some(BodyPending { unsent, tail }),
     }
 }
 
@@ -278,6 +286,24 @@ fn a_full_read_into_a_drained_body_buffer_is_fine() {
     let (sim, _, up) = connecting();
     let cap = sim.backends.recv_bound;
     sim.check_upstream_view(up, &body_view(cap, 0));
+    // Behind a chunked tail of up to 35 bytes, the rest of the buffer.
+    sim.check_upstream_view(up, &tail_view(cap - 35, 0, 35));
+    // Nothing offered while bytes (and a tail behind them) are unsent.
+    sim.check_upstream_view(up, &tail_view(0, 9, 3));
+}
+
+#[test]
+#[should_panic(expected = "up=1 keeps a chunked tail of 36 bytes, more than 35")]
+fn long_response_chunked_tail_is_a_violation() {
+    let (sim, _, up) = connecting();
+    sim.check_upstream_view(up, &tail_view(0, 0, 36));
+}
+
+#[test]
+#[should_panic(expected = "offers a body read of 16380 bytes behind a 3-byte tail, not the rest")]
+fn short_read_behind_a_response_tail_is_a_violation() {
+    let (sim, _, up) = connecting();
+    sim.check_upstream_view(up, &tail_view(16380, 0, 3));
 }
 
 #[test]
@@ -289,7 +315,7 @@ fn read_offered_with_unsent_body_bytes_is_a_violation() {
 }
 
 #[test]
-#[should_panic(expected = "offers a body read of 16383 bytes, not its capacity 16384")]
+#[should_panic(expected = "offers a body read of 16383 bytes behind a 0-byte tail, not the rest")]
 fn partial_body_read_is_a_violation() {
     let (sim, _, up) = connecting();
     sim.check_upstream_view(up, &body_view(16383, 0));

@@ -259,10 +259,19 @@
 //!   the response.
 //! - Body bytes are never copied by the core: the bytes [`Core::send_buffer`]
 //!   hands out for a relayed response body are the region of the upstream's
-//!   receive buffer the backend's bytes landed in. That buffer is offered
+//!   receive buffer the backend's bytes landed in, validated (a chunked
+//!   body chunk by chunk, forwarded verbatim). That buffer is offered
 //!   for a body read only once every byte of the previous read was sent,
-//!   and then with its full capacity, from offset 0 (fill, drain, refill;
-//!   NFR-RES-04). Its capacity is `max(16 KiB, max_head)`
+//!   and then with its full capacity, from offset 0, but an incomplete
+//!   chunked-framing tail of at most 35 bytes moved to its front (fill,
+//!   drain, refill; NFR-RES-04). A close-delimited body ends with
+//!   [`Event::UpstreamReadClosed`]; any other ends at its framing, and the
+//!   upstream is closed then, so bytes after a body's end are never sent
+//!   (FR-PROXY-22). A response to HEAD, a 204 or a 304 has no body: what
+//!   the backend sends after its head is dropped and the upstream closed.
+//!   Interim (1xx) heads are dropped and the next head parsed afresh; more
+//!   than eight in a row are a 502 (FR-PROXY-18). Its capacity is
+//!   `max(16 KiB, max_head)`
 //!   ([`UPSTREAM_RECV_MIN`]). The upstream's send buffer holds the
 //!   rewritten request head; once that is written, the same buffer holds
 //!   the rewritten response head for the client, which `send_buffer`
@@ -276,12 +285,22 @@
 //!   or refused connect is answered 502 ([`BackendFailure::Refused`]), a
 //!   reset or early end of stream 502 ([`BackendFailure::Reset`]), a
 //!   malformed or oversized response head 502
-//!   ([`BackendFailure::BadResponse`]), a connect or response timeout 504.
+//!   ([`BackendFailure::BadResponse`], also for `101` and too many interim
+//!   heads), a body over `max_response_body` 502
+//!   ([`BackendFailure::BodyTooLarge`]: its `Content-Length`, or body bytes
+//!   that came with the head), bad chunked framing in the body bytes that
+//!   came with the head 502 ([`BackendFailure::BadChunk`]), a chunked
+//!   response to an HTTP/1.0 client (whose request went out as HTTP/1.0)
+//!   502 ([`BackendFailure::ChunkedToHttp10`]), a connect or response
+//!   timeout 504.
 //!   Each is logged as [`Log::BackendFailed`] before the response's
 //!   [`Log::Response`], and the client connection stays as the request
 //!   asked if its body was fully read (else it closes). After the head was
 //!   queued, any failure cuts the client connection at once (logged, then
-//!   `CloseUpstream`, then `Close`). A request body with invalid chunked
+//!   `CloseUpstream`, then `Close`, no lingering close): a reset, an end of
+//!   stream before a `Content-Length` or chunked body is complete, bad
+//!   chunked framing, a chunked or close-delimited body passing
+//!   `max_response_body`, a stalled body. A request body with invalid chunked
 //!   framing is answered 400 if it came with the head, else both
 //!   connections are cut; a chunked body over `max_request_body` is cut
 //!   (both logged as [`Log::Rejected`]).
@@ -364,6 +383,7 @@
 mod contract;
 mod limits;
 mod proxy;
+mod relay;
 mod request;
 mod static_files;
 #[cfg(test)]
@@ -380,7 +400,7 @@ use std::path::PathBuf;
 use crate::config::{BackendAddr, Config, RouteAction};
 #[cfg(doc)]
 use crate::conn::LINGER_TIMEOUT;
-use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY, Source};
+use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 use crate::file::{Chunk, FileSegment, FileTable};
 #[cfg(doc)]
 use crate::file::{FileError, FileId, RootId};
@@ -595,16 +615,11 @@ impl Core {
     pub fn send_buffer(&self, conn: ConnId) -> &[u8] {
         match self.conns.get(&conn) {
             Some(c) => match &c.state {
-                ConnState::Relaying {
-                    buffers,
-                    start,
-                    end,
-                    ..
-                } => {
+                ConnState::Relaying { body, buffers, .. } => {
                     if !c.send.is_empty() {
                         &c.send
                     } else if buffers.head.is_empty() {
-                        buffers.recv.get(*start..*end).unwrap_or_default()
+                        body.unsent(&buffers.recv)
                     } else {
                         &buffers.head
                     }
@@ -719,7 +734,7 @@ impl Core {
             ConnState::AwaitingResponse {
                 buffers, filled, ..
             } => buffers.recv.get_mut(*filled..).unwrap_or_default(),
-            ConnState::Relaying { buffers, .. } => &mut buffers.recv,
+            ConnState::Relaying { body, buffers, .. } => body.spare(&mut buffers.recv),
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }
@@ -785,22 +800,18 @@ impl Core {
     }
 
     /// While upstream `up` is relaying a body: how many body bytes of its
-    /// receive buffer are not yet sent to the client. `None` outside a
-    /// body. For drivers' invariant checks (fill, drain, refill), not for
-    /// I/O.
+    /// receive buffer are not yet sent to the client, and how long a
+    /// chunked-framing tail it keeps behind them (moved to the front once
+    /// they are sent). `None` outside a body. For drivers' invariant checks
+    /// (fill, drain, refill), not for I/O.
     #[doc(hidden)]
-    pub fn upstream_body_pending(&self, up: UpstreamId) -> Option<usize> {
+    pub fn upstream_body_pending(&self, up: UpstreamId) -> Option<BodyPending> {
         let c = self
             .upstreams
             .conn(up)
             .and_then(|conn| self.conns.get(&conn))?;
-        match c.state {
-            ConnState::Relaying {
-                source: Source::Open { up: own, .. },
-                start,
-                end,
-                ..
-            } if own == up => Some(end.saturating_sub(start)),
+        match &c.state {
+            ConnState::Relaying { body, .. } if body.upstream() == Some(up) => body.pending(),
             ConnState::Relaying { .. }
             | ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }

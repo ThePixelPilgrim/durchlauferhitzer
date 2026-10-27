@@ -6,6 +6,7 @@ mod core;
 mod file;
 pub mod http;
 mod log;
+mod relay_body;
 mod request_body;
 pub mod routing;
 mod time;

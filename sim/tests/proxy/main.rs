@@ -1,9 +1,11 @@
 //! Proxy routes end to end: the upstream interface between core and
 //! driver, with scripted backends behind it. Heads, failures and timeouts
-//! here; request bodies in `bodies.rs`, `Expect` in `expect.rs`.
+//! here; request bodies in `bodies.rs`, `Expect` in `expect.rs`, response
+//! bodies in `responses.rs`.
 
 mod bodies;
 mod expect;
+mod responses;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -26,8 +28,7 @@ host example.test {
   path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
-/// As `CONFIG`, with room for a response larger than the 1 MiB limit (the
-/// limit itself is Task 7's).
+/// As `CONFIG`, with room for a response larger than 1 MiB.
 const LARGE: &str = "listen 127.0.0.1:8080;
 host example.test {
   path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 4MiB; }
@@ -445,29 +446,6 @@ fn duplicate_forwarded_for_is_400_without_connect() {
         fixed(Status::BadRequest, Persistence::Close, BodyMode::Full)
     );
     assert_eq!(sim.state(c), SimConnState::WriteShutdown);
-}
-
-/// Chunked and close-delimited responses are Task 7's: still 501, and the
-/// upstream is closed.
-#[test]
-fn other_response_framings_are_still_501() {
-    for response in [
-        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
-        b"HTTP/1.1 200 OK\r\n\r\nuntil close",
-    ] {
-        let mut sim = Sim::new(CONFIG);
-        let c = request(&mut sim, GET_X);
-        let up = only_upstream(&sim);
-        sim.backend_send(up, response);
-        sim.run_until_idle();
-        assert_eq!(
-            sim.take_received(c),
-            fixed(Status::NotImplemented, Persistence::Close, BodyMode::Full),
-            "{}",
-            sim.trace()
-        );
-        assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
-    }
 }
 
 fn assert_504(sim: &Sim, c: ConnId, kind: BackendFailure) {

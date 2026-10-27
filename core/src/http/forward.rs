@@ -17,7 +17,7 @@
 //! either counts or appends), so they cannot disagree.
 
 use crate::http::head_line::connection_tokens;
-use crate::http::request::{Header, Method, Persistence, RequestHead};
+use crate::http::request::{Header, Method, Persistence, RequestHead, Version};
 use crate::http::response_head::ResponseHead;
 use std::fmt::{self, Write as _};
 use std::net::IpAddr;
@@ -82,8 +82,10 @@ fn is_hop_by_hop_bytes(name: &[u8], connection_tokens: &[&[u8]]) -> bool {
 /// [`strip_segments`](crate::routing::strip_segments)); `peer` is the
 /// client's address.
 ///
-/// The request line is `METHOD <path>[?query] HTTP/1.1` with the query
-/// unchanged. The client's headers follow in order without the hop-by-hop
+/// The request line is `METHOD <path>[?query] HTTP/1.x` with the query
+/// unchanged and the client's version: `HTTP/1.0` for an HTTP/1.0 client,
+/// so the backend never answers it with a chunked body (owner decision
+/// 2026-10-27), `HTTP/1.1` otherwise. The client's headers follow in order without the hop-by-hop
 /// ones, `x-forwarded-for` and `x-forwarded-proto`; `content-length` is
 /// re-rendered without leading zeros, everything else (`host`,
 /// `transfer-encoding`, …) as received. Then come `x-forwarded-for` (the
@@ -185,7 +187,10 @@ fn backend_request(head: &RequestHead, path: &str, peer: IpAddr, sink: &mut impl
         sink.put(b"?");
         sink.put(query.as_bytes());
     }
-    sink.put(b" HTTP/1.1\r\n");
+    sink.put(match head.version {
+        Version::Http10 => b" HTTP/1.0\r\n",
+        Version::Http11 => b" HTTP/1.1\r\n",
+    });
 
     let listed = listed_tokens(&head.headers);
     let forwardable = head.headers.iter().filter(|h| {

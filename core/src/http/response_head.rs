@@ -79,7 +79,16 @@ pub enum ResponseError {
     ConnectionNamesFraming,
     /// `101 Switching Protocols`: upgrades are not supported.
     SwitchingProtocols,
+    /// More than [`MAX_INTERIM_HEADS`] interim heads in a row
+    /// (FR-PROXY-18). The parser judges one head at a time, so its caller
+    /// counts them and reports this.
+    TooManyInterimHeads,
 }
+
+/// The most interim (1xx) heads a backend may send before its final head
+/// (FR-PROXY-18, owner-confirmed): real backends send at most a `100` and
+/// a `103`.
+pub const MAX_INTERIM_HEADS: u8 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseStatus {
