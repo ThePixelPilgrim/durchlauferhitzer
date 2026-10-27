@@ -1434,9 +1434,9 @@ sim implements and checks it; the epoll driver is [stage 4].
   when `TimerFired` is handled: an event handled before it counts (as
   progress, a completed head, an open answered, …) even when `now` is
   already past its connection's deadline. So for a loop that wakes late
-  with I/O and an overdue timer both ready, every deadline, the total ones
-  (`header_timeout`, `backend_response_timeout`, a response head's cap)
-  included, and the disk wait may be overrun by as long as the loop was
+  with I/O and an overdue timer both ready, every deadline may be overrun,
+  the total ones (`header_timeout`, `backend_response_timeout`, a response
+  head's cap) and the disk wait included, by as long as the loop was
   late: the events handled in that one late wake, before `TimerFired`,
   still count. The sim's late-timer mode (NFR-TEST-07) pins both orders
   (tests in `sim/tests/late_timers.rs`).

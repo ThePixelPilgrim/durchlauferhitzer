@@ -417,10 +417,10 @@
 //! connection's deadline: a body byte is progress, a completed head is
 //! served, an answered open goes on. A driver that wakes late with I/O
 //! and an overdue timer both ready may deliver either first, so every
-//! deadline, the total ones (`header_timeout`, the response timeout, a
-//! response head's cap) included, and the disk wait may be overrun by as
-//! long as the loop was late: the events handled in that one late wake,
-//! before `TimerFired`, still count.
+//! deadline may be overrun, the total ones (`header_timeout`, the response
+//! timeout, a response head's cap) and the disk wait included, by as long
+//! as the loop was late: the events handled in that one late wake, before
+//! `TimerFired`, still count.
 //!
 //! # Shutdown
 //!

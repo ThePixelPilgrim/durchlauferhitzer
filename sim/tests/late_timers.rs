@@ -232,8 +232,7 @@ fn response_head_byte_with_the_response_timeout_is_504_either_way() {
 // connection's deadline; a deadline, total ones included, may be overrun
 // by as long as the loop was late: the events handled in that one late
 // wake, before `TimerFired`, still count. The four cases below differ
-// between the orders
-// for that reason, and each order's outcome is pinned.
+// between the orders for that reason, and each order's outcome is pinned.
 
 fn summary(method: Method, path: &str) -> RequestSummary {
     RequestSummary {
