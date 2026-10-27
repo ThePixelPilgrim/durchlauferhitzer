@@ -8,8 +8,8 @@ pub mod validate;
 
 pub use lexer::Pos;
 pub use model::{
-    BackendAddr, BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, OnFileChange, ProxyRoute,
-    Route, RouteAction, StripPrefix, VirtualHost,
+    BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, OnFileChange, ProxyRoute, Route,
+    RouteAction, StripPrefix, VirtualHost,
 };
 pub use units::{parse_duration, parse_size};
 pub use validate::load;

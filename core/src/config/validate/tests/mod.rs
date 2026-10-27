@@ -1,12 +1,11 @@
 //! Tests for configuration validation: top level, listen, user.
 
 use super::super::model::{
-    BackendAddr, BodyLimit, Limits, OnFileChange, ProxyRoute, Route, RouteAction, StripPrefix,
-    VirtualHost,
+    BodyLimit, Limits, OnFileChange, ProxyRoute, Route, RouteAction, StripPrefix, VirtualHost,
 };
 use super::super::syntax::SyntaxErrorKind;
 use super::*;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -104,10 +103,7 @@ fn loads_spec_example() {
                 Route {
                     segments: strings(&["api"]),
                     action: RouteAction::Proxy(ProxyRoute {
-                        backend: BackendAddr {
-                            host: "127.0.0.1".to_string(),
-                            port: 3000,
-                        },
+                        backend: SocketAddr::from((Ipv4Addr::LOCALHOST, 3000)),
                         strip_prefix: StripPrefix::Strip,
                         max_request_body: BodyLimit::Bytes(10 << 20),
                         max_response_body: BodyLimit::Unlimited,

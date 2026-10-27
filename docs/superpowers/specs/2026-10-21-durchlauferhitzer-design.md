@@ -239,9 +239,13 @@ Structure and values:
 - **FR-CFG-15** [done] A static root is an absolute path without `.`, `..`
   or empty components and without a trailing `/` (except `/` itself). That
   it exists is checked by the driver at startup [stage 4].
-- **FR-CFG-16** [done] A proxy backend is `host:port`, split at the last
-  `:`; host is a host name (FR-CFG-12 rules), an IPv4 literal or a
-  bracketed IPv6 literal; port 1–65535.
+- **FR-CFG-16** [done] A proxy backend is an IP literal with a port,
+  IPv4 (`127.0.0.1:3000`) or bracketed IPv6 (`[::1]:3000`), parsed like
+  `listen`; port 1–65535. A host name is a config error naming its
+  line:column. *Owner decision 2026-10-27: no DNS anywhere, so the
+  driver resolves nothing (a name with several addresses, such as
+  `localhost`, cannot pick the wrong one). Until then a host name was
+  accepted and resolved by the driver at startup.*
 - **FR-CFG-17** [done] `strip_prefix;` is a flag, allowed only on proxy
   routes; on route `/` it is accepted and has no effect. *(since stage 1
   Task 11: the earlier `strip_prefix <value>` form is withdrawn)*
@@ -498,10 +502,11 @@ Forwarding and identity:
 - **FR-PROXY-02** [done] One fresh backend connection per request, with
   `Connection: close` toward the backend; a client has at most one upstream
   at a time. (Pooling: stage 7.)
-- **FR-PROXY-03** [done] `Core::backends()` lists the distinct
-  `host:port` backends in config order (`BackendId` = index); the driver
-  resolves each once at startup and connects by id (DRV-10). Upstream ids
-  are core-allocated, from 1, never reused.
+- **FR-PROXY-03** [done] `Core::backends()` lists the distinct backend
+  addresses (IP and port, FR-CFG-16) in config order (`BackendId` =
+  index); the driver connects by id to the address as it is, with no
+  resolution (DRV-10; owner decision 2026-10-27). Upstream ids are
+  core-allocated, from 1, never reused.
 - **FR-PROXY-04** [done] The request line toward the backend is
   `METHOD <path>[?query] HTTP/1.x`, where `<path>` is the raw path as
   received (after `strip_prefix`), the query is unchanged and the version
@@ -941,9 +946,10 @@ Failures, persistence, timeouts:
 - **FR-PROC-03** [stage 4] Otherwise the process binds itself: it starts as
   root only if it needs a port below 1024, binds, then switches to `user`;
   it refuses to keep running as root if `user` is unset.
-- **FR-PROC-04** [stage 4] At startup the driver resolves the backends,
-  opens every static root, checks `openat2` support and the descriptor
-  budget (NFR-RES-05), and fails with a clear error otherwise.
+- **FR-PROC-04** [stage 4] At startup the driver opens every static root
+  (backends are IP literals and need no resolution, FR-CFG-16), checks
+  `openat2` support and the descriptor budget (NFR-RES-05), and fails
+  with a clear error otherwise.
 - **FR-PROC-05** [stage 4] Shutdown has two speeds and two targets (owner
   decision):
   - *Graceful* (SIGTERM): stop accepting work, let in-flight requests
@@ -1273,10 +1279,15 @@ sim implements and checks it; the epoll driver is [stage 4].
   returning 0 mid-segment is `Truncated`; `EPIPE`/`ECONNRESET` are the
   socket's (`Failed`); other file-side errors are `FileFailed { Other }`.
   Known limit: `sendfile` may still block on evicted pages (stage 7).
-- **DRV-10** [done] Upstreams: `backends()` resolved once at startup;
+- **DRV-10** [done] Upstreams: `backends()` are IP addresses with ports,
+  connected to as they are (no DNS; owner decision 2026-10-27);
   `Connect` is a non-blocking connect answered by exactly one
   `UpstreamConnected` or `UpstreamFailed` unless `CloseUpstream` comes
-  first (then nothing more for that id); upstream buffers follow DRV-02…04;
+  first (then nothing more for that id), always as a later event, never
+  inside the `handle` call that emitted it (also when `connect()` succeeds
+  or fails at once); a `socket()` that fails (`EMFILE`, ...) is
+  `UpstreamFailed { Other }`, a 502 `Refused`, logged distinctly by the
+  driver (FR-LOG-07); upstream buffers follow DRV-02…04;
   `CloseUpstream` closes the socket. An upstream (never a client) may get
   `Interest::ReadWrite`: the driver then reads and writes as readiness
   allows, reports each read and write as the very next call, and asks for

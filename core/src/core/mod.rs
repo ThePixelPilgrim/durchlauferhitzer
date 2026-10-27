@@ -19,10 +19,10 @@ mod timers;
 mod upload;
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use crate::config::{BackendAddr, Config, RouteAction};
+use crate::config::{Config, RouteAction};
 use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 #[cfg(doc)]
 use crate::file::RootId;
@@ -58,7 +58,7 @@ pub struct Core {
     static_roots: Vec<PathBuf>,
     files: FileTable,
     /// Distinct backends in config order; a `BackendId` indexes it.
-    backends: Vec<BackendAddr>,
+    backends: Vec<SocketAddr>,
     upstreams: UpstreamTable,
     /// Capacity of each exchange's upstream receive buffer.
     upstream_recv_capacity: usize,
@@ -70,7 +70,7 @@ impl Core {
     /// A core serving `config`, with no connections.
     pub fn new(config: Config) -> Core {
         let mut static_roots: Vec<PathBuf> = Vec::new();
-        let mut backends: Vec<BackendAddr> = Vec::new();
+        let mut backends: Vec<SocketAddr> = Vec::new();
         for route in config.hosts.iter().flat_map(|h| &h.routes) {
             match &route.action {
                 RouteAction::Static { root, .. } => {
@@ -80,7 +80,7 @@ impl Core {
                 }
                 RouteAction::Proxy(proxy) => {
                     if !backends.contains(&proxy.backend) {
-                        backends.push(proxy.backend.clone());
+                        backends.push(proxy.backend);
                     }
                 }
             }
@@ -106,10 +106,10 @@ impl Core {
         }
     }
 
-    /// Every distinct backend (`host:port`) in config order (identical
-    /// addresses once). A [`BackendId`] is an index into it; the driver
-    /// resolves each once at startup.
-    pub fn backends(&self) -> &[BackendAddr] {
+    /// Every distinct backend address (an IP literal and port) in config
+    /// order (identical addresses once). A [`BackendId`] is an index into
+    /// it; the driver connects to it as it is, resolving nothing.
+    pub fn backends(&self) -> &[SocketAddr] {
         &self.backends
     }
 

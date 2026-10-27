@@ -5,9 +5,11 @@
 //! `upload.rs`; relaying the response head and body to the client is in
 //! `relay.rs`.
 
+use std::net::SocketAddr;
+
 use super::request::HeadEnd;
 use super::{Action, ConnId, Core};
-use crate::config::{BackendAddr, BodyLimit, Limits, ProxyRoute, Route, StripPrefix};
+use crate::config::{BodyLimit, Limits, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, UnreadBody};
 use crate::http::forward::{backend_request_len, check_forwardable, render_backend_request};
 use crate::http::request::{BodyFraming, Expect, Method, Persistence, RequestHead};
@@ -51,7 +53,7 @@ pub(super) fn plan(
     route: &Route,
     target: &ProxyRoute,
     head: &RequestHead,
-    backends: &[BackendAddr],
+    backends: &[SocketAddr],
 ) -> ProxyPlan {
     if let Err(error) = check_forwardable(head) {
         return ProxyPlan::Respond(error.status(), Persistence::Close);

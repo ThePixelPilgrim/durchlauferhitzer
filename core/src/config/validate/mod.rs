@@ -10,8 +10,8 @@ use crate::routing::same_segments;
 
 use super::lexer::Pos;
 use super::model::{
-    BackendAddr, BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, OnFileChange, ProxyRoute,
-    Route, RouteAction, StripPrefix, VirtualHost,
+    BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, OnFileChange, ProxyRoute, Route,
+    RouteAction, StripPrefix, VirtualHost,
 };
 use super::syntax::{Block, Item, Setting, parse};
 use super::units::{parse_duration, parse_size};
@@ -119,23 +119,13 @@ fn valid_root(root: &str) -> bool {
     }
 }
 
-/// Splits at the last `:`; host name, IPv4 or bracketed IPv6 literal, and a
-/// port in 1..=65535. IPv6 literals are stored without brackets.
-fn parse_backend(value: &str) -> Option<BackendAddr> {
-    let (host, port) = value.rsplit_once(':')?;
-    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let port: u16 = port.parse().ok().filter(|p| *p != 0)?;
-    let name = host_name(host)?;
-    let unbracketed = name
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .map(str::to_string);
-    Some(BackendAddr {
-        host: unbracketed.unwrap_or(name),
-        port,
-    })
+/// An IP literal with a port, IPv4 or bracketed IPv6, as for `listen`; no
+/// host names (owner decision 2026-10-27: no DNS anywhere) and no port 0.
+fn parse_backend(value: &str) -> Option<SocketAddr> {
+    value
+        .parse::<SocketAddr>()
+        .ok()
+        .filter(|addr| addr.port() != 0)
 }
 
 /// A plain decimal count that is not zero.
@@ -328,7 +318,7 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
         }
     };
     let mut static_root: Option<Slot<PathBuf>> = None;
-    let mut backend: Option<Slot<BackendAddr>> = None;
+    let mut backend: Option<Slot<SocketAddr>> = None;
     let mut strip: Option<Slot<StripPrefix>> = None;
     let mut max_request: Option<Slot<BodyLimit>> = None;
     let mut max_response: Option<Slot<BodyLimit>> = None;

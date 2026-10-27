@@ -35,7 +35,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use durchlauferhitzer_core::config::{BackendAddr, Limits};
+use std::net::SocketAddr;
+
+use durchlauferhitzer_core::config::Limits;
 use durchlauferhitzer_core::http::chunked::{ChunkedValidator, Done, MAX_UNCONSUMED};
 use durchlauferhitzer_core::http::request::{BodyFraming, HeadLimits, ParseStatus, parse_head};
 use durchlauferhitzer_core::{
@@ -197,7 +199,7 @@ pub(crate) struct UpstreamView {
 /// The sim's scripted backends and the upstreams the core opened.
 #[derive(Debug)]
 pub(crate) struct Backends {
-    connect: BTreeMap<String, ConnectBehaviour>,
+    connect: BTreeMap<SocketAddr, ConnectBehaviour>,
     default_window: Window,
     upstreams: BTreeMap<UpstreamId, Upstream>,
     /// The upstream receive buffer's capacity for this config, by the
@@ -234,20 +236,15 @@ impl Backends {
     }
 }
 
-/// `host:port`, with an IPv6 literal in brackets, as in the config.
-fn address(backend: &BackendAddr) -> String {
-    if backend.host.contains(':') {
-        format!("[{}]:{}", backend.host, backend.port)
-    } else {
-        format!("{}:{}", backend.host, backend.port)
-    }
-}
-
 impl Sim {
-    /// Connects to backend `addr` (`host:port` as written in the config)
-    /// are answered by `behaviour` from now on.
+    /// Connects to backend `addr` (an IP literal and port, as in the
+    /// config) are answered by `behaviour` from now on.
     pub fn set_connect(&mut self, addr: &str, behaviour: ConnectBehaviour) {
-        self.backends.connect.insert(addr.to_owned(), behaviour);
+        let addr: SocketAddr = match addr.parse() {
+            Ok(addr) => addr,
+            Err(_) => panic!("set_connect: {addr:?} is not an IP address and port"),
+        };
+        self.backends.connect.insert(addr, behaviour);
     }
 
     /// The window of upstreams opened from now on (`Unlimited` by default).
@@ -359,7 +356,7 @@ impl Sim {
     }
 
     /// The core's backends.
-    pub fn backends(&self) -> &[BackendAddr] {
+    pub fn backends(&self) -> &[SocketAddr] {
         self.core.backends()
     }
 
@@ -509,7 +506,7 @@ impl Sim {
                         up.0
                     ));
                 }
-                let Some(addr) = self.core.backends().get(backend.0 as usize).map(address) else {
+                let Some(addr) = self.core.backends().get(backend.0 as usize).copied() else {
                     self.violation(&format!(
                         "Connect up={} for unknown backend={}",
                         up.0, backend.0

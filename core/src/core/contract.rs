@@ -187,10 +187,11 @@
 //!
 //! Rules for upstreams:
 //!
-//! - The driver resolves every entry of [`Core::backends`] (`host:port`,
-//!   distinct, in config order) once at startup; a [`BackendId`] is an
-//!   index into that list, and `Connect` names the backend by id, never by
-//!   name. Resolution failures are a startup error, not a runtime event.
+//! - Every entry of [`Core::backends`] (distinct, in config order) is an
+//!   IP address and port taken from the config, where host names are
+//!   refused (FR-CFG-16), so the driver resolves nothing and does no DNS.
+//!   A [`BackendId`] is an index into that list; `Connect` names the
+//!   backend by id.
 //! - The core allocates [`UpstreamId`]s, sequentially from 1, and never
 //!   reuses one. A connection holds at most one upstream at a time (one
 //!   fresh backend connection per request, FR-PROXY-02).
@@ -199,7 +200,16 @@
 //!   (the socket became writable and `SO_ERROR` is 0) or `UpstreamFailed`
 //!   (any connect error; reported as `ConnError::Other`, since the core
 //!   treats every failed connect alike), unless `CloseUpstream { up }`
-//!   comes first: then nothing more is delivered for that id.
+//!   comes first: then nothing more is delivered for that id. The answer
+//!   always comes as a later event, never inside the `handle` call that
+//!   emitted the `Connect`: a `connect()` that succeeds or fails at once
+//!   is still reported as its own `UpstreamConnected` or `UpstreamFailed`
+//!   after the actions of that call are done. A `socket()` that fails
+//!   (`EMFILE`, `ENFILE`, `ENOBUFS`, ...) is a failed connect too:
+//!   `UpstreamFailed { error: Other }`, so the client gets a 502
+//!   ([`BackendFailure::Refused`]); the driver logs `EMFILE`/`ENFILE`
+//!   distinctly (FR-LOG-07), since they mean the descriptor budget is
+//!   wrong.
 //! - While a `Connect` is pending the upstream's interest is
 //!   `Interest::None`, yet the driver itself waits for the socket to become
 //!   writable (`EPOLLOUT`) to learn that the connect completed, then reads

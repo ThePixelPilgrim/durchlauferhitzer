@@ -11,10 +11,9 @@ mod resets;
 mod responses;
 mod timeouts;
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use durchlauferhitzer_core::config::BackendAddr;
 use durchlauferhitzer_core::http::request::{Method, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::response_head::ResponseError;
@@ -347,19 +346,16 @@ host a.test {
   path /c { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body 1MiB; }
 }
 host b.test {
-  path /d { proxy backend.internal:80; max_request_body 1MiB; max_response_body 1MiB; }
+  path /d { proxy 10.0.0.7:80; max_request_body 1MiB; max_response_body 1MiB; }
 }";
     let mut sim = Sim::new(config);
-    let addr = |host: &str, port| BackendAddr {
-        host: host.to_owned(),
-        port,
-    };
+    let addr = |text: &str| -> SocketAddr { text.parse().unwrap_or_else(|e| panic!("{e}")) };
     assert_eq!(
         sim.backends(),
         [
-            addr("127.0.0.1", 3000),
-            addr("::1", 4000),
-            addr("backend.internal", 80),
+            addr("127.0.0.1:3000"),
+            addr("[::1]:4000"),
+            addr("10.0.0.7:80")
         ]
     );
     // Requests connect by the id of their route's backend.

@@ -218,12 +218,9 @@ fn static_root_rules() {
     }
 }
 
-fn proxy_route(host: &str, port: u16) -> RouteAction {
+fn proxy_route(backend: SocketAddr) -> RouteAction {
     RouteAction::Proxy(ProxyRoute {
-        backend: BackendAddr {
-            host: host.to_string(),
-            port,
-        },
+        backend,
         strip_prefix: StripPrefix::Keep,
         max_request_body: BodyLimit::Bytes(1),
         max_response_body: BodyLimit::Bytes(1),
@@ -251,18 +248,29 @@ fn proxy_rules() {
         "a:b",
         "a:+80",
         "a:80:80",
+        // Owner decision 2026-10-27 (D-C): IP literals only, no DNS.
+        "backend.local:3000",
+        "Backend.Local:3000",
+        "localhost:65535",
+        "::1:3000",
+        "[::1%eth0]:80",
+        "127.0.0.1:080x",
     ];
     for b in bad {
         assert_eq!(err(&proxy_cfg(b)), (invalid("proxy", b), 4, 5), "{b:?}");
     }
+    let v4 = |a, b, c, d, port| SocketAddr::from((Ipv4Addr::new(a, b, c, d), port));
+    let v6 = |ip: Ipv6Addr, port| SocketAddr::from((ip, port));
     let good = [
-        ("backend.local:3000", "backend.local", 3000),
-        ("Backend.Local:3000", "backend.local", 3000),
-        ("127.0.0.1:1", "127.0.0.1", 1),
-        ("[::1]:3000", "::1", 3000),
-        ("localhost:65535", "localhost", 65535),
+        ("127.0.0.1:1", v4(127, 0, 0, 1, 1)),
+        ("10.0.0.2:65535", v4(10, 0, 0, 2, 65535)),
+        ("[::1]:3000", v6(Ipv6Addr::LOCALHOST, 3000)),
+        (
+            "[::ffff:192.0.2.1]:80",
+            v6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped(), 80),
+        ),
     ];
-    for (input, host, port) in good {
+    for (input, addr) in good {
         let config = ok(&proxy_cfg(input));
         assert_eq!(
             config
@@ -270,7 +278,7 @@ fn proxy_rules() {
                 .first()
                 .and_then(|h| h.routes.first())
                 .map(|r| r.action.clone()),
-            Some(proxy_route(host, port)),
+            Some(proxy_route(addr)),
             "{input:?}"
         );
     }

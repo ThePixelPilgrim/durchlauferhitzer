@@ -93,7 +93,9 @@ pub enum OnFileChange {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyRoute {
-    pub backend: BackendAddr,
+    /// The backend's IP address and port (FR-CFG-16: a literal, never a
+    /// name, so the driver resolves nothing).
+    pub backend: SocketAddr,
     pub strip_prefix: StripPrefix,
     pub max_request_body: BodyLimit,
     pub max_response_body: BodyLimit,
@@ -105,14 +107,6 @@ pub struct ProxyRoute {
 pub enum StripPrefix {
     Keep,
     Strip,
-}
-
-/// A backend host and port; resolved later, by the driver.
-/// IPv6 literals are stored without brackets.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BackendAddr {
-    pub host: String,
-    pub port: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
