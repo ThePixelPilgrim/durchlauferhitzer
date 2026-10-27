@@ -190,6 +190,9 @@
 //! - Every entry of [`Core::backends`] (distinct, in config order) is an
 //!   IP address and port taken from the config, where host names are
 //!   refused (FR-CFG-16), so the driver resolves nothing and does no DNS.
+//!   The config also refuses unspecified, broadcast and multicast
+//!   addresses; a numeric IPv6 scope id (link-local) is kept in the
+//!   `SocketAddr` and used as given.
 //!   A [`BackendId`] is an index into that list; `Connect` names the
 //!   backend by id.
 //! - The core allocates [`UpstreamId`]s, sequentially from 1, and never

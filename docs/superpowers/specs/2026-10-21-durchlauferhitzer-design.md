@@ -12,7 +12,8 @@ Status: approved — **single source of truth** for what the product must do.
   (new ID or edited text), then cited.
 - Status tags: **[done]** implemented and tested (stages 1–3);
   **[done in core; driver stage 4]** the core's half is done and the
-  epoll driver's is due; **[stage N]** due in that stage of the
+  epoll driver's is due; **[done; X stage N]** done, with the follow-up X
+  due in stage N (e.g. NFR-MAINT-04's CI hardening); **[stage N]** due in that stage of the
   timeline; **[open]** waits for an owner decision (see "Open decisions"
   at the end). "since stage N" notes when a decision was taken.
 - Rationale is kept short and next to its requirement, in *italics*.
@@ -246,7 +247,13 @@ Structure and values:
   line:column. *Owner decision 2026-10-27: no DNS anywhere, so the
   driver resolves nothing (a name with several addresses, such as
   `localhost`, cannot pick the wrong one). Until then a host name was
-  accepted and resolved by the driver at startup.*
+  accepted and resolved by the driver at startup.* An address that is
+  not one connectable host is a config error naming its line:column
+  too: unspecified (`0.0.0.0`, `[::]`), broadcast (`255.255.255.255`)
+  or multicast (`224.0.0.0/4`, `ff00::/8`), also when spelled
+  IPv4-mapped (`[::ffff:0.0.0.0]`). A numeric IPv6 scope id is accepted
+  (`[fe80::1%2]:8080`: link-local needs one). *Owner decision
+  2026-10-27 (stage 3 follow-up F1).*
 - **FR-CFG-17** [done] `strip_prefix;` is a flag, allowed only on proxy
   routes; on route `/` it is accepted and has no effect. *(since stage 1
   Task 11: the earlier `strip_prefix <value>` form is withdrawn)*
@@ -557,8 +564,9 @@ Request head toward the backend:
 Response head toward the client:
 
 - **FR-PROXY-12** [done] The same hop-by-hop headers are removed (the
-  whole FR-PROXY-06 list, `Expect` included: one list for both directions,
-  owner decision 2026-10-26); the
+  whole hop-by-hop list of FR-PROXY-06, `Expect` included: one list for
+  both directions, owner decision 2026-10-26; not its client identity
+  headers, which are stripped toward the backend only); the
   status line is re-rendered as `HTTP/1.1 <code> <reason>` with the
   backend's reason; `Connection: close` is added when the client
   connection will close; backend `Date`, `Server` and `Content-Length`
@@ -1104,7 +1112,7 @@ Failures, persistence, timeouts:
   chunked`, at least 51 bytes (`X / HTTP/1.1`, `Host:a`,
   `Transfer-Encoding:chunked`, the blank line), and that head had to fit
   in the buffer.
-- **NFR-RES-05** [core bound done; startup check stage 4] File-descriptor
+- **NFR-RES-05** [done in core; driver stage 4] File-descriptor
   budget: at most `max_connections` files are open or being opened
   (orphans included, FR-CONN-11); at most 2 × `max_connections` client
   sockets (refused ones included); from stage 3 at most one upstream socket
@@ -1298,8 +1306,9 @@ sim implements and checks it; the epoll driver is [stage 4].
   returning 0 mid-segment is `Truncated`; `EPIPE`/`ECONNRESET` are the
   socket's (`Failed`); other file-side errors are `FileFailed { Other }`.
   Known limit: `sendfile` may still block on evicted pages (stage 7).
-- **DRV-10** [done] Upstreams: `backends()` are IP addresses with ports,
-  connected to as they are (no DNS; owner decision 2026-10-27);
+- **DRV-10** [done] Upstreams: `backends()` are unicast IP addresses
+  with ports (FR-CFG-16; an IPv6 scope id is kept), connected to as they
+  are (no DNS; owner decisions 2026-10-27);
   `Connect` is a non-blocking connect answered by exactly one
   `UpstreamConnected` or `UpstreamFailed` unless `CloseUpstream` comes
   first (then nothing more for that id), always as a later event, never

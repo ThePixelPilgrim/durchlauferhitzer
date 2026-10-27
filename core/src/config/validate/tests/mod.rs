@@ -5,7 +5,7 @@ use super::super::model::{
 };
 use super::super::syntax::SyntaxErrorKind;
 use super::*;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
 use std::time::Duration;
 

@@ -738,3 +738,81 @@ fn chunk_size_trickle_does_not_hold_a_stalled_client() {
         sim.trace()
     );
 }
+
+/// Send idle 30 s, body idle 4 s.
+const BODY_4: &str = "listen 127.0.0.1:8080;
+limits { send_idle_timeout 30s; body_idle_timeout 4s; }
+host example.test {
+  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+}";
+
+/// FR-PROXY-29 (final review I2, follow-up F2): a client that took the
+/// head and waits for the body has the body idle deadline; once backend
+/// bytes give it something to take, its send idle deadline starts then.
+/// It stalls, so it is cut at exactly 1 s + 3 s with `Timeout(Send)`,
+/// not at the 20 s body idle deadline it had before.
+#[test]
+fn backend_bytes_for_a_waiting_client_start_its_send_deadline() {
+    let mut sim = Sim::new(SEND_3);
+    let c = request(&mut sim, GET_X);
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n",
+        "{}",
+        sim.trace()
+    );
+    sim.set_client_window(c, Window::Stalled);
+    sim.advance(Duration::from_secs(1));
+    sim.backend_send(up, b"01234");
+    sim.run_until_idle();
+    sim.advance(Duration::from_millis(2999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
+}
+
+/// FR-PROXY-29 (follow-up F2): while the client waits for the backend,
+/// backend progress that gives it nothing yet (a chunk-size byte, which
+/// only grows the chunked tail) restarts the body idle deadline: the
+/// stall is cut 4 s after that byte (at 7 s), not 4 s after the head.
+#[test]
+fn backend_progress_restarts_body_idle_while_the_client_waits() {
+    let mut sim = Sim::new(BODY_4);
+    let c = request(&mut sim, GET_X);
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+    sim.run_until_idle();
+    assert!(!sim.take_received(c).is_empty(), "{}", sim.trace());
+    sim.advance(Duration::from_secs(3));
+    sim.backend_send(up, b"5");
+    sim.run_until_idle();
+    sim.advance(Duration::from_millis(3999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::BackendFailed {
+            conn: c,
+            peer: peer(),
+            backend: BackendId(0),
+            kind: BackendFailure::ResponseTimeout,
+        }),
+        "{}",
+        sim.trace()
+    );
+}

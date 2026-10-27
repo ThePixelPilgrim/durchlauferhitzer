@@ -1,6 +1,6 @@
 //! Validation of the syntax tree into the configuration model.
 
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -121,11 +121,20 @@ fn valid_root(root: &str) -> bool {
 
 /// An IP literal with a port, IPv4 or bracketed IPv6, as for `listen`; no
 /// host names (owner decision 2026-10-27: no DNS anywhere) and no port 0.
+/// An address one cannot connect to as a single backend is refused too
+/// (owner decision 2026-10-27): unspecified (`0.0.0.0`, `::`), broadcast
+/// (`255.255.255.255`) and multicast (`224.0.0.0/4`, `ff00::/8`), also
+/// spelled IPv4-mapped. A numeric IPv6 scope id stays (link-local needs
+/// one).
 fn parse_backend(value: &str) -> Option<SocketAddr> {
-    value
-        .parse::<SocketAddr>()
-        .ok()
-        .filter(|addr| addr.port() != 0)
+    let addr = value.parse::<SocketAddr>().ok()?;
+    let ip = addr.ip().to_canonical();
+    let broadcast = match ip {
+        IpAddr::V4(v4) => v4.is_broadcast(),
+        IpAddr::V6(_) => false,
+    };
+    let refused = addr.port() == 0 || ip.is_unspecified() || ip.is_multicast() || broadcast;
+    (!refused).then_some(addr)
 }
 
 /// A plain decimal count that is not zero.

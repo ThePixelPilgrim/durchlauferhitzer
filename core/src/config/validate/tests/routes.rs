@@ -255,6 +255,17 @@ fn proxy_rules() {
         "::1:3000",
         "[::1%eth0]:80",
         "127.0.0.1:080x",
+        // Owner decision 2026-10-27 (F1): no unspecified, broadcast or
+        // multicast backend.
+        "0.0.0.0:80",
+        "[::]:80",
+        "255.255.255.255:80",
+        "224.0.0.1:80",
+        "239.255.255.250:1900",
+        "[ff02::1]:80",
+        "[ff0e::1%3]:80",
+        "[::ffff:0.0.0.0]:80",
+        "[::ffff:224.0.0.1]:80",
     ];
     for b in bad {
         assert_eq!(err(&proxy_cfg(b)), (invalid("proxy", b), 4, 5), "{b:?}");
@@ -265,6 +276,16 @@ fn proxy_rules() {
         ("127.0.0.1:1", v4(127, 0, 0, 1, 1)),
         ("10.0.0.2:65535", v4(10, 0, 0, 2, 65535)),
         ("[::1]:3000", v6(Ipv6Addr::LOCALHOST, 3000)),
+        // A numeric scope id is kept: link-local needs one.
+        (
+            "[fe80::1%2]:8080",
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+                8080,
+                0,
+                2,
+            )),
+        ),
         (
             "[::ffff:192.0.2.1]:80",
             v6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped(), 80),

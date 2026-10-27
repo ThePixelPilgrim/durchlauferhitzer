@@ -30,7 +30,9 @@ pub(crate) struct Story {
     /// The client closed its sending side after its last request.
     eof: bool,
     /// The client closed its sending side at a random point: the story
-    /// may end anywhere (silently, FR-CONN-12).
+    /// may end anywhere, silently (FR-CONN-12) or, in the middle of a
+    /// forwarded request body, with `Rejected { Body(ClosedEarly) }`
+    /// (FR-PROXY-26).
     pub(crate) eof_anywhere: bool,
     /// Routes whose backend accepts slowly in this round.
     slow: [bool; 2],
