@@ -3,7 +3,7 @@
 
 use super::proxy::{self, ProxyPlan};
 use super::static_files::{Plan, plan};
-use super::{Action, ConnId, Core};
+use super::{Action, ConnId, Core, Mode};
 use crate::config::{Limits, RouteAction};
 use crate::conn::{Conn, ConnState, LINGER_TIMEOUT, UnreadBody};
 use crate::file::Chunk;
@@ -200,7 +200,10 @@ impl Core {
                     consumed: consumed.min(buffered),
                     buffered,
                 };
-                self.respond(now, conn, head, after, actions);
+                match self.mode {
+                    Mode::Serving => self.respond(now, conn, head, after, actions),
+                    Mode::Draining => self.refuse_during_drain(now, conn, head, actions),
+                }
             }
             Err(error) => {
                 // Once the request line is valid the method is known: a HEAD

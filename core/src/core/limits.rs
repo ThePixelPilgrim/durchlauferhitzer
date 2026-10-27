@@ -4,7 +4,7 @@
 use std::net::IpAddr;
 
 use super::proxy::close_upstream;
-use super::{Action, ConnId, Core};
+use super::{Action, ConnId, Core, Mode};
 use crate::conn::{Conn, ConnState, Counted, UnreadBody};
 use crate::file::{FileId, OrphanSlots, Owner};
 use crate::http::request::{HeadParser, Persistence};
@@ -107,10 +107,14 @@ impl Core {
         let limits = &self.config.limits;
         let canonical = peer.to_canonical();
         let per_ip = self.counted_per_ip.get(&canonical).copied().unwrap_or(0);
-        let refusal = if self.counted >= limits.max_connections {
-            Some(LimitKind::Connections)
+        let refusal = if self.mode == Mode::Draining {
+            // The driver closed its listeners before the drain; answer a
+            // straggler all the same (FR-PROC-05).
+            Some(RejectReason::ShuttingDown)
+        } else if self.counted >= limits.max_connections {
+            Some(RejectReason::Limit(LimitKind::Connections))
         } else if per_ip >= limits.max_connections_per_ip {
-            Some(LimitKind::ConnectionsPerIp)
+            Some(RejectReason::Limit(LimitKind::ConnectionsPerIp))
         } else {
             None
         };
@@ -127,12 +131,8 @@ impl Core {
                 };
                 Conn::new(peer, Counted::Yes, state, capacity)
             }
-            Some(kind) => {
-                actions.push(Action::Log(Log::Rejected {
-                    conn,
-                    peer,
-                    reason: RejectReason::Limit(kind),
-                }));
+            Some(reason) => {
+                actions.push(Action::Log(Log::Rejected { conn, peer, reason }));
                 // Too many refusals in flight: do not even answer.
                 if self.refused >= limits.max_connections {
                     actions.push(Action::Close { conn });

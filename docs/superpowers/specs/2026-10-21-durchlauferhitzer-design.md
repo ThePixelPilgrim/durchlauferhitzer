@@ -983,7 +983,8 @@ Failures, persistence, timeouts:
 - **FR-LOG-02** [done] Kinds: `Response` (status and a request summary of
   method, host and raw path; emitted when the response is queued),
   `Rejected` (parse error, with the method and raw path once the request
-  line was valid, FR-LOG-07; header/send/disk timeout, connection limits),
+  line was valid, FR-LOG-07; header/send/disk timeout, connection limits,
+  a connection delivered during the shutdown drain, FR-PROC-05),
   `Reset`, `FileAborted` (with the file error);
   `ProxiedResponse { status: u16, backend, request }` (a backend's
   response head was queued; its status is any 100–599, so a number rather
@@ -1048,6 +1049,25 @@ Failures, persistence, timeouts:
     new process, so new connections wait in the kernel's accept queue
     until it accepts them; the old process only drains what it already
     holds.
+  - *Core half* (stage 4 amendment A4, owner-approved 2026-10-27;
+    [done in the core]): `Core::begin_drain(now, actions)` starts the
+    graceful drain once the driver closed its listeners: idle keep-alive
+    connections and connections that have not received a byte are closed
+    at once (silently); a partly received head completes and is answered
+    503 with `Connection: close`, like every request completed during the
+    drain; every exchange in flight (fixed, static, proxied) finishes,
+    with `Connection: close` in any head rendered after the drain began,
+    then the connection takes the normal close path (lingering close);
+    requests pipelined behind it are not answered. A connection delivered
+    after `begin_drain` anyway is answered 503 and closed, logged as
+    `Rejected` with `ShuttingDown`. `Core::is_drained()` is true once no
+    connection, upstream, open file or orphaned open is left.
+    `Core::abort_all(actions)` is the fast path: every connection is
+    closed at once, each upstream and each open file exactly once, with no
+    log entries (the shutdown is the operator's, not a failure; the driver
+    logs it once); orphaned opens stay until their answer arrives. The
+    core drains afterwards, and `handle` keeps working after all three
+    calls.
 - **FR-PROC-05a** [stage 4] Exit codes: 0 success (including `--check` on a
   valid config), 1 invalid config, 2 startup failure (e.g. a port in use,
   a missing static root).
@@ -1406,6 +1426,12 @@ sim implements and checks it; the epoll driver is [stage 4].
 - **DRV-13** [done in the sim; the epoll driver: stage 4] The driver calls
   `set_date(unix_secs)` with the wall-clock second whenever it changes,
   before the next `handle` call (FR-HTTP-22a); it emits nothing.
+- **DRV-14** [done in the sim; the epoll driver: stage 4] Shutdown
+  (FR-PROC-05): the driver closes its listeners, then calls
+  `begin_drain`, runs its loop until `is_drained()` or `shutdown_timeout`,
+  and calls `abort_all` on expiry, a second SIGTERM or SIGINT; each call
+  comes between two `handle` calls, and `handle` keeps working after
+  them.
 
 ---
 

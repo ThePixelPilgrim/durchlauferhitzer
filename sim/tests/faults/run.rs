@@ -153,6 +153,8 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
                 RejectReason::Route(_)
                 | RejectReason::Body(_)
                 | RejectReason::Timeout(TimeoutKind::RequestBody) => {}
+                // The net never drains (`tests/shutdown.rs` does).
+                RejectReason::ShuttingDown => {}
             }
         }
     }

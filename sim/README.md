@@ -52,6 +52,8 @@ tests/
                       none on `100 Continue`, the backend's kept
   routing.rs          request handling, keep-alive, pipelining
   limits.rs           timeouts, connection caps, lingering close
+  shutdown.rs         the graceful drain and the fast path (FR-PROC-05):
+                      `Sim::begin_drain`, `abort_all`, `is_drained`
   static_files/       static routes end to end (one test binary)
     main.rs             shared configs and helpers
     transfer.rs         chunks, slow disks and clients, changing files, resets

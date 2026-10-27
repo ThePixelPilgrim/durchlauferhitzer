@@ -137,6 +137,10 @@ pub enum RejectReason {
     Route(RouteMiss),
     Timeout(TimeoutKind),
     Limit(LimitKind),
+    /// The driver delivered a connection after the drain began (it closes
+    /// its listeners first, so this should not happen): answered 503 and
+    /// closed, like a connection over the limits (FR-PROC-05).
+    ShuttingDown,
     /// The request body on a proxy route broke a rule: answered 400 while
     /// its head had not been forwarded yet, else both connections were cut
     /// (also when the client ended its stream mid-body).

@@ -525,9 +525,16 @@ impl Sim {
             | Event::UpstreamSent { up, .. } => self.backends.conn_of(*up),
             Event::TimerFired => None,
         };
+        self.call_core(|core, now, actions| core.handle(now, event, actions));
+    }
+
+    /// Run one call into the core that emits actions (`handle`,
+    /// `begin_drain`, `abort_all`), apply them in order and check the
+    /// contract afterwards.
+    fn call_core(&mut self, call: impl FnOnce(&mut Core, Instant, &mut Vec<Action>)) {
         let mut actions = std::mem::take(&mut self.actions);
         actions.clear();
-        self.core.handle(self.now, event, &mut actions);
+        call(&mut self.core, self.now, &mut actions);
         for action in actions.drain(..) {
             self.apply(action);
         }
@@ -536,6 +543,29 @@ impl Sim {
         self.check_buffers();
         self.check_files();
         self.check_upstreams();
+    }
+
+    /// Start the graceful drain (`Core::begin_drain`), as the driver does
+    /// on the first SIGTERM once it closed its listeners: idle and fresh
+    /// connections close at once, the rest finish their exchange and then
+    /// close; requests completed from now on get 503. Pump with
+    /// `run_until_idle` or `advance` afterwards.
+    pub fn begin_drain(&mut self) {
+        self.line("begin_drain");
+        self.call_core(|core, now, actions| core.begin_drain(now, actions));
+    }
+
+    /// The fast shutdown (`Core::abort_all`): every connection, upstream
+    /// and open file is closed at once.
+    pub fn abort_all(&mut self) {
+        self.line("abort_all");
+        self.call_core(|core, _, actions| core.abort_all(actions));
+    }
+
+    /// Whether the core holds nothing any more (`Core::is_drained`): no
+    /// connection, upstream, open file or orphaned open.
+    pub fn is_drained(&self) -> bool {
+        self.core.is_drained()
     }
 
     fn apply(&mut self, action: Action) {

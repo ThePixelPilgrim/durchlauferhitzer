@@ -278,7 +278,8 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
                 RejectReason::Body(RequestBodyError::TooLarge | RequestBodyError::ClosedEarly)
                 | RejectReason::Route(_)
                 | RejectReason::Timeout(_)
-                | RejectReason::Limit(_) => None,
+                | RejectReason::Limit(_)
+                | RejectReason::ShuttingDown => None,
             },
             Log::Reset { .. }
             | Log::FileAborted { .. }

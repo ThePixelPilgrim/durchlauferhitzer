@@ -10,6 +10,7 @@ mod limits;
 mod proxy;
 mod relay;
 mod request;
+mod shutdown;
 mod static_files;
 #[cfg(test)]
 mod test_support;
@@ -69,6 +70,18 @@ pub struct Core {
     /// the IMF-fixdate of the second last passed to [`Core::set_date`];
     /// `None` until then, and no `Date` is sent.
     date: Option<ImfFixdate>,
+    /// Serving, or draining for shutdown (FR-PROC-05).
+    mode: Mode,
+}
+
+/// Whether the core takes new work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Serving,
+    /// [`Core::begin_drain`] or [`Core::abort_all`] was called: every
+    /// request completed from now on is answered 503 with
+    /// `Connection: close`, every connection delivered refused with 503.
+    Draining,
 }
 
 /// Capacity of a connection's receive buffer: room for the largest allowed
@@ -119,6 +132,7 @@ impl Core {
             upstream_recv_capacity,
             head_capacity,
             date: None,
+            mode: Mode::Serving,
         }
     }
 

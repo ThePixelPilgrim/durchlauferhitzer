@@ -207,7 +207,7 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
                 RejectReason::Body(RequestBodyError::TooLarge | RequestBodyError::ClosedEarly) => {
                     return Ok(None);
                 }
-                RejectReason::Limit(_) => Status::ServiceUnavailable,
+                RejectReason::Limit(_) | RejectReason::ShuttingDown => Status::ServiceUnavailable,
                 // Not emitted in this stage; a route miss is answered 404.
                 RejectReason::Route(_) => Status::NotFound,
             };

@@ -411,6 +411,31 @@
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
 //!
+//! # Shutdown
+//!
+//! Three calls serve FR-PROC-05; each is made between two `handle` calls
+//! (never between a read and its report), and `handle` keeps working
+//! after any of them:
+//!
+//! - [`Core::begin_drain`]: on the first SIGTERM, after the driver closed
+//!   its listeners. Idle keep-alive connections and connections without a
+//!   byte of their request are closed at once (`Close`, nothing logged); a
+//!   partly received head completes and is answered `503` with
+//!   `Connection: close`, as is any request completed later; exchanges in
+//!   flight finish (any head rendered from now on says `Connection:
+//!   close`), then take the normal close path (lingering close). An
+//!   `Accepted` after it is answered 503 and closed like a refused
+//!   connection (`Rejected` with `ShuttingDown`).
+//! - [`Core::is_drained`]: true once no connection, upstream, open file or
+//!   orphaned open is left; the driver polls it after every call and exits
+//!   when it is true.
+//! - [`Core::abort_all`]: on a second SIGTERM, a SIGINT or when
+//!   `shutdown_timeout` expires. Every connection is closed at once, per
+//!   connection `CloseFile`, `CloseUpstream`, `Close` as usual, each
+//!   exactly once; nothing is logged. Unanswered opens become orphaned
+//!   opens and are answered as always; `is_drained` waits for them, though
+//!   the driver may also exit without waiting.
+//!
 //! # Connection limits
 //!
 //! A connection accepted while `max_connections` connections, or

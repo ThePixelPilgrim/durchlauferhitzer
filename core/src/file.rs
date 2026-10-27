@@ -182,6 +182,12 @@ impl FileTable {
         self.owners.remove(&file);
     }
 
+    /// Whether no id is tracked: no file open or being opened, for a
+    /// connection or as an orphan.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.owners.is_empty()
+    }
+
     /// Ids still tracked (for tests).
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {

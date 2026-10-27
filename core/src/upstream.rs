@@ -136,6 +136,11 @@ impl UpstreamTable {
         }
     }
 
+    /// Whether no upstream is open.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.open.is_empty()
+    }
+
     /// How many upstreams are open.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
