@@ -667,7 +667,7 @@ Bodies:
 
 Failures, persistence, timeouts:
 
-- **FR-PROXY-26** [stage 3] Failure matrix. Before the response head was
+- **FR-PROXY-26** [done] Failure matrix. Before the response head was
   queued to the client: connect refused or reset, a reset before the
   response head, a malformed or oversized response head, 101, too many
   interim heads, an oversized `Content-Length` → 502;
@@ -730,7 +730,7 @@ Failures, persistence, timeouts:
 - **FR-PROXY-28** [done] After a proxied response the client stays
   keep-alive only if the request asked for it, its body was fully read and
   the response was not close-delimited.
-- **FR-PROXY-29** [stage 3] Timeouts: `backend_connect_timeout`;
+- **FR-PROXY-29** [done] Timeouts: `backend_connect_timeout`;
   `backend_response_timeout` from the request head being fully written to
   the backend until the response head is complete; `body_idle_timeout`, no
   body progress in either direction; the client's `send_idle_timeout`
@@ -752,7 +752,7 @@ Failures, persistence, timeouts:
 - **FR-PROXY-30** [done] Nothing from a backend reaches the client
   unvalidated: heads are parsed strictly, bodies framed strictly, and
   nothing after a framing error is written.
-- **FR-PROXY-31** [stage 3] Backend failures are logged
+- **FR-PROXY-31** [done] Backend failures are logged
   (`BackendFailed`: refused, reset, closed early (an end of stream before
   the response was complete) [done in stage 3 Task 8], bad response with its parse error,
   connect timeout, response timeout, body timeout: a backend that stopped
