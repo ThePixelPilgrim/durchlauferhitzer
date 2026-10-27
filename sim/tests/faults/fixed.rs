@@ -100,3 +100,43 @@ pub(crate) fn model_fixed(status: Status, persistence: Persistence, body: BodyMo
     }
     out.into_bytes()
 }
+
+/// The head of a `200 OK` file response (FR-STATIC-11): status line,
+/// `Content-Type` (FR-STATIC-12, from the model's own table in
+/// `model.rs`), `Content-Length` = the size at open,
+/// `X-Content-Type-Options: nosniff`, `Connection: close` only when
+/// closing, blank line. A `HEAD` gets the same head (FR-STATIC-13).
+pub(crate) fn model_file_head(content_type: &str, size: u64, persistence: Persistence) -> Vec<u8> {
+    let mut out = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {size}\r\n\
+         X-Content-Type-Options: nosniff\r\n"
+    );
+    if persistence == Persistence::Close {
+        out.push_str("Connection: close\r\n");
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
+}
+
+/// A directory redirect (FR-STATIC-06): `301 Moved Permanently` with
+/// `Location`, then the headers of every fixed response (FR-HTTP-19) for
+/// the fixed body `"301 Moved Permanently\n"`, which a `HEAD` leaves out
+/// (FR-HTTP-21). The spec does not order `Location` among the headers;
+/// the model puts it right after the status line.
+pub(crate) fn model_redirect(location: &str, persistence: Persistence, body: BodyMode) -> Vec<u8> {
+    const BODY: &str = "301 Moved Permanently\n";
+    let mut out = format!(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\n\
+         Content-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\
+         X-Content-Type-Options: nosniff\r\n",
+        BODY.len()
+    );
+    if persistence == Persistence::Close {
+        out.push_str("Connection: close\r\n");
+    }
+    out.push_str("\r\n");
+    if body == BodyMode::Full {
+        out.push_str(BODY);
+    }
+    out.into_bytes()
+}

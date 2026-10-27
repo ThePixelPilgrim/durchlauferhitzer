@@ -42,6 +42,9 @@ pub(crate) struct Coverage {
     /// Complete `GET` bodies of files that grew under `allow_growth`.
     pub(crate) grown: usize,
     pub(crate) head_ok: usize,
+    /// 200s and 301s rendered as closing.
+    pub(crate) close_ok: usize,
+    pub(crate) close_redirect: usize,
     /// Directory redirects answered 414 because they would not fit the
     /// send buffer.
     pub(crate) redirect_414: usize,
@@ -76,6 +79,8 @@ impl Coverage {
             ("multi-chunk 200 bodies", self.multi_chunk),
             ("grown files sent under allow_growth", self.grown),
             ("HEAD 200", self.head_ok),
+            ("closing 200", self.close_ok),
+            ("closing 301", self.close_redirect),
             ("414 instead of a redirect", self.redirect_414),
             (
                 "400 for an encoded unreserved character",
@@ -158,14 +163,14 @@ pub(crate) fn redirect_renderings(path: &str, body: BodyMode) -> (Vec<Rendering>
     for query in all_queries() {
         let location = format!("{path}/{query}");
         for persistence in BOTH {
-            if redirect_len(location.len(), persistence, body) > SEND_CAPACITY {
+            // FR-STATIC-07: a redirect that does not fit the send buffer
+            // (1 KiB, NFR-RES-01) is a 414 instead.
+            let bytes = model_redirect(&location, persistence, body);
+            if bytes.len() > SEND_CAPACITY {
                 overflow = true;
                 continue;
             }
-            let mut bytes = Vec::new();
-            render_redirect(&location, persistence, body, &mut bytes);
-            let mut head = Vec::new();
-            render_redirect(&location, persistence, BodyMode::HeadOnly, &mut head);
+            let head = model_redirect(&location, persistence, BodyMode::HeadOnly);
             fitting.push(Rendering {
                 persistence,
                 with_query: !query.is_empty(),
@@ -249,8 +254,7 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
             let renderings = BOTH
                 .iter()
                 .map(|&persistence| {
-                    let mut bytes = Vec::new();
-                    render_file_head(f.content_type, f.size(), persistence, &mut bytes);
+                    let mut bytes = model_file_head(f.content_type, f.size(), persistence);
                     let head_len = bytes.len();
                     match body {
                         BodyMode::Full => bytes.extend_from_slice(&f.bytes),
@@ -379,6 +383,24 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
             }
             if a.status == Status::Ok && a.body == BodyMode::HeadOnly {
                 coverage.head_ok += 1;
+            }
+            if r.persistence == Persistence::Close {
+                match a.status {
+                    Status::Ok => coverage.close_ok += 1,
+                    Status::MovedPermanently => coverage.close_redirect += 1,
+                    Status::BadRequest
+                    | Status::NotFound
+                    | Status::MethodNotAllowed
+                    | Status::RequestTimeout
+                    | Status::ContentTooLarge
+                    | Status::UriTooLong
+                    | Status::ExpectationFailed
+                    | Status::RequestHeaderFieldsTooLarge
+                    | Status::BadGateway
+                    | Status::ServiceUnavailable
+                    | Status::GatewayTimeout
+                    | Status::HttpVersionNotSupported => {}
+                }
             }
             if a.status == Status::MovedPermanently && r.with_query {
                 coverage.redirect_query += 1;
@@ -526,6 +548,22 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
         if close + 1 != seen.len() || truncated {
             fail(format!("response after Connection: close: {seen:?}"));
         }
+    }
+    // The core shuts its sending side only after a response it rendered
+    // as closing (FR-HTTP-19, FR-STATIC-11): the last complete response
+    // must say `Connection: close`.
+    let shut = sim
+        .trace()
+        .contains(&format!(" conn={} -> ShutdownWrite", client.id.0));
+    if shut
+        && !truncated
+        && seen
+            .last()
+            .is_none_or(|s| s.persistence != Persistence::Close)
+    {
+        fail(format!(
+            "the connection was shut down after {seen:?}, whose last response does not close"
+        ));
     }
     for (slot, status) in coverage.statuses.iter_mut().zip(STATUSES) {
         *slot += statuses.iter().filter(|s| **s == status).count();

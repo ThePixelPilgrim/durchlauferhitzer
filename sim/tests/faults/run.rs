@@ -202,7 +202,7 @@ fn random_fault_schedules() {
             eprintln!(
                 "COVERAGE statuses={:?} http={} header={} send={} disk={} conns={} per_ip={} \
                  pipelined={} truncated={} changed={} first_chunk={} multi_chunk={} grown={} \
-                 head_ok={} redirect_414={} encoded_unreserved={} well_known={} \
+                 head_ok={} close_ok={} close_redirect={} redirect_414={} encoded_unreserved={} well_known={} \
                  redirect_query={} respelled_route={}",
                 coverage.statuses,
                 coverage.http,
@@ -218,6 +218,8 @@ fn random_fault_schedules() {
                 coverage.multi_chunk,
                 coverage.grown,
                 coverage.head_ok,
+                coverage.close_ok,
+                coverage.close_redirect,
                 coverage.redirect_414,
                 coverage.encoded_unreserved,
                 coverage.well_known,

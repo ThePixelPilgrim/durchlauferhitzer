@@ -18,9 +18,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
 use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
-use durchlauferhitzer_core::http::response::{
-    BodyMode, redirect_len, render_file_head, render_redirect,
-};
+use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::http::target::TargetError;
 use durchlauferhitzer_core::{
@@ -76,7 +74,8 @@ host example.test {
   path /api/ { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body unlimited; }
 }";
 
-/// The send buffer's capacity (`SEND_CAPACITY` in the core).
+/// The send buffer's capacity: 1 KiB by NFR-RES-01 (`SEND_CAPACITY` in
+/// the core).
 const SEND_CAPACITY: usize = 1024;
 
 /// Unknown host: 404, keep-alive.

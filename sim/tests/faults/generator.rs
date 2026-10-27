@@ -120,7 +120,12 @@ pub(crate) const MIB: u64 = 1024 * 1024;
 /// `up/` paths, so the expected status of every logged request follows
 /// from its method and path alone (and, for a redirect, the query).
 pub(crate) fn random_static_request(rng: &mut fastrand::Rng, long_dir: Option<&str>) -> Vec<u8> {
-    let host = "Host: example.test\r\n";
+    // One request in six asks to close, so closing 200s and 301s occur.
+    let host = if rng.u8(0..6) == 0 {
+        "Host: example.test\r\nConnection: close\r\n"
+    } else {
+        "Host: example.test\r\n"
+    };
     // Long seeds: the long directory, with or without its slash, and a
     // query of any length.
     if let Some(dir) = long_dir.filter(|_| rng.u8(0..3) == 0) {
