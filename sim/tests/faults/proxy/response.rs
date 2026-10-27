@@ -103,6 +103,10 @@ enum HeadDefect {
     TooManyInterim,
     HeadTooLarge,
     TooManyHeaders,
+    TeTwice,
+    CtlInValue,
+    ClOverflow,
+    BadInterim,
 }
 
 impl HeadDefect {
@@ -113,14 +117,17 @@ impl HeadDefect {
             | HeadDefect::ObsTextReason
             | HeadDefect::BadCode
             | HeadDefect::NoReasonSpace => ResponseError::BadStatusLine,
-            HeadDefect::CrInValue | HeadDefect::ObsTextValue => ResponseError::BadHeaderValue,
+            HeadDefect::CrInValue
+            | HeadDefect::ObsTextValue
+            | HeadDefect::CtlInValue
+            | HeadDefect::BadInterim => ResponseError::BadHeaderValue,
             HeadDefect::ObsFold => ResponseError::ObsFold,
             HeadDefect::BadName => ResponseError::BadHeaderName,
             HeadDefect::BadVersion => ResponseError::BadVersion,
             HeadDefect::ClTe => ResponseError::ContentLengthWithTransferEncoding,
             HeadDefect::DupCl => ResponseError::DuplicateContentLength,
-            HeadDefect::BadCl => ResponseError::BadContentLength,
-            HeadDefect::BadTe | HeadDefect::TeInHttp10 => {
+            HeadDefect::BadCl | HeadDefect::ClOverflow => ResponseError::BadContentLength,
+            HeadDefect::BadTe | HeadDefect::TeInHttp10 | HeadDefect::TeTwice => {
                 ResponseError::UnsupportedTransferEncoding
             }
             HeadDefect::ConnFraming => ResponseError::ConnectionNamesFraming,
@@ -132,7 +139,11 @@ impl HeadDefect {
     }
 
     fn random(rng: &mut fastrand::Rng) -> HeadDefect {
-        match rng.u8(0..21) {
+        match rng.u8(0..25) {
+            21 => HeadDefect::TeTwice,
+            22 => HeadDefect::CtlInValue,
+            23 => HeadDefect::ClOverflow,
+            24 => HeadDefect::BadInterim,
             0 => HeadDefect::BareLf,
             1 => HeadDefect::CrInReason,
             2 => HeadDefect::ObsTextReason,
@@ -224,7 +235,8 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     // Interim heads.
     let interim = match defect {
         Some(HeadDefect::TooManyInterim) => 9,
-        _ => match rng.u8(0..40) {
+        Some(HeadDefect::BadInterim) => rng.usize(1..3),
+        Some(_) | None => match rng.u8(0..40) {
             0..26 => 0,
             26..38 => rng.usize(1..3),
             _ => 8,
@@ -232,7 +244,10 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     };
     let mut interim_ends = Vec::new();
     for i in 0..interim {
-        if i % 2 == 0 {
+        // The defect in the last interim head.
+        if defect == Some(HeadDefect::BadInterim) && i + 1 == interim {
+            wire.extend_from_slice(b"HTTP/1.1 103 Early Hints\r\nLink: </caf\xc3\xa9>\r\n\r\n");
+        } else if i % 2 == 0 {
             wire.extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
         } else {
             wire.extend_from_slice(
@@ -254,11 +269,11 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         code = 200;
     }
     match defect {
-        Some(HeadDefect::ClTe | HeadDefect::DupCl | HeadDefect::BadCl) => {
+        Some(HeadDefect::ClTe | HeadDefect::DupCl | HeadDefect::BadCl | HeadDefect::ClOverflow) => {
             framing = BodyKind::Length;
         }
-        Some(HeadDefect::BadTe) => framing = BodyKind::Chunked,
-        _ => {}
+        Some(HeadDefect::BadTe | HeadDefect::TeTwice) => framing = BodyKind::Chunked,
+        Some(_) | None => {}
     }
     if body_defect.is_some() {
         framing = BodyKind::Chunked;
@@ -276,14 +291,14 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
             version = b"HTTP/1.0";
             framing = BodyKind::Chunked;
         }
-        _ => {}
+        Some(_) | None => {}
     }
     wire.extend_from_slice(version);
     match defect {
         Some(HeadDefect::BadCode) => wire.extend_from_slice(b" 20 OK"),
         Some(HeadDefect::NoReasonSpace) => wire.extend_from_slice(b" 200"),
         Some(HeadDefect::Upgrade101) => wire.extend_from_slice(b" 101 Switching Protocols"),
-        _ => {
+        Some(_) | None => {
             wire.extend_from_slice(format!(" {code} ").as_bytes());
             wire.extend_from_slice(&reason);
         }
@@ -312,6 +327,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         Some(HeadDefect::LfInValue) => wire.extend_from_slice(b"X-Split: a\nInjected: b\r\n"),
         Some(HeadDefect::CrInValue) => wire.extend_from_slice(b"X-Split: a\rInjected: b\r\n"),
         Some(HeadDefect::ObsTextValue) => wire.extend_from_slice(b"X-Name: caf\xc3\xa9\r\n"),
+        Some(HeadDefect::CtlInValue) => wire.extend_from_slice(b"X-Ctl: a\x7fb\x1bc\r\n"),
         Some(HeadDefect::ObsFold) => wire.extend_from_slice(b"X-Fold: a\r\n b\r\n"),
         Some(HeadDefect::BadName) => wire.extend_from_slice(b"Bad Name: x\r\n"),
         Some(HeadDefect::ConnFraming) => wire.extend_from_slice(b"Connection: Content-Length\r\n"),
@@ -325,7 +341,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
                 wire.extend_from_slice(format!("X-{i}: v\r\n").as_bytes());
             }
         }
-        _ => {}
+        Some(_) | None => {}
     }
     // The body and its framing header.
     let len = if ctx.need_body {
@@ -347,6 +363,9 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
             let value = format!("{}{}", "0".repeat(zeros), body.len());
             match defect {
                 Some(HeadDefect::BadCl) => header(&mut wire, rng, "Content-Length", b"1 2"),
+                Some(HeadDefect::ClOverflow) => {
+                    header(&mut wire, rng, "Content-Length", b"18446744073709551616");
+                }
                 Some(HeadDefect::DupCl) => {
                     header(&mut wire, rng, "Content-Length", value.as_bytes());
                     header(&mut wire, rng, "content-length", value.as_bytes());
@@ -355,7 +374,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
                     header(&mut wire, rng, "Content-Length", value.as_bytes());
                     header(&mut wire, rng, "Transfer-Encoding", b"chunked");
                 }
-                _ => push(&mut wire, rng, "Content-Length", value.as_bytes()),
+                Some(_) | None => push(&mut wire, rng, "Content-Length", value.as_bytes()),
             }
             cl_value = Some(body.len() as u64);
         }
@@ -364,7 +383,11 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
             body_wire = c.wire.clone();
             match defect {
                 Some(HeadDefect::BadTe) => header(&mut wire, rng, "Transfer-Encoding", b"identity"),
-                _ => push(&mut wire, rng, "Transfer-Encoding", b"chunked"),
+                Some(HeadDefect::TeTwice) => {
+                    header(&mut wire, rng, "Transfer-Encoding", b"chunked");
+                    header(&mut wire, rng, "transfer-encoding", b"chunked");
+                }
+                Some(_) | None => push(&mut wire, rng, "Transfer-Encoding", b"chunked"),
             }
             chunk = Some(c);
         }
@@ -396,7 +419,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     let sent_body: &[u8] = match (framing, kind) {
         (BodyKind::None, _) => &[],
         (_, BodyKind::None) if rng.bool() => &[],
-        _ => &body_wire,
+        (BodyKind::Length | BodyKind::Chunked | BodyKind::UntilClose, _) => &body_wire,
     };
     wire.extend_from_slice(sent_body);
     let body_end = match kind {
@@ -414,6 +437,10 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
             "bad backend framing"
         }
         HeadDefect::TeInHttp10 => "TE in an HTTP/1.0 response",
+        HeadDefect::TeTwice => "duplicate backend TE",
+        HeadDefect::CtlInValue => "control byte from a backend",
+        HeadDefect::ClOverflow => "backend CL overflow",
+        HeadDefect::BadInterim => "defect in an interim head",
         HeadDefect::ConnFraming => "backend Connection names framing",
         HeadDefect::Upgrade101 => "101 from a backend",
         HeadDefect::TooManyInterim => "too many interim heads",

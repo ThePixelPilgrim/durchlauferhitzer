@@ -60,6 +60,7 @@ tests/
                         client's half-close, the failure log kinds
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers
+    fixed.rs            the model of the core's fixed responses and statuses
     split.rs            deterministic split, byte-by-byte and pipelined runs
     generator.rs        random requests and schedule steps
     model.rs            the model of the random file tree
@@ -101,7 +102,14 @@ knows. To replay one failing seed (of both nets):
 
 ```sh
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults
+# one net only:
+SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_proxy_schedules
+SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_fault_schedules
 ```
+
+Both nets render the core's own fixed responses (status line, headers,
+body) and map parse errors to statuses by a model of their own
+(`tests/faults/fixed.rs`), not by the core's renderer.
 
 ## Commands
 

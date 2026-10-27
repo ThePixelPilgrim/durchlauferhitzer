@@ -81,6 +81,12 @@ enum Body {
 /// A defect a request may carry (at most one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Defect {
+    ObsFold,
+    SpaceBeforeColon,
+    BareLfLine,
+    ClList,
+    ClOverflow,
+    NulInValue,
     ClTe,
     DupCl,
     BadCl,
@@ -212,7 +218,13 @@ pub(crate) fn random_proxy_request(
     };
     let mut defect = None;
     if !allow.forward_only && rng.u8(0..4) == 0 {
-        defect = Some(match rng.u8(0..16) {
+        defect = Some(match rng.u8(0..22) {
+            16 => Defect::ObsFold,
+            17 => Defect::SpaceBeforeColon,
+            18 => Defect::BareLfLine,
+            19 => Defect::ClList,
+            20 => Defect::ClOverflow,
+            21 => Defect::NulInValue,
             0 => Defect::ClTe,
             1 => Defect::DupCl,
             2 => Defect::BadCl,
@@ -238,6 +250,9 @@ pub(crate) fn random_proxy_request(
                 Defect::ClTe
                 | Defect::DupCl
                 | Defect::BadCl
+                | Defect::ClList
+                | Defect::ClOverflow
+                | Defect::SpaceBeforeColon
                 | Defect::BadTe
                 | Defect::TeTwice
                 | Defect::Chunk(_)
@@ -264,9 +279,9 @@ pub(crate) fn random_proxy_request(
             payload(rng, len)
         };
         let chunk = match defect {
-            Some(Defect::ClTe | Defect::BadTe | Defect::TeTwice) => true,
+            Some(Defect::ClTe | Defect::BadTe | Defect::TeTwice | Defect::SpaceBeforeColon) => true,
             Some(Defect::Chunk(_)) => true,
-            Some(Defect::DupCl | Defect::BadCl) => false,
+            Some(Defect::DupCl | Defect::BadCl | Defect::ClList | Defect::ClOverflow) => false,
             Some(_) | None => rng.u8(0..5) < 2 && !http10,
         };
         if chunk {
@@ -356,6 +371,14 @@ pub(crate) fn random_proxy_request(
                     let last = lines.len() - 1;
                     lines[last].value = format!("+{}", payload.len()).into_bytes();
                 }
+                Some(Defect::ClList) => {
+                    let last = lines.len() - 1;
+                    lines[last].value = format!("{0}, {0}", payload.len()).into_bytes();
+                }
+                Some(Defect::ClOverflow) => {
+                    let last = lines.len() - 1;
+                    lines[last].value = b"18446744073709551616".to_vec();
+                }
                 Some(_) | None => {}
             }
         }
@@ -365,7 +388,12 @@ pub(crate) fn random_proxy_request(
                 (_, 0) => b"Chunked",
                 _ => b"chunked",
             };
-            lines.push(line(&random_case(rng, "Transfer-Encoding"), value));
+            let name = if defect == Some(Defect::SpaceBeforeColon) {
+                "Transfer-Encoding ".to_owned()
+            } else {
+                random_case(rng, "Transfer-Encoding")
+            };
+            lines.push(line(&name, value));
             match defect {
                 Some(Defect::ClTe) => lines.push(line("Content-Length", b"5")),
                 Some(Defect::TeTwice) => lines.push(line("Transfer-Encoding", b"chunked")),
@@ -384,6 +412,9 @@ pub(crate) fn random_proxy_request(
         }
         Some(Defect::ObsText) => lines.push(line("X-Name", b"caf\xc3\xa9")),
         Some(Defect::CtlInValue) => lines.push(line("X-Name", b"a\x01b")),
+        Some(Defect::NulInValue) => lines.push(line("X-Name", b"a\x00b")),
+        Some(Defect::ObsFold) => lines.push(line("X-Fold", b"a\r\n folded")),
+        Some(Defect::BareLfLine) => lines.push(line("X-Split", b"a\nX-Injected: b")),
         Some(Defect::DupHost) => lines.push(line("Host", b"example.test")),
         Some(_) | None => {}
     }
@@ -445,6 +476,12 @@ pub(crate) fn random_proxy_request(
         path: path.clone(),
     };
     let tag = defect.map(|d| match d {
+        Defect::ObsFold => "obs-fold",
+        Defect::SpaceBeforeColon => "whitespace before a colon",
+        Defect::BareLfLine => "bare LF in the head",
+        Defect::ClList => "CL list",
+        Defect::ClOverflow => "CL overflow",
+        Defect::NulInValue => "NUL in a value",
         Defect::ClTe => "CL+TE",
         Defect::DupCl => "duplicate CL",
         Defect::BadCl => "bad CL",
@@ -569,7 +606,12 @@ fn judge(j: &Judged) -> Verdict {
     // Line checks (FR-HTTP-05), then the head checks in their order:
     // FR-HTTP-09a, Host, framing (FR-HTTP-08), `Expect` (FR-PROXY-25).
     let parse = match j.defect {
-        Some(Defect::ObsText | Defect::CtlInValue) => Some(HttpError::BadHeaderValue),
+        Some(Defect::ObsText | Defect::CtlInValue | Defect::NulInValue) => {
+            Some(HttpError::BadHeaderValue)
+        }
+        Some(Defect::ObsFold) => Some(HttpError::ObsFold),
+        Some(Defect::SpaceBeforeColon) => Some(HttpError::BadHeaderName),
+        Some(Defect::BareLfLine) => Some(HttpError::BareLf),
         Some(Defect::ConnFraming) => Some(HttpError::ConnectionNamesFraming),
         Some(Defect::DupHost) => Some(HttpError::DuplicateHost),
         Some(Defect::ClTe | Defect::BadTe | Defect::TeTwice | Defect::Chunk(_)) if j.http10 => {
@@ -577,7 +619,9 @@ fn judge(j: &Judged) -> Verdict {
         }
         Some(Defect::ClTe) => Some(HttpError::ContentLengthWithTransferEncoding),
         Some(Defect::DupCl) => Some(HttpError::DuplicateContentLength),
-        Some(Defect::BadCl) => Some(HttpError::BadContentLength),
+        Some(Defect::BadCl | Defect::ClList | Defect::ClOverflow) => {
+            Some(HttpError::BadContentLength)
+        }
         Some(Defect::BadTe | Defect::TeTwice) => Some(HttpError::UnsupportedTransferEncoding),
         Some(_) | None if j.http10 && matches!(j.body, Body::Chunked(_)) => {
             Some(HttpError::TransferEncodingInHttp10)

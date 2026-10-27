@@ -14,6 +14,8 @@ pub(crate) enum ChunkDefect {
     Overflow,
     DataTooLong,
     BareLf,
+    LongSize,
+    EmptySize,
 }
 
 impl ChunkDefect {
@@ -21,7 +23,10 @@ impl ChunkDefect {
         match self {
             ChunkDefect::Extension => ChunkedError::Extension,
             ChunkDefect::Trailer => ChunkedError::Trailer,
-            ChunkDefect::SignedSize | ChunkDefect::SpaceSize => ChunkedError::BadSize,
+            ChunkDefect::SignedSize
+            | ChunkDefect::SpaceSize
+            | ChunkDefect::LongSize
+            | ChunkDefect::EmptySize => ChunkedError::BadSize,
             ChunkDefect::Overflow => ChunkedError::SizeOverflow,
             ChunkDefect::DataTooLong | ChunkDefect::BareLf => ChunkedError::BadLineEnd,
         }
@@ -32,13 +37,17 @@ impl ChunkDefect {
             ChunkDefect::Extension => "chunk extension",
             ChunkDefect::Trailer => "chunk trailer",
             ChunkDefect::SignedSize | ChunkDefect::SpaceSize => "bad chunk size",
+            ChunkDefect::LongSize => "chunk size over 32 characters",
+            ChunkDefect::EmptySize => "empty chunk size",
             ChunkDefect::Overflow => "chunk size overflow",
             ChunkDefect::DataTooLong | ChunkDefect::BareLf => "bad chunk line end",
         }
     }
 
     pub(crate) fn random(rng: &mut fastrand::Rng) -> ChunkDefect {
-        match rng.u8(0..7) {
+        match rng.u8(0..9) {
+            7 => ChunkDefect::LongSize,
+            8 => ChunkDefect::EmptySize,
             0 => ChunkDefect::Extension,
             1 => ChunkDefect::Trailer,
             2 => ChunkDefect::SignedSize,
@@ -118,6 +127,16 @@ pub(crate) fn chunked(
                 out.wire
                     .extend_from_slice(format!("1{:016x}\r\n", n).as_bytes());
             }
+            // 33 characters: the 33rd is one too many.
+            Some(ChunkDefect::LongSize) => {
+                out.defect_at = Some(start + 32);
+                out.wire
+                    .extend_from_slice(format!("{size:0>33}\r\n").as_bytes());
+            }
+            Some(ChunkDefect::EmptySize) => {
+                out.defect_at = Some(start);
+                out.wire.extend_from_slice(b"\r\n");
+            }
             Some(ChunkDefect::Extension) => {
                 out.defect_at = Some(start + size.len());
                 out.wire
@@ -164,6 +183,15 @@ pub(crate) fn chunked(
             out.defect_at = Some(out.wire.len() + 16);
             out.wire.extend_from_slice(b"10000000000000000\r\n\r\n");
         }
+        Some(ChunkDefect::LongSize) => {
+            out.defect_at = Some(out.wire.len() + 32);
+            out.wire
+                .extend_from_slice(format!("{:0>33}\r\n\r\n", 0).as_bytes());
+        }
+        Some(ChunkDefect::EmptySize) => {
+            out.defect_at = Some(out.wire.len());
+            out.wire.extend_from_slice(b"\r\n\r\n");
+        }
         Some(ChunkDefect::Extension) => {
             out.defect_at = Some(out.wire.len() + 1);
             out.wire.extend_from_slice(b"0;x\r\n\r\n");
@@ -204,9 +232,9 @@ pub(crate) fn payload(rng: &mut fastrand::Rng, len: usize) -> Vec<u8> {
 
 /// The offsets in `c.wire` where a unit of chunked framing ends: after
 /// each data byte, and after each complete line (size line, the CRLF
-/// after data, the last CRLF). A body forwarded so far ends at one of
-/// them: an incomplete size line or CRLF is held back, never data
-/// (NFR-RES-04).
+/// after data), the last chunk counting as one (`0` CRLF CRLF). A body
+/// forwarded so far ends at one of them: an incomplete size line or CRLF
+/// is held back, never data (NFR-RES-04).
 pub(crate) fn unit_ends(c: &Chunked) -> Vec<usize> {
     let mut data = vec![false; c.wire.len()];
     for &at in &c.payload_at {
@@ -219,6 +247,11 @@ pub(crate) fn unit_ends(c: &Chunked) -> Vec<usize> {
         if data[i] || line_end {
             ends.push(i + 1);
         }
+    }
+    // The last chunk (`0` CRLF CRLF) is held back as a whole.
+    if c.defect_at.is_none() {
+        let last_size_line = c.wire.len().saturating_sub(2);
+        ends.retain(|&e| e != last_size_line);
     }
     ends
 }

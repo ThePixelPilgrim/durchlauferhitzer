@@ -638,6 +638,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
     let mut sim = Sim::new(&net.text);
     let mut assigned = 0;
     let mut n = 1u8;
+    let mut used_peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
     for _ in 0..rng.usize(2..6) {
         let solo = rng.u8(0..3) == 0;
         // Per backend: accept, refuse, or accept slowly (the model treats
@@ -686,6 +687,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         } else {
             sim.set_default_backend_window(Window::Unlimited);
         }
+        used_peer = stories.first().map_or(used_peer, |s| s.peer);
         run_round(&mut sim, &mut rng, &net, &mut stories, &mut assigned);
         if let Some(first) = stories.first_mut().filter(|s| s.paused) {
             first.paused = false;
@@ -696,6 +698,16 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
             check_story(&sim, story, coverage);
         }
         assert_closed(&sim, &stories);
+    }
+    // Nothing is held once every round closed its connections, before
+    // and after every timer has run out.
+    for id in sim.conn_ids() {
+        assert!(
+            !sim.core_knows(id),
+            "core still holds conn={} after its round\ntrace:\n{}",
+            id.0,
+            sim.trace()
+        );
     }
     sim.advance(Duration::from_secs(600));
     for id in sim.conn_ids() {
@@ -718,9 +730,13 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         "files left open\ntrace:\n{}",
         sim.trace()
     );
-    // Every slot is free again: a full house of new clients is accepted.
+    // Every slot is free again: a full house of new clients is accepted,
+    // the per-IP share of it from a peer the run already used.
     let logged = sim.logs().len();
-    for i in 0..net.max_connections {
+    for _ in 0..net.max_connections_per_ip {
+        sim.connect(used_peer);
+    }
+    for i in net.max_connections_per_ip..net.max_connections {
         sim.connect(IpAddr::V4(Ipv4Addr::new(198, 51, 100, i)));
     }
     assert_eq!(

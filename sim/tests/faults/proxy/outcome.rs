@@ -157,8 +157,24 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
         }],
         Verdict::Answer(status, p) => {
             let mut tags = tags;
-            if *status == Status::BadRequest {
-                tags.push("400 duplicate X-Forwarded-For");
+            match status {
+                Status::BadRequest => tags.push("400 duplicate X-Forwarded-For"),
+                Status::ContentTooLarge if req.summary.path.starts_with("/files") => {
+                    tags.push("413 static route with a body");
+                }
+                Status::ContentTooLarge => tags.push("413 Content-Length over the proxy limit"),
+                Status::Ok
+                | Status::MovedPermanently
+                | Status::NotFound
+                | Status::MethodNotAllowed
+                | Status::RequestTimeout
+                | Status::UriTooLong
+                | Status::ExpectationFailed
+                | Status::RequestHeaderFieldsTooLarge
+                | Status::BadGateway
+                | Status::ServiceUnavailable
+                | Status::GatewayTimeout
+                | Status::HttpVersionNotSupported => {}
             }
             vec![Alt {
                 bytes: fixed(*status, *p, mode(req)),

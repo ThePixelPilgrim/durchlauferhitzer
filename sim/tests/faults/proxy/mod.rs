@@ -63,6 +63,8 @@ pub(crate) struct NetConfig {
     pub(crate) routes: [RouteConfig; 2],
     pub(crate) max_head: usize,
     pub(crate) max_connections: u8,
+    /// Below `max_connections`, so the per-IP slots are checked too.
+    pub(crate) max_connections_per_ip: u8,
     pub(crate) connect: Duration,
     pub(crate) response: Duration,
     pub(crate) body_idle: Duration,
@@ -124,6 +126,7 @@ impl NetConfig {
         let body_idle = secs(rng, 2, 8);
         let send_idle = secs(rng, 3, 10);
         let max_connections = 8;
+        let max_connections_per_ip = 4;
         let route = |r: &RouteConfig| {
             format!(
                 "  path {} {{ proxy {};{} max_request_body {}; max_response_body {}; }}\n",
@@ -146,7 +149,7 @@ limits {{
   backend_response_timeout {}s;
   body_idle_timeout {}s;
   max_connections {max_connections};
-  max_connections_per_ip {max_connections};
+  max_connections_per_ip {max_connections_per_ip};
 }}
 host example.test {{
   path /files {{ static /srv/www; }}
@@ -163,6 +166,7 @@ host example.test {{
             routes,
             max_head,
             max_connections,
+            max_connections_per_ip,
             connect,
             response,
             body_idle,
@@ -188,7 +192,8 @@ pub(crate) const REQUIRED: &[&str] = &[
     "status 400",
     "status 404",
     "status 408",
-    "status 413",
+    "413 Content-Length over the proxy limit",
+    "413 static route with a body",
     "status 417",
     "status 431",
     "status 502",
@@ -226,7 +231,38 @@ pub(crate) const REQUIRED: &[&str] = &[
     "eager, body unread",
     "body error with the response head",
     "body error after the response head",
+    "bad CL",
+    "CL list",
+    "CL overflow",
+    "TE twice",
+    "unsupported TE",
+    "obs-fold",
+    "whitespace before a colon",
+    "bare LF in the head",
+    "NUL in a value",
+    "obs-text value",
+    "control byte in value",
+    "duplicate Host",
+    "bad Expect",
+    "bad chunk size",
+    "chunk size overflow",
+    "chunk size over 32 characters",
+    "empty chunk size",
+    "bad chunk line end",
+    "request body over the limit",
     // NFR-SEC-03.
+    "101 from a backend",
+    "too many interim heads",
+    "TE in an HTTP/1.0 response",
+    "backend Connection names framing",
+    "malformed backend head",
+    "bad backend framing",
+    "backend head too large",
+    "duplicate backend TE",
+    "control byte from a backend",
+    "backend CL overflow",
+    "defect in an interim head",
+    "502 BadChunk",
     "bytes after a backend response",
     "CR in a backend head",
     "LF in a backend head",
