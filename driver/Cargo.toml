@@ -1,0 +1,33 @@
+[package]
+name = "durchlauferhitzer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The durchlauferhitzer binary: the Linux epoll driver for the sans-IO core."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "durchlauferhitzer"
+path = "src/main.rs"
+
+# The workspace lints, except that `unsafe_code` is `deny` instead of
+# `forbid`: `forbid` cannot be lifted, and the `sys` module (and only it)
+# needs `#[allow(unsafe_code)]`. Keep this table in step with the root
+# `Cargo.toml`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+wildcard_enum_match_arm = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+undocumented_unsafe_blocks = "warn"
+
+[dependencies]
+durchlauferhitzer-core = { path = "../core" }
+libc = { version = "0.2.191", default-features = false }

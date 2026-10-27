@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "sim"]
+members = ["core", "sim", "driver"]
 
 [workspace.package]
 edition = "2024"
