@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-27, after stage 4 Task 1 landed on `main`.
+Last updated 2026-10-27, after stage 4 Task 2 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -10,7 +10,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 1 Foundations | done (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
 | 3 Reverse proxy | done (`576a77c..b583d96` + this handoff) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
-| 4 epoll driver + binary | **in progress** — plan `docs/superpowers/plans/2026-10-27-stage-4-epoll-driver.md` (owner-approved, amendments A1–A11). Task 1 ✅ (config bounds, memory budget, `disk_threads`, `shutdown_timeout`, `memory_limit`); **next: Task 2** (core: `Date`, drain/abort API, FR-LOG-07 fields) |
+| 4 epoll driver + binary | **in progress** — plan `docs/superpowers/plans/2026-10-27-stage-4-epoll-driver.md` (owner-approved, amendments A1–A11). Task 1 ✅ (config bounds, memory budget, `disk_threads`, `shutdown_timeout`, `memory_limit`); Task 2 ✅ (core: `Date`, drain/abort API, FR-LOG-07 fields); **next: Task 3** (sim late-timer mode) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -23,6 +23,8 @@ The stage 3 review record lists every owner decision, every ruling taken on the 
 - FR-CFG-21 is decided (owner, 2026-10-27): per-key caps plus a `memory_limit` budget over each connection's own buffers; an unset `max_connections_per_ip` defaults to min(64, `max_connections`).
 - The driver must implement the contract in `core/src/core/contract.rs` exactly: client and upstream readiness, `Interest::ReadWrite` (upstreams only), reading an upstream's readable bytes before reporting its socket error, deferring errors while the interest is `None`, connect answers always as a later event, the file contract, and the descriptor budget (NFR-RES-05: startup check of `RLIMIT_NOFILE`).
 - Backend addresses are IP literals only (no DNS); unspecified, broadcast and multicast are rejected at config load.
+- Drain and abort (owner, 2026-10-27; spec FR-PROC-05b–05d): during a drain a complete pipelined request behind a response whose head was queued keep-alive before the drain gets 503 + close; `abort_all` logs `Rejected { ShuttingDown }` per connection with an exchange in flight. Controller ruling (awaiting owner confirmation, then relabel in FR-PROC-05b): a request pipelined behind a head rendered during the drain (file opening, backend connecting/awaited) is not answered, since that head says close (A4).
+- Process note, Task 2: the `Date` sim tests (66a8f77) were written after the code, not red-first.
 
 ## Carry-forwards to later stages
 
