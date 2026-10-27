@@ -1130,10 +1130,13 @@ Failures, persistence, timeouts:
   not just validated config values.
 - **NFR-ROB-04** [done; upstreams stage 3] The core tolerates driver
   mistakes without panicking: events for unknown connections, files or
-  upstreams are ignored, a duplicate `Accepted` is ignored, a file event
-  that does not fit the file's state is ignored, and reported lengths
-  larger than offered are clamped; an impossible answer (`Truncated` or
-  `Changed` to an `OpenFile`) closes the connection.
+  upstreams are ignored, a duplicate `Accepted` is ignored, a file or
+  upstream event that does not fit its state is ignored (an upstream's
+  data or end of stream while no read was offered too: stage 3 final
+  review M3, test `upstream_read_closed_without_a_read_offered_is_ignored`),
+  and reported lengths larger than offered are clamped; an impossible
+  answer (`Truncated` or `Changed` to an `OpenFile`) closes the
+  connection.
 - **NFR-ROB-05** [done; upstreams stage 3] Late events after a connection
   closed are harmless: a late `FileOpened` is answered with `CloseFile`, a
   late `FileFailed` ignored; nothing is delivered for an upstream after

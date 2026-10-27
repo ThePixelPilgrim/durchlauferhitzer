@@ -605,11 +605,7 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        // Every response to a HEAD request is head only.
-        let body = match head.method {
-            Method::Head => BodyMode::HeadOnly,
-            Method::Get | Method::Other(_) => BodyMode::Full,
-        };
+        let body = BodyMode::of(&head.method);
         let StaticOpen {
             root,
             path,

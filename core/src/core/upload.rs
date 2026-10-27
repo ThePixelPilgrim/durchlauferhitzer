@@ -3,12 +3,12 @@
 //! fill, drain, refill (NFR-RES-04), its framing and limit errors
 //! (FR-PROXY-19, -23) and a client that stalls it (FR-PROXY-26).
 
-use super::proxy::{body_mode, queued_send_deadline};
+use super::proxy::queued_send_deadline;
 use super::{Action, ConnId, Core};
 use crate::config::Limits;
 use crate::conn::{ConnState, UnreadBody};
 use crate::http::request::{Method, Persistence};
-use crate::http::response::render_fixed;
+use crate::http::response::{BodyMode, render_fixed};
 use crate::http::status::Status;
 use crate::log::{Log, RejectReason, RequestBodyError, TimeoutKind};
 use crate::request_body::{Arrived, RequestBody, Stage};
@@ -111,7 +111,7 @@ impl Core {
         };
         match error {
             RequestBodyError::Chunked(_) => {
-                let body = body_mode(method);
+                let body = BodyMode::of(method);
                 render_fixed(Status::BadRequest, Persistence::Close, body, &mut c.send);
                 actions.push(Action::Log(Log::Rejected {
                     conn,
@@ -191,7 +191,7 @@ impl Core {
         let ConnState::AwaitingResponse { up, request, .. } = &c.state else {
             return;
         };
-        let (up, body) = (*up, body_mode(&request.summary.method));
+        let (up, body) = (*up, BodyMode::of(&request.summary.method));
         render_fixed(
             Status::RequestTimeout,
             Persistence::Close,
@@ -220,8 +220,20 @@ impl Core {
 /// written (FR-PROXY-29). The current response head's own deadline caps it
 /// separately ([`ConnState::deadline`]).
 pub(super) fn awaiting_deadline(now: Instant, body: &RequestBody, limits: &Limits) -> Instant {
+    body_idle_deadline(now, body, limits)
+        .unwrap_or_else(|| now.saturating_add(limits.backend_response_timeout))
+}
+
+/// The body idle deadline after progress at `now`, while the request body
+/// streams (bytes due from the client or waiting for the backend); `None`
+/// once the whole request is written (FR-PROXY-29).
+pub(super) fn body_idle_deadline(
+    now: Instant,
+    body: &RequestBody,
+    limits: &Limits,
+) -> Option<Instant> {
     match body.stage() {
-        Stage::Receiving | Stage::Writing => now.saturating_add(limits.body_idle_timeout),
-        Stage::Written => now.saturating_add(limits.backend_response_timeout),
+        Stage::Receiving | Stage::Writing => Some(now.saturating_add(limits.body_idle_timeout)),
+        Stage::Written => None,
     }
 }

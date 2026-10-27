@@ -7,7 +7,9 @@
 
 use std::net::SocketAddr;
 
+use super::relay::{ClientSide, client_side};
 use super::request::HeadEnd;
+use super::upload::body_idle_deadline;
 use super::{Action, ConnId, Core};
 use crate::config::{BodyLimit, Limits, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, UnreadBody};
@@ -18,7 +20,7 @@ use crate::http::response_head::{
     MAX_INTERIM_HEADS, RequestKind, ResponseError, ResponseHead, ResponseParser, ResponseStatus,
 };
 use crate::http::status::Status;
-use crate::log::{BackendFailure, Log, RejectReason, RequestSummary, TimeoutKind};
+use crate::log::{BackendFailure, Log, RequestSummary, TimeoutKind};
 use crate::request_body::{BodyEnd, RequestBody, Stage};
 use crate::routing::strip_segments;
 use crate::time::Instant;
@@ -125,7 +127,7 @@ impl Core {
             render_fixed(
                 status,
                 Persistence::Close,
-                body_mode(&head.method),
+                BodyMode::of(&head.method),
                 &mut c.send,
             );
             actions.push(Action::Log(Log::Response {
@@ -196,13 +198,6 @@ pub(super) fn close_upstream(
 ) {
     if upstreams.close(up) {
         actions.push(Action::CloseUpstream { up });
-    }
-}
-
-pub(super) fn body_mode(method: &Method) -> BodyMode {
-    match method {
-        Method::Head => BodyMode::HeadOnly,
-        Method::Get | Method::Other(_) => BodyMode::Full,
     }
 }
 
@@ -311,20 +306,28 @@ impl Core {
     /// body; otherwise it closed before its response was complete, a 502
     /// before the response head and a cut after it, logged as
     /// [`BackendFailure::ClosedEarly`]. (After any other complete body the
-    /// upstream is already closed and no event comes; while connecting no
-    /// read is offered, so none can come then either.)
+    /// upstream is already closed and no event comes.) End of stream is
+    /// only learnt from a read: without a read offered (connecting,
+    /// writing the request head, a full buffer, unsent body bytes) the
+    /// event does not fit the state and is ignored (NFR-ROB-04).
     pub(super) fn upstream_read_closed(
         &mut self,
         now: Instant,
         up: UpstreamId,
         actions: &mut Vec<Action>,
     ) {
-        if self.relay_read_closed(now, up, actions) {
-            return;
-        }
         let Some(conn) = self.upstreams.conn(up) else {
             return;
         };
+        let Some(c) = self.conns.get(&conn) else {
+            return;
+        };
+        if !c.state.reads_upstream(up) {
+            return;
+        }
+        if self.relay_read_closed(now, up, actions) {
+            return;
+        }
         let Some(c) = self.conns.get(&conn) else {
             return;
         };
@@ -384,11 +387,8 @@ impl Core {
                 // (FR-PROXY-29: no progress in either direction); once the
                 // whole request is written, the response timeout is a total
                 // deadline and runs on.
-                match request.body.stage() {
-                    Stage::Receiving | Stage::Writing => {
-                        *deadline = now.saturating_add(limits.body_idle_timeout);
-                    }
-                    Stage::Written => {}
+                if let Some(body_idle) = body_idle_deadline(now, &request.body, limits) {
+                    *deadline = body_idle;
                 }
                 self.judge_head(now, conn, actions);
             }
@@ -482,7 +482,7 @@ impl Core {
             return;
         };
         let deadline = queued_send_deadline(c.state.unread_continue(), now, limits);
-        let Some((up, mut request)) = take_request(c) else {
+        let Some((up, mut request, _)) = take_exchange(c) else {
             return;
         };
         let (persistence, unread_body, buffered) = match request.body.end(&mut c.recv) {
@@ -510,7 +510,7 @@ impl Core {
         render_fixed(
             status,
             persistence,
-            body_mode(&request.summary.method),
+            BodyMode::of(&request.summary.method),
             &mut c.send,
         );
         actions.push(Action::Log(Log::Response {
@@ -550,15 +550,7 @@ impl Core {
             ConnState::AwaitingResponse {
                 send_deadline: Some(send),
                 ..
-            } if now >= *send => {
-                actions.push(Action::Log(Log::Rejected {
-                    conn,
-                    peer: c.peer,
-                    reason: RejectReason::Timeout(TimeoutKind::Send),
-                }));
-                self.forget(conn, actions);
-                actions.push(Action::Close { conn });
-            }
+            } if now >= *send => self.close_timed_out(conn, TimeoutKind::Send, actions),
             // The backend did not finish a response head (interim or final)
             // in time after its first byte, even if the body streams
             // (FR-PROXY-29).
@@ -585,20 +577,12 @@ impl Core {
                 self.fail_before_head(now, conn, BackendFailure::ResponseTimeout, actions);
             }
             ConnState::Relaying { body, buffers, .. } => {
-                let client_stalled =
-                    !c.send.is_empty() || !buffers.head.is_empty() || body.unsent_len() > 0;
-                match body.upstream() {
-                    Some(_) if !client_stalled => {
+                match (client_side(&c.send, buffers, body), body.upstream()) {
+                    (ClientSide::Waits, Some(_)) => {
                         self.cut(conn, BackendFailure::ResponseTimeout, actions);
                     }
-                    Some(_) | None => {
-                        actions.push(Action::Log(Log::Rejected {
-                            conn,
-                            peer: c.peer,
-                            reason: RejectReason::Timeout(TimeoutKind::Send),
-                        }));
-                        self.forget(conn, actions);
-                        actions.push(Action::Close { conn });
+                    (ClientSide::HasBytes, _) | (ClientSide::Waits, None) => {
+                        self.close_timed_out(conn, TimeoutKind::Send, actions);
                     }
                 }
             }
@@ -628,13 +612,24 @@ pub(super) fn queued_send_deadline(
 /// What the core answers itself to `Expect: 100-continue`.
 const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 
-/// Take the request out of `c`'s `Connecting` or `AwaitingResponse` state,
-/// with the upstream id; the caller sets the next state. Any other state
-/// stays.
-fn take_request(c: &mut Conn) -> Option<(UpstreamId, ProxyRequest)> {
+/// Take the exchange out of `c`'s `Connecting` or `AwaitingResponse`
+/// state: the upstream id, the request and the exchange's buffers; the
+/// caller sets the next state. Any other state stays.
+#[must_use]
+pub(super) fn take_exchange(c: &mut Conn) -> Option<(UpstreamId, ProxyRequest, ExchangeBuffers)> {
     match c.take_state() {
-        ConnState::Connecting { up, request, .. }
-        | ConnState::AwaitingResponse { up, request, .. } => Some((up, request)),
+        ConnState::Connecting {
+            up,
+            request,
+            buffers,
+            ..
+        }
+        | ConnState::AwaitingResponse {
+            up,
+            request,
+            buffers,
+            ..
+        } => Some((up, request, buffers)),
         other @ (ConnState::ReadingHead { .. }
         | ConnState::Idle { .. }
         | ConnState::Responding { .. }

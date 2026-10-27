@@ -8,7 +8,7 @@ use crate::config::{Limits, RouteAction};
 use crate::conn::{Conn, ConnState, LINGER_TIMEOUT, UnreadBody};
 use crate::file::Chunk;
 use crate::http::request::{
-    BodyFraming, HeadParser, HttpError, KnownMethod, Method, ParseStatus, Persistence, RequestHead,
+    BodyFraming, HeadParser, HttpError, KnownMethod, ParseStatus, Persistence, RequestHead,
 };
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::status::Status;
@@ -322,11 +322,7 @@ impl Core {
             BodyFraming::None => UnreadBody::None,
             BodyFraming::Length(_) | BodyFraming::Chunked => UnreadBody::Pending,
         };
-        // Every response to a HEAD request is head only.
-        let body = match head.method {
-            Method::Head => BodyMode::HeadOnly,
-            Method::Get | Method::Other(_) => BodyMode::Full,
-        };
+        let body = BodyMode::of(&head.method);
         let (status, persistence) = match route {
             Err(_) => (Status::NotFound, head.persistence),
             Ok(route) => match &route.action {

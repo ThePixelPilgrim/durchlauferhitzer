@@ -4,11 +4,11 @@
 //! (FR-PROXY-19…22, -24, -28; NFR-RES-04), and the failures after the head
 //! (FR-PROXY-26: the connection is cut).
 
-use super::proxy::{close_upstream, queued_send_deadline};
+use super::proxy::{close_upstream, queued_send_deadline, take_exchange};
 use super::request::{AfterResponse, finish};
 use super::{Action, ConnId, Core};
 use crate::config::Limits;
-use crate::conn::{Conn, ConnState, ProxyRequest, UnreadBody};
+use crate::conn::{ConnState, UnreadBody};
 use crate::http::forward::{client_response_len, render_client_response};
 use crate::http::request::{Persistence, Version};
 use crate::http::response_head::{ResponseBody, ResponseError, ResponseHead};
@@ -89,7 +89,7 @@ impl Core {
                 return;
             }
         };
-        let Some((mut request, mut buffers)) = take_awaiting(c) else {
+        let Some((_, mut request, mut buffers)) = take_exchange(c) else {
             return;
         };
         // Body forwarding stops here; a fully read body leaves the next
@@ -360,27 +360,5 @@ fn after_backend_progress(
     match before {
         ClientSide::HasBytes => deadline,
         ClientSide::Waits => relay_deadline(now, after, body, limits),
-    }
-}
-
-/// Take the parts of `c`'s `AwaitingResponse` state that relaying keeps
-/// (request, buffers); the caller sets the next state. Any other state
-/// stays.
-fn take_awaiting(c: &mut Conn) -> Option<(ProxyRequest, ExchangeBuffers)> {
-    match c.take_state() {
-        ConnState::AwaitingResponse {
-            request, buffers, ..
-        } => Some((request, buffers)),
-        other @ (ConnState::ReadingHead { .. }
-        | ConnState::Idle { .. }
-        | ConnState::Responding { .. }
-        | ConnState::OpeningFile { .. }
-        | ConnState::SendingFile { .. }
-        | ConnState::Connecting { .. }
-        | ConnState::Relaying { .. }
-        | ConnState::Lingering { .. }) => {
-            c.state = other;
-            None
-        }
     }
 }

@@ -1,13 +1,24 @@
 //! Response heads: fixed plain-text responses (status line plus short text
 //! body), `301` redirects and the head of a `200 OK` file response.
 
-use super::request::Persistence;
+use super::request::{Method, Persistence};
 use super::status::Status;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyMode {
     Full,
     HeadOnly,
+}
+
+impl BodyMode {
+    /// How a response to a request with `method` is sent: every response
+    /// to a HEAD request is head only (FR-HTTP-21).
+    pub fn of(method: &Method) -> BodyMode {
+        match method {
+            Method::Head => BodyMode::HeadOnly,
+            Method::Get | Method::Other(_) => BodyMode::Full,
+        }
+    }
 }
 
 /// Appends a fixed response for `status` to `out` (existing bytes are kept).

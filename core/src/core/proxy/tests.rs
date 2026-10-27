@@ -151,6 +151,36 @@ fn late_and_stray_upstream_events_are_ignored() {
     assert_eq!(core.next_deadline(), None);
 }
 
+/// NFR-ROB-04 (stage 3 final review M3): an end of stream is only learnt
+/// from a read, so an `UpstreamReadClosed` while no read was offered (the
+/// interest is `None` while connecting, `Write` while the request head is
+/// written) is a driver mistake and ignored, like any upstream event that
+/// does not fit the state.
+#[test]
+fn upstream_read_closed_without_a_read_offered_is_ignored() {
+    let mut core = files_core();
+    request(&mut core, secs(0), 1, GET_P);
+    // Connecting: interest `None`.
+    assert!(handle(&mut core, 0, Event::UpstreamReadClosed { up: UP }).is_empty());
+    handle(&mut core, 0, Event::UpstreamConnected { up: UP });
+    // Writing the request head: interest `Write`.
+    assert!(handle(&mut core, 0, Event::UpstreamReadClosed { up: UP }).is_empty());
+    assert_eq!(core.upstreams.len(), 1);
+    // Once a read is offered, the same event is a 502 `ClosedEarly`.
+    let len = core.upstream_send_buffer(UP).len();
+    handle(&mut core, 0, Event::UpstreamSent { up: UP, len });
+    let actions = handle(&mut core, 0, Event::UpstreamReadClosed { up: UP });
+    assert_eq!(
+        actions.first(),
+        Some(&Action::Log(Log::BackendFailed {
+            conn: CONN,
+            peer: PEER,
+            backend: BackendId(0),
+            kind: BackendFailure::ClosedEarly,
+        }))
+    );
+}
+
 /// The head buffer's capacity holds the rewrite of any head within the
 /// limits, in the worst case of each direction: as many header lines as
 /// allowed, each as short as possible (`a:b`, which re-renders one byte

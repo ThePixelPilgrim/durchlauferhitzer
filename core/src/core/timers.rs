@@ -96,14 +96,30 @@ impl Core {
                     | ConnState::Relaying { .. }
                     | ConnState::Lingering { .. } => TimeoutKind::Send,
                 };
-                actions.push(Action::Log(Log::Rejected {
-                    conn,
-                    peer: c.peer,
-                    reason: RejectReason::Timeout(kind),
-                }));
-                self.forget(conn, actions);
-                actions.push(Action::Close { conn });
+                self.close_timed_out(conn, kind, actions);
             }
         }
+    }
+
+    /// `conn` timed out where nothing can be answered any more (the client
+    /// stopped reading, or the disk did not answer): log the timeout and
+    /// close at once, without further writes; `forget` closes any file or
+    /// upstream in between (`Log`, `CloseFile` / `CloseUpstream`, `Close`).
+    pub(super) fn close_timed_out(
+        &mut self,
+        conn: ConnId,
+        kind: TimeoutKind,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(c) = self.conns.get(&conn) else {
+            return;
+        };
+        actions.push(Action::Log(Log::Rejected {
+            conn,
+            peer: c.peer,
+            reason: RejectReason::Timeout(kind),
+        }));
+        self.forget(conn, actions);
+        actions.push(Action::Close { conn });
     }
 }

@@ -25,7 +25,9 @@ use crate::log::RequestBodyError;
 /// not yet written to the backend; `recv[end..filled]` are bytes after
 /// them: while the body is open an unconsumed chunked-framing tail, once it
 /// is done the start of the next request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not `Clone`: it holds the chunked validator's state, which must never
+/// fork (like `RelayBody`).
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RequestBody {
     due: Due,
     start: usize,
@@ -34,7 +36,7 @@ pub(crate) struct RequestBody {
 }
 
 /// What of the body is still to arrive from the client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum Due {
     /// `remaining` (more than 0) bytes of a `Content-Length` body.
     Length { remaining: u64 },
