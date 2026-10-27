@@ -1321,10 +1321,13 @@ Failures, persistence, timeouts:
   `Cargo.lock` (enforced with `--locked`), uses minimal features, and has
   its full transitive tree checked for build scripts and C sources.
   Test-only crates (property testing, seeded randomness) are free.
-- **NFR-MAINT-04** [done; hardening stage 4] CI fails if the product's
-  dependency tree contains anything but workspace crates and `libc`
-  (`scripts/check-product-deps.sh`). Stage 4: match workspace members
-  rather than a name prefix, check all targets, add a self-test.
+- **NFR-MAINT-04** [done] CI fails if the product's dependency tree
+  contains anything but workspace crates and `libc`
+  (`scripts/check-product-deps.sh`): the core may have nothing, the driver
+  `libc` only. A workspace crate is a path crate inside the workspace (not
+  a name prefix), and the tree is checked for all targets
+  (`cargo tree --target all`). CI also runs the script's offline self-test
+  (`scripts/test-check-product-deps.sh`).
 - **NFR-MAINT-05** [done in core; driver stage 4] `unsafe` is forbidden
   in the core; the driver confines it to a small, documented `libc`
   wrapper module.

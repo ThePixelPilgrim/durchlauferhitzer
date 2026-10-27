@@ -22,3 +22,5 @@ jobs:
           DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
       - name: Product dependency check
         run: scripts/check-product-deps.sh
+      - name: Product dependency check self-test
+        run: scripts/test-check-product-deps.sh
