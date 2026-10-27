@@ -2,11 +2,11 @@
 //! backends on proxy routes (with and without `strip_prefix`, varied body
 //! limits and timeouts), smuggling attempts and hostile backends among
 //! them. Every exchange is predicted by a model of its own (`request.rs`,
-//! `response.rs`, `outcome.rs`), written from the spec: the backend must
-//! receive exactly the rewritten request and the client's body, the client
-//! exactly the rewritten head and the backend's body bytes, a cut
-//! connection with its log, or the predicted 4xx/5xx; nothing after a
-//! framing end is ever forwarded (NFR-SEC-02, NFR-SEC-03).
+//! `response.rs`, `outcome.rs`; drawn by `draw.rs`), written from the
+//! spec: the backend must receive exactly the rewritten request and the
+//! client's body, the client exactly the rewritten head and the backend's
+//! body bytes, a cut connection with its log, or the predicted 4xx/5xx;
+//! nothing after a framing end is ever forwarded (NFR-SEC-02, NFR-SEC-03).
 //!
 //! A seed is a series of rounds: several stories (one client connection
 //! each, a series of exchanges on it) interleaved at random without time
@@ -18,6 +18,7 @@
 
 mod check;
 mod chunks;
+mod draw;
 mod drive;
 mod outcome;
 mod request;
@@ -34,6 +35,7 @@ use durchlauferhitzer_core::{BackendFailure, BackendId, UpstreamId};
 use super::*;
 use check::*;
 use chunks::*;
+use draw::*;
 use drive::*;
 use outcome::*;
 use request::*;

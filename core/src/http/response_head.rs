@@ -50,8 +50,9 @@ impl ResponseHead {
 /// How the response body is delimited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBody {
-    /// No body: a response to HEAD, a 1xx, 204 or 304 status, or
-    /// `Content-Length: 0`.
+    /// No body: a response to HEAD, a 204 or 304 status, or
+    /// `Content-Length: 0`. (Interim 1xx heads never get this far: they
+    /// are reported as [`ResponseStatus::Interim`].)
     None,
     /// Exactly this many bytes (more than 0).
     Length(u64),

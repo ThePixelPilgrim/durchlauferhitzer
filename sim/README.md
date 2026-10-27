@@ -81,6 +81,7 @@ tests/
       response.rs         random backend responses (hostile ones among
                           them) and the model of what the client receives
       outcome.rs          exchanges, timings and the outcomes they allow
+      draw.rs             drawing an exchange: plain ones, timed scenarios
       drive.rs            stories, rounds, backends, timed scenarios
       check.rs            the oracle: each story against the model
 ```

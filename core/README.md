@@ -37,14 +37,16 @@ src/
     static_files.rs     static routes: open, index.html, send, abort
     proxy.rs            proxy routes: plan, connect, `100 Continue`, judge
                         the response head (interim heads dropped), 502/504
-                        before it, timeouts
+                        before it, timeouts (`expire_proxy` decides 408 vs
+                        504 `BodyTimeout`, the head cap, send timeouts)
     relay.rs            the response side: queue the rewritten head, relay
                         the body, end the exchange, cut on a failure
     upload.rs           the request side once connected: write the head
                         and body to the backend, read the body from the
-                        client, body errors and stalls (400/408/504, cut)
+                        client, body errors (400, cut), a client end of
+                        stream mid-body, the 408 for a stalled body
     limits.rs           connection counting, refusals (503), orphaned opens
-    timers.rs           deadlines and TimerFired
+    timers.rs           deadlines and TimerFired; closing on a timeout
     test_support.rs     helpers shared by the unit tests
   conn.rs             per-connection state (ConnState) and buffers
   file.rs             file ids, file metadata/stamps, change policy

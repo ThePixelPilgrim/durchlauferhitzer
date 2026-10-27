@@ -101,8 +101,8 @@ const CLIENT_IDENTITY: [&str; 5] = [
 /// so the backend never answers it with a chunked body (owner decision
 /// 2026-10-27), `HTTP/1.1` otherwise. The client's headers follow in
 /// order without the hop-by-hop ones, `x-forwarded-for` and the client
-/// identity headers ([`CLIENT_IDENTITY`]: `x-forwarded-proto`,
-/// `forwarded`, `x-real-ip`, `x-forwarded-host`, `x-forwarded-port`);
+/// identity headers (`x-forwarded-proto`, `forwarded`, `x-real-ip`,
+/// `x-forwarded-host`, `x-forwarded-port`);
 /// `content-length` is
 /// re-rendered without leading zeros, everything else (`host`,
 /// `transfer-encoding`, …) as received. Then come `x-forwarded-for` (the
