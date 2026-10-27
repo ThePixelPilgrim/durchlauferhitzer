@@ -218,7 +218,7 @@ mod tests {
     /// One counted connection allowed, so at most one refused one. The long
     /// header timeout keeps the counted connection open throughout.
     const CAPPED: &str = "listen 127.0.0.1:8080; \
-        limits { max_connections 1; max_connections_per_ip 1; header_timeout 60m; } \
+        limits { max_connections 1; header_timeout 60m; } \
         host a.test { path / { static /srv; } }";
 
     fn capped() -> Core {

@@ -452,7 +452,7 @@ fn allow_growth_aborts_on_shrink() {
 }
 
 pub(crate) const CAPPED: &str = "listen 127.0.0.1:8080;
-limits { max_connections 2; max_connections_per_ip 2; }
+limits { max_connections 2; }
 host example.test { path / { static /srv/www; } }";
 
 /// Opens orphaned by a hung disk keep their connection slots, so they

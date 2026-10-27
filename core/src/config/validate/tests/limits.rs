@@ -270,11 +270,15 @@ fn per_ip_may_not_exceed_max_connections() {
         )),
         (invalid("max_connections_per_ip", "11"), 3, 3)
     );
-    // The default per-IP limit (64) applies when only max_connections is set.
-    assert_eq!(
-        err(&with_limit("max_connections 10;")),
-        (invalid("max_connections", "10"), 3, 3)
-    );
+    // Owner decision 2026-10-27: an unset per-IP limit is
+    // min(64, max_connections), so it never exceeds max_connections.
+    let small = ok(&with_limit("max_connections 10;"));
+    assert_eq!(small.limits.max_connections, 10);
+    assert_eq!(small.limits.max_connections_per_ip, 10);
+    let large = ok(&with_limit("max_connections 100;"));
+    assert_eq!(large.limits.max_connections_per_ip, 64);
+    let one = ok(&with_limit("max_connections 1;"));
+    assert_eq!(one.limits.max_connections_per_ip, 1);
 }
 
 /// NFR-RES-01 by hand, for the defaults: receive max(16384, 8192 + 2) +
@@ -378,11 +382,27 @@ fn memory_budget_counts_proxy_terms_only_with_a_proxy_route() {
     );
 }
 
+/// The budget is checked at the position it is given. A config without a
+/// `limits` block always fits (the defaults are well inside 1 GiB), so the
+/// first-host position is unreachable through `load`; it is tested on
+/// `check_memory_budget` directly with a hand-built config.
 #[test]
 fn memory_budget_without_a_limits_block_is_checked_at_the_first_host() {
-    // Defaults always fit (1024 * 50404 < 1 GiB); this pins that it loads.
     let config = ok(&cfg(
         "\nhost a { path /p { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body 1MiB; } }\n",
     ));
     assert_eq!(config.limits, Limits::default());
+    let mut small = config;
+    small.limits.memory_limit = 1 << 20;
+    let first_host = Pos { line: 7, column: 3 };
+    assert_eq!(
+        check_memory_budget(&small, first_host),
+        Err(ConfigError {
+            kind: ConfigErrorKind::MemoryBudget {
+                needed: 1024 * 50404,
+                limit: 1 << 20
+            },
+            pos: first_host
+        })
+    );
 }

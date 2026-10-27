@@ -259,7 +259,6 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
     let mut seen: Vec<&str> = Vec::new();
     let mut request_line: Option<&Setting> = None;
     let mut head: Option<&Setting> = None;
-    let mut connections: Option<&Setting> = None;
     let mut per_ip: Option<&Setting> = None;
     for item in &block.items {
         let setting = match item {
@@ -289,7 +288,6 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
                 limits.max_connections = parse_count(value)
                     .filter(|n| *n <= MAX_CONNECTIONS_CAP)
                     .ok_or_else(bad)?;
-                connections = Some(setting);
             }
             LimitKey::MaxConnectionsPerIp => {
                 limits.max_connections_per_ip = parse_count(value).ok_or_else(bad)?;
@@ -345,10 +343,19 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
             return Err(invalid_value(&setting.key, value, setting.pos));
         }
     }
-    if limits.max_connections_per_ip > limits.max_connections {
-        if let Some(setting) = per_ip.or(connections) {
-            let value = setting.values.first().map_or("", String::as_str);
-            return Err(invalid_value(&setting.key, value, setting.pos));
+    match per_ip {
+        // Owner decision 2026-10-27 (FR-CFG-21): an unset per-IP limit is
+        // min(64, max_connections); an explicit one above max_connections
+        // is an error at the per-IP setting.
+        None => {
+            limits.max_connections_per_ip =
+                limits.max_connections_per_ip.min(limits.max_connections);
+        }
+        Some(setting) => {
+            if limits.max_connections_per_ip > limits.max_connections {
+                let value = setting.values.first().map_or("", String::as_str);
+                return Err(invalid_value(&setting.key, value, setting.pos));
+            }
         }
     }
     Ok(limits)

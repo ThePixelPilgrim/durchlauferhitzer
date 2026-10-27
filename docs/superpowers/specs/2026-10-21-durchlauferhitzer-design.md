@@ -267,7 +267,7 @@ Structure and values:
   | key | default | status |
   |---|---|---|
   | `max_connections` | 1024 | [done] |
-  | `max_connections_per_ip` | 64 | [done] |
+  | `max_connections_per_ip` | 64, or `max_connections` if smaller (owner decision 2026-10-27) | [done] |
   | `max_request_line` | 8KiB (excluding CRLF) | [done] |
   | `max_head` | 16KiB (request line + headers + final CRLF) | [done] |
   | `max_headers` | 100 | [done] |
@@ -285,9 +285,9 @@ Structure and values:
   non-zero, `max_request_line` ≤ `max_head`, and `max_head` ≤ 1 MiB.
   Caps and memory budget (owner decision 2026-10-27):
   - `max_connections` 1–65536; `max_connections_per_ip` 1–`max_connections`
-    (a config with the per-IP limit, default 64, above `max_connections` is
-    an error at the per-IP setting, or at `max_connections` when only that
-    is written); `max_headers` 1–1000; every duration (including
+    (an explicit per-IP value above `max_connections` is an error at the
+    per-IP setting; when the key is not written its default is
+    `min(64, max_connections)`, owner decision 2026-10-27); `max_headers` 1–1000; every duration (including
     `shutdown_timeout`) 1 ms – 24 h; `disk_threads` 1–64; `memory_limit`
     1 MiB – 1 TiB (written `1024GiB`).
   - The config is rejected when `max_connections` × worst case per
