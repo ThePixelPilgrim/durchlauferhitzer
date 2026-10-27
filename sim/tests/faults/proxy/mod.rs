@@ -219,6 +219,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "request hidden in a body",
     // Each branch of an outcome that depends on the split.
     "body error before connect",
+    "request body over the limit, silent",
     "body error after connect",
     "body error, then refused",
     "refused, body read with the head",

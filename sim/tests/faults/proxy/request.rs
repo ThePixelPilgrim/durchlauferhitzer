@@ -43,7 +43,9 @@ pub(crate) struct Request {
 #[derive(Debug)]
 pub(crate) enum Verdict {
     /// A head the parser must reject: logged `Rejected { Http(e) }`,
-    /// answered `e.status()` with a body, closed.
+    /// answered with the status of the model's own table
+    /// (`model_http_status`, FR-HTTP-10), head-only for HEAD (FR-HTTP-21),
+    /// closed.
     Parse(HttpError),
     /// The core answers itself (route miss, 413, duplicate
     /// `X-Forwarded-For`), logged as a `Response`.

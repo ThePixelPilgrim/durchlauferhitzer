@@ -407,10 +407,17 @@ fn forward_alts(
             full,
             &tags,
         ),
+        // The body can be read in full only if what the backend did not
+        // take fits one client receive buffer: a buffer with unsent bytes
+        // is not refilled (NFR-RES-04).
         (ConnectBehaviour::Accept, Timing::BackendBodyStall(j)) => mark(
             core_fail(
                 BackendFailure::BodyTimeout,
-                maybe_unread,
+                if req.wire.len() - req.head_len - j <= net.client_recv_capacity() {
+                    maybe_unread
+                } else {
+                    vec![Persistence::Close]
+                },
                 cont,
                 only(fwd.head_len + j),
                 &tags,
