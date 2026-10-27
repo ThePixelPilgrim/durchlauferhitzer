@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-26, after stage 3 Task 7 landed on `main`.
+Last updated 2026-10-26, after stage 3 Task 8 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -9,9 +9,9 @@ A new session should start from the latest `main`, read this file first, then `C
 |---|---|
 | 1 Foundations | done, merged to `main` (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done, merged to `main` (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
-| 3 Reverse proxy | **in progress** on `main` (Tasks 1–7 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
+| 3 Reverse proxy | **in progress** on `main` (Tasks 1–8 landed) — plan: `docs/superpowers/plans/2026-10-26-stage-3-reverse-proxy.md` |
 
-Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ✅, 6 request bodies ✅, 7 response bodies ✅, 8 timeouts/failure matrix ← **next**, 9 randomized sim. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
+Stage 3 tasks: **1 split core.rs ✅, 2 response-head parser ✅, 3 chunked validator ✅**, 4 head rewriting ✅, 5 upstream interface + scripted backends ✅, 6 request bodies ✅, 7 response bodies ✅, 8 timeouts/failure matrix ✅, 9 randomized sim ← **next**. Each task lands on `main` once reviewed. Then the stage 3 whole-branch review over the stage's range on `main`, its fixes, and the review record.
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…, consolidated 2026-10-25); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -40,10 +40,10 @@ Task 6 (done, `be4f8e8`..`acc0ec0` + doc nit): `Expect` parsing (FR-PROXY-25/25a
 
 Task 7 (done, `5fdcf65`..`bfcb69c`): response bodies — chunked passed through verbatim, close-delimited with `connection: close`, HEAD/204/304 never carry a body, bytes after a body end dropped, `max_response_body` (502 up front, cut once passed; body bytes arriving with the head are judged before the head is sent, so errors there are a 502), fill-drain-refill toward a slow client with the chunked tail, interim heads dropped with a cap of 8, `not_implemented` removed. Owner decisions 2026-10-27 (FR-PROXY-04): the request line mirrors the client's version; any `Transfer-Encoding` toward an HTTP/1.0 client → 502 (`TransferEncodingToHttp10`), also on body-less replies. New `BackendFailure` kinds `BadChunk`, `BodyTooLarge`.
 
+Task 8 (done, `b5cf7e0`..`21cfb80`): `backend_connect_timeout`, `backend_response_timeout`, `body_idle_timeout` are `limits` keys (all constants gone, each tested at a non-default value); half-close keeps the upstream (FR-PROXY-26); `BackendFailure::ClosedEarly` for an end of stream before the head or mid-body; response-head bytes during an upload count as body progress; owner decisions 2026-10-27 (FR-PROXY-29): every response head, interim or final, must be complete within `backend_response_timeout` of its own first byte (a completed interim head ends its cap), expiry → 504; `Status::NotImplemented` removed; `LimitKey::ALL` is the single key list; example config documents the proxy behaviour; stale `[stage 3]` markers fixed.
+
 Still to carry into later tasks (`.superpowers/` notes are not in git, so listed here):
-- A partial response head under `ReadWrite` does not restart the body idle deadline (log label only).
-- `Status::NotImplemented` is no longer sent by the core; remove it when convenient.
-- Waiting states still use named default-timeout constants (`BODY_IDLE_TIMEOUT` etc.); Task 8 replaces them with `Limits` keys. Task 8 may also add `BackendFailure` kinds for "closed before head" and "body stalled".
+- Task 9: NFR-SEC-02 / -03 stay `[stage 3]` until the randomized proxy net proves them; mark them `[done]` then.
 
 ## Branches
 
