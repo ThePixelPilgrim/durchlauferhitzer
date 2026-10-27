@@ -298,3 +298,120 @@ fn unread_100_continue_carries_its_send_deadline_into_a_relay() {
         sim.trace()
     );
 }
+
+/// A config with the given send idle, response and body idle timeouts.
+fn timeouts(send: u64, response: u64, body: u64) -> String {
+    format!(
+        "listen 127.0.0.1:8080;
+limits {{ send_idle_timeout {send}s; backend_response_timeout {response}s; body_idle_timeout {body}s; }}
+host example.test {{
+  path /api {{ proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }}
+}}"
+    )
+}
+
+const POST_EXPECT: &[u8] =
+    b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+    Content-Length: 10\r\n\r\n";
+
+/// The client never reads its `100 Continue`; whatever else falls due at
+/// the same instant, the send timeout is the outcome (FR-PROXY-29 builder
+/// call): exactly `Rejected { Timeout(Send) }`, no 504 or 408 logged.
+fn assert_send_timeout_at(sim: &mut Sim, c: durchlauferhitzer_core::ConnId, ms: u64) {
+    sim.advance(Duration::from_millis(ms - 1));
+    assert!(sim.logs().is_empty(), "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(
+        sim.logs(),
+        &[Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+}
+
+/// Send idle and the head cap both at 3 s (body idle 20 s): the send
+/// timeout wins.
+#[test]
+fn send_timeout_tied_with_head_cap_wins() {
+    let mut sim = Sim::new(&timeouts(3, 3, 20));
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(c, POST_EXPECT);
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\n");
+    sim.run_until_idle();
+    assert_send_timeout_at(&mut sim, c, 3000);
+}
+
+/// Send idle, the head cap and body idle all at 3 s: the send timeout
+/// wins.
+#[test]
+fn three_way_tie_goes_to_the_send_timeout() {
+    let mut sim = Sim::new(&timeouts(3, 3, 3));
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(c, POST_EXPECT);
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\n");
+    sim.run_until_idle();
+    assert_send_timeout_at(&mut sim, c, 3000);
+}
+
+/// The whole request (its body came with the head) is written, so
+/// `backend_response_timeout` runs; send idle and it are both 3 s: the
+/// send timeout wins.
+#[test]
+fn send_timeout_tied_with_response_timeout_wins() {
+    let mut sim = Sim::new(&timeouts(3, 3, 20));
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    let mut whole = POST_EXPECT.to_vec();
+    whole.extend_from_slice(b"0123456789");
+    sim.send(c, &whole);
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    assert!(
+        sim.take_backend_request(up).ends_with(b"0123456789"),
+        "{}",
+        sim.trace()
+    );
+    assert_send_timeout_at(&mut sim, c, 3000);
+}
+
+/// Once the client has taken its whole `100 Continue`, the send idle
+/// timeout stops: a body uploaded slowly (a byte every 2.5 s, past the
+/// 3 s send idle timeout, within the 5 s body idle timeout) goes on.
+#[test]
+fn continue_taken_stops_the_send_idle_timeout() {
+    let mut sim = Sim::new(&timeouts(3, 20, 5));
+    let c = sim.connect(peer());
+    sim.send(c, POST_EXPECT);
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        b"HTTP/1.1 100 Continue\r\n\r\n",
+        "{}",
+        sim.trace()
+    );
+    let up = only_upstream(&sim);
+    for byte in b"0123" {
+        sim.advance(Duration::from_millis(2500));
+        sim.send(c, &[*byte]);
+        sim.run_until_idle();
+    }
+    assert!(sim.logs().is_empty(), "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
+    assert!(
+        sim.take_backend_request(up).ends_with(b"0123"),
+        "{}",
+        sim.trace()
+    );
+}
