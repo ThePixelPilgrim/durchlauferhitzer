@@ -3,7 +3,8 @@
 
 use std::net::{IpAddr, Ipv6Addr};
 
-use crate::core::test_support::{PEER, files_core, request, secs};
+use crate::conn::ConnState;
+use crate::core::test_support::{PEER, accept, files_core, request, secs};
 use crate::core::{Action, ConnError, ConnId, Core, Event, Interest};
 use crate::log::{BackendFailure, Log};
 use crate::upstream::{BackendId, UPSTREAM_RECV_MIN, UpstreamId};
@@ -286,4 +287,56 @@ fn own_send_buffer_goes_out_before_the_relayed_response() {
         !core.recv_buffer(CONN).is_empty(),
         "back to reading: {actions:?}"
     );
+}
+
+/// I1: `worst_case_per_connection` (the config's memory budget) equals the
+/// buffers a real `Core` allocates, for the defaults and for limits that
+/// make every term matter. A change to a core buffer constant or formula
+/// that the budget does not follow fails here.
+#[test]
+fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
+    use crate::config::{load, worst_case_per_connection};
+    // The budget and the core share their capacity functions, so equality
+    // alone follows any constant. The defaults are therefore also pinned to
+    // the NFR-RES-01 numbers (also in the example config): changing a core
+    // buffer constant must be a deliberate spec change.
+    let defaults = crate::config::Limits::default();
+    assert_eq!(worst_case_per_connection(&defaults, false), 17_408);
+    assert_eq!(worst_case_per_connection(&defaults, true), 50_404);
+    let get = b"GET /p/f HTTP/1.1\r\nHost: b.test\r\n\r\n";
+    for limits in [
+        "",
+        "limits { max_head 40KiB; max_request_line 30KiB; }",
+        "limits { max_head 2KiB; max_request_line 1KiB; max_headers 7; }",
+    ] {
+        let stat =
+            format!("listen 127.0.0.1:8080; {limits} host a.test {{ path / {{ static /srv; }} }}");
+        let proxy = format!(
+            "listen 127.0.0.1:8080; {limits} host b.test {{ path /p {{ proxy 127.0.0.1:9; \
+             max_request_body 1MiB; max_response_body 1MiB; }} }}"
+        );
+
+        // Static: a fresh connection's receive and send buffers, as
+        // allocated (not as reported by the capacity accessors, which
+        // would echo the same constants).
+        let config = load(&stat).unwrap();
+        let limits = config.limits.clone();
+        let mut core = Core::new(config);
+        accept(&mut core, secs(0), 1, PEER);
+        let c = core.conns.get(&CONN).unwrap();
+        let held = c.recv.len() + c.send.capacity();
+        assert_eq!(worst_case_per_connection(&limits, false), held as u64);
+
+        // Proxy: the same plus a connected exchange's upstream receive and
+        // send ("head") buffers.
+        let mut core = Core::new(load(&proxy).unwrap());
+        request(&mut core, secs(0), 1, get);
+        handle(&mut core, 0, Event::UpstreamConnected { up: UP });
+        let c = core.conns.get(&CONN).unwrap();
+        let ConnState::AwaitingResponse { buffers, .. } = &c.state else {
+            panic!("expected AwaitingResponse, got {:?}", c.state);
+        };
+        let held = c.recv.len() + c.send.capacity() + buffers.recv.len() + buffers.head.capacity();
+        assert_eq!(worst_case_per_connection(&limits, true), held as u64);
+    }
 }

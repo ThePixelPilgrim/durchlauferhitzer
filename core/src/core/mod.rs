@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use crate::config::{Config, RouteAction};
+use crate::config::{Config, Limits, RouteAction};
 use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 #[cfg(doc)]
 use crate::file::RootId;
@@ -64,6 +64,16 @@ pub struct Core {
     upstream_recv_capacity: usize,
     /// Capacity of each exchange's head buffer.
     head_capacity: usize,
+}
+
+/// Capacity of a connection's receive buffer: room for the largest allowed
+/// head, and for `max_request_line + 2` bytes so the parser can always
+/// reach a verdict on an over-long request line. The single source for the
+/// buffer and for the config's memory budget.
+pub(crate) fn client_recv_capacity(limits: &Limits) -> usize {
+    limits
+        .max_head
+        .max(limits.max_request_line.saturating_add(2))
 }
 
 impl Core {
@@ -120,14 +130,9 @@ impl Core {
         &self.static_roots
     }
 
-    /// Capacity of each connection's receive buffer: room for the largest
-    /// allowed head, and for `max_request_line + 2` bytes so the parser can
-    /// always reach a verdict on an over-long request line.
+    /// Capacity of each connection's receive buffer ([`client_recv_capacity`]).
     fn new_recv_capacity(&self) -> usize {
-        let limits = &self.config.limits;
-        limits
-            .max_head
-            .max(limits.max_request_line.saturating_add(2))
+        client_recv_capacity(&self.config.limits)
     }
 
     /// Process one event at time `now`, appending the resulting actions.

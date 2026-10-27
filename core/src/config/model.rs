@@ -5,6 +5,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::conn::SEND_CAPACITY;
+use crate::core::client_recv_capacity;
+use crate::upstream::{head_capacity, recv_capacity};
+
 use super::lexer::Pos;
 use super::syntax::SyntaxErrorKind;
 
@@ -44,38 +48,28 @@ pub struct Limits {
     pub memory_limit: u64,
 }
 
-/// Bytes of the per-connection send buffer (`conn::SEND_CAPACITY`).
-const SEND_BUFFER: u64 = 1024;
-/// Floor of the upstream receive buffer (`upstream::UPSTREAM_RECV_MIN`).
-const UPSTREAM_RECV_FLOOR: u64 = 16 * 1024;
-/// Slack in the proxy head buffer (`max_head + max_headers + 128`).
-const HEAD_SLACK: u64 = 128;
-
 /// The most buffer memory one counted connection can hold, from the
-/// NFR-RES-01 formulas the core allocates by:
+/// NFR-RES-01 formulas the core allocates by. It calls the core's own
+/// capacity functions, so the two cannot drift apart:
 ///
 /// - client receive buffer `max(max_head, max_request_line + 2)`
-///   (`Core::recv_capacity`);
-/// - client send buffer 1 KiB (`SEND_CAPACITY`);
+///   ([`client_recv_capacity`]);
+/// - client send buffer 1 KiB (`conn::SEND_CAPACITY`);
 /// - only when `proxied` (the config has a proxy route) an active exchange
 ///   adds the upstream receive buffer `max(16 KiB, max_head)`
 ///   (`upstream::recv_capacity`) and the head buffer
-///   `max_head + max_headers + 128` (contract.rs, Task 5 builder call).
+///   `max_head + max_headers + 128` (`upstream::head_capacity`).
 ///
 /// Saturating arithmetic: the result never wraps.
 pub fn worst_case_per_connection(limits: &Limits, proxied: bool) -> u64 {
     let widen = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-    let max_head = widen(limits.max_head);
-    let recv = max_head.max(widen(limits.max_request_line).saturating_add(2));
-    let client = recv.saturating_add(SEND_BUFFER);
+    let client = widen(client_recv_capacity(limits)).saturating_add(widen(SEND_CAPACITY));
     if !proxied {
         return client;
     }
-    let upstream_recv = UPSTREAM_RECV_FLOOR.max(max_head);
-    let head = max_head
-        .saturating_add(widen(limits.max_headers))
-        .saturating_add(HEAD_SLACK);
-    client.saturating_add(upstream_recv).saturating_add(head)
+    client
+        .saturating_add(widen(recv_capacity(limits.max_head)))
+        .saturating_add(widen(head_capacity(limits.max_head, limits.max_headers)))
 }
 
 impl Default for Limits {
