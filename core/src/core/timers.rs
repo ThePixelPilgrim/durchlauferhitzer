@@ -46,6 +46,7 @@ impl Core {
                     Status::RequestTimeout,
                     Persistence::Close,
                     BodyMode::Full,
+                    self.date.as_ref(),
                     &mut c.send,
                 );
                 actions.push(Action::Log(Log::Rejected {

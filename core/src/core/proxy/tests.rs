@@ -185,13 +185,15 @@ fn upstream_read_closed_without_a_read_offered_is_ignored() {
 /// The head buffer's capacity holds the rewrite of any head within the
 /// limits, in the worst case of each direction: as many header lines as
 /// allowed, each as short as possible (`a:b`, which re-renders one byte
-/// longer), an IPv6 peer, and `connection: close` toward the client.
+/// longer), an IPv6 peer, and toward the client `connection: close` and
+/// the core's `date` for a backend that sent none (FR-HTTP-22a).
 #[test]
 fn rewritten_heads_at_the_limits_fit_the_head_buffer() {
     let config = "listen 127.0.0.1:8080; limits { max_request_line 256; max_head 512; max_headers 40; } \
         host b.test { path /p { proxy 127.0.0.1:3000; \
         max_request_body 1MiB; max_response_body 1MiB; } }";
     let mut core = Core::new(crate::config::load(config).unwrap());
+    core.set_date(crate::http::date::MAX_UNIX_SECS);
     let mut req = b"GET /p HTTP/1.1\r\nHost: b.test\r\nConnection: close\r\n".to_vec();
     for _ in 0..38 {
         req.extend_from_slice(b"a:b\r\n");
@@ -240,10 +242,14 @@ fn rewritten_heads_at_the_limits_fit_the_head_buffer() {
             .any(|a| matches!(a, Action::Log(Log::ProxiedResponse { status: 511, .. }))),
         "{actions:?}"
     );
+    // Each of the 40 header lines grows by a byte, then `connection:
+    // close` (19 bytes) and `date: <IMF-fixdate>` (37) are added.
     let head = core.send_buffer(CONN).len();
+    assert_eq!(head, response.len() + 40 + 19 + 37);
+    assert!(head <= core.head_capacity, "{head}");
     assert!(
-        head > response.len() + 40 && head <= core.head_capacity,
-        "{head}"
+        core.send_buffer(CONN)
+            .ends_with(b"date: Fri, 31 Dec 9999 23:59:59 GMT\r\nconnection: close\r\n\r\n")
     );
 }
 

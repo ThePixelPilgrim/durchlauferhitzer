@@ -31,9 +31,11 @@ const _: () = assert!(UPSTREAM_RECV_MIN > 35);
 /// What re-rendering a head may add beyond one byte per header line:
 /// toward the backend `x-forwarded-for` with the peer address (at most 58
 /// bytes more), `x-forwarded-proto: http` (25) and `connection: close`
-/// (19); toward the client `connection: close` (19) and a standard reason
-/// in place of an unprintable one (at most 31). Every header line may grow
-/// by one byte (`name:value` becomes `name: value`).
+/// (19), 102 in all; toward the client `connection: close` (19), the
+/// core's `date` line for a backend that sent none (37, FR-HTTP-22a) and
+/// a standard reason in place of an unprintable one (at most 31), 87 in
+/// all. Every header line may grow by one byte (`name:value` becomes
+/// `name: value`).
 const HEAD_SLACK: usize = 128;
 
 /// Capacity of an upstream's receive buffer for heads of at most

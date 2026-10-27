@@ -34,6 +34,7 @@ impl Core {
         actions: &mut Vec<Action>,
     ) {
         let head_capacity = self.head_capacity;
+        let date = self.date;
         let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
@@ -68,7 +69,7 @@ impl Core {
                 Err(BackendFailure::TransferEncodingToHttp10)
             }
             Version::Http10 | Version::Http11
-                if client_response_len(&head, persistence) > head_capacity =>
+                if client_response_len(&head, persistence, date.as_ref()) > head_capacity =>
             {
                 Err(BackendFailure::BadResponse(ResponseError::HeadTooLarge))
             }
@@ -106,7 +107,7 @@ impl Core {
             request: request.summary,
         }));
         buffers.head.clear();
-        render_client_response(&head, persistence, &mut buffers.head);
+        render_client_response(&head, persistence, date.as_ref(), &mut buffers.head);
         match closing {
             // Every body byte is here: anything after it is dropped.
             Closing::Upstream(up) => close_upstream(&mut self.upstreams, up, actions),

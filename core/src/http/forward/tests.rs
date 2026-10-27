@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::model::Limits;
+use crate::http::date::{ImfFixdate, imf_fixdate};
 use crate::http::request::{HeadLimits, ParseStatus, Version, parse_head};
 use crate::http::response_head::{RequestKind, ResponseBody, ResponseParser, ResponseStatus};
 use crate::routing::strip_segments;
@@ -38,9 +39,17 @@ fn rendered_request(raw: &[u8], path: &str, peer: IpAddr) -> String {
 }
 
 fn render_response(head: &ResponseHead, persistence: Persistence) -> String {
+    render_dated_response(head, persistence, None)
+}
+
+fn render_dated_response(
+    head: &ResponseHead,
+    persistence: Persistence,
+    date: Option<&ImfFixdate>,
+) -> String {
     let mut out = Vec::new();
-    render_client_response(head, persistence, &mut out);
-    assert_eq!(client_response_len(head, persistence), out.len());
+    render_client_response(head, persistence, date, &mut out);
+    assert_eq!(client_response_len(head, persistence, date), out.len());
     String::from_utf8(out).unwrap()
 }
 
@@ -252,7 +261,7 @@ fn rendering_appends_to_the_buffer() {
     assert!(out.starts_with(b"keepGET /p HTTP/1.1\r\n"));
     let head = response(b"HTTP/1.1 204 No Content\r\n\r\n");
     let mut out = b"keep".to_vec();
-    render_client_response(&head, Persistence::KeepAlive, &mut out);
+    render_client_response(&head, Persistence::KeepAlive, None, &mut out);
     assert_eq!(out, b"keepHTTP/1.1 204 No Content\r\n\r\n");
 }
 
@@ -372,6 +381,54 @@ fn response_passes_content_length_date_and_server_through() {
         render_response(&head, Persistence::KeepAlive),
         "HTTP/1.1 200 OK\r\ndate: Mon, 26 Oct 2026 10:00:00 GMT\r\nserver: b/1\r\n\
          content-length: 007\r\nx-forwarded-proto: https\r\n\r\n"
+    );
+}
+
+/// FR-PROXY-12, FR-HTTP-22a: the backend's `Date` passes through byte for
+/// byte, even when the core has a time of its own.
+#[test]
+fn backend_date_is_kept_over_ours() {
+    let ours = imf_fixdate(784_111_777);
+    let raw =
+        b"HTTP/1.1 200 OK\r\nDATE:  Mon, 26 Oct 2026 10:00:00 GMT\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(
+        render_dated_response(&response(raw), Persistence::Close, Some(&ours)),
+        "HTTP/1.1 200 OK\r\ndate: Mon, 26 Oct 2026 10:00:00 GMT\r\ncontent-length: 0\r\n\
+         connection: close\r\n\r\n"
+    );
+}
+
+/// A backend response without `Date` gets the core's, behind the
+/// backend's headers; none at all while the core has no time.
+#[test]
+fn ours_is_added_when_the_backend_sent_no_date() {
+    let ours = imf_fixdate(784_111_777);
+    let head = response(b"HTTP/1.1 204 No Content\r\nX-A: b\r\n\r\n");
+    assert_eq!(
+        render_dated_response(&head, Persistence::KeepAlive, Some(&ours)),
+        "HTTP/1.1 204 No Content\r\nx-a: b\r\ndate: Sun, 06 Nov 1994 08:49:37 GMT\r\n\r\n"
+    );
+    assert_eq!(
+        render_dated_response(&head, Persistence::Close, Some(&ours)),
+        "HTTP/1.1 204 No Content\r\nx-a: b\r\ndate: Sun, 06 Nov 1994 08:49:37 GMT\r\n\
+         connection: close\r\n\r\n"
+    );
+    assert_eq!(
+        render_dated_response(&head, Persistence::KeepAlive, None),
+        "HTTP/1.1 204 No Content\r\nx-a: b\r\n\r\n"
+    );
+}
+
+/// A `Date` the backend named in `Connection` is hop-by-hop and dropped,
+/// so the client gets the core's instead.
+#[test]
+fn backend_date_named_in_connection_is_replaced_by_ours() {
+    let ours = imf_fixdate(0);
+    let raw = b"HTTP/1.1 200 OK\r\nConnection: date\r\nDate: Mon, 26 Oct 2026 10:00:00 GMT\r\n\
+        Content-Length: 0\r\n\r\n";
+    assert_eq!(
+        render_dated_response(&response(raw), Persistence::KeepAlive, Some(&ours)),
+        "HTTP/1.1 200 OK\r\ncontent-length: 0\r\ndate: Thu, 01 Jan 1970 00:00:00 GMT\r\n\r\n"
     );
 }
 
@@ -495,6 +552,7 @@ const VALUES: &[&str] = &[
     "https",
     "Upgrade, ,TE",
     "x-forwarded-for",
+    "close, date",
 ];
 const SEPS: &[&str] = &[":", ": ", ":  ", ":\t"];
 
@@ -599,16 +657,25 @@ fn model_request(head: &RequestHead, path: &str, peer: IpAddr) -> String {
     out
 }
 
-fn model_response(head: &ResponseHead, persistence: Persistence) -> String {
+/// The client's response head by FR-PROXY-12 and FR-HTTP-22a: the
+/// backend's end-to-end headers in order, then the core's `date` (only
+/// when it has a time and none of the backend's passes through), then
+/// `connection: close` when closing.
+fn model_response(head: &ResponseHead, persistence: Persistence, date: Option<&str>) -> String {
     let mut out = format!("HTTP/1.1 {} {}\r\n", head.status, head.reason);
+    let mut backend_date = false;
     for h in &head.headers {
         if !model_hop_by_hop(&h.name, &head.headers) {
+            backend_date |= h.name == "date";
             out += &format!(
                 "{}: {}\r\n",
                 h.name,
                 String::from_utf8(h.value.clone()).unwrap()
             );
         }
+    }
+    if let (Some(date), false) = (date, backend_date) {
+        out += &format!("date: {date}\r\n");
     }
     if persistence == Persistence::Close {
         out += "connection: close\r\n";
@@ -656,14 +723,18 @@ proptest! {
         raw.extend_from_slice(b"\r\n");
         let parsed = ResponseParser::new().advance(&raw, &limits(), RequestKind::Other);
         if let Ok(ResponseStatus::Complete { head, .. }) = parsed {
+            let ours = imf_fixdate(784_111_777);
+            let dates = [(None, None), (Some(&ours), Some("Sun, 06 Nov 1994 08:49:37 GMT"))];
             for persistence in [Persistence::KeepAlive, Persistence::Close] {
-                let mut out = Vec::new();
-                render_client_response(&head, persistence, &mut out);
-                prop_assert_eq!(client_response_len(&head, persistence), out.len());
-                prop_assert_eq!(
-                    String::from_utf8(out).unwrap(),
-                    model_response(&head, persistence)
-                );
+                for (date, model_date) in dates {
+                    let mut out = Vec::new();
+                    render_client_response(&head, persistence, date, &mut out);
+                    prop_assert_eq!(client_response_len(&head, persistence, date), out.len());
+                    prop_assert_eq!(
+                        String::from_utf8(out).unwrap(),
+                        model_response(&head, persistence, model_date)
+                    );
+                }
             }
         }
     }
@@ -676,8 +747,8 @@ proptest! {
         let reason = String::from_utf8_lossy(&reason).into_owned();
         let head = head_with_reason(status, &reason);
         let mut out = Vec::new();
-        render_client_response(&head, Persistence::KeepAlive, &mut out);
-        prop_assert_eq!(client_response_len(&head, Persistence::KeepAlive), out.len());
+        render_client_response(&head, Persistence::KeepAlive, None, &mut out);
+        prop_assert_eq!(client_response_len(&head, Persistence::KeepAlive, None), out.len());
         let text = String::from_utf8(out).unwrap();
         let line = text.strip_suffix("\r\n\r\n").unwrap();
         prop_assert!(!line.contains('\r') && !line.contains('\n'));

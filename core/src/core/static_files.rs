@@ -11,6 +11,7 @@ use crate::conn::{Conn, ConnState, OpenStep, SEND_CAPACITY, StaticRequest, Unrea
 use crate::file::{
     Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileStamp, Owner, RootId, check_stamp,
 };
+use crate::http::date::ImfFixdate;
 use crate::http::mime::content_type;
 use crate::http::request::{BodyFraming, Method, Persistence, RequestHead};
 use crate::http::response::{
@@ -89,7 +90,13 @@ impl Core {
                     status: Status::Ok,
                     request: Some(request.summary),
                 }));
-                render_file_head(content_type, size, persistence, &mut c.send);
+                render_file_head(
+                    content_type,
+                    size,
+                    persistence,
+                    self.date.as_ref(),
+                    &mut c.send,
+                );
                 match body {
                     BodyMode::Full => {
                         let chunk = if size == 0 {
@@ -162,6 +169,7 @@ impl Core {
                         body,
                         persistence,
                         buffered,
+                        date: self.date,
                     },
                     deadline,
                     actions,
@@ -222,6 +230,7 @@ impl Core {
                             body,
                             persistence,
                             buffered,
+                            date: self.date,
                         },
                         deadline,
                         actions,
@@ -473,6 +482,8 @@ struct Reply {
     body: BodyMode,
     persistence: Persistence,
     buffered: usize,
+    /// The core's `Date` value, if the driver set one.
+    date: Option<ImfFixdate>,
 }
 
 /// Close out the static request of `reply` on `c` without a file: a 301 to
@@ -491,6 +502,7 @@ fn not_served(
         body,
         persistence,
         buffered,
+        date,
     } = reply;
     let status = match reason {
         NotServed::Redirect => {
@@ -502,17 +514,29 @@ fn not_served(
             // The send buffer never grows beyond its capacity: a redirect
             // too long for it (path and query are bounded only by
             // `max_request_line`) is answered 414 instead.
-            let len = redirect_len(location.len(), persistence, body);
+            let len = redirect_len(location.len(), persistence, body, date.as_ref());
             if c.send.len().saturating_add(len) <= SEND_CAPACITY {
-                render_redirect(&location, persistence, body, &mut c.send);
+                render_redirect(&location, persistence, body, date.as_ref(), &mut c.send);
                 Status::MovedPermanently
             } else {
-                render_fixed(Status::UriTooLong, persistence, body, &mut c.send);
+                render_fixed(
+                    Status::UriTooLong,
+                    persistence,
+                    body,
+                    date.as_ref(),
+                    &mut c.send,
+                );
                 Status::UriTooLong
             }
         }
         NotServed::NotFound => {
-            render_fixed(Status::NotFound, persistence, body, &mut c.send);
+            render_fixed(
+                Status::NotFound,
+                persistence,
+                body,
+                date.as_ref(),
+                &mut c.send,
+            );
             Status::NotFound
         }
     };

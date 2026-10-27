@@ -568,14 +568,21 @@ fn relay(
     let mut head = format!("HTTP/1.1 {code} ").into_bytes();
     head.extend_from_slice(reason);
     head.extend_from_slice(b"\r\n");
+    let mut backend_date = false;
     for (name, value) in lines {
         if is_hop(name, &tokens) {
             continue;
         }
+        backend_date |= name == "date";
         head.extend_from_slice(name.as_bytes());
         head.extend_from_slice(b": ");
         head.extend_from_slice(value);
         head.extend_from_slice(b"\r\n");
+    }
+    // FR-PROXY-12, FR-HTTP-22a: the backend's `Date` passes through; a
+    // response without one gets the core's, behind the backend's headers.
+    if !backend_date {
+        head.extend_from_slice(format!("date: {}\r\n", NET_DATE.1).as_bytes());
     }
     if persistence == Persistence::Close {
         head.extend_from_slice(b"connection: close\r\n");

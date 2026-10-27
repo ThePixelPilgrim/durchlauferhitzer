@@ -167,12 +167,12 @@ pub(crate) fn redirect_renderings(path: &str, body: BodyMode) -> (Vec<Rendering>
         for persistence in BOTH {
             // FR-STATIC-07: a redirect that does not fit the send buffer
             // (1 KiB, NFR-RES-01) is a 414 instead.
-            let bytes = model_redirect(&location, persistence, body);
+            let bytes = model_redirect(&location, persistence, body, Some(NET_DATE.1));
             if bytes.len() > SEND_CAPACITY {
                 overflow = true;
                 continue;
             }
-            let head = model_redirect(&location, persistence, BodyMode::HeadOnly);
+            let head = model_redirect(&location, persistence, BodyMode::HeadOnly, Some(NET_DATE.1));
             fitting.push(Rendering {
                 persistence,
                 with_query: !query.is_empty(),
@@ -259,7 +259,8 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
             let renderings = BOTH
                 .iter()
                 .map(|&persistence| {
-                    let mut bytes = model_file_head(f.content_type, f.size(), persistence);
+                    let mut bytes =
+                        model_file_head(f.content_type, f.size(), persistence, Some(NET_DATE.1));
                     let head_len = bytes.len();
                     match body {
                         BodyMode::Full => bytes.extend_from_slice(&f.bytes),

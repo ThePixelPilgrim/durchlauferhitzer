@@ -27,6 +27,7 @@ use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 #[cfg(doc)]
 use crate::file::RootId;
 use crate::file::{Chunk, FileSegment, FileTable};
+use crate::http::date::{ImfFixdate, imf_fixdate};
 use crate::http::request::HeadLimits;
 use crate::log::Log;
 pub use crate::request_body::BodyPending;
@@ -64,6 +65,10 @@ pub struct Core {
     upstream_recv_capacity: usize,
     /// Capacity of each exchange's head buffer.
     head_capacity: usize,
+    /// The `Date` value of every response the core renders (FR-HTTP-22a):
+    /// the IMF-fixdate of the second last passed to [`Core::set_date`];
+    /// `None` until then, and no `Date` is sent.
+    date: Option<ImfFixdate>,
 }
 
 /// Capacity of a connection's receive buffer: room for the largest allowed
@@ -113,7 +118,18 @@ impl Core {
             upstreams: UpstreamTable::new(),
             upstream_recv_capacity,
             head_capacity,
+            date: None,
         }
+    }
+
+    /// The wall-clock time is `unix_secs` seconds since the Unix epoch
+    /// (FR-HTTP-22a): every response the core renders from now on carries
+    /// it as `Date` (its IMF-fixdate; beyond the year 9999 clamped to
+    /// `Fri, 31 Dec 9999 23:59:59 GMT`). The driver calls it whenever the
+    /// second changes, before the next [`Core::handle`]; until the first
+    /// call no `Date` is sent. It emits nothing.
+    pub fn set_date(&mut self, unix_secs: u64) {
+        self.date = Some(imf_fixdate(unix_secs));
     }
 
     /// Every distinct backend address (an IP literal and port) in config

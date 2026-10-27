@@ -73,6 +73,7 @@ fn file_is_opened_read_sent_and_closed() {
         "text/plain; charset=utf-8",
         3,
         Persistence::KeepAlive,
+        None,
         &mut head,
     );
     assert_eq!(core.send_buffer(conn), head.as_slice());
@@ -202,6 +203,7 @@ fn directory_without_slash_is_closed_and_redirected() {
         "/x/f.txt/",
         Persistence::KeepAlive,
         BodyMode::Full,
+        None,
         &mut expected,
     );
     assert_eq!(core.send_buffer(conn), expected.as_slice());
@@ -259,6 +261,7 @@ fn directory_with_slash_opens_its_index_after_closing_it() {
         Status::NotFound,
         Persistence::KeepAlive,
         BodyMode::Full,
+        None,
         &mut expected,
     );
     assert_eq!(core.send_buffer(conn), expected.as_slice());
@@ -305,6 +308,7 @@ fn head_of_a_file_sends_the_head_and_closes_it() {
         "text/plain; charset=utf-8",
         1 << 40,
         Persistence::KeepAlive,
+        None,
         &mut head,
     );
     assert_eq!(core.send_buffer(conn), head.as_slice());

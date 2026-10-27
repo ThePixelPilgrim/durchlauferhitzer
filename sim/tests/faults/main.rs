@@ -87,9 +87,21 @@ fn peer() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
 }
 
+/// The date every simulation of this binary sets (`Sim::set_date`), so
+/// both randomized nets check `Date` on every response (FR-HTTP-22a): the
+/// example of RFC 9110 section 5.6.7, its text as written there.
+const NET_DATE: (u64, &str) = RFC_DATE;
+
+/// A simulation of `config` whose core has the time `NET_DATE`.
+fn dated_sim(config: &str) -> Sim {
+    let mut sim = Sim::new(config);
+    sim.set_date(NET_DATE.0);
+    sim
+}
+
 /// A fixed response, by the model (`support/model_http.rs`), not the core's renderer.
 fn fixed(status: Status, persistence: Persistence, body: BodyMode) -> Vec<u8> {
-    model_fixed(status, persistence, body)
+    model_fixed(status, persistence, body, Some(NET_DATE.1))
 }
 
 fn not_found_keep_alive() -> Vec<u8> {
@@ -119,7 +131,7 @@ struct Outcome {
 
 /// Deliver `parts` in separate pumps on a fresh connection.
 fn deliver(config: &str, parts: &[&[u8]]) -> (Outcome, String) {
-    let mut sim = Sim::new(config);
+    let mut sim = dated_sim(config);
     let c = sim.connect(peer());
     for part in parts {
         sim.send(c, part);

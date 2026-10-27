@@ -403,7 +403,8 @@ Request target:
 Core-generated responses:
 
 - **FR-HTTP-19** [done] Responses are `HTTP/1.1`. A fixed (error or
-  status) response is exactly: status line, `Content-Type: text/plain;
+  status) response is exactly: status line, `Date` once the driver set the
+  time (FR-HTTP-22a), `Content-Type: text/plain;
   charset=utf-8`, `Content-Length`, `X-Content-Type-Options: nosniff`,
   `Connection: close` only when the connection will close, blank line, body
   `"<code> <reason>\n"`.
@@ -416,9 +417,35 @@ Core-generated responses:
   answered with a body, since no method was accepted. *(since stage 2;
   supersedes the stage 2 Task 3 ruling "parse errors keep a body")*
 - **FR-HTTP-22** [done] Core-generated responses carry no `Server` header.
-- **FR-HTTP-22a** [stage 4] Core-generated responses carry a `Date` header;
-  the driver supplies the wall-clock time with each event (the core stays
-  free of clocks).
+- **FR-HTTP-22a** [done in the core; the epoll driver: stage 4]
+  Core-generated responses carry a `Date` header; the driver supplies the
+  wall-clock time (the core stays free of clocks). (Stage 4 amendment A3,
+  owner-approved 2026-10-27:)
+  - The driver calls `Core::set_date(unix_secs)` whenever the wall-clock
+    second changes, before its next `handle` call. The core renders the
+    IMF-fixdate (RFC 9110 section 5.6.7, e.g. `Sun, 06 Nov 1994 08:49:37
+    GMT`, always 29 bytes) once per call, with no time library; seconds
+    beyond the year 9999 are clamped to `Fri, 31 Dec 9999 23:59:59 GMT`.
+  - Every final response the core renders itself carries `Date:
+    <IMF-fixdate>` right after its status line: the fixed responses of every
+    status (FR-HTTP-19, the 503 of a refused connection included), 301
+    and the 414 for an oversized redirect, and the heads of file responses
+    (FR-STATIC-11). The interim `HTTP/1.1 100 Continue` (FR-PROXY-25)
+    carries none.
+  - A relayed backend response keeps the backend's `Date` byte for byte
+    (FR-PROXY-12); one without a `Date` that passes through (none sent, or
+    the backend named `Date` in `Connection`, which makes it hop-by-hop)
+    gets the core's as `date: <IMF-fixdate>` behind the backend's headers,
+    before `connection: close`.
+  - Before the first `set_date` no response carries `Date` (the
+    simulation's default; tests that check `Date` set one).
+  - The 37 bytes of the line (`Date: ` + 29 + CRLF) fit both bounds of
+    NFR-RES-01: the largest rendered fixed response or file head (a
+    200-byte content type and a 20-digit length) is 362 bytes, 387 behind
+    a queued `100 Continue`, within the 1 KiB send buffer; toward the
+    client a relayed head grows by at most one byte per header line plus
+    `connection: close` (19), the `date` line (37) and a substituted
+    reason (31), 87 bytes within the head buffer's 128 bytes of slack.
 
 ### FR-ROUTE — Hosts, segments, decoded matching
 
@@ -480,7 +507,8 @@ Core-generated responses:
   route whose prefix names them, e.g. `path /.well-known { static
   /srv/well-known; }` (ACME, security.txt); dotfiles below that route are
   still 404.
-- **FR-STATIC-11** [done] `200 OK` heads are: status line, `Content-Type`,
+- **FR-STATIC-11** [done] `200 OK` heads are: status line, `Date` once the
+  driver set the time (FR-HTTP-22a), `Content-Type`,
   `Content-Length` = size at open, `X-Content-Type-Options: nosniff`,
   `Connection: close` only when closing. Exactly that many body bytes
   follow, or the connection is cut (FR-STATIC-15).
@@ -591,7 +619,8 @@ Response head toward the client:
   backend's reason; `Connection: close` is added when the client
   connection will close; backend `Date`, `Server` and `Content-Length`
   pass through exactly as received (owner decision: easier debugging; the
-  value is already validated as digits only). An empty backend reason
+  value is already validated as digits only); a response without a
+  `Date` that passes through gets the core's (FR-HTTP-22a). An empty backend reason
   phrase stays empty. (The parser only admits printable ASCII/HTAB reasons,
   FR-PROXY-15; the renderer still substitutes the standard reason for any
   other byte, as defence in depth, and an empty reason for a code that has
@@ -1365,6 +1394,9 @@ sim implements and checks it; the epoll driver is [stage 4].
   `TCP_NODELAY` (NFR-PERF-04); `RLIMIT_NOFILE` is checked against
   NFR-RES-05 at startup.
 - **DRV-12** [stage 4] Logs are formatted and written per FR-LOG-05/06.
+- **DRV-13** [done in the sim; the epoll driver: stage 4] The driver calls
+  `set_date(unix_secs)` with the wall-clock second whenever it changes,
+  before the next `handle` call (FR-HTTP-22a); it emits nothing.
 
 ---
 

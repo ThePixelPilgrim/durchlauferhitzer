@@ -73,6 +73,8 @@ src/
     head_line.rs        line scanning, limits, header-line, framing and
                         `Connection` rules shared by the two head parsers
     chunked.rs          strict, streaming chunked-body framing validator
+    date.rs             the IMF-fixdate of the `Date` header (no time
+                        library: days-from-civil arithmetic)
     forward.rs          proxy head rewriting: request head to the backend,
                         response head to the client, hop-by-hop rules
     target.rs           request-target validation (traversal, encodings)

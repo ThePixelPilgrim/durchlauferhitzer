@@ -48,6 +48,8 @@ tests/
     model_http.rs     the spec's fixed responses, file heads, redirects and
                       parse-error statuses, shared by every test binary
   connections.rs      accepting, buffering, backpressure, resets
+  date.rs             the `Date` header on every response the core renders,
+                      none on `100 Continue`, the backend's kept
   routing.rs          request handling, keep-alive, pipelining
   limits.rs           timeouts, connection caps, lingering close
   static_files/       static routes end to end (one test binary)
@@ -113,6 +115,10 @@ SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_proxy_schedules
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_fault_schedules
 ```
+
+Both nets (the whole `faults` binary) run with a date set (`Sim::set_date`,
+the RFC 9110 example `Sun, 06 Nov 1994 08:49:37 GMT`), so every response
+they check carries `Date`; the other binaries leave it unset and see none.
 
 Every test binary takes the bytes of the responses the core writes itself
 (fixed 4xx/5xx, file heads, redirects) and the status of each parse error

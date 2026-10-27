@@ -128,6 +128,7 @@ impl Core {
                 status,
                 Persistence::Close,
                 BodyMode::of(&head.method),
+                self.date.as_ref(),
                 &mut c.send,
             );
             actions.push(Action::Log(Log::Response {
@@ -511,6 +512,7 @@ impl Core {
             status,
             persistence,
             BodyMode::of(&request.summary.method),
+            self.date.as_ref(),
             &mut c.send,
         );
         actions.push(Action::Log(Log::Response {

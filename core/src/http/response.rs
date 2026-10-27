@@ -1,8 +1,24 @@
 //! Response heads: fixed plain-text responses (status line plus short text
 //! body), `301` redirects and the head of a `200 OK` file response.
+//!
+//! Each takes the core's current IMF-fixdate, if the driver has set one,
+//! and then carries `Date` right after the status line (FR-HTTP-22a).
 
+use super::date::{IMF_FIXDATE_LEN, ImfFixdate};
 use super::request::{Method, Persistence};
 use super::status::Status;
+
+/// Length of a `Date: <IMF-fixdate>\r\n` line: 37 bytes.
+pub const DATE_LINE_LEN: usize = "Date: \r\n".len() + IMF_FIXDATE_LEN;
+
+/// Appends the `Date` line for `date`, if there is one.
+fn put_date(date: Option<&ImfFixdate>, out: &mut Vec<u8>) {
+    if let Some(date) = date {
+        out.extend_from_slice(b"Date: ");
+        out.extend_from_slice(date);
+        out.extend_from_slice(b"\r\n");
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyMode {
@@ -23,13 +39,20 @@ impl BodyMode {
 
 /// Appends a fixed response for `status` to `out` (existing bytes are kept).
 /// `Content-Length` always describes the full body, also for `HeadOnly`.
-/// A `405` names the allowed methods (`Allow: GET, HEAD`).
-pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, out: &mut Vec<u8>) {
+/// A `405` names the allowed methods (`Allow: GET, HEAD`). `Date` follows
+/// the status line when `date` is set.
+pub fn render_fixed(
+    status: Status,
+    persistence: Persistence,
+    body: BodyMode,
+    date: Option<&ImfFixdate>,
+    out: &mut Vec<u8>,
+) {
     let text = format!("{} {}\n", status.code(), status.reason());
+    out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status.code(), status.reason()).as_bytes());
+    put_date(date, out);
     let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\n",
-        status.code(),
-        status.reason(),
+        "Content-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\n",
         text.len()
     );
     match status {
@@ -63,8 +86,11 @@ pub fn render_fixed(status: Status, persistence: Persistence, body: BodyMode, ou
 /// Body of every redirect.
 const REDIRECT_BODY: &str = "301 Moved Permanently\n";
 
-/// The redirect head up to the `Location` value.
-const REDIRECT_START: &str = "HTTP/1.1 301 Moved Permanently\r\nLocation: ";
+/// The redirect's status line.
+const REDIRECT_STATUS: &str = "HTTP/1.1 301 Moved Permanently\r\n";
+
+/// The redirect head after the `Date` line, up to the `Location` value.
+const REDIRECT_START: &str = "Location: ";
 
 /// The redirect head after the `Location` value, up to the optional
 /// `Connection` line (`22` is `REDIRECT_BODY.len()`, checked by a test).
@@ -75,13 +101,17 @@ const CONNECTION_CLOSE: &str = "Connection: close\r\n";
 /// Appends a `301 Moved Permanently` response pointing at `location` (a
 /// validated ASCII path, plus `?query`) to `out` (existing bytes are kept).
 /// The body is fixed; `Content-Length` describes it also for `HeadOnly`.
-/// It appends exactly [`redirect_len`] bytes.
+/// `Date` follows the status line when `date` is set. It appends exactly
+/// [`redirect_len`] bytes.
 pub fn render_redirect(
     location: &str,
     persistence: Persistence,
     body: BodyMode,
+    date: Option<&ImfFixdate>,
     out: &mut Vec<u8>,
 ) {
+    out.extend_from_slice(REDIRECT_STATUS.as_bytes());
+    put_date(date, out);
     out.extend_from_slice(REDIRECT_START.as_bytes());
     out.extend_from_slice(location.as_bytes());
     out.extend_from_slice(REDIRECT_REST.as_bytes());
@@ -99,7 +129,12 @@ pub fn render_redirect(
 /// How many bytes [`render_redirect`] appends for a `Location` of
 /// `location_len` bytes, so a caller can check that it fits before
 /// rendering it.
-pub fn redirect_len(location_len: usize, persistence: Persistence, body: BodyMode) -> usize {
+pub fn redirect_len(
+    location_len: usize,
+    persistence: Persistence,
+    body: BodyMode,
+    date: Option<&ImfFixdate>,
+) -> usize {
     let connection = match persistence {
         Persistence::Close => CONNECTION_CLOSE.len(),
         Persistence::KeepAlive => 0,
@@ -108,8 +143,14 @@ pub fn redirect_len(location_len: usize, persistence: Persistence, body: BodyMod
         BodyMode::Full => REDIRECT_BODY.len(),
         BodyMode::HeadOnly => 0,
     };
-    REDIRECT_START
+    let date = match date {
+        Some(_) => DATE_LINE_LEN,
+        None => 0,
+    };
+    REDIRECT_STATUS
         .len()
+        .saturating_add(date)
+        .saturating_add(REDIRECT_START.len())
         .saturating_add(location_len)
         .saturating_add(REDIRECT_REST.len())
         .saturating_add(connection)
@@ -118,10 +159,19 @@ pub fn redirect_len(location_len: usize, persistence: Persistence, body: BodyMod
 }
 
 /// Appends the head of a `200 OK` response whose body is `len` bytes of a
-/// file of type `content_type` (existing bytes are kept).
-pub fn render_file_head(content_type: &str, len: u64, persistence: Persistence, out: &mut Vec<u8>) {
+/// file of type `content_type` (existing bytes are kept). `Date` follows
+/// the status line when `date` is set.
+pub fn render_file_head(
+    content_type: &str,
+    len: u64,
+    persistence: Persistence,
+    date: Option<&ImfFixdate>,
+    out: &mut Vec<u8>,
+) {
+    out.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
+    put_date(date, out);
     let mut head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nX-Content-Type-Options: nosniff\r\n"
+        "Content-Type: {content_type}\r\nContent-Length: {len}\r\nX-Content-Type-Options: nosniff\r\n"
     );
     match persistence {
         Persistence::Close => head.push_str("Connection: close\r\n"),
@@ -134,6 +184,66 @@ pub fn render_file_head(content_type: &str, len: u64, persistence: Persistence, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::date::imf_fixdate;
+
+    /// The example date of RFC 9110 section 5.6.7.
+    fn rfc_date() -> ImfFixdate {
+        imf_fixdate(784_111_777)
+    }
+
+    const DATE_LINE: &str = "Date: Sun, 06 Nov 1994 08:49:37 GMT\r\n";
+
+    /// FR-HTTP-22a: once the driver set the time, every response the core
+    /// renders carries `Date` right after its status line.
+    #[test]
+    fn renders_date_after_the_status_line() {
+        let date = rfc_date();
+        let mut out = Vec::new();
+        render_fixed(
+            Status::NotFound,
+            Persistence::Close,
+            BodyMode::Full,
+            Some(&date),
+            &mut out,
+        );
+        let expected = format!(
+            "HTTP/1.1 404 Not Found\r\n{DATE_LINE}Content-Type: text/plain; charset=utf-8\r\nContent-Length: 14\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n404 Not Found\n"
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+
+        let mut out = Vec::new();
+        render_file_head(
+            "image/png",
+            3,
+            Persistence::KeepAlive,
+            Some(&date),
+            &mut out,
+        );
+        let expected = format!(
+            "HTTP/1.1 200 OK\r\n{DATE_LINE}Content-Type: image/png\r\nContent-Length: 3\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+
+        let mut out = Vec::new();
+        render_redirect(
+            "/a/",
+            Persistence::KeepAlive,
+            BodyMode::HeadOnly,
+            Some(&date),
+            &mut out,
+        );
+        let expected = format!(
+            "HTTP/1.1 301 Moved Permanently\r\n{DATE_LINE}Location: /a/\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 22\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+    }
+
+    /// The `Date` line is the 37 bytes the send-buffer arithmetic counts.
+    #[test]
+    fn date_line_is_37_bytes() {
+        assert_eq!(DATE_LINE.len(), DATE_LINE_LEN);
+        assert_eq!(DATE_LINE_LEN, 37);
+    }
 
     #[test]
     fn renders_404_keep_alive() {
@@ -142,6 +252,7 @@ mod tests {
             Status::NotFound,
             Persistence::KeepAlive,
             BodyMode::Full,
+            None,
             &mut out,
         );
         assert_eq!(
@@ -157,6 +268,7 @@ mod tests {
             Status::BadRequest,
             Persistence::Close,
             BodyMode::HeadOnly,
+            None,
             &mut out,
         );
         assert_eq!(
@@ -172,6 +284,7 @@ mod tests {
             Status::NotFound,
             Persistence::KeepAlive,
             BodyMode::Full,
+            None,
             &mut out,
         );
         let first = out.clone();
@@ -179,6 +292,7 @@ mod tests {
             Status::BadRequest,
             Persistence::Close,
             BodyMode::HeadOnly,
+            None,
             &mut out,
         );
         let mut second = Vec::new();
@@ -186,6 +300,7 @@ mod tests {
             Status::BadRequest,
             Persistence::Close,
             BodyMode::HeadOnly,
+            None,
             &mut second,
         );
         assert!(!second.is_empty());
@@ -200,6 +315,7 @@ mod tests {
             "text/css; charset=utf-8",
             1234,
             Persistence::KeepAlive,
+            None,
             &mut out,
         );
         assert_eq!(
@@ -211,7 +327,7 @@ mod tests {
     #[test]
     fn renders_file_head_close() {
         let mut out = b"x".to_vec();
-        render_file_head("image/png", 0, Persistence::Close, &mut out);
+        render_file_head("image/png", 0, Persistence::Close, None, &mut out);
         assert_eq!(
             out,
             b"xHTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 0\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
@@ -225,6 +341,7 @@ mod tests {
             Status::MethodNotAllowed,
             Persistence::KeepAlive,
             BodyMode::Full,
+            None,
             &mut out,
         );
         assert_eq!(
@@ -241,7 +358,7 @@ mod tests {
             Status::BadGateway,
         ] {
             let mut out = Vec::new();
-            render_fixed(status, Persistence::Close, BodyMode::Full, &mut out);
+            render_fixed(status, Persistence::Close, BodyMode::Full, None, &mut out);
             let text = String::from_utf8(out).unwrap();
             assert!(!text.contains("Allow:"), "{text}");
         }
@@ -254,6 +371,7 @@ mod tests {
             "/docs/?x=1",
             Persistence::KeepAlive,
             BodyMode::Full,
+            None,
             &mut out,
         );
         assert_eq!(
@@ -265,16 +383,18 @@ mod tests {
     #[test]
     fn redirect_len_is_the_rendered_length() {
         assert!(REDIRECT_REST.contains(&format!("Content-Length: {}\r\n", REDIRECT_BODY.len())));
-        for location in ["/", "/a/", "/docs/?x=1", &"/b".repeat(700)] {
-            for persistence in [Persistence::KeepAlive, Persistence::Close] {
-                for body in [BodyMode::Full, BodyMode::HeadOnly] {
-                    let mut out = b"prefix".to_vec();
-                    render_redirect(location, persistence, body, &mut out);
-                    assert_eq!(
-                        out.len() - 6,
-                        redirect_len(location.len(), persistence, body),
-                        "{location} {persistence:?} {body:?}"
-                    );
+        for date in [None, Some(imf_fixdate(0))] {
+            for location in ["/", "/a/", "/docs/?x=1", &"/b".repeat(700)] {
+                for persistence in [Persistence::KeepAlive, Persistence::Close] {
+                    for body in [BodyMode::Full, BodyMode::HeadOnly] {
+                        let mut out = b"prefix".to_vec();
+                        render_redirect(location, persistence, body, date.as_ref(), &mut out);
+                        assert_eq!(
+                            out.len() - 6,
+                            redirect_len(location.len(), persistence, body, date.as_ref()),
+                            "{location} {persistence:?} {body:?}"
+                        );
+                    }
                 }
             }
         }
@@ -283,7 +403,13 @@ mod tests {
     #[test]
     fn renders_redirect_close_head_only() {
         let mut out = Vec::new();
-        render_redirect("/a/", Persistence::Close, BodyMode::HeadOnly, &mut out);
+        render_redirect(
+            "/a/",
+            Persistence::Close,
+            BodyMode::HeadOnly,
+            None,
+            &mut out,
+        );
         assert_eq!(
             out,
             b"HTTP/1.1 301 Moved Permanently\r\nLocation: /a/\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 22\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"

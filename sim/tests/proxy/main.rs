@@ -47,7 +47,7 @@ mod model_http;
 
 /// A fixed response, by the spec-written model, not the core's renderer.
 fn fixed(status: Status, persistence: Persistence, body: BodyMode) -> Vec<u8> {
-    model_http::model_fixed(status, persistence, body)
+    model_http::model_fixed(status, persistence, body, None)
 }
 
 fn summary(method: Method, path: &str) -> RequestSummary {

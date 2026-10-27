@@ -16,6 +16,7 @@
 //! before rendering. Both are built on the same code path (a `Sink` that
 //! either counts or appends), so they cannot disagree.
 
+use crate::http::date::ImfFixdate;
 use crate::http::head_line::connection_tokens;
 use crate::http::request::{Header, Method, Persistence, RequestHead, Version};
 use crate::http::response_head::ResponseHead;
@@ -126,21 +127,32 @@ pub fn backend_request_len(head: &RequestHead, path: &str, peer: IpAddr) -> usiz
 /// Appends the head sent to the client (FR-PROXY-12): the status line as
 /// `HTTP/1.1 <code> <reason>`, the backend's headers in order without the
 /// hop-by-hop ones (`content-length`, `date`, `server` and all others pass
-/// through as received), and `connection: close` when `persistence` is
-/// `Close`.
+/// through as received), then `date: <date>` if `date` is set and none of
+/// the backend's `date` headers passes through (FR-HTTP-22a; one the
+/// backend named in `Connection` is hop-by-hop and does not), and
+/// `connection: close` when `persistence` is `Close`.
 ///
 /// The backend's reason is kept, also when empty. The parser admits only
 /// printable ASCII and HTAB; a reason with any other byte is replaced by
 /// the standard reason for the code, or by an empty one for a code that has
 /// none (defence in depth).
-pub fn render_client_response(head: &ResponseHead, persistence: Persistence, out: &mut Vec<u8>) {
-    client_response(head, persistence, out);
+pub fn render_client_response(
+    head: &ResponseHead,
+    persistence: Persistence,
+    date: Option<&ImfFixdate>,
+    out: &mut Vec<u8>,
+) {
+    client_response(head, persistence, date, out);
 }
 
 /// The exact number of bytes [`render_client_response`] appends.
-pub fn client_response_len(head: &ResponseHead, persistence: Persistence) -> usize {
+pub fn client_response_len(
+    head: &ResponseHead,
+    persistence: Persistence,
+    date: Option<&ImfFixdate>,
+) -> usize {
     let mut count = Count(0);
-    client_response(head, persistence, &mut count);
+    client_response(head, persistence, date, &mut count);
     count.0
 }
 
@@ -246,7 +258,12 @@ fn without_leading_zeros(value: &[u8]) -> &[u8] {
     }
 }
 
-fn client_response(head: &ResponseHead, persistence: Persistence, sink: &mut impl Sink) {
+fn client_response(
+    head: &ResponseHead,
+    persistence: Persistence,
+    date: Option<&ImfFixdate>,
+    sink: &mut impl Sink,
+) {
     sink.put(b"HTTP/1.1 ");
     put_display(sink, head.status);
     sink.put(b" ");
@@ -262,10 +279,15 @@ fn client_response(head: &ResponseHead, persistence: Persistence, sink: &mut imp
     sink.put(b"\r\n");
 
     let listed = listed_tokens(&head.headers);
+    let mut backend_date = false;
     for header in &head.headers {
         if !is_hop_by_hop_bytes(header.name.as_bytes(), &listed) {
+            backend_date |= header.name == "date";
             put_header(sink, &header.name, &header.value);
         }
+    }
+    if let (Some(date), false) = (date, backend_date) {
+        put_header(sink, "date", date);
     }
     match persistence {
         Persistence::KeepAlive => {}

@@ -637,7 +637,7 @@ pub(crate) fn conn_of(log: &Log) -> ConnId {
 pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
     let mut rng = fastrand::Rng::with_seed(seed ^ 0x005e_ed0f_9e7a);
     let net = NetConfig::random(&mut rng);
-    let mut sim = Sim::new(&net.text);
+    let mut sim = dated_sim(&net.text);
     let mut assigned = 0;
     let mut n = 1u8;
     let mut used_peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));

@@ -31,7 +31,7 @@ mod model_http;
 
 /// A file head, by the spec-written model, not the core's renderer.
 fn head(content_type: &str, len: u64, persistence: Persistence) -> Vec<u8> {
-    model_http::model_file_head(content_type, len, persistence)
+    model_http::model_file_head(content_type, len, persistence, None)
 }
 
 fn get(path: &str) -> Vec<u8> {

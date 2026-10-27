@@ -153,6 +153,7 @@ impl Core {
                     Status::ServiceUnavailable,
                     Persistence::Close,
                     BodyMode::Full,
+                    self.date.as_ref(),
                     &mut c.send,
                 );
                 c

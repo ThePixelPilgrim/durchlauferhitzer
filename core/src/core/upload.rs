@@ -112,7 +112,13 @@ impl Core {
         match error {
             RequestBodyError::Chunked(_) => {
                 let body = BodyMode::of(method);
-                render_fixed(Status::BadRequest, Persistence::Close, body, &mut c.send);
+                render_fixed(
+                    Status::BadRequest,
+                    Persistence::Close,
+                    body,
+                    self.date.as_ref(),
+                    &mut c.send,
+                );
                 actions.push(Action::Log(Log::Rejected {
                     conn,
                     peer: c.peer,
@@ -196,6 +202,7 @@ impl Core {
             Status::RequestTimeout,
             Persistence::Close,
             body,
+            self.date.as_ref(),
             &mut c.send,
         );
         actions.push(Action::Log(Log::Rejected {

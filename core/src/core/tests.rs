@@ -5,12 +5,15 @@ use crate::http::request::Persistence;
 use crate::http::response::{BodyMode, render_file_head, render_fixed};
 use crate::time::Instant;
 
-/// The send buffer bound: every fixed response and every file head,
-/// in every persistence and body mode, at its largest (longest content
-/// type, largest length), fits `SEND_CAPACITY` on its own. (Redirects
-/// are checked before they are rendered.)
+/// The send buffer bound: every fixed response and every file head, in
+/// every persistence and body mode, at its largest (longest content type,
+/// largest length), with and without its `Date` line (FR-HTTP-22a), fits
+/// `SEND_CAPACITY` even behind a queued `100 Continue` (the only bytes a
+/// response is ever rendered behind). (Redirects are checked before they
+/// are rendered.)
 #[test]
 fn every_rendered_head_fits_the_send_buffer() {
+    use crate::http::date::{MAX_UNIX_SECS, imf_fixdate};
     use crate::http::status::Status as S;
     let statuses = [
         S::Ok,
@@ -28,20 +31,29 @@ fn every_rendered_head_fits_the_send_buffer() {
         S::GatewayTimeout,
         S::HttpVersionNotSupported,
     ];
-    for persistence in [Persistence::KeepAlive, Persistence::Close] {
-        for body in [BodyMode::Full, BodyMode::HeadOnly] {
-            for status in statuses {
-                let mut out = Vec::new();
-                render_fixed(status, persistence, body, &mut out);
-                assert!(out.len() <= SEND_CAPACITY, "{status:?}");
+    const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+    let date = imf_fixdate(MAX_UNIX_SECS);
+    let mut largest = 0;
+    for date in [None, Some(&date)] {
+        for persistence in [Persistence::KeepAlive, Persistence::Close] {
+            for body in [BodyMode::Full, BodyMode::HeadOnly] {
+                for status in statuses {
+                    let mut out = CONTINUE.to_vec();
+                    render_fixed(status, persistence, body, date, &mut out);
+                    largest = largest.max(out.len());
+                    assert!(out.len() <= SEND_CAPACITY, "{status:?}");
+                }
             }
+            let mut out = CONTINUE.to_vec();
+            // Far longer than any content type in the table.
+            let content_type = "x".repeat(200);
+            render_file_head(&content_type, u64::MAX, persistence, date, &mut out);
+            largest = largest.max(out.len());
+            assert!(out.len() <= SEND_CAPACITY);
         }
-        let mut out = Vec::new();
-        // Far longer than any content type in the table.
-        let content_type = "x".repeat(200);
-        render_file_head(&content_type, u64::MAX, persistence, &mut out);
-        assert!(out.len() <= SEND_CAPACITY);
     }
+    // The arithmetic of the report: well within the 1 KiB buffer.
+    assert!(largest <= 400, "{largest}");
 }
 
 #[test]

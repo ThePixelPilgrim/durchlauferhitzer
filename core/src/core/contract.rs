@@ -77,6 +77,12 @@
 //!   call and delivers [`Event::TimerFired`] once that instant has passed.
 //!   After `TimerFired`, every deadline at or before `now` has been handled:
 //!   `next_deadline` is `None` or later than `now`.
+//! - The driver calls [`Core::set_date`] with the wall-clock time (whole
+//!   seconds since the Unix epoch) whenever the second changes, before its
+//!   next `handle` call (FR-HTTP-22a); it emits no action. Every final
+//!   response the core renders from then on carries that second as
+//!   `Date` (an interim `100 Continue` does not; a relayed response keeps
+//!   the backend's). Until the first call no `Date` is sent.
 //!
 //! Rules for files:
 //!

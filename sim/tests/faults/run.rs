@@ -7,7 +7,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     let mut rng = fastrand::Rng::with_seed(seed);
     // One seed in three allows long request lines (and long paths).
     let long = rng.u8(0..3) == 0;
-    let mut sim = Sim::new(if long {
+    let mut sim = dated_sim(if long {
         LONG_RANDOM_CONFIG
     } else {
         RANDOM_CONFIG

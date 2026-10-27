@@ -210,7 +210,13 @@ impl Core {
                     KnownMethod::Head => BodyMode::HeadOnly,
                     KnownMethod::Unknown | KnownMethod::Get | KnownMethod::Other => BodyMode::Full,
                 };
-                render_fixed(error.status(), Persistence::Close, body, &mut c.send);
+                render_fixed(
+                    error.status(),
+                    Persistence::Close,
+                    body,
+                    self.date.as_ref(),
+                    &mut c.send,
+                );
                 actions.push(Action::Log(Log::Rejected {
                     conn,
                     peer: c.peer,
@@ -354,7 +360,7 @@ impl Core {
             UnreadBody::None => persistence,
             UnreadBody::Pending => Persistence::Close,
         };
-        render_fixed(status, persistence, body, &mut c.send);
+        render_fixed(status, persistence, body, self.date.as_ref(), &mut c.send);
         actions.push(Action::Log(Log::Response {
             conn,
             peer: c.peer,

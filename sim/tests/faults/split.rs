@@ -45,7 +45,7 @@ fn every_split_point_gives_identical_responses() {
 
 #[test]
 fn byte_by_byte_delivery() {
-    let mut sim = Sim::new(CONFIG);
+    let mut sim = dated_sim(CONFIG);
     let c = sim.connect(peer());
     sim.set_read_chunk(c, 1);
     sim.send(c, b"GET /a HTTP/1.1\r\nHost: other.test\r\n\r\n");
@@ -80,7 +80,7 @@ fn pipelined_requests_in_one_read() {
 
 #[test]
 fn pipelined_bytes_beyond_head_limit() {
-    let mut sim = Sim::new(SMALL_HEAD);
+    let mut sim = dated_sim(SMALL_HEAD);
     let c = sim.connect(peer());
     let mut bytes = VALID.to_vec();
     bytes.extend_from_slice(b"GET /y HTTP/1.1\r\nHost: other.test\r\nX-Pad: ");
@@ -112,7 +112,7 @@ fn pipelined_bytes_beyond_head_limit() {
 
 #[test]
 fn no_answer_after_connection_close_pipelined() {
-    let mut sim = Sim::new(CONFIG);
+    let mut sim = dated_sim(CONFIG);
     let c = sim.connect(peer());
     sim.send(
         c,
@@ -142,7 +142,7 @@ fn no_answer_after_connection_close_pipelined() {
 
 #[test]
 fn partial_pipelined_leftover_completed_later() {
-    let mut sim = Sim::new(CONFIG);
+    let mut sim = dated_sim(CONFIG);
     let c = sim.connect(peer());
     let mut bytes = VALID.to_vec();
     bytes.extend_from_slice(b"GET /y HTTP/1.1\r\nHo");
@@ -177,7 +177,7 @@ fn partial_pipelined_leftover_completed_later() {
 
 #[test]
 fn http10_request_closes_after_response() {
-    let mut sim = Sim::new(CONFIG);
+    let mut sim = dated_sim(CONFIG);
     let c = sim.connect(peer());
     sim.send(c, b"GET /x HTTP/1.0\r\n\r\n");
     sim.run_until_idle();

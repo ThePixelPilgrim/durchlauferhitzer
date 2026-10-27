@@ -40,7 +40,7 @@ mod model_http;
 
 /// A fixed response, by the spec-written model, not the core's renderer.
 fn fixed(status: Status, persistence: Persistence) -> Vec<u8> {
-    model_http::model_fixed(status, persistence, BodyMode::Full)
+    model_http::model_fixed(status, persistence, BodyMode::Full, None)
 }
 
 fn not_found_response(conn: ConnId, peer: IpAddr) -> Log {

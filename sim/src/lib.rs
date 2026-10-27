@@ -185,6 +185,15 @@ impl Sim {
         }
     }
 
+    /// Tell the core the wall-clock time (`Core::set_date`): every
+    /// response it renders from now on carries it as `Date`. The sim's
+    /// clock is virtual and never sets it by itself, so until a test calls
+    /// this no `Date` is sent.
+    pub fn set_date(&mut self, unix_secs: u64) {
+        self.line(&format!("set_date unix_secs={unix_secs}"));
+        self.core.set_date(unix_secs);
+    }
+
     /// The core's static roots.
     pub fn static_roots(&self) -> &[PathBuf] {
         self.core.static_roots()
