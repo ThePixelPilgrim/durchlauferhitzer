@@ -338,12 +338,13 @@
 //!   the core waited for the client's body bytes, a 504
 //!   ([`BackendFailure::BodyTimeout`]) if they waited for the backend; once
 //!   the whole request is written, the response timeout again, a total
-//!   deadline that response head bytes do not extend. From the first
-//!   response head byte on (of an interim head too), the response timeout
-//!   from that byte is also a total deadline for the head, never extended
-//!   or restarted: the deadline is never later than it, and its expiry is
-//!   a 504 ([`BackendFailure::ResponseTimeout`]) even while the body
-//!   streams;
+//!   deadline that response head bytes do not extend. Each response head
+//!   (interim or final) is also capped at the response timeout from its
+//!   own first byte, which later bytes of that head do not move; a
+//!   completed interim head ends its cap and the next head's first byte
+//!   starts a fresh one. The connection times out at the earlier of the
+//!   cap and the other deadline; the cap's expiry is a 504
+//!   ([`BackendFailure::ResponseTimeout`]) even while the body streams;
 //! - relaying a response: the client's `send_idle_timeout` while the client
 //!   has bytes to take (or nothing more is due from the backend),
 //!   `body_idle_timeout` while it waits for the backend's next body bytes;

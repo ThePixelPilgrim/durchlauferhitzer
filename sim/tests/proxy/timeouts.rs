@@ -21,8 +21,8 @@ host example.test {
 }";
 
 /// As `TIMEOUTS`, but the response timeout (10 s) is above the body idle
-/// timeout, so the response head's total deadline (FR-PROXY-29) passes
-/// only after body idle timeouts restarted by head bytes.
+/// timeout, so a response head's own deadline (FR-PROXY-29) passes only
+/// after body idle timeouts restarted by head bytes.
 const LONG_RESPONSE: &str = "listen 127.0.0.1:8080;
 limits { backend_connect_timeout 2s; backend_response_timeout 10s; body_idle_timeout 4s; }
 host example.test {
@@ -179,7 +179,7 @@ fn configured_body_idle_timeout_cuts_a_stalled_response() {
 /// they restart `body_idle_timeout`. Who is blamed on expiry still follows
 /// what the core waited for: the client's body bytes (408) or a backend
 /// that stopped taking them (504). (With `LONG_RESPONSE`, so the head's
-/// total deadline comes later.)
+/// own deadline comes later.)
 #[test]
 fn partial_response_head_during_upload_restarts_body_idle_timeout() {
     for backend_stalls in [false, true] {
@@ -389,7 +389,7 @@ fn client_half_close_still_gets_response() {
 }
 
 /// What happens at a given time (in ms) in
-/// `response_head_has_a_total_deadline_while_the_body_streams`.
+/// `each_response_head_has_its_own_deadline`.
 #[derive(Debug, Clone, Copy)]
 enum Step {
     /// The client sends these body bytes.
@@ -398,15 +398,19 @@ enum Step {
     Backend(u64, &'static [u8]),
 }
 
-/// FR-PROXY-29 (owner decision 2026-10-27): once the first response head
-/// byte arrives, `backend_response_timeout` is also a total deadline for
-/// completing the response head, even while the request body streams.
-/// Neither later head bytes, nor a new interim head, nor body progress
-/// restart it: the 504 comes exactly `backend_response_timeout` after the
-/// first head byte.
+/// A complete interim head, as a backend sends it before its response.
+const EARLY_HINTS: &[u8] = b"HTTP/1.1 103 Early Hints\r\n\r\n";
+
+/// FR-PROXY-29 (owner decision 2026-10-27, refined): each response head,
+/// interim or final, must be complete within `backend_response_timeout`
+/// of its own first byte, even while the request body streams. Later bytes
+/// of the same head and body progress do not move that cap; a completed
+/// interim head ends it, and the next head's first byte starts a fresh
+/// one. The earlier of the cap and the deadline that otherwise applies
+/// wins.
 #[test]
-fn response_head_has_a_total_deadline_while_the_body_streams() {
-    let cases: [(&str, &[Step], u64, Persistence); 3] = [
+fn each_response_head_has_its_own_deadline() {
+    let cases: [(&str, &[Step], u64, Persistence); 5] = [
         // TIMEOUTS (response 3 s): the client keeps its body streaming;
         // the cap passes 3 s after the first head byte at 1 s.
         (
@@ -435,19 +439,51 @@ fn response_head_has_a_total_deadline_while_the_body_streams() {
             4000,
             Persistence::KeepAlive,
         ),
-        // Response 10 s: the client stalls, the backend trickles one piece
-        // every body idle timeout less 1 ms, finishing an interim head on
-        // the way, never the response head.
+        // An interim head completes at 1 s and the upload goes on past
+        // 1 s + 3 s. The final head starts at 5 s and trickles: its own
+        // cap passes at 8 s, later bytes of it do not move it.
         (
-            LONG_RESPONSE,
+            TIMEOUTS,
             &[
-                Step::Client(0, b"012"),
-                Step::Backend(1000, b"H"),
-                Step::Backend(4999, b"TTP/1.1 100 Continue\r\n\r\n"),
-                Step::Backend(8998, b"H"),
+                Step::Client(0, b"0"),
+                Step::Backend(1000, EARLY_HINTS),
+                Step::Client(2000, b"1"),
+                Step::Client(3000, b"2"),
+                Step::Client(4000, b"3"),
+                Step::Backend(5000, b"H"),
+                Step::Client(6000, b"4"),
+                Step::Backend(7000, b"TTP/1.1"),
+                Step::Client(7000, b"5"),
             ],
-            11_000,
+            8000,
             Persistence::Close,
+        ),
+        // The next head's first byte comes with the interim head: its cap
+        // starts with it.
+        (
+            TIMEOUTS,
+            &[
+                Step::Client(0, b"0"),
+                Step::Backend(1000, b"HTTP/1.1 103 Early Hints\r\n\r\nH"),
+                Step::Client(2000, b"1"),
+                Step::Client(3000, b"2"),
+            ],
+            4000,
+            Persistence::Close,
+        ),
+        // An interim head that ends its cap does not end the response
+        // timeout from the fully written request (2 s + 3 s): the cap from
+        // 1 s was the earlier deadline, then that one applies again.
+        (
+            TIMEOUTS,
+            &[
+                Step::Client(0, b"0"),
+                Step::Backend(1000, b"H"),
+                Step::Client(2000, b"123456789"),
+                Step::Backend(3000, b"TTP/1.1 100 Continue\r\n\r\n"),
+            ],
+            5000,
+            Persistence::KeepAlive,
         ),
     ];
     for (config, steps, expiry, persistence) in cases {
@@ -510,4 +546,50 @@ fn response_head_has_a_total_deadline_while_the_body_streams() {
             sim.trace()
         );
     }
+}
+
+/// FR-PROXY-18, -29 (owner decision 2026-10-27, refined): a completed
+/// interim head ends its cap, so a slow but healthy upload behind a
+/// backend that sent `103 Early Hints` goes on well past the interim
+/// head's first byte + `backend_response_timeout`, and its response is
+/// relayed.
+#[test]
+fn slow_upload_goes_on_after_an_interim_head() {
+    let mut sim = Sim::new(TIMEOUTS);
+    let c = sim.connect(peer());
+    sim.send(c, POST_10);
+    sim.send(c, b"0");
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.advance(Duration::from_millis(1000));
+    sim.backend_send(up, EARLY_HINTS);
+    sim.run_until_idle();
+    // One body byte a second, 9 s in all, each within the body idle
+    // timeout (4 s); the interim head's cap (4 s) passes on the way.
+    for byte in b"123456789".chunks(1) {
+        sim.advance(Duration::from_millis(1000));
+        sim.send(c, byte);
+        sim.run_until_idle();
+        assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+        assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
+    }
+    assert!(
+        sim.take_backend_request(up)
+            .ends_with(b"\r\n\r\n0123456789"),
+        "{}",
+        sim.trace()
+    );
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
+        "{}",
+        sim.trace()
+    );
+    assert!(
+        matches!(sim.logs(), [Log::ProxiedResponse { status: 200, .. }]),
+        "{}",
+        sim.trace()
+    );
 }

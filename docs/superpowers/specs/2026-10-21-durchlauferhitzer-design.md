@@ -589,9 +589,11 @@ Backend response parsing:
   once, as after a request head; an interim head does not restart
   `backend_response_timeout` (it is not the response head); an interim
   head that arrives while the request body streams is dropped the same
-  way and the upload goes on. (Since the owner decision of 2026-10-27 in
-  FR-PROXY-29, its first byte starts the response head's total deadline,
-  which no later interim head restarts.)
+  way and the upload goes on. (Since the owner decision of 2026-10-27,
+  refined the same day, in FR-PROXY-29: each head, interim or final, must
+  be complete within `backend_response_timeout` of its own first byte; a
+  completed interim head ends its deadline and the next head's first
+  byte starts a fresh one.)
 
 Bodies:
 
@@ -698,13 +700,14 @@ Failures, persistence, timeouts:
   core waited for the client's body bytes, and a 504 (`BackendFailed {
   BodyTimeout }`, its own kind so the log says what stalled; owner policy
   2026-10-26) when body bytes waited for the backend: a backend that
-  stops taking the body is at fault. A backend that sent a first
-  response head byte but did not complete the head within
-  `backend_response_timeout` of it is at fault too: a 504 (`BackendFailed
-  { ResponseTimeout }`), even while the core waits for the client's body
-  bytes (owner decision 2026-10-27, FR-PROXY-29). A 408 or 504 to a HEAD
-  request is head-only, like every response to HEAD. *Owner decision 2026-10-26:*
-  while body bytes wait for the backend, the upstream is read too (the
+  stops taking the body is at fault. A backend that sent the first byte
+  of a response head (interim or final) but did not complete that head
+  within `backend_response_timeout` of it is at fault too: a 504
+  (`BackendFailed { ResponseTimeout }`), even while the core waits for
+  the client's body bytes (owner decision 2026-10-27, refined,
+  FR-PROXY-29). A 408 or 504 to a HEAD request is head-only, like every
+  response to HEAD. *Owner decision 2026-10-26:* while body bytes wait
+  for the backend, the upstream is read too (the
   driver contract's upstream-only `Interest::ReadWrite`), so a backend
   that stops taking the body and answers has its response relayed at once
   (FR-PROXY-27); only one that neither reads nor answers gets the 504. A
@@ -757,20 +760,25 @@ Failures, persistence, timeouts:
   waited for (408 for the client's body bytes, 504 `BodyTimeout` for a
   backend that stopped taking them). Once the whole request is written,
   `backend_response_timeout` is a total deadline: head bytes do not
-  extend it. *Owner decision 2026-10-27:* once the first response head
-  byte arrives (of an interim head too), `backend_response_timeout` also
-  runs from that byte as a total deadline for completing the response
-  head, even while the request body streams; it needs no config key of
-  its own. Later head bytes and new interim heads do not restart it. The
-  connection's deadline is the earlier of that total deadline and the one
-  that otherwise applies (`body_idle_timeout` while the body streams, the
-  response timeout from the fully written request), so of the two starts
-  of `backend_response_timeout` (first head byte, request fully written)
-  the earlier wins. Its expiry is a 504 (`BackendFailed {
+  extend it. *Owner decision 2026-10-27 (refined the same day from one
+  total cap to a cap per head):* each response head, interim or final,
+  must be complete within `backend_response_timeout` of its own first
+  byte, even while the request body streams; it needs no config key of
+  its own. A head's first byte sets its cap once: later bytes of the same
+  head do not move it. A completed interim head ends its cap, and the
+  next head's first byte starts a fresh one, so a slow but healthy
+  upload behind a backend that sent `103 Early Hints` (or an early `100`)
+  goes on. The connection's deadline is the earlier of the current head's
+  cap and the one that otherwise applies (`body_idle_timeout` while the
+  body streams, the response timeout from the fully written request,
+  which interim heads do not restart), so of the two starts of
+  `backend_response_timeout` (head's first byte, request fully written)
+  the earlier wins. Expiry of the cap is a 504 (`BackendFailed {
   ResponseTimeout }`), even while the core waits for the client's body
-  bytes; once the response head is queued it no longer applies. A backend
-  trickling response head bytes therefore holds the connection for at
-  most `backend_response_timeout` after its first byte.
+  bytes; once the response head is queued it no longer applies. A
+  backend trickling response head bytes therefore holds the connection
+  for at most `MAX_INTERIM_HEADS` + 1 = 9 heads, each at most
+  `backend_response_timeout` from its first byte.
 - **FR-PROXY-30** [done] Nothing from a backend reaches the client
   unvalidated: heads are parsed strictly, bodies framed strictly, and
   nothing after a framing error is written.

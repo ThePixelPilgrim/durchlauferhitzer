@@ -367,20 +367,20 @@ impl Core {
                     return;
                 }
                 *filled = filled.saturating_add(added);
-                // The first head byte starts the head's total deadline
-                // (FR-PROXY-29); later ones do not restart it.
-                let cap = *head_deadline
+                // A head's first byte starts its deadline (FR-PROXY-29);
+                // later bytes of the same head do not move it.
+                head_deadline
                     .get_or_insert_with(|| now.saturating_add(limits.backend_response_timeout));
                 // While the body streams, backend bytes are progress too
                 // (FR-PROXY-29: no progress in either direction); once the
                 // whole request is written, the response timeout is a total
                 // deadline and runs on.
-                *deadline = match request.body.stage() {
+                match request.body.stage() {
                     Stage::Receiving | Stage::Writing => {
-                        now.saturating_add(limits.body_idle_timeout).min(cap)
+                        *deadline = now.saturating_add(limits.body_idle_timeout);
                     }
-                    Stage::Written => (*deadline).min(cap),
-                };
+                    Stage::Written => {}
+                }
                 self.judge_head(now, conn, actions);
             }
             ConnState::Relaying { .. } => self.relay_received(now, conn, len, actions),
@@ -398,8 +398,10 @@ impl Core {
     /// on a verdict. An interim (1xx) head is dropped: the bytes after it
     /// move to the front, once, as after a request head, and are parsed
     /// afresh; more than [`MAX_INTERIM_HEADS`] of them are a 502
-    /// (FR-PROXY-18). The deadline runs on: an interim head is not the
-    /// response head.
+    /// (FR-PROXY-18). The connection's deadline runs on (an interim head
+    /// is not the response head), but a completed interim head ends its
+    /// own head deadline; bytes behind it start the next head's
+    /// (FR-PROXY-29).
     fn judge_head(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
@@ -410,11 +412,13 @@ impl Core {
             filled,
             parser,
             interim,
+            head_deadline,
             ..
         } = &mut c.state
         else {
             return;
         };
+        let response_timeout = self.config.limits.backend_response_timeout;
         let verdict = loop {
             let bytes = buffers.recv.get(..*filled).unwrap_or_default();
             let full = *filled >= buffers.recv.len();
@@ -435,6 +439,9 @@ impl Core {
                     buffers.recv.copy_within(consumed..*filled, 0);
                     *filled = filled.saturating_sub(consumed);
                     *parser = ResponseParser::new();
+                    // The interim head is complete: its deadline ends, and
+                    // bytes behind it start the next head's (FR-PROXY-29).
+                    *head_deadline = (*filled > 0).then(|| now.saturating_add(response_timeout));
                 }
                 Ok(ResponseStatus::Complete { head, consumed }) => {
                     break Verdict::Relay { head, consumed };
@@ -514,7 +521,7 @@ impl Core {
 
     /// A relaying connection's deadline passed. Before the head was queued
     /// that is a 504 (a 408 when the client stalled its body, unless the
-    /// head's total deadline passed); after it, the connection is cut:
+    /// current response head's deadline passed); after it, the connection is cut:
     /// logged as a send timeout when the client had bytes to take, as a
     /// backend timeout when the body stalled on the backend's side.
     pub(super) fn expire_proxy(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
@@ -525,8 +532,9 @@ impl Core {
             ConnState::Connecting { .. } => {
                 self.fail_before_head(now, conn, BackendFailure::ConnectTimeout, actions);
             }
-            // The backend did not finish its response head in time, even
-            // if the body streams (FR-PROXY-29).
+            // The backend did not finish a response head (interim or final)
+            // in time after its first byte, even if the body streams
+            // (FR-PROXY-29).
             ConnState::AwaitingResponse {
                 head_deadline: Some(cap),
                 ..
