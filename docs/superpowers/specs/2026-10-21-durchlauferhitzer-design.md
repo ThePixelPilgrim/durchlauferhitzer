@@ -665,12 +665,20 @@ Bodies:
   body already arrived.
   *Builder call (stage 3 Task 9):* while a queued `100 Continue` waits for
   a client that does not read it, the client is not read either (its
-  interest is to write), so its body stays unread; after
-  `body_idle_timeout` without body progress the client is at fault: a 408
-  queued behind the `100` (logged `Rejected { Timeout(RequestBody) }`),
-  the upstream closed; a client that still takes nothing is then closed
-  after `send_idle_timeout` (`Rejected { Timeout(Send) }`). Test
-  `unread_100_continue_stalls_the_body_into_a_408`.
+  interest is to write), so its body stays unread. The client's
+  `send_idle_timeout` applies to the queued `100` (FR-PROXY-29), restarted
+  by every byte the client takes, and the earlier of it and
+  `body_idle_timeout` decides, both blaming the client: the send timeout
+  cuts the connection (logged `Rejected { Timeout(Send) }`, the upstream
+  closed, no response); the body idle timeout is a 408 queued behind the
+  `100` (logged `Rejected { Timeout(RequestBody) }`, the upstream closed),
+  and a client that still takes nothing is then closed after
+  `send_idle_timeout`. If both expire at the same instant the send
+  timeout wins. Tests `unread_100_continue_hits_the_send_idle_timeout_first`,
+  `slowly_read_100_continue_restarts_the_send_idle_timeout`,
+  `unread_100_continue_stalls_the_body_into_a_408`. *(Fixed in stage 3
+  Task 9, review round 2: the send idle timeout did not run while a
+  response was awaited.)*
 - **FR-PROXY-25a** [done] Outside proxy routes (static routes, route
   misses) `Expect: 100-continue` is never answered with `100 Continue`: the
   normal final response (413, 404, …) is sent at once. Any other `Expect`

@@ -94,10 +94,14 @@ impl Core {
         }
         let len = len.min(c.send.len());
         c.send.drain(..len);
-        // Progress resets the send idle deadline.
+        // Progress resets the send idle deadline; a `100 Continue` that is
+        // out stops it while a response is awaited.
         if len > 0 {
-            c.state
-                .set_deadline(now.saturating_add(limits.send_idle_timeout));
+            let send_idle = now.saturating_add(limits.send_idle_timeout);
+            c.state.set_deadline(send_idle);
+            if let ConnState::AwaitingResponse { send_deadline, .. } = &mut c.state {
+                *send_deadline = (!c.send.is_empty()).then_some(send_idle);
+            }
         }
         if c.send.is_empty() {
             match c.state {

@@ -138,8 +138,10 @@ pub(crate) enum ConnState {
     /// per response head (FR-PROXY-29): `None` until a head's first byte
     /// (of an interim head too) arrives, then the backend response timeout
     /// from that byte; a completed interim head ends it, and the next
-    /// head's first byte starts a fresh one. The state times out at the
-    /// earlier of the two ([`ConnState::deadline`]).
+    /// head's first byte starts a fresh one. `send_deadline` is the
+    /// client's send idle timeout while it has bytes of its own to take (a
+    /// `100 Continue`), reset by each byte it takes (FR-PROXY-29). The
+    /// state times out at the earliest of them ([`ConnState::deadline`]).
     AwaitingResponse {
         up: UpstreamId,
         request: ProxyRequest,
@@ -148,6 +150,7 @@ pub(crate) enum ConnState {
         parser: ResponseParser,
         interim: u8,
         head_deadline: Option<Instant>,
+        send_deadline: Option<Instant>,
         deadline: Instant,
     },
     /// The backend's response head was queued: what is left of its rewrite
@@ -193,21 +196,25 @@ pub(crate) struct ProxyRequest {
 
 impl ConnState {
     /// The instant at which this state times out: for `AwaitingResponse`
-    /// the earlier of `deadline` and the current head's `head_deadline`.
+    /// the earliest of `deadline`, the current head's `head_deadline` and
+    /// the client's `send_deadline`.
     pub(crate) fn deadline(&self) -> Instant {
         match *self {
             ConnState::AwaitingResponse {
-                head_deadline: Some(cap),
+                head_deadline,
+                send_deadline,
                 deadline,
                 ..
-            } => deadline.min(cap),
+            } => [head_deadline, send_deadline]
+                .into_iter()
+                .flatten()
+                .fold(deadline, Instant::min),
             ConnState::ReadingHead { deadline, .. }
             | ConnState::Idle { deadline }
             | ConnState::Responding { deadline, .. }
             | ConnState::OpeningFile { deadline, .. }
             | ConnState::SendingFile { deadline, .. }
             | ConnState::Connecting { deadline, .. }
-            | ConnState::AwaitingResponse { deadline, .. }
             | ConnState::Relaying { deadline, .. }
             | ConnState::Lingering { deadline } => deadline,
         }

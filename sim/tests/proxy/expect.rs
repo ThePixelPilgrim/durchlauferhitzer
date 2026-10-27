@@ -92,7 +92,8 @@ host example.test {
 /// stays unread; after `body_idle_timeout` without body progress the
 /// client is at fault: a 408 (queued behind the `100`), the upstream
 /// closed. A client that still takes nothing is then closed by
-/// `send_idle_timeout`.
+/// `send_idle_timeout`. (Here the send idle timeout, 7 s, is the later
+/// one; see `unread_100_continue_hits_the_send_idle_timeout_first`.)
 #[test]
 fn unread_100_continue_stalls_the_body_into_a_408() {
     let mut sim = Sim::new(SHORT);
@@ -142,4 +143,73 @@ fn unread_100_continue_stalls_the_body_into_a_408() {
         sim.trace()
     );
     assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+}
+
+/// As `SHORT`, but the client's send idle timeout (3 s) comes before the
+/// body idle timeout (6 s).
+const SHORT_SEND: &str = "listen 127.0.0.1:8080;
+limits { send_idle_timeout 3s; body_idle_timeout 6s; backend_response_timeout 20s; }
+host example.test {
+  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+}";
+
+/// FR-PROXY-29: the client's `send_idle_timeout` still applies while the
+/// response is awaited. A client that takes nothing of its queued `100
+/// Continue` for 3 s is cut then (a send timeout, the upstream released),
+/// not left until the 6 s body idle timeout.
+#[test]
+fn unread_100_continue_hits_the_send_idle_timeout_first() {
+    let mut sim = Sim::new(SHORT_SEND);
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(
+        c,
+        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+          Content-Length: 10\r\n\r\n",
+    );
+    sim.run_until_idle();
+    sim.send(c, b"0123456789");
+    sim.run_until_idle();
+    assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
+    sim.advance(Duration::from_millis(2999));
+    assert!(sim.logs().is_empty(), "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(
+        sim.logs(),
+        &[Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+}
+
+/// A client that takes its `100 Continue` slowly but steadily keeps the
+/// exchange alive: each byte taken restarts the send idle timeout (5 s
+/// pass, more than the 3 s send idle timeout, less than the 6 s body
+/// idle timeout).
+#[test]
+fn slowly_read_100_continue_restarts_the_send_idle_timeout() {
+    let mut sim = Sim::new(SHORT_SEND);
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(
+        c,
+        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+          Content-Length: 10\r\n\r\n",
+    );
+    sim.run_until_idle();
+    for _ in 0..2 {
+        sim.advance(Duration::from_millis(2500));
+        sim.set_client_window(c, Window::Budget(1));
+        sim.run_until_idle();
+    }
+    assert!(sim.logs().is_empty(), "{}", sim.trace());
+    assert_eq!(sim.take_received(c), b"HT", "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
 }

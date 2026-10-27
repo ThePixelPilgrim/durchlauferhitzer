@@ -225,6 +225,7 @@ impl Core {
         actions: &mut Vec<Action>,
     ) {
         let response_deadline = now.saturating_add(self.config.limits.backend_response_timeout);
+        let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
         let Some(conn) = self.upstreams.conn(up) else {
             return;
         };
@@ -238,10 +239,15 @@ impl Core {
                 buffers,
                 ..
             } if own == up => {
-                match request.expect {
-                    Expect::Continue => c.send.extend_from_slice(CONTINUE),
-                    Expect::None => {}
-                }
+                // The client's send idle timeout runs while it has the
+                // `100 Continue` to take (FR-PROXY-29).
+                let send_deadline = match request.expect {
+                    Expect::Continue => {
+                        c.send.extend_from_slice(CONTINUE);
+                        Some(send_deadline)
+                    }
+                    Expect::None => None,
+                };
                 ConnState::AwaitingResponse {
                     up,
                     request,
@@ -250,6 +256,7 @@ impl Core {
                     parser: ResponseParser::new(),
                     interim: 0,
                     head_deadline: None,
+                    send_deadline,
                     deadline: response_deadline,
                 }
             }
@@ -521,7 +528,8 @@ impl Core {
 
     /// A relaying connection's deadline passed. Before the head was queued
     /// that is a 504 (a 408 when the client stalled its body, unless the
-    /// current response head's deadline passed); after it, the connection
+    /// current response head's deadline passed), or a send timeout when the
+    /// client took nothing of its `100 Continue`; after it, the connection
     /// is cut: logged as a send timeout when the client had bytes to take,
     /// as a backend timeout when the body stalled on the backend's side.
     pub(super) fn expire_proxy(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
@@ -531,6 +539,22 @@ impl Core {
         match &c.state {
             ConnState::Connecting { .. } => {
                 self.fail_before_head(now, conn, BackendFailure::ConnectTimeout, actions);
+            }
+            // The client took nothing of its `100 Continue` for its send
+            // idle timeout, which still applies (FR-PROXY-29): it is cut,
+            // as a client that stops reading is, and the upstream released.
+            // Checked first: a client that is gone cannot be answered.
+            ConnState::AwaitingResponse {
+                send_deadline: Some(send),
+                ..
+            } if now >= *send => {
+                actions.push(Action::Log(Log::Rejected {
+                    conn,
+                    peer: c.peer,
+                    reason: RejectReason::Timeout(TimeoutKind::Send),
+                }));
+                self.forget(conn, actions);
+                actions.push(Action::Close { conn });
             }
             // The backend did not finish a response head (interim or final)
             // in time after its first byte, even if the body streams
