@@ -14,7 +14,8 @@ What it simulates:
   denied entries, special files, slow disks, files that shrink or change
   while they are being sent.
 - **Backends** ([`src/backend.rs`](src/backend.rs)) — scripted upstream
-  servers: connects accepted, refused or left hanging per backend address;
+  servers: connects accepted, refused or left hanging per backend address
+  (and a hanging one let through later, a slow accept);
   the test reads what a backend received and makes it send bytes, close,
   reset or read slowly (`Window`).
 
@@ -63,7 +64,18 @@ tests/
     generator.rs        random requests and schedule steps
     model.rs            the model of the random file tree
     oracle.rs           what each client must receive; coverage
-    run.rs              one random schedule; the test over all seeds
+    run.rs              one random schedule; the test over all seeds;
+                        seed replay for every net of the binary
+    proxy/              the randomized proxy net (see below)
+      mod.rs              random configs, coverage, the test over all seeds
+      request.rs          random client requests (smuggling attempts among
+                          them) and the model of what the backend receives
+      chunks.rs           payloads and chunked bodies, with framing defects
+      response.rs         random backend responses (hostile ones among
+                          them) and the model of what the client receives
+      outcome.rs          exchanges, timings and the outcomes they allow
+      drive.rs            stories, rounds, backends, timed scenarios
+      check.rs            the oracle: each story against the model
 ```
 
 ## Randomized runs
@@ -71,8 +83,21 @@ tests/
 `tests/faults/` runs thousands of seeded random scenarios (requests, chunk
 sizes, stalls, resets, clock jumps, file trees, disk faults). Each run checks
 every response byte against a model of what the server should do, and the test
-fails if any interesting outcome never occurs across all seeds. To replay one
-failing seed:
+fails if any interesting outcome never occurs across all seeds. The
+proxy net (`tests/faults/proxy/`) does the same for proxy routes: random
+clients (bodies by `Content-Length` and chunked, `Expect`, oversized bodies,
+pipelining, half-closes, resets, smuggling attempts) against random backends
+(refused, hanging or slow connects; `Content-Length`, chunked,
+close-delimited and empty responses of up to 2 MiB; interim heads; malformed
+and hostile heads; bytes after the body; resets and ends of stream anywhere;
+random windows), on two proxy routes beside a static one, with random body
+limits and timeouts. Each exchange is predicted by a model written from the
+spec, not from the core: the backend must receive exactly the rewritten
+request and the client's body, and the client exactly the rewritten head and
+the backend's body bytes, a cut connection with its log, or the predicted
+4xx/5xx. Timed scenarios (connect, response, body, head and send timeouts)
+run alone in their round, so the clock only runs out deadlines the model
+knows. To replay one failing seed (of both nets):
 
 ```sh
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults

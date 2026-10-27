@@ -930,13 +930,18 @@ Failures, persistence, timeouts:
 
 - **NFR-SEC-01** [done; proxy stage 3] No request smuggling: every framing
   ambiguity is a hard rejection (FR-HTTP-03…08, -09a, FR-PROXY-16, -19).
-- **NFR-SEC-02** [stage 3] A backend receives exactly one well-framed
-  request per client request: `Content-Length` + `Transfer-Encoding`,
-  duplicate lengths, chunk-extension and trailer tricks, and a second
-  request hidden in a body never get through (FR-PROXY-10, -19, -22).
-- **NFR-SEC-03** [stage 3] No response splitting or desync from a hostile
-  backend: extra bytes after a body, a second response, CR/LF in reasons or
-  header values are never forwarded (FR-PROXY-15, -22, -30).
+- **NFR-SEC-02** [done in stage 3 Task 9] A backend receives exactly one
+  well-framed request per client request: `Content-Length` +
+  `Transfer-Encoding`, duplicate lengths, chunk-extension and trailer
+  tricks, and a second request hidden in a body never get through
+  (FR-PROXY-10, -19, -22). Proven by the randomized proxy net
+  (`sim/tests/faults/proxy/`): every forwarded byte against an independent
+  model of the rewritten request.
+- **NFR-SEC-03** [done in stage 3 Task 9] No response splitting or desync
+  from a hostile backend: extra bytes after a body, a second response,
+  CR/LF in reasons or header values are never forwarded (FR-PROXY-15, -22,
+  -30). Proven by the randomized proxy net: every byte the client gets
+  against an independent model of the rewritten response.
 - **NFR-SEC-04** [done in core; driver stage 4] No escape from a static
   root: dot segments and their encodings, encoded `/`, `\`, NUL and
   controls are rejected (FR-HTTP-13/14), dotfiles are 404

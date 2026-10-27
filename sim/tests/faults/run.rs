@@ -12,8 +12,8 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     } else {
         RANDOM_CONFIG
     });
-    // Proxying in the random runs is Task 9's; until then the backend
-    // refuses, so every forwarded request is a 502.
+    // Here the backend refuses, so every forwarded request is a 502;
+    // proxying itself has a randomized net of its own (`proxy/`).
     sim.set_connect("127.0.0.1:3000", ConnectBehaviour::Refuse);
     // One seed in three serves files up to 1 MiB.
     let big = rng.u8(0..3) == 0;
@@ -144,7 +144,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
                 RejectReason::Timeout(TimeoutKind::Disk) => coverage.disk_timeout += 1,
                 RejectReason::Limit(LimitKind::Connections) => coverage.limit_connections += 1,
                 RejectReason::Limit(LimitKind::ConnectionsPerIp) => coverage.limit_per_ip += 1,
-                // Proxied bodies are not generated yet (Task 9).
+                // Proxied bodies are the proxy net's (`proxy/`).
                 RejectReason::Route(_)
                 | RejectReason::Body(_)
                 | RejectReason::Timeout(TimeoutKind::RequestBody) => {}
@@ -165,10 +165,22 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     );
 }
 
+/// The seed to replay, from `SIM_SEED`, if set (every randomized net of
+/// this binary replays it).
+pub(crate) fn replay_seed() -> Option<u64> {
+    match std::env::var("SIM_SEED") {
+        Ok(seed) => match seed.parse::<u64>() {
+            Ok(seed) => Some(seed),
+            Err(e) => panic!("SIM_SEED={seed:?} is not a u64: {e}"),
+        },
+        Err(_) => None,
+    }
+}
+
 /// Run one seed; on failure, panic with `SIM_SEED=<seed>` and the original
 /// message (which carries the trace).
-pub(crate) fn run_seed_reporting(seed: u64, coverage: &mut Coverage) {
-    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| run_seed(seed, coverage))) {
+pub(crate) fn run_reporting(seed: u64, run: impl FnOnce()) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(run)) {
         let message = payload
             .downcast_ref::<String>()
             .cloned()
@@ -181,14 +193,11 @@ pub(crate) fn run_seed_reporting(seed: u64, coverage: &mut Coverage) {
 #[test]
 fn random_fault_schedules() {
     let mut coverage = Coverage::default();
-    match std::env::var("SIM_SEED") {
-        Ok(seed) => match seed.parse::<u64>() {
-            Ok(seed) => run_seed_reporting(seed, &mut coverage),
-            Err(e) => panic!("SIM_SEED={seed:?} is not a u64: {e}"),
-        },
-        Err(_) => {
+    match replay_seed() {
+        Some(seed) => run_reporting(seed, || run_seed(seed, &mut coverage)),
+        None => {
             for seed in 0..SEEDS {
-                run_seed_reporting(seed, &mut coverage);
+                run_reporting(seed, || run_seed(seed, &mut coverage));
             }
             eprintln!(
                 "COVERAGE statuses={:?} http={} header={} send={} disk={} conns={} per_ip={} \

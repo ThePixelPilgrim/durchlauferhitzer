@@ -733,3 +733,32 @@ fn head_too_large_response_is_502() {
         received,
     );
 }
+
+/// A connect that completes late (a slow accept): the request is forwarded
+/// once it does, and the upstream belongs to the client that asked.
+#[test]
+fn slow_accept_forwards_the_request() {
+    let mut sim = Sim::new(CONFIG);
+    sim.set_connect(BACKEND, ConnectBehaviour::Hang);
+    let c = request(&mut sim, GET_X);
+    let up = only_upstream(&sim);
+    assert_eq!(sim.upstream_conn(up), c);
+    assert!(sim.take_backend_request(up).is_empty(), "{}", sim.trace());
+    sim.accept_upstream(up);
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_backend_request(up),
+        GET_X_FORWARDED,
+        "{}",
+        sim.trace()
+    );
+    sim.backend_send(up, b"HTTP/1.1 204 \r\n\r\n");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        b"HTTP/1.1 204 \r\n\r\n",
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+}

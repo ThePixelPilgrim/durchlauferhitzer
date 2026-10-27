@@ -3,7 +3,9 @@
 //! static files on a random tree, slow disks and files that shrink or
 //! change while they are sent.
 //!
-//! Run a single random schedule with `SIM_SEED=<seed>`.
+//! Proxy routes have a randomized net of their own (`proxy/`).
+//!
+//! Run a single random schedule of each net with `SIM_SEED=<seed>`.
 
 #![allow(
     clippy::panic,
@@ -136,9 +138,15 @@ fn deliver(config: &str, parts: &[&[u8]]) -> (Outcome, String) {
 mod generator;
 mod model;
 mod oracle;
+#[allow(
+    clippy::indexing_slicing,
+    reason = "the proxy net indexes its own generated exchanges and buffers; an out-of-range index is a bug in the net, reported with its seed like any failure"
+)]
+mod proxy;
 mod run;
 mod split;
 
 use generator::*;
 use model::*;
 use oracle::*;
+use run::{replay_seed, run_reporting};

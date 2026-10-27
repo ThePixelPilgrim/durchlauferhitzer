@@ -287,6 +287,16 @@ impl Sim {
         });
     }
 
+    /// A connect left hanging (`ConnectBehaviour::Hang`) completes on the
+    /// next pump after all (a slow accept); any other upstream is left as
+    /// it is.
+    pub fn accept_upstream(&mut self, up: UpstreamId) {
+        let u = self.upstream_mut(up);
+        if u.phase == Phase::Connecting(ConnectBehaviour::Hang) {
+            u.phase = Phase::Connecting(ConnectBehaviour::Accept);
+        }
+    }
+
     /// Every upstream id the core has opened, in order.
     pub fn upstreams(&self) -> Vec<UpstreamId> {
         self.backends.upstreams.keys().copied().collect()
@@ -299,6 +309,11 @@ impl Sim {
             .values()
             .filter(|u| u.phase != Phase::Closed)
             .count()
+    }
+
+    /// The client connection whose request opened upstream `up`.
+    pub fn upstream_conn(&self, up: UpstreamId) -> ConnId {
+        self.upstream(up).conn
     }
 
     /// The backend upstream `up` was connected to.
