@@ -847,10 +847,8 @@ fn tail_only_read_keeps_the_send_timeout_while_the_head_is_unsent() {
 /// holds the head and the bytes relayed so far.
 #[test]
 fn reset_or_eof_mid_body_after_the_head_cuts_both() {
-    enum End {
-        Reset,
-        Eof,
-    }
+    // How the backend ends is named by the failure it is logged as.
+    let (reset, eof) = (BackendFailure::Reset, BackendFailure::ClosedEarly);
     let close_head: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n";
     let close_relayed: &[u8] = b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n";
     for (head, piece, relayed_head, relayed, end) in [
@@ -859,21 +857,15 @@ fn reset_or_eof_mid_body_after_the_head_cuts_both() {
             b"hello".as_slice(),
             close_relayed,
             b"hello".as_slice(),
-            End::Reset,
+            reset,
         ),
+        (CHUNKED_HEAD, b"5\r\nhel", CHUNKED_RELAYED, b"5\r\nhel", eof),
         (
             CHUNKED_HEAD,
             b"5\r\nhel",
             CHUNKED_RELAYED,
             b"5\r\nhel",
-            End::Eof,
-        ),
-        (
-            CHUNKED_HEAD,
-            b"5\r\nhel",
-            CHUNKED_RELAYED,
-            b"5\r\nhel",
-            End::Reset,
+            reset,
         ),
     ] {
         let mut sim = Sim::new(CONFIG);
@@ -882,12 +874,11 @@ fn reset_or_eof_mid_body_after_the_head_cuts_both() {
         sim.backend_send(up, &cat(&[head, piece]));
         sim.run_until_idle();
         let before = sim.trace().len();
-        match end {
-            End::Reset => sim.backend_reset(up),
-            End::Eof => {
-                sim.backend_eof(up);
-                sim.run_until_idle();
-            }
+        if end == reset {
+            sim.backend_reset(up);
+        } else {
+            sim.backend_eof(up);
+            sim.run_until_idle();
         }
         assert_eq!(
             sim.take_received(c),
@@ -895,10 +886,6 @@ fn reset_or_eof_mid_body_after_the_head_cuts_both() {
             "{}",
             sim.trace()
         );
-        let kind = match end {
-            End::Reset => BackendFailure::Reset,
-            End::Eof => BackendFailure::ClosedEarly,
-        };
-        assert_cut(&sim, c, before, kind);
+        assert_cut(&sim, c, before, end);
     }
 }
