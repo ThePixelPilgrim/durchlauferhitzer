@@ -62,6 +62,16 @@ durchlauferhitzer-core v0.1.0 (/ws/core)
 libc v0.2.191
 TREE
 
+expect libc "an allow-listed name from a path outside the workspace" libc <<'TREE'
+durchlauferhitzer v0.1.0 (/ws/driver)
+libc v0.2.191 (/elsewhere/libc)
+TREE
+
+expect libc "an allow-listed name from git" libc <<'TREE'
+durchlauferhitzer v0.1.0 (/ws/driver)
+libc v0.2.191 (https://github.com/rust-lang/libc#0123abcd)
+TREE
+
 if ((failures > 0)); then
     echo "check-product-deps.sh self-test: $failures case(s) failed" >&2
     exit 1

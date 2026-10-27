@@ -1,7 +1,7 @@
 //! The `durchlauferhitzer` binary. Stage 4 Task 4: a stub that prints the
 //! usage; the CLI and startup sequence follow in Task 8 (FR-PROC-01).
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use std::process::ExitCode;
 

@@ -17,16 +17,22 @@ set -euo pipefail
 # filter ROOT ALLOWED: the check itself, on stdin; prints disallowed names.
 filter() {
     local root=$1 allowed=$2 name source a ok status=0
-    # Each line is `name vX.Y.Z [(source)] [(*)]`.
+    # Each line is `name vX.Y.Z [(source)] [(*)]`; a registry crate has no
+    # source, so its third field is empty or the repeat marker `(*)`.
+    # Paths containing spaces are not supported (they split the source).
     while read -r name _ source _; do
         [[ -z "$name" ]] && continue
         # Workspace crates (the package itself among them): a path source
         # below the root, whatever the name.
         [[ "$source" == "($root/"* ]] && continue
+        # Allow-listed crates count only from the registry: the same name
+        # from git or a foreign path is flagged.
         ok=no
-        for a in $allowed; do
-            [[ "$name" == "$a" ]] && ok=yes
-        done
+        if [[ -z "$source" || "$source" == "(*)" ]]; then
+            for a in $allowed; do
+                [[ "$name" == "$a" ]] && ok=yes
+            done
+        fi
         if [[ "$ok" != yes ]]; then
             echo "$name"
             status=1
