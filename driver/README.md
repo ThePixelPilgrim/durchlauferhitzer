@@ -33,8 +33,25 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 ```
 src/
   lib.rs            crate root: lint rules, the Linux and 64-bit checks,
-                    `mod sys`
+                    the modules, re-exports (`Driver`, `Exit`,
+                    `StopHandle`, `LogSink`, `LogEntry`, `DriverLog`, `Pool`)
   main.rs           the binary (a usage stub until the CLI, Task 8)
+  event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
+                    `next_deadline`, dispatch, `TimerFired`), `deliver`
+                    (one `handle` call, its actions in order, then the
+                    queued connect answers), `apply` (every `Action`
+                    matched), the clock and `set_date`, `Exit`,
+                    `StopHandle`
+    clients.rs        accept (errors: transient, EMFILE/ENFILE pause),
+                      client reads, writes and errors, client actions
+    upstreams.rs      `Connect` and its later answer, upstream reads and
+                      writes by interest, error deferral, upstream actions
+  conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
+                    Signal` in a `u64`), the per-client and per-upstream
+                    records and the registration each wants
+  log.rs            `LogSink` (a channel sink for tests until Task 7),
+                    `LogEntry`, `DriverLog` (FR-LOG-07)
+  pool.rs           `Pool`: a stub until the disk worker pool (Task 6)
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules
     fd.rs             `Io` (Done / WouldBlock / Closed / Err), the -1/errno
@@ -60,8 +77,66 @@ src/
     rlimit.rs         `nofile`, `raise_nofile` (RLIMIT_NOFILE)
 tests/
   sys.rs            the wrappers on the real kernel, unprivileged
+  loop_static_less.rs  the event loop on loopback, no static roots: fixed
+                    responses, keep-alive, lingering close, a proxied
+                    exchange, an early 413 then a reset (I1), a client
+                    reset under interest `None`, the header timeout
+  loop_fd_leak.rs   a client reset mid-relay leaks no descriptor; alone in
+                    its binary, since the fd count is process-wide
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
+  support/server.rs the loop tests' harness: a `Driver` in a thread on an
+                    ephemeral port, a std backend, response readers
 ```
+
+## The event loop
+
+`Driver::new(core, listeners, roots, pool, log)` registers the listeners
+and the wake eventfd; `Driver::run` loops until a `StopHandle` asks it to
+stop (`Exit::Stopped`; the signal-driven endings come with Task 9). It
+follows the contract in `core/src/core/contract.rs`; where the contract
+leaves a choice, this is what the loop does:
+
+- **Ids and tokens** (DRV-01). Connection ids count from 1 and are never
+  reused; an epoll token carries the kind in its low 3 bits and the id
+  above, so an event for a socket closed earlier in the same batch finds no
+  entry and is dropped (DRV-05).
+- **One event at a time** (DRV-02, DRV-04). Every event is one `handle`
+  call; its actions are all performed before anything else, and every read
+  or write is reported as the very next call. Reads and writes loop until
+  the buffer is empty or the socket would block (DRV-03).
+- **Timers** (DRV-06). The wait's timeout is the time to `next_deadline`
+  (rounded up to whole milliseconds, so the loop never wakes early); after
+  the ready descriptors of a wake are handled, `TimerFired` is delivered if
+  the deadline has passed. The core's `Instant` is the monotonic clock since
+  `Driver::new`.
+- **`Date`** (DRV-13). Before each `handle` call the wall-clock second is
+  checked and passed to `set_date` when it changed.
+- **Clients.** `TCP_NODELAY` on every socket, buffer sizes left to the
+  kernel (NFR-PERF-04). A client always stays in the epoll set: after the
+  reads or writes its interest allows, an `EPOLLERR`/`EPOLLHUP` still
+  pending is reported as `Failed` whatever the interest, with the error from
+  `SO_ERROR` (`ECONNRESET`/`EPIPE` are `Reset`; a hang-up without an error
+  is `Reset` too). The end of stream is reported once; the socket is not
+  read again after it.
+- **Accept.** Loops until it would block. `ECONNABORTED`, `EPROTO` and
+  `EPERM` are skipped. `EMFILE`/`ENFILE` are logged (`DriverLog::AcceptFailed`)
+  and pause every listener until a client connection closes, so the loop
+  never spins; any other errno (`ENOBUFS`, `ENOMEM`, ...) is logged and
+  ends this turn's accepting.
+- **Upstreams** (DRV-10). `Connect` calls `connect()` at once; an outcome
+  known at once (connected, refused, `socket()` failed) is queued and
+  delivered after the actions of that call. `socket()` failing with
+  `EMFILE`/`ENFILE` is logged (`DriverLog::SocketFailed`). While connecting
+  the socket waits for `EPOLLOUT`, then `SO_ERROR` decides. Once open, it is
+  registered for its interest and taken out of the epoll set while that is
+  `None`, so an error waits until the core reads or writes again. Under
+  `ReadWrite` the loop reads before it writes; a write that fails there is
+  not reported, the socket stops writing and goes on reading, and the reads
+  report bytes, end of stream, then the error. Under `Write` alone a failed
+  write is reported at once. A failed upstream socket is closed when its
+  `UpstreamFailed` is delivered; `CloseUpstream` forgets the entry.
+- **Failures of the loop itself** (`epoll_wait`, `epoll_ctl`) end `run`
+  with the error; a failure of one socket never does.
 
 Notes on the wrappers:
 

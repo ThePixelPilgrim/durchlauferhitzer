@@ -14,5 +14,13 @@ compile_error!(
     "durchlauferhitzer needs a 64-bit target (NFR-PORT-01: x86_64, aarch64; 64-bit off_t)"
 );
 
+mod conns;
+pub mod event_loop;
+pub mod log;
+pub mod pool;
 #[allow(unsafe_code)]
 pub mod sys;
+
+pub use event_loop::{Driver, Exit, StopHandle};
+pub use log::{DriverLog, LogEntry, LogSink};
+pub use pool::Pool;

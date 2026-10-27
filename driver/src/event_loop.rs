@@ -1,0 +1,324 @@
+//! The epoll event loop: it runs the core over real sockets, following the
+//! driver contract (`core/src/core/contract.rs`, DRV-01…06, DRV-10,
+//! DRV-13) to the letter.
+//!
+//! One thread owns everything. Each turn waits on the epoll set with a
+//! timeout derived from [`Core::next_deadline`], handles every ready
+//! descriptor (listeners, clients, upstreams, the wake eventfd), then
+//! delivers `TimerFired` if the deadline has passed. Every event goes
+//! through `Driver::deliver`: one `handle` call whose actions are all
+//! performed, in order, before anything else happens (DRV-02), followed by
+//! the connect answers those actions queued (DRV-10: never inside the call
+//! that emitted the `Connect`).
+//!
+//! Clients are in `clients.rs` (accept, reads, writes, their actions),
+//! upstreams in `upstreams.rs`.
+
+mod clients;
+mod upstreams;
+
+use std::collections::{BTreeMap, VecDeque};
+use std::io;
+use std::os::fd::{AsFd, OwnedFd};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use durchlauferhitzer_core::{Action, ConnError, ConnId, Core, Event, Instant, UpstreamId};
+
+use crate::conns::{Client, Token, Upstream};
+use crate::log::{LogEntry, LogSink};
+use crate::pool::Pool;
+use crate::sys::epoll::{Epoll, EpollEvent, Readiness};
+use crate::sys::eventfd::EventFd;
+
+/// How many ready descriptors one `epoll_wait` returns at most.
+const EVENTS_PER_WAIT: usize = 256;
+
+/// How [`Driver::run`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// A [`StopHandle`] asked the loop to stop. The connections still
+    /// open are closed when the driver is dropped. (Task 9 adds the
+    /// signal-driven endings: drained, aborted.)
+    Stopped,
+}
+
+/// Asks a running [`Driver`] to stop: the loop returns
+/// [`Exit::Stopped`] at its next turn. Cheap to clone; usable from any
+/// thread.
+#[derive(Debug, Clone)]
+pub struct StopHandle {
+    wake: Arc<Wake>,
+}
+
+impl StopHandle {
+    /// Sets the stop request and wakes the loop.
+    pub fn stop(&self) -> io::Result<()> {
+        self.wake.stop.store(true, Ordering::SeqCst);
+        self.wake.fd.notify()
+    }
+}
+
+/// The eventfd that wakes the loop, with the stop request it may carry.
+#[derive(Debug)]
+struct Wake {
+    fd: EventFd,
+    stop: AtomicBool,
+}
+
+/// Whether the listeners take new connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Accepting {
+    Open,
+    /// `accept` hit `EMFILE`/`ENFILE`: the listeners are out of the wait
+    /// until a connection closes, so the loop never spins on them.
+    Paused,
+}
+
+/// The time sources: the monotonic clock as the core's [`Instant`] (DRV-06)
+/// and the wall-clock second for `Date` (DRV-13).
+#[derive(Debug)]
+struct Clock {
+    /// The core's instant 0.
+    origin: std::time::Instant,
+    /// The wall-clock second last passed to [`Core::set_date`].
+    second: Option<u64>,
+}
+
+impl Clock {
+    fn now(&self) -> Instant {
+        let nanos = self.origin.elapsed().as_nanos();
+        Instant::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+    }
+
+    /// The wall-clock second if it differs from the last one returned. A
+    /// clock before 1970 counts as second 0.
+    fn changed_second(&mut self) -> Option<u64> {
+        let second = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if self.second == Some(second) {
+            return None;
+        }
+        self.second = Some(second);
+        Some(second)
+    }
+}
+
+/// The production driver: the core on epoll.
+#[derive(Debug)]
+pub struct Driver {
+    core: Core,
+    epoll: Epoll,
+    wake: Arc<Wake>,
+    listeners: Vec<OwnedFd>,
+    accepting: Accepting,
+    /// The static roots, opened once at startup, indexed by `RootId`
+    /// (DRV-07); used by the file contract (Task 6).
+    _roots: Vec<OwnedFd>,
+    /// The disk worker pool; a stub until Task 6.
+    _pool: Option<Pool>,
+    log: LogSink,
+    clients: BTreeMap<ConnId, Client>,
+    upstreams: BTreeMap<UpstreamId, Upstream>,
+    /// Upstreams whose connect outcome waits to be delivered.
+    answers: VecDeque<UpstreamId>,
+    /// The next connection id: from 1, never reused (DRV-01).
+    next_conn: u64,
+    clock: Clock,
+    /// Reused for every `handle` call.
+    actions: Vec<Action>,
+}
+
+impl Driver {
+    /// A driver for `core`, accepting on `listeners` (bound, listening,
+    /// non-blocking sockets), with the static roots opened at startup in
+    /// [`Core::static_roots`] order, the disk pool and the log sink.
+    pub fn new(
+        core: Core,
+        listeners: Vec<OwnedFd>,
+        roots: Vec<OwnedFd>,
+        pool: Option<Pool>,
+        log: LogSink,
+    ) -> io::Result<Driver> {
+        let epoll = Epoll::new()?;
+        let wake = Arc::new(Wake {
+            fd: EventFd::new()?,
+            stop: AtomicBool::new(false),
+        });
+        epoll.add(wake.fd.as_fd(), token(Token::Wake)?, Readiness::Read)?;
+        for (i, listener) in listeners.iter().enumerate() {
+            let i = u32::try_from(i).map_err(|_| too_many("listeners"))?;
+            epoll.add(
+                listener.as_fd(),
+                token(Token::Listener(i))?,
+                Readiness::Read,
+            )?;
+        }
+        Ok(Driver {
+            core,
+            epoll,
+            wake,
+            listeners,
+            accepting: Accepting::Open,
+            _roots: roots,
+            _pool: pool,
+            log,
+            clients: BTreeMap::new(),
+            upstreams: BTreeMap::new(),
+            answers: VecDeque::new(),
+            next_conn: 1,
+            clock: Clock {
+                origin: std::time::Instant::now(),
+                second: None,
+            },
+            actions: Vec::new(),
+        })
+    }
+
+    /// A handle that stops [`Driver::run`] from another thread.
+    pub fn stop_handle(&self) -> StopHandle {
+        StopHandle {
+            wake: Arc::clone(&self.wake),
+        }
+    }
+
+    /// Runs the loop until it is asked to stop. An `Err` is a failure of
+    /// the loop itself (`epoll_wait`, `epoll_ctl`), never of one
+    /// connection.
+    pub fn run(&mut self) -> io::Result<Exit> {
+        let mut events = vec![EpollEvent::EMPTY; EVENTS_PER_WAIT];
+        loop {
+            if self.wake.stop.load(Ordering::SeqCst) {
+                return Ok(Exit::Stopped);
+            }
+            let timeout = self.timeout();
+            let n = self.epoll.wait(&mut events, timeout)?;
+            for event in events.iter().take(n) {
+                self.dispatch(event)?;
+            }
+            self.fire_timer()?;
+        }
+    }
+
+    /// How long to wait: until [`Core::next_deadline`] (DRV-06), forever
+    /// without one. `Epoll::wait` rounds up to whole milliseconds, so the
+    /// loop never wakes before the deadline.
+    fn timeout(&self) -> Option<Duration> {
+        let deadline = self.core.next_deadline()?;
+        let now = self.clock.now();
+        Some(Duration::from_nanos(
+            deadline.as_nanos().saturating_sub(now.as_nanos()),
+        ))
+    }
+
+    /// Delivers `TimerFired` once the deadline has passed (DRV-06).
+    fn fire_timer(&mut self) -> io::Result<()> {
+        match self.core.next_deadline() {
+            Some(deadline) if deadline <= self.clock.now() => self.deliver(Event::TimerFired),
+            Some(_) | None => Ok(()),
+        }
+    }
+
+    fn dispatch(&mut self, event: &EpollEvent) -> io::Result<()> {
+        // A value no token encodes to cannot come from our registrations.
+        let Some(token) = Token::decode(event.token()) else {
+            return Ok(());
+        };
+        match token {
+            Token::Listener(i) => self.accept_all(i),
+            Token::Client(conn) => self.client_event(conn, event.readiness(), event.trouble()),
+            Token::Upstream(up) => self.upstream_event(up, event.readiness(), event.trouble()),
+            Token::Wake => {
+                // The stop request is read at the top of the loop.
+                self.wake.fd.drain()?;
+                Ok(())
+            }
+            // Not registered before Task 9.
+            Token::Signal => Ok(()),
+        }
+    }
+
+    /// One event into the core (DRV-02): its actions are performed in
+    /// order; then every connect answer they queued is delivered, each as
+    /// its own later event (DRV-10).
+    fn deliver(&mut self, event: Event) -> io::Result<()> {
+        self.call(event)?;
+        while let Some(up) = self.answers.pop_front() {
+            if let Some(answer) = self.take_answer(up)? {
+                self.call(answer)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One `handle` call and its actions. The wall-clock second is passed
+    /// on first whenever it changed (DRV-13).
+    fn call(&mut self, event: Event) -> io::Result<()> {
+        if let Some(second) = self.clock.changed_second() {
+            self.core.set_date(second);
+        }
+        let now = self.clock.now();
+        let mut actions = std::mem::take(&mut self.actions);
+        actions.clear();
+        self.core.handle(now, event, &mut actions);
+        let mut result = Ok(());
+        for action in actions.drain(..) {
+            if result.is_ok() {
+                result = self.apply(action);
+            }
+        }
+        self.actions = actions;
+        result
+    }
+
+    /// Performs one action. Every variant is matched, so a new action is a
+    /// compile error here.
+    fn apply(&mut self, action: Action) -> io::Result<()> {
+        match action {
+            Action::SetInterest { conn, interest } => self.set_interest(conn, interest),
+            Action::ShutdownWrite { conn } => {
+                self.shutdown_write(conn);
+                Ok(())
+            }
+            Action::Close { conn } => self.close(conn),
+            // The file contract arrives with the pool (Task 6). With no
+            // static roots the core never opens a file.
+            Action::OpenFile { .. } | Action::Readahead { .. } | Action::CloseFile { .. } => Ok(()),
+            Action::Connect { up, backend } => self.connect(up, backend),
+            Action::SetUpstreamInterest { up, interest } => {
+                self.set_upstream_interest(up, interest)
+            }
+            Action::CloseUpstream { up } => {
+                self.close_upstream(up);
+                Ok(())
+            }
+            Action::Log(log) => {
+                self.log.write(LogEntry::Core(log));
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A token's epoll value, or an error for an id beyond the token space.
+fn token(token: Token) -> io::Result<u64> {
+    token.encode().ok_or_else(|| too_many("ids"))
+}
+
+fn too_many(what: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("too many {what} for the epoll token space"),
+    )
+}
+
+/// The contract's mapping of a socket error (DRV-09, DRV-10): `ECONNRESET`
+/// and `EPIPE` are `Reset`, anything else `Other`.
+fn conn_error(err: &io::Error) -> ConnError {
+    match err.raw_os_error() {
+        Some(libc::ECONNRESET | libc::EPIPE) => ConnError::Reset,
+        Some(_) | None => ConnError::Other,
+    }
+}
