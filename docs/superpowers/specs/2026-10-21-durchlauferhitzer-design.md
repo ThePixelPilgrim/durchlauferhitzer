@@ -10,10 +10,11 @@ Status: approved — **single source of truth** for what the product must do.
   *withdrawn*. Plans, reviews, ledgers and commit messages cite IDs instead
   of restating requirements. A new owner decision is written here first
   (new ID or edited text), then cited.
-- Status tags: **[done]** implemented and tested (stages 1–2, and stage 3
-  Tasks 1–3); **[stage N]** due in that stage of the timeline; **[open]**
-  waits for an owner decision (see "Open decisions" at the end). "since
-  stage N" notes when a decision was taken.
+- Status tags: **[done]** implemented and tested (stages 1–3);
+  **[done in core; driver stage 4]** the core's half is done and the
+  epoll driver's is due; **[stage N]** due in that stage of the
+  timeline; **[open]** waits for an owner decision (see "Open decisions"
+  at the end). "since stage N" notes when a decision was taken.
 - Rationale is kept short and next to its requirement, in *italics*.
 - Exact enum names, module layout and buffer sizes are implementation
   details unless a requirement names them; the driver contract lives in the
@@ -494,7 +495,8 @@ Core-generated responses:
 
 Implemented building blocks: response-head parser (FR-PROXY-14…18) and
 chunked validator (FR-PROXY-19) [done in stage 3 Tasks 2–3]; the rest
-of the proxy in stage 3 Tasks 4–8. Each requirement carries its status.
+of the proxy [done in stage 3 Tasks 4–9 and the final review fixes].
+Each requirement carries its status.
 
 Forwarding and identity:
 
@@ -1002,7 +1004,7 @@ Failures, persistence, timeouts:
 
 ### NFR-SEC — Security
 
-- **NFR-SEC-01** [done; proxy stage 3] No request smuggling: every framing
+- **NFR-SEC-01** [done] No request smuggling: every framing
   ambiguity is a hard rejection (FR-HTTP-03…08, -09a, FR-PROXY-16, -19).
 - **NFR-SEC-02** [done in stage 3 Task 9] A backend receives exactly one
   well-framed request per client request: `Content-Length` +
@@ -1031,9 +1033,9 @@ Failures, persistence, timeouts:
 - **NFR-SEC-06** [done] No header injection: CR, LF, NUL and other control
   bytes are never accepted in header values, reasons or targets, and only
   validated bytes are rendered into heads.
-- **NFR-SEC-07** [done; driver stage 4] No log injection: decoded control
-  bytes cannot reach the core (FR-HTTP-14), logs keep the raw path
-  (FR-LOG-04), and the driver escapes untrusted fields (FR-LOG-05).
+- **NFR-SEC-07** [done in core; driver stage 4] No log injection: decoded
+  control bytes cannot reach the core (FR-HTTP-14), logs keep the raw
+  path (FR-LOG-04), and the driver escapes untrusted fields (FR-LOG-05).
 - **NFR-SEC-08** [done by construction] Not an open proxy: a proxied
   request only ever goes to a backend named in the config; absolute-form
   and `CONNECT` are rejected (FR-HTTP-11).
@@ -1043,17 +1045,17 @@ Failures, persistence, timeouts:
   resumable, with total work O(`max_head`) per head however it is split; the
   chunked validator re-judges at most 35 bytes per call. *(stage 1 review
   I1: a stateless rescan let ~7 MB/s of input saturate the loop)*
-- **NFR-SEC-11** [done static; proxy stage 3; driver stage 4] A slow
-  client, slow disk or slow backend never stalls other connections: the
-  core never blocks, disk work runs on driver workers, and every waiting
-  state has a deadline.
+- **NFR-SEC-11** [done in core; driver stage 4] A slow client, slow disk
+  or slow backend never stalls other connections: the core never blocks,
+  disk work runs on driver workers, and every waiting state has a
+  deadline.
 - **NFR-SEC-12** [stage 4/5] Least privilege: never root after binding
   (FR-PROC-03); Landlock and seccomp (FR-PROC-06).
 - **NFR-SEC-13** [stage 5] Parsers and the config language are fuzzed.
 
 ### NFR-RES — Resource bounds
 
-- **NFR-RES-01** [done; upstream buffers stage 3] Memory per connection is
+- **NFR-RES-01** [done] Memory per connection is
   fixed by the config:
   - a counted connection: one receive buffer of
     `max(max_head, max_request_line + 2)` bytes plus one send buffer of
@@ -1108,7 +1110,7 @@ Failures, persistence, timeouts:
   sockets (refused ones included); from stage 3 at most one upstream socket
   per counted connection; plus the static roots, listeners and the eventfd.
   The driver checks `RLIMIT_NOFILE` against this at startup.
-- **NFR-RES-06** [done; upstreams stage 3] Every opened file is closed
+- **NFR-RES-06** [done] Every opened file is closed
   exactly once and every upstream is closed exactly once, on every path
   (normal end, error, reset, timeout, orphan).
 - **NFR-RES-07** [done] Body transfers in either direction are bounded by
@@ -1128,7 +1130,7 @@ Failures, persistence, timeouts:
   with more bytes.
 - **NFR-ROB-03** [done] The parsers hold their guarantees for any limits,
   not just validated config values.
-- **NFR-ROB-04** [done; upstreams stage 3] The core tolerates driver
+- **NFR-ROB-04** [done] The core tolerates driver
   mistakes without panicking: events for unknown connections, files or
   upstreams are ignored, a duplicate `Accepted` is ignored, a file or
   upstream event that does not fit its state is ignored (an upstream's
@@ -1137,7 +1139,7 @@ Failures, persistence, timeouts:
   and reported lengths larger than offered are clamped; an impossible
   answer (`Truncated` or `Changed` to an `OpenFile`) closes the
   connection.
-- **NFR-ROB-05** [done; upstreams stage 3] Late events after a connection
+- **NFR-ROB-05** [done] Late events after a connection
   closed are harmless: a late `FileOpened` is answered with `CloseFile`, a
   late `FileFailed` ignored; nothing is delivered for an upstream after
   `CloseUpstream`.
@@ -1174,9 +1176,9 @@ Failures, persistence, timeouts:
   dependency tree contains anything but workspace crates and `libc`
   (`scripts/check-product-deps.sh`). Stage 4: match workspace members
   rather than a name prefix, check all targets, add a self-test.
-- **NFR-MAINT-05** [done; driver stage 4] `unsafe` is forbidden in the
-  core; the driver confines it to a small, documented `libc` wrapper
-  module.
+- **NFR-MAINT-05** [done in core; driver stage 4] `unsafe` is forbidden
+  in the core; the driver confines it to a small, documented `libc`
+  wrapper module.
 - **NFR-MAINT-06** [done] Exhaustive enum handling: no `_ =>` arm on an
   enum anywhere (tests' helpers included);
   `clippy::wildcard_enum_match_arm` is denied.
@@ -1219,7 +1221,7 @@ Targets are set in stage 7 from measurements; none are invented here.
 
 ### NFR-TEST — Verification
 
-- **NFR-TEST-01** [done; backends stage 3] Every behaviour is tested
+- **NFR-TEST-01** [done] Every behaviour is tested
   through a simulated network, clock, file system and (stage 3) scripted
   backends, with fault injection: arbitrary chunking down to single bytes,
   slow and stalled readers, EOF and resets, slow disks, symlinks, denied and
@@ -1227,7 +1229,7 @@ Targets are set in stage 7 from measurements; none are invented here.
   refuse, hang, misframe or reset.
 - **NFR-TEST-02** [done] The sim records every event and action; a failure
   prints the exact transition sequence.
-- **NFR-TEST-03** [done; upstreams stage 3] The sim checks the driver
+- **NFR-TEST-03** [done] The sim checks the driver
   contract from the core's side after every step: no actions for unknown
   or closed connections, files or upstreams; no second close; buffers within
   capacity; no stalled output; files and upstreams closed exactly once and
@@ -1246,7 +1248,7 @@ Targets are set in stage 7 from measurements; none are invented here.
 - **NFR-TEST-05** [done] Property tests: parsers never panic; a prefix
   never contradicts the full input; accepted paths never contain dot
   segments, `//`, `\` or NUL after decoding.
-- **NFR-TEST-06** [done static; proxy stage 3] Bounded memory, intact bytes,
+- **NFR-TEST-06** [done] Bounded memory, intact bytes,
   fill-drain-refill and write sizes are asserted with bodies far larger
   than the buffers.
 - **NFR-TEST-07** [stage 4] Smoke tests over real loopback sockets; a sim
@@ -1341,9 +1343,9 @@ project working and tested.
 2. **Static files** [done] — simulated file system, path decoding and
    validation, open/readahead/sendfile actions, index.html, content types,
    HEAD, mid-transfer failures.
-3. **Reverse proxy** [in progress: Tasks 1–3 done] — backend connections in
-   the simulation, header handling, `strip_prefix`, body streaming with
-   backpressure, 502/504, misbehaving backends.
+3. **Reverse proxy** [done] — backend connections in the simulation,
+   header handling, `strip_prefix`, body streaming with backpressure,
+   502/504, misbehaving backends.
 4. **epoll driver + binary** — the real driver, worker pool, `eventfd`,
    `sendfile`, `openat2`, logging output, CLI, privilege drop, systemd
    socket activation, SIGTERM drain, a few smoke tests over real loopback
