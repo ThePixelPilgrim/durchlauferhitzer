@@ -1380,7 +1380,11 @@ Targets are set in stage 7 from measurements; none are invented here.
   fill-drain-refill and write sizes are asserted with bodies far larger
   than the buffers.
 - **NFR-TEST-07** [stage 4] Smoke tests over real loopback sockets; a sim
-  mode with late timers (I/O delivered before an overdue `TimerFired`).
+  mode with late timers, `Sim::set_timer_order(TimerOrder::Late)` (default
+  `TimerOrder::OnTime`): `advance` wakes once, at its end, and delivers
+  every queued I/O and every disk completion due by then before the
+  overdue `TimerFired`, as a real loop that overslept does. The randomized
+  nets run one seed in four (`seed % 4 == 0`) in it.
 - **NFR-TEST-08** [stage 5] Long randomized runs and fuzzing.
 
 ---

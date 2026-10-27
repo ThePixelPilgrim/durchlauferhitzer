@@ -14,6 +14,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     });
     // Here the backend refuses, so every forwarded request is a 502;
     // proxying itself has a randomized net of its own (`proxy/`).
+    sim.set_timer_order(timer_order(seed));
     sim.set_connect("127.0.0.1:3000", ConnectBehaviour::Refuse);
     // One seed in three serves files up to 1 MiB.
     let big = rng.u8(0..3) == 0;
@@ -73,13 +74,15 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
         collect(&mut sim, &mut clients);
     }
     // Wind down: every client sends EOF, then 5 minutes pass (longer than
-    // any disk delay, so every open and readahead is answered).
+    // any disk delay, so every open and readahead is answered), again
+    // while anything is still due: with late timers each wake runs out
+    // only the deadlines due by then, and the next ones start from it.
     for client in &clients {
         sim.send_eof(client.id);
     }
     sim.run_until_idle();
     collect(&mut sim, &mut clients);
-    sim.advance(Duration::from_secs(300));
+    wind_down_clock(&mut sim);
     collect(&mut sim, &mut clients);
     for id in sim.conn_ids() {
         assert_eq!(
@@ -172,6 +175,19 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     );
 }
 
+/// Let 5 minutes pass, a few times over while anything is still due
+/// (`Sim::next_due`): once on time, at most a handful of wakes with late
+/// timers, one per deadline of a chain (an open answered late, its
+/// response, the next head's timeout, a lingering close).
+pub(crate) fn wind_down_clock(sim: &mut Sim) {
+    for _ in 0..8 {
+        sim.advance(Duration::from_secs(300));
+        if sim.next_due().is_none() {
+            return;
+        }
+    }
+}
+
 /// The seed to replay, from `SIM_SEED`, if set (every randomized net of
 /// this binary replays it).
 pub(crate) fn replay_seed() -> Option<u64> {
@@ -184,8 +200,8 @@ pub(crate) fn replay_seed() -> Option<u64> {
     }
 }
 
-/// Run one seed; on failure, panic with `SIM_SEED=<seed>` and the original
-/// message (which carries the trace).
+/// Run one seed; on failure, panic with `SIM_SEED=<seed>`, the seed's
+/// timer order and the original message (which carries the trace).
 pub(crate) fn run_reporting(seed: u64, run: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(run)) {
         let message = payload
@@ -193,7 +209,10 @@ pub(crate) fn run_reporting(seed: u64, run: impl FnOnce()) {
             .cloned()
             .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
             .unwrap_or_default();
-        panic!("SIM_SEED={seed} failed: {message}");
+        panic!(
+            "SIM_SEED={seed} failed (timer order {:?}): {message}",
+            timer_order(seed)
+        );
     }
 }
 

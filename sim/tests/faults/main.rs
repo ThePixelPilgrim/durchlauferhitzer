@@ -25,7 +25,7 @@ use durchlauferhitzer_core::{
     ConnId, FileError, FileStamp, LimitKind, Log, RejectReason, RequestBodyError, RequestLine,
     RequestSummary, TimeoutKind,
 };
-use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
+use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, TimerOrder, Window};
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test { path / { static /srv/www; } }";
@@ -97,6 +97,17 @@ fn dated_sim(config: &str) -> Sim {
     let mut sim = Sim::new(config);
     sim.set_date(NET_DATE.0);
     sim
+}
+
+/// The timer order a seed of either net runs in: one seed in four with
+/// late timers (NFR-TEST-07), chosen from the seed alone so that a failure
+/// replays from `SIM_SEED`.
+fn timer_order(seed: u64) -> TimerOrder {
+    if seed % 4 == 0 {
+        TimerOrder::Late
+    } else {
+        TimerOrder::OnTime
+    }
 }
 
 /// A fixed response, by the model (`support/model_http.rs`), not the core's renderer.

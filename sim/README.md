@@ -10,6 +10,10 @@ What it simulates:
 - **Clients** — byte delivery in arbitrary chunks, slow or stalled readers
   (`Window`), end of input and resets.
 - **Time** — a virtual clock; `advance` fires the core's deadlines in order.
+  With `Sim::set_timer_order(TimerOrder::Late)` (NFR-TEST-07) it instead
+  wakes once, at the end of the advance, as a real loop that overslept:
+  every queued I/O and every disk completion due by then is delivered
+  first, then the overdue `TimerFired` (default `TimerOrder::OnTime`).
 - **A file system** ([`src/fs.rs`](src/fs.rs)) — files, directories, symlinks,
   denied entries, special files, slow disks, files that shrink or change
   while they are being sent.
@@ -54,6 +58,8 @@ tests/
   limits.rs           timeouts, connection caps, lingering close
   shutdown.rs         the graceful drain and the fast path (FR-PROC-05):
                       `Sim::begin_drain`, `abort_all`, `is_drained`
+  late_timers.rs      the late-timer mode (NFR-TEST-07): I/O and disk
+                      completions before an overdue `TimerFired`
   static_files/       static routes end to end (one test binary)
     main.rs             shared configs and helpers
     transfer.rs         chunks, slow disks and clients, changing files, resets
@@ -117,6 +123,10 @@ SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_proxy_schedules
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_fault_schedules
 ```
+
+One seed in four of either net (`seed % 4 == 0`) runs with late timers
+(`TimerOrder::Late`); the order follows from the seed alone, and a failure
+prints it beside `SIM_SEED`.
 
 Both nets (the whole `faults` binary) run with a date set (`Sim::set_date`,
 the RFC 9110 example `Sun, 06 Nov 1994 08:49:37 GMT`), so every response
