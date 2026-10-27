@@ -7,7 +7,7 @@
 
 use super::request::HeadEnd;
 use super::{Action, ConnId, Core};
-use crate::config::{BackendAddr, BodyLimit, ProxyRoute, Route, StripPrefix};
+use crate::config::{BackendAddr, BodyLimit, Limits, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, UnreadBody};
 use crate::http::forward::{backend_request_len, check_forwardable, render_backend_request};
 use crate::http::request::{BodyFraming, Expect, Method, Persistence, RequestHead};
@@ -475,27 +475,11 @@ impl Core {
         kind: BackendFailure,
         actions: &mut Vec<Action>,
     ) {
-        let deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        // Behind an unread `100 Continue` the send idle deadline runs on: it
-        // restarts only when the client takes a byte.
-        let deadline = match c.state {
-            ConnState::AwaitingResponse {
-                send_deadline: Some(unread_continue),
-                ..
-            } => unread_continue,
-            ConnState::AwaitingResponse { .. }
-            | ConnState::ReadingHead { .. }
-            | ConnState::Idle { .. }
-            | ConnState::Responding { .. }
-            | ConnState::OpeningFile { .. }
-            | ConnState::SendingFile { .. }
-            | ConnState::Connecting { .. }
-            | ConnState::Relaying { .. }
-            | ConnState::Lingering { .. } => deadline,
-        };
+        let deadline = queued_send_deadline(c.state.unread_continue(), now, limits);
         let Some((up, mut request)) = take_request(c) else {
             return;
         };
@@ -624,6 +608,19 @@ impl Core {
             | ConnState::Lingering { .. } => {}
         }
     }
+}
+
+/// The send idle deadline of a response (a 408, 502 or 504, or a proxied
+/// response) queued at `now` on a connection that awaited its response.
+/// Behind an unread `100 Continue` the deadline the `100` started runs on:
+/// it restarts only when the client takes a byte (FR-PROXY-25 carry-over).
+/// Otherwise it starts now.
+pub(super) fn queued_send_deadline(
+    unread_continue: Option<Instant>,
+    now: Instant,
+    limits: &Limits,
+) -> Instant {
+    unread_continue.unwrap_or_else(|| now.saturating_add(limits.send_idle_timeout))
 }
 
 /// What the core answers itself to `Expect: 100-continue`.

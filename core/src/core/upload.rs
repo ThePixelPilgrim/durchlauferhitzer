@@ -3,7 +3,7 @@
 //! fill, drain, refill (NFR-RES-04), its framing and limit errors
 //! (FR-PROXY-19, -23) and a client that stalls it (FR-PROXY-26).
 
-use super::proxy::body_mode;
+use super::proxy::{body_mode, queued_send_deadline};
 use super::{Action, ConnId, Core};
 use crate::config::Limits;
 use crate::conn::{ConnState, UnreadBody};
@@ -149,23 +149,15 @@ impl Core {
     /// next body bytes, before the response head: the client is at fault,
     /// so it gets a 408 and closes; the upstream is closed (FR-PROXY-26).
     pub(super) fn body_stalled(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
-        let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        let ConnState::AwaitingResponse {
-            up,
-            request,
-            send_deadline: unread_continue,
-            ..
-        } = &c.state
-        else {
+        let send_deadline = queued_send_deadline(c.state.unread_continue(), now, limits);
+        let ConnState::AwaitingResponse { up, request, .. } = &c.state else {
             return;
         };
         let (up, body) = (*up, body_mode(&request.summary.method));
-        // Behind an unread `100 Continue` the send idle deadline runs on: it
-        // restarts only when the client takes a byte.
-        let send_deadline = unread_continue.unwrap_or(send_deadline);
         render_fixed(
             Status::RequestTimeout,
             Persistence::Close,

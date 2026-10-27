@@ -160,7 +160,8 @@ pub(crate) enum ConnState {
     /// `persistence` and `buffered` as in `Responding`. `deadline` is the
     /// send idle timeout while the client has bytes to take or nothing more
     /// is due, the body idle timeout while it waits for the backend's next
-    /// bytes; reset on progress.
+    /// bytes. The send idle deadline restarts only when the client takes
+    /// bytes, never on backend progress (FR-CONN-08).
     Relaying {
         body: RelayBody,
         buffers: ExchangeBuffers,
@@ -217,6 +218,22 @@ impl ConnState {
             | ConnState::Connecting { deadline, .. }
             | ConnState::Relaying { deadline, .. }
             | ConnState::Lingering { deadline } => deadline,
+        }
+    }
+
+    /// The send idle deadline of an unread `100 Continue` the client still
+    /// has to take, while the connection awaits its response.
+    pub(crate) fn unread_continue(&self) -> Option<Instant> {
+        match *self {
+            ConnState::AwaitingResponse { send_deadline, .. } => send_deadline,
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::Relaying { .. }
+            | ConnState::Lingering { .. } => None,
         }
     }
 

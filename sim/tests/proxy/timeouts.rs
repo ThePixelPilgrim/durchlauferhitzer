@@ -698,3 +698,43 @@ fn head_deadline_tied_with_body_idle_is_504() {
     assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
 }
+
+/// Send idle 3 s, body idle 20 s.
+const SEND_3: &str = "listen 127.0.0.1:8080;
+limits { send_idle_timeout 3s; body_idle_timeout 20s; }
+host example.test {
+  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+}";
+
+/// FR-CONN-08 (final review I2): only the client taking bytes restarts its
+/// send idle deadline. A client that never reads its response head is cut
+/// 3 s after the head was queued, although the backend trickles one byte
+/// of a chunk-size line every 2 s (each only grows the chunked tail, so
+/// the upstream keeps being read).
+#[test]
+fn chunk_size_trickle_does_not_hold_a_stalled_client() {
+    let mut sim = Sim::new(SEND_3);
+    let c = request(&mut sim, GET_X);
+    sim.set_client_window(c, Window::Stalled);
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+    sim.run_until_idle();
+    sim.advance(Duration::from_secs(2));
+    sim.backend_send(up, b"0");
+    sim.run_until_idle();
+    sim.advance(Duration::from_millis(999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
+}

@@ -345,12 +345,27 @@
 //!   starts a fresh one. The connection times out at the earlier of the
 //!   cap and the other deadline; the cap's expiry is a 504
 //!   ([`BackendFailure::ResponseTimeout`]) even while the body streams;
+//! - while a `100 Continue` the core queued waits for the client
+//!   (awaiting the response): also the client's `send_idle_timeout`, from
+//!   the moment the `100` is queued, restarted only by a byte the client
+//!   takes and dropped once the whole `100` is out; on expiry the
+//!   connection is cut, logged as a send timeout, the upstream closed.
+//!   Deadlines that fall due at the same instant are taken in this order:
+//!   this send deadline, then the current head's cap, then the deadline
+//!   that otherwise applies (body idle or response timeout). A response
+//!   queued behind an unread `100` (a 408, 502 or 504 of the core's own, or
+//!   a proxied response) does not restart the send idle deadline: the one
+//!   the `100` started carries over;
 //! - relaying a response: the client's `send_idle_timeout` while the client
 //!   has bytes to take (or nothing more is due from the backend),
-//!   `body_idle_timeout` while it waits for the backend's next body bytes;
-//!   reset on progress either way. On expiry the connection is cut, logged
-//!   as a send timeout when the client had bytes to take, as a backend
-//!   response timeout otherwise;
+//!   `body_idle_timeout` while it waits for the backend's next body bytes.
+//!   Only the client taking bytes restarts the send idle deadline: backend
+//!   progress (body bytes, a chunked tail that grew, the end of stream)
+//!   keeps it while the client already had bytes to take, starts it from
+//!   now when the client had none and now has some, and restarts the body
+//!   idle deadline while the client still waits. On expiry the connection
+//!   is cut, logged as a send timeout when the client had bytes to take,
+//!   as a backend response timeout otherwise;
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
 //!

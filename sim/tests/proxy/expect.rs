@@ -299,6 +299,45 @@ fn unread_100_continue_carries_its_send_deadline_into_a_relay() {
     );
 }
 
+/// The carry-over holds when the body comes later than the head (final
+/// review I2): body bytes from the backend are not the client's progress,
+/// so the client, which took nothing since the `100` was queued, is still
+/// closed at 7 s although the body arrived at 5 s.
+#[test]
+fn unread_100_continue_carries_its_send_deadline_past_a_late_body() {
+    let mut sim = Sim::new(CAP_FIRST);
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(
+        c,
+        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+          Content-Length: 10\r\n\r\n",
+    );
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.advance(Duration::from_secs(2));
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n");
+    sim.run_until_idle();
+    sim.advance(Duration::from_secs(3));
+    sim.backend_send(up, b"ok");
+    sim.run_until_idle();
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
+}
+
 /// A config with the given send idle, response and body idle timeouts.
 fn timeouts(send: u64, response: u64, body: u64) -> String {
     format!(

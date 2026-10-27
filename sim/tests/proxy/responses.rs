@@ -695,7 +695,9 @@ fn early_close_delimited_response_lingers() {
 /// FR-PROXY-29 (review fix M1): a read that only grows a chunked tail while
 /// the client still has the rewritten head to take keeps the client's
 /// `send_idle_timeout`: a client that takes nothing is cut after 5 s, not
-/// after the 30 s body idle timeout.
+/// after the 30 s body idle timeout. The read at 1 s is backend progress,
+/// not the client's, so it does not restart the deadline either (final
+/// review I2): the cut comes 5 s after the head was queued.
 #[test]
 fn tail_only_read_keeps_the_send_timeout_while_the_head_is_unsent() {
     let mut sim = Sim::new(SHORT_SEND_IDLE);
@@ -708,7 +710,7 @@ fn tail_only_read_keeps_the_send_timeout_while_the_head_is_unsent() {
     // Only the size line's CR: the tail grows, nothing new for the client.
     sim.backend_send(up, b"\r");
     sim.run_until_idle();
-    sim.advance(Duration::from_millis(4999));
+    sim.advance(Duration::from_millis(3999));
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     sim.advance(Duration::from_millis(1));
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());

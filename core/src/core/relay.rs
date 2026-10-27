@@ -4,7 +4,7 @@
 //! (FR-PROXY-19…22, -24, -28; NFR-RES-04), and the failures after the head
 //! (FR-PROXY-26: the connection is cut).
 
-use super::proxy::close_upstream;
+use super::proxy::{close_upstream, queued_send_deadline};
 use super::request::{AfterResponse, finish};
 use super::{Action, ConnId, Core};
 use crate::config::Limits;
@@ -114,9 +114,7 @@ impl Core {
         }
         // The rewritten head is for the client to take now.
         c.state = ConnState::Relaying {
-            // Behind an unread `100 Continue` the send idle deadline runs
-            // on: it restarts only when the client takes a byte.
-            deadline: unread_continue.unwrap_or_else(|| relay_deadline(now, true, &body, limits)),
+            deadline: queued_send_deadline(unread_continue, now, limits),
             body,
             buffers,
             persistence,
@@ -148,6 +146,7 @@ impl Core {
         else {
             return;
         };
+        let before = client_side(&c.send, buffers, body);
         // `upstream_received` checked that a read was offered (the body is
         // open and drained), so the bytes are new progress.
         match body.received(len, &mut buffers.recv) {
@@ -158,11 +157,11 @@ impl Core {
                 return;
             }
         }
-        // Progress either way: bytes for the client, or a chunked tail
-        // that grew. The client may still have the head (or its own send
+        // Backend progress: bytes for the client, or a chunked tail that
+        // grew. The client may still have the head (or its own send
         // buffer) to take even when no body byte is new (FR-PROXY-29).
-        let pending = client_pending(&c.send, buffers, body);
-        *deadline = relay_deadline(now, pending, body, limits);
+        let after = client_side(&c.send, buffers, body);
+        *deadline = after_backend_progress(*deadline, before, now, after, body, limits);
         self.sync_interest(conn, actions);
     }
 
@@ -197,12 +196,13 @@ impl Core {
         if body.upstream() != Some(up) || body.unsent_len() > 0 {
             return false;
         }
+        let before = client_side(&c.send, buffers, body);
         let Some(up) = body.end_of_stream() else {
             return false;
         };
         close_upstream(&mut self.upstreams, up, actions);
-        let pending = client_pending(&c.send, buffers, body);
-        *deadline = relay_deadline(now, pending, body, limits);
+        let after = client_side(&c.send, buffers, body);
+        *deadline = after_backend_progress(*deadline, before, now, after, body, limits);
         self.finish_relay(now, conn, actions);
         self.sync_interest(conn, actions);
         true
@@ -271,8 +271,9 @@ impl Core {
         if sent == 0 {
             return;
         }
-        let pending = client_pending(&c.send, buffers, body);
-        *deadline = relay_deadline(now, pending, body, limits);
+        // The client took bytes: its progress restarts the deadline.
+        let side = client_side(&c.send, buffers, body);
+        *deadline = relay_deadline(now, side, body, limits);
         self.finish_relay(now, conn, actions);
         self.sync_interest(conn, actions);
     }
@@ -294,8 +295,9 @@ impl Core {
         else {
             return;
         };
-        if client_pending(&c.send, buffers, body) || body.upstream().is_some() {
-            return;
+        match (client_side(&c.send, buffers, body), body.upstream()) {
+            (ClientSide::HasBytes, _) | (ClientSide::Waits, Some(_)) => return,
+            (ClientSide::Waits, None) => {}
         }
         let after = AfterResponse {
             persistence: *persistence,
@@ -307,21 +309,57 @@ impl Core {
     }
 }
 
-/// Whether the client of a relaying connection has bytes to take: of its
-/// own send buffer (a `100 Continue`), of the rewritten head, or of the
-/// body.
-fn client_pending(send: &[u8], buffers: &ExchangeBuffers, body: &RelayBody) -> bool {
-    !send.is_empty() || !buffers.head.is_empty() || body.unsent_len() > 0
+/// Whether the client of a relaying connection has bytes to take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClientSide {
+    /// Of its own send buffer (a `100 Continue`), of the rewritten head,
+    /// or of the body.
+    HasBytes,
+    /// Nothing: it waits for the backend (or for the end of the exchange).
+    Waits,
 }
 
-/// The deadline of a relaying connection after progress at `now`: the
-/// client's `send_idle_timeout` while it has bytes to take (`pending`) or
-/// nothing more is due from the backend, the body idle timeout while it
-/// waits for the backend's next bytes (FR-PROXY-29).
-fn relay_deadline(now: Instant, pending: bool, body: &RelayBody, limits: &Limits) -> Instant {
-    match (pending, body.upstream()) {
-        (true, _) | (false, None) => now.saturating_add(limits.send_idle_timeout),
-        (false, Some(_)) => now.saturating_add(limits.body_idle_timeout),
+/// What the client of a relaying connection has to take.
+pub(super) fn client_side(send: &[u8], buffers: &ExchangeBuffers, body: &RelayBody) -> ClientSide {
+    if !send.is_empty() || !buffers.head.is_empty() || body.unsent_len() > 0 {
+        ClientSide::HasBytes
+    } else {
+        ClientSide::Waits
+    }
+}
+
+/// The deadline of a relaying connection after the client's progress (or
+/// on entry) at `now`: the client's `send_idle_timeout` while it has bytes
+/// to take or nothing more is due from the backend, the body idle timeout
+/// while it waits for the backend's next bytes (FR-PROXY-29).
+fn relay_deadline(now: Instant, client: ClientSide, body: &RelayBody, limits: &Limits) -> Instant {
+    match (client, body.upstream()) {
+        (ClientSide::HasBytes, _) | (ClientSide::Waits, None) => {
+            now.saturating_add(limits.send_idle_timeout)
+        }
+        (ClientSide::Waits, Some(_)) => now.saturating_add(limits.body_idle_timeout),
+    }
+}
+
+/// The deadline of a relaying connection after backend progress at `now`
+/// (body bytes, a chunked tail that grew, or the end of stream), given
+/// what the client had to take `before` it and has `after` it. Backend
+/// progress is not the client's (FR-CONN-08): while the client already
+/// had bytes to take, its send idle deadline runs on (also the one an
+/// unread `100 Continue` started, FR-PROXY-25). Otherwise the deadline
+/// starts now: the send idle timeout once the client has bytes, the body
+/// idle timeout while it still waits for the backend.
+fn after_backend_progress(
+    deadline: Instant,
+    before: ClientSide,
+    now: Instant,
+    after: ClientSide,
+    body: &RelayBody,
+    limits: &Limits,
+) -> Instant {
+    match before {
+        ClientSide::HasBytes => deadline,
+        ClientSide::Waits => relay_deadline(now, after, body, limits),
     }
 }
 

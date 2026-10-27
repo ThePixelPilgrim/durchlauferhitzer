@@ -685,10 +685,13 @@ Bodies:
   `unread_100_continue_stalls_the_body_into_a_408`,
   `unread_100_continue_carries_its_send_deadline_into_a_502`,
   `unread_100_continue_carries_its_send_deadline_into_a_504`,
-  `unread_100_continue_carries_its_send_deadline_into_a_relay`.
+  `unread_100_continue_carries_its_send_deadline_into_a_relay`,
+  `unread_100_continue_carries_its_send_deadline_past_a_late_body`.
   *(Fixed in stage 3 Task 9, review rounds 2 and 3: the send idle timeout
   did not run while a response was awaited, and restarted when a 408 or
-  504 was queued behind the unread `100`.)*
+  504 was queued behind the unread `100`. Fixed in the stage 3 final
+  review, I2: body bytes the backend sent after the relayed head restarted
+  it.)*
 - **FR-PROXY-25a** [done] Outside proxy routes (static routes, route
   misses) `Expect: 100-continue` is never answered with `100 Continue`: the
   normal final response (413, 404, …) is sent at once. Any other `Expect`
@@ -818,7 +821,15 @@ Failures, persistence, timeouts:
   `send_timeout_tied_with_response_timeout_wins`,
   `send_timeout_tied_with_body_idle_wins`). A response queued behind an
   unread `100 Continue` keeps the send idle deadline that started with
-  the `100` (FR-PROXY-25's carry-over rule). A
+  the `100` (FR-PROXY-25's carry-over rule). While a response is
+  relayed, only the client taking bytes restarts its send idle deadline
+  (FR-CONN-08): backend progress (body bytes, a chunked tail that grew, the
+  end of stream) leaves it running while the client already had bytes to
+  take, starts it when the client had none and now has some, and restarts
+  `body_idle_timeout` while the client still waits for the backend
+  (stage 3 final review I2; tests
+  `chunk_size_trickle_does_not_hold_a_stalled_client`,
+  `tail_only_read_keeps_the_send_timeout_while_the_head_is_unsent`). A
   backend trickling response head bytes therefore holds the connection
   for at most `MAX_INTERIM_HEADS` + 1 = 9 heads, each at most
   `backend_response_timeout` from its first byte.
