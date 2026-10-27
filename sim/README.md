@@ -23,7 +23,7 @@ What it simulates:
   slowly (`Window`).
 
 What it checks: after every step the sim verifies the driver contract
-documented in [`../core/src/core/mod.rs`](../core/src/core/mod.rs) from the
+documented in [`../core/src/core/contract.rs`](../core/src/core/contract.rs) from the
 core's side — no actions for closed connections, files or upstreams, buffers
 within their capacities, every file and upstream closed exactly once and never
 left open after its connection, at most one upstream per client, `ReadWrite`

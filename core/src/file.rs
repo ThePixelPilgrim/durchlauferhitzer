@@ -1,6 +1,6 @@
 //! Files as the core sees them: ids, metadata and the ranges the driver
 //! sends. The core never reads file bytes; the driver opens, reads ahead and
-//! `sendfile`s on its behalf (see the contract in the `core` module).
+//! `sendfile`s on its behalf (see the contract in `core/contract.rs`).
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;

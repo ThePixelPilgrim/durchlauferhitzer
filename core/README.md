@@ -17,7 +17,7 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 
 ## Where to start
 
-- **The driver contract** — the module docs of [`src/core/mod.rs`](src/core/mod.rs)
+- **The driver contract** — the module docs of [`src/core/contract.rs`](src/core/contract.rs)
   describe exactly how a driver must talk to the core (buffers, readiness,
   file operations, deadlines, limits). Read this first.
 - **The design** — [`../docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md`](../docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md).
@@ -28,9 +28,10 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 src/
   lib.rs              crate root and re-exports
   core/               the state machine behind `Core::handle`
-    mod.rs              Core, buffers API, event dispatch; driver contract docs
-    contract.rs         Event, Action, Interest, ConnId, ConnError (client,
-                        file and upstream events and actions)
+    mod.rs              Core, buffers API, event dispatch
+    contract.rs         the driver contract (module docs); Event, Action,
+                        Interest, ConnId, ConnError (client, file and
+                        upstream events and actions)
     request.rs          reading request heads, routing, fixed responses,
                         keep-alive, pipelining, lingering close
     static_files.rs     static routes: open, index.html, send, abort

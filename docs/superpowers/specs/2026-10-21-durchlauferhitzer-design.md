@@ -17,7 +17,7 @@ Status: approved — **single source of truth** for what the product must do.
 - Rationale is kept short and next to its requirement, in *italics*.
 - Exact enum names, module layout and buffer sizes are implementation
   details unless a requirement names them; the driver contract lives in the
-  module docs of `core/src/core/mod.rs` (summarised as DRV-…).
+  module docs of `core/src/core/contract.rs` (summarised as DRV-…).
 
 ## Intent
 
@@ -1235,7 +1235,7 @@ Targets are set in stage 7 from measurements; none are invented here.
 ## Driver requirements (DRV)
 
 The binding text is the contract in the module docs of
-`core/src/core/mod.rs`; these are its headlines. Status: [done] where the
+`core/src/core/contract.rs`; these are its headlines. Status: [done] where the
 sim implements and checks it; the epoll driver is [stage 4].
 
 - **DRV-01** Connection ids are allocated by the driver and never reused;
