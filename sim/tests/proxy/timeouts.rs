@@ -593,3 +593,54 @@ fn slow_upload_goes_on_after_an_interim_head() {
         sim.trace()
     );
 }
+
+/// FR-PROXY-29 (owner decision 2026-10-27, refined): a completed interim
+/// head ends its cap, so a client that then stalls its body is blamed as
+/// before: a 408 exactly `body_idle_timeout` (4 s) after its last body
+/// byte (at 2 s), not a 504 at the interim head's first byte + 3 s. A 408
+/// to HEAD is head-only (FR-PROXY-26).
+#[test]
+fn client_stall_after_an_interim_head_is_408() {
+    let head: &[u8] = b"HEAD /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 10\r\n\r\n";
+    for (request, mode) in [(POST_10, BodyMode::Full), (head, BodyMode::HeadOnly)] {
+        let mut sim = Sim::new(TIMEOUTS);
+        let c = sim.connect(peer());
+        sim.send(c, request);
+        sim.send(c, b"0");
+        sim.run_until_idle();
+        let up = only_upstream(&sim);
+        sim.advance(Duration::from_millis(1000));
+        sim.backend_send(up, b"HTTP/1.1 100 Continue\r\n\r\n");
+        sim.run_until_idle();
+        sim.advance(Duration::from_millis(1000));
+        sim.send(c, b"1");
+        sim.run_until_idle();
+        sim.advance(Duration::from_millis(3999));
+        assert!(sim.take_received(c).is_empty(), "{mode:?}\n{}", sim.trace());
+        assert_eq!(sim.open_upstreams(), 1, "{mode:?}\n{}", sim.trace());
+        sim.advance(Duration::from_millis(1));
+        assert_eq!(
+            sim.take_received(c),
+            fixed(Status::RequestTimeout, Persistence::Close, mode),
+            "{mode:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(
+            sim.logs(),
+            &[Log::Rejected {
+                conn: c,
+                peer: peer(),
+                reason: RejectReason::Timeout(TimeoutKind::RequestBody),
+            }],
+            "{mode:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(sim.open_upstreams(), 0, "{mode:?}\n{}", sim.trace());
+        assert_eq!(
+            sim.trace().matches("CloseUpstream").count(),
+            1,
+            "{mode:?}\n{}",
+            sim.trace()
+        );
+    }
+}

@@ -521,9 +521,9 @@ impl Core {
 
     /// A relaying connection's deadline passed. Before the head was queued
     /// that is a 504 (a 408 when the client stalled its body, unless the
-    /// current response head's deadline passed); after it, the connection is cut:
-    /// logged as a send timeout when the client had bytes to take, as a
-    /// backend timeout when the body stalled on the backend's side.
+    /// current response head's deadline passed); after it, the connection
+    /// is cut: logged as a send timeout when the client had bytes to take,
+    /// as a backend timeout when the body stalled on the backend's side.
     pub(super) fn expire_proxy(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
         let Some(c) = self.conns.get(&conn) else {
             return;
