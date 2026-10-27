@@ -283,7 +283,8 @@ fn to_sockaddr(addr: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
             let mut sin6: libc::sockaddr_in6 = unsafe { zeroed() };
             sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
             sin6.sin6_port = v6.port().to_be();
-            sin6.sin6_flowinfo = v6.flowinfo().to_be();
+            // Raw, as std does: `flowinfo` is the C field as it is.
+            sin6.sin6_flowinfo = v6.flowinfo();
             sin6.sin6_addr = libc::in6_addr {
                 s6_addr: v6.ip().octets(),
             };
@@ -321,7 +322,7 @@ fn from_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
         Ok(SocketAddr::V6(SocketAddrV6::new(
             Ipv6Addr::from(sin6.sin6_addr.s6_addr),
             u16::from_be(sin6.sin6_port),
-            u32::from_be(sin6.sin6_flowinfo),
+            sin6.sin6_flowinfo,
             sin6.sin6_scope_id,
         )))
     } else {
@@ -336,7 +337,24 @@ fn from_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
 mod tests {
     use std::os::fd::AsRawFd;
 
-    use super::{get_int_option, tcp_listen};
+    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+
+    use super::{from_sockaddr, get_int_option, tcp_listen, to_sockaddr};
+
+    #[test]
+    fn ipv6_flowinfo_is_passed_raw_like_std() {
+        // std passes `sin6_flowinfo` through unconverted (its docs say
+        // `flowinfo` corresponds to the C field), and so do we, so our
+        // addresses compare equal to std's (A7).
+        let addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 80, 0x0001_2345, 7));
+        let (storage, _) = to_sockaddr(&addr);
+        // SAFETY: `to_sockaddr` wrote a `sockaddr_in6` at the start of the
+        // storage, which is large and aligned enough to read one.
+        let sin6 = unsafe { (&raw const storage).cast::<libc::sockaddr_in6>().read() };
+        assert_eq!(sin6.sin6_flowinfo, 0x0001_2345);
+        assert_eq!(sin6.sin6_scope_id, 7);
+        assert_eq!(from_sockaddr(&storage).unwrap(), addr);
+    }
 
     #[test]
     fn ipv6_listeners_are_ipv6_only() {
