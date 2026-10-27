@@ -713,6 +713,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         );
     }
     sim.advance(Duration::from_secs(600));
+    assert_clock_done(&sim);
     for id in sim.conn_ids() {
         assert!(
             !sim.core_knows(id),

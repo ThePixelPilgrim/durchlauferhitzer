@@ -174,4 +174,4 @@ use fixed::*;
 use generator::*;
 use model::*;
 use oracle::*;
-use run::{replay_seed, run_reporting};
+use run::{assert_clock_done, replay_seed, run_reporting};

@@ -82,7 +82,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     }
     sim.run_until_idle();
     collect(&mut sim, &mut clients);
-    wind_down_clock(&mut sim);
+    wind_down_clock(&mut sim, timer_order(seed));
     collect(&mut sim, &mut clients);
     for id in sim.conn_ids() {
         assert_eq!(
@@ -175,17 +175,32 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     );
 }
 
-/// Let 5 minutes pass, a few times over while anything is still due
-/// (`Sim::next_due`): once on time, at most a handful of wakes with late
-/// timers, one per deadline of a chain (an open answered late, its
-/// response, the next head's timeout, a lingering close).
-pub(crate) fn wind_down_clock(sim: &mut Sim) {
-    for _ in 0..8 {
+/// Let 5 minutes pass (longer than any disk delay and any deadline): once
+/// on time; with late timers again while anything is still due
+/// (`Sim::next_due`), at most 8 wakes, one per deadline of a chain (an
+/// open answered late, its response, the next head's timeout, a
+/// lingering close). Either way the clock must have nothing left to do.
+pub(crate) fn wind_down_clock(sim: &mut Sim, order: TimerOrder) {
+    let rounds = match order {
+        TimerOrder::OnTime => 1,
+        TimerOrder::Late => 8,
+    };
+    for _ in 0..rounds {
         sim.advance(Duration::from_secs(300));
         if sim.next_due().is_none() {
-            return;
+            break;
         }
     }
+    assert_clock_done(sim);
+}
+
+/// Nothing is left for the clock: no deadline, no disk completion.
+pub(crate) fn assert_clock_done(sim: &Sim) {
+    assert!(
+        sim.next_due().is_none(),
+        "clock still has work after wind-down\ntrace:\n{}",
+        sim.trace()
+    );
 }
 
 /// The seed to replay, from `SIM_SEED`, if set (every randomized net of
