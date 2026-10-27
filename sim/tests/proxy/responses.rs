@@ -12,10 +12,14 @@ use durchlauferhitzer_core::http::request::{Method, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::response_head::ResponseError;
 use durchlauferhitzer_core::http::status::Status;
-use durchlauferhitzer_core::{BackendFailure, BackendId, ConnId, Interest, Log, UpstreamId};
+use durchlauferhitzer_core::{
+    BackendFailure, BackendId, ConnId, Interest, Log, RejectReason, TimeoutKind, UpstreamId,
+};
 use durchlauferhitzer_sim::{Sim, SimConnState, Window};
 
-use super::{CONFIG, GET_X, LARGE, assert_502, fixed, only_upstream, peer, request, summary};
+use super::{
+    CONFIG, GET_X, LARGE, SHORT_SEND_IDLE, assert_502, fixed, only_upstream, peer, request, summary,
+};
 
 /// As `CONFIG`, with a response body limit of 10 bytes.
 const SMALL: &str = "listen 127.0.0.1:8080;
@@ -802,4 +806,37 @@ fn transfer_encoding_to_http10_client_is_502_also_without_a_body() {
         let closes = sim.trace().matches("-> CloseUpstream").count();
         assert_eq!(closes, 1, "{}", sim.trace());
     }
+}
+
+/// FR-PROXY-29 (review fix M1): a read that only grows a chunked tail while
+/// the client still has the rewritten head to take keeps the client's
+/// `send_idle_timeout`: a client that takes nothing is cut after 5 s, not
+/// after the 30 s body idle timeout.
+#[test]
+fn tail_only_read_keeps_the_send_timeout_while_the_head_is_unsent() {
+    let mut sim = Sim::new(SHORT_SEND_IDLE);
+    let c = request(&mut sim, GET_X);
+    sim.set_client_window(c, Window::Stalled);
+    let up = only_upstream(&sim);
+    sim.backend_send(up, &cat(&[CHUNKED_HEAD, b"5"]));
+    sim.run_until_idle();
+    sim.advance(Duration::from_secs(1));
+    // Only the size line's CR: the tail grows, nothing new for the client.
+    sim.backend_send(up, b"\r");
+    sim.run_until_idle();
+    sim.advance(Duration::from_millis(4999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
 }

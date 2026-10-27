@@ -28,7 +28,9 @@ use crate::upstream::{BackendId, UpstreamId};
 /// not yet sent to the client; `recv[end..filled]` are bytes after them:
 /// while the body is open an unconsumed chunked-framing tail, once it is
 /// done whatever the backend sent after the body (never sent).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not `Clone`: it holds the chunked validator's state, which must never
+/// fork.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RelayBody {
     source: Source,
     limit: BodyLimit,
@@ -38,7 +40,7 @@ pub(crate) struct RelayBody {
 }
 
 /// Where the rest of the body comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum Source {
     /// More body bytes are due from upstream `up` of `backend`, which is
     /// open.
@@ -53,7 +55,7 @@ enum Source {
 }
 
 /// What of an open body is still to arrive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum Due {
     /// `remaining` (more than 0) bytes of a `Content-Length` body.
     Length { remaining: u64 },

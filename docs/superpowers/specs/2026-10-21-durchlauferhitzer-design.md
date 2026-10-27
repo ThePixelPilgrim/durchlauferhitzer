@@ -590,7 +590,8 @@ Backend response parsing:
 
 Bodies:
 
-- **FR-PROXY-19** [done] Chunked framing (both directions) is strict: chunk sizes are hex digits in either case, leading zeros allowed,
+- **FR-PROXY-19** [done] Chunked framing (both directions) is strict:
+  chunk sizes are hex digits in either case, leading zeros allowed,
   at most 32 characters and 16 significant digits (fits `u64`), no sign,
   whitespace or empty size; no chunk extensions; no trailers (the last
   chunk is exactly `0` + CRLF + CRLF); CRLF only; data longer than its size

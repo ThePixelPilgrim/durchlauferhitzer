@@ -145,9 +145,8 @@ impl Core {
         else {
             return;
         };
-        if body.spare(&mut buffers.recv).is_empty() {
-            return;
-        }
+        // `upstream_received` checked that a read was offered (the body is
+        // open and drained), so the bytes are new progress.
         match body.received(len, &mut buffers.recv) {
             Ok(Closing::Upstream(up)) => close_upstream(&mut self.upstreams, up, actions),
             Ok(Closing::No) => {}
@@ -157,8 +156,10 @@ impl Core {
             }
         }
         // Progress either way: bytes for the client, or a chunked tail
-        // that grew.
-        *deadline = relay_deadline(now, body.unsent_len() > 0, body, send_idle_timeout);
+        // that grew. The client may still have the head (or its own send
+        // buffer) to take even when no body byte is new (FR-PROXY-29).
+        let pending = client_pending(&c.send, buffers, body);
+        *deadline = relay_deadline(now, pending, body, send_idle_timeout);
         self.sync_interest(conn, actions);
     }
 
@@ -179,7 +180,13 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return false;
         };
-        let ConnState::Relaying { body, deadline, .. } = &mut c.state else {
+        let ConnState::Relaying {
+            body,
+            buffers,
+            deadline,
+            ..
+        } = &mut c.state
+        else {
             return false;
         };
         // End of stream is only learnt from a read, offered once the
@@ -191,7 +198,7 @@ impl Core {
             return false;
         };
         close_upstream(&mut self.upstreams, up, actions);
-        let pending = !c.send.is_empty();
+        let pending = client_pending(&c.send, buffers, body);
         *deadline = relay_deadline(now, pending, body, send_idle_timeout);
         self.finish_relay(now, conn, actions);
         self.sync_interest(conn, actions);
@@ -261,7 +268,7 @@ impl Core {
         if sent == 0 {
             return;
         }
-        let pending = !c.send.is_empty() || !buffers.head.is_empty() || body.unsent_len() > 0;
+        let pending = client_pending(&c.send, buffers, body);
         *deadline = relay_deadline(now, pending, body, send_idle_timeout);
         self.finish_relay(now, conn, actions);
         self.sync_interest(conn, actions);
@@ -284,8 +291,7 @@ impl Core {
         else {
             return;
         };
-        let done = c.send.is_empty() && buffers.head.is_empty() && body.unsent_len() == 0;
-        if !done || body.upstream().is_some() {
+        if client_pending(&c.send, buffers, body) || body.upstream().is_some() {
             return;
         }
         let after = AfterResponse {
@@ -296,6 +302,13 @@ impl Core {
         c.state = finish(conn, c, after, now, limits, actions);
         self.try_parse(now, conn, actions);
     }
+}
+
+/// Whether the client of a relaying connection has bytes to take: of its
+/// own send buffer (a `100 Continue`), of the rewritten head, or of the
+/// body.
+fn client_pending(send: &[u8], buffers: &ExchangeBuffers, body: &RelayBody) -> bool {
+    !send.is_empty() || !buffers.head.is_empty() || body.unsent_len() > 0
 }
 
 /// The deadline of a relaying connection after progress at `now`: the

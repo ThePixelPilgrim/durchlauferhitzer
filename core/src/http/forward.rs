@@ -85,8 +85,9 @@ fn is_hop_by_hop_bytes(name: &[u8], connection_tokens: &[&[u8]]) -> bool {
 /// The request line is `METHOD <path>[?query] HTTP/1.x` with the query
 /// unchanged and the client's version: `HTTP/1.0` for an HTTP/1.0 client,
 /// so the backend never answers it with a chunked body (owner decision
-/// 2026-10-27), `HTTP/1.1` otherwise. The client's headers follow in order without the hop-by-hop
-/// ones, `x-forwarded-for` and `x-forwarded-proto`; `content-length` is
+/// 2026-10-27), `HTTP/1.1` otherwise. The client's headers follow in
+/// order without the hop-by-hop ones, `x-forwarded-for` and
+/// `x-forwarded-proto`; `content-length` is
 /// re-rendered without leading zeros, everything else (`host`,
 /// `transfer-encoding`, …) as received. Then come `x-forwarded-for` (the
 /// client's non-empty value, `, `, the peer in canonical form),
