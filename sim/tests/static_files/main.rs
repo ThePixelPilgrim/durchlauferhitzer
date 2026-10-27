@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
-use durchlauferhitzer_core::http::response::{
-    BodyMode, render_file_head, render_fixed, render_redirect,
-};
+use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::http::target::TargetError;
 use durchlauferhitzer_core::{
@@ -27,10 +25,13 @@ fn peer() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
 }
 
+#[allow(dead_code, reason = "shared by all test binaries; each uses part")]
+#[path = "../support/model_http.rs"]
+mod model_http;
+
+/// A file head, by the spec-written model, not the core's renderer.
 fn head(content_type: &str, len: u64, persistence: Persistence) -> Vec<u8> {
-    let mut out = Vec::new();
-    render_file_head(content_type, len, persistence, &mut out);
-    out
+    model_http::model_file_head(content_type, len, persistence)
 }
 
 fn get(path: &str) -> Vec<u8> {

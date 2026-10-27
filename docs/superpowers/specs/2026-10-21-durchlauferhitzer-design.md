@@ -958,7 +958,7 @@ Failures, persistence, timeouts:
   (`sim/tests/faults/proxy/`): every forwarded byte against a model of
   the rewritten request written from this spec, independent of the
   core's renderers (the core's own 4xx/5xx included,
-  `sim/tests/faults/fixed.rs`).
+  `sim/tests/support/model_http.rs`).
 - **NFR-SEC-03** [done in stage 3 Task 9] No response splitting or desync
   from a hostile backend: extra bytes after a body, a second response,
   CR/LF in reasons or header values are never forwarded (FR-PROXY-15, -22,

@@ -1,9 +1,12 @@
-//! The model of the core's own fixed responses, written from the spec
-//! (FR-HTTP-10, -19…-21, -06) rather than taken from the core's renderer,
-//! so a wrong status, reason, header or body in the core shows up in both
-//! randomized nets.
+//! The model of the responses the core writes itself, written from the
+//! spec (FR-HTTP-10, -19…-21, -06, FR-STATIC-06, -11…-13) rather than taken
+//! from the core's renderers, so a wrong status, reason, header or body in
+//! the core shows up in the tests. Shared by every test binary of the sim
+//! (`#[path]` include), which take their expected bytes from here.
 
-use super::*;
+use durchlauferhitzer_core::http::request::{HttpError, Persistence};
+use durchlauferhitzer_core::http::response::BodyMode;
+use durchlauferhitzer_core::http::status::Status;
 
 /// The model's reason phrase for each status the core sends.
 pub(crate) fn model_reason(status: Status) -> &'static str {

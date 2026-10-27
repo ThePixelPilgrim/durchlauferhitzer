@@ -87,7 +87,7 @@ fn peer() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
 }
 
-/// A fixed response, by the model (`fixed.rs`), not the core's renderer.
+/// A fixed response, by the model (`support/model_http.rs`), not the core's renderer.
 fn fixed(status: Status, persistence: Persistence, body: BodyMode) -> Vec<u8> {
     model_fixed(status, persistence, body)
 }
@@ -133,6 +133,8 @@ fn deliver(config: &str, parts: &[&[u8]]) -> (Outcome, String) {
     (outcome, sim.trace().to_owned())
 }
 
+#[allow(dead_code, reason = "shared by all test binaries; each uses part")]
+#[path = "../support/model_http.rs"]
 mod fixed;
 mod generator;
 mod model;

@@ -41,6 +41,9 @@ src/
   fs.rs               the in-memory file system
   tests.rs            unit tests of the sim's own invariant checks
 tests/
+  support/
+    model_http.rs     the spec's fixed responses, file heads, redirects and
+                      parse-error statuses, shared by every test binary
   connections.rs      accepting, buffering, backpressure, resets
   routing.rs          request handling, keep-alive, pipelining
   limits.rs           timeouts, connection caps, lingering close
@@ -60,7 +63,6 @@ tests/
                         client's half-close, the failure log kinds
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers
-    fixed.rs            the model of the core's fixed responses and statuses
     split.rs            deterministic split, byte-by-byte and pipelined runs
     generator.rs        random requests and schedule steps
     model.rs            the model of the random file tree
@@ -107,9 +109,10 @@ SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_proxy_
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_fault_schedules
 ```
 
-Both nets render the core's own fixed responses (status line, headers,
-body) and map parse errors to statuses by a model of their own
-(`tests/faults/fixed.rs`), not by the core's renderer.
+Every test binary takes the bytes of the responses the core writes itself
+(fixed 4xx/5xx, file heads, redirects) and the status of each parse error
+from a model written from the spec (`tests/support/model_http.rs`, included
+by `#[path]`), never from the core's renderers.
 
 ## Commands
 

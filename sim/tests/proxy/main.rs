@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use durchlauferhitzer_core::config::BackendAddr;
 use durchlauferhitzer_core::http::request::{Method, Persistence};
-use durchlauferhitzer_core::http::response::{BodyMode, render_fixed};
+use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::response_head::ResponseError;
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::{
@@ -40,10 +40,13 @@ fn peer() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
 }
 
+#[allow(dead_code, reason = "shared by all test binaries; each uses part")]
+#[path = "../support/model_http.rs"]
+mod model_http;
+
+/// A fixed response, by the spec-written model, not the core's renderer.
 fn fixed(status: Status, persistence: Persistence, body: BodyMode) -> Vec<u8> {
-    let mut out = Vec::new();
-    render_fixed(status, persistence, body, &mut out);
-    out
+    model_http::model_fixed(status, persistence, body)
 }
 
 fn summary(method: Method, path: &str) -> RequestSummary {

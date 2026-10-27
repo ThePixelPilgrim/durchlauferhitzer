@@ -7,15 +7,11 @@ use super::*;
 // Static route rules
 
 pub(crate) fn fixed(status: Status, persistence: Persistence, body: BodyMode) -> Vec<u8> {
-    let mut out = Vec::new();
-    render_fixed(status, persistence, body, &mut out);
-    out
+    model_http::model_fixed(status, persistence, body)
 }
 
 pub(crate) fn redirect(location: &str, persistence: Persistence, body: BodyMode) -> Vec<u8> {
-    let mut out = Vec::new();
-    render_redirect(location, persistence, body, &mut out);
-    out
+    model_http::model_redirect(location, persistence, body)
 }
 
 pub(crate) fn head_req(path: &str) -> Vec<u8> {
