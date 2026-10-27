@@ -44,7 +44,10 @@ pub struct Limits {
     /// aborted (FR-PROC-05).
     pub shutdown_timeout: Duration,
     /// The memory budget in bytes: `max_connections` times
-    /// [`worst_case_per_connection`] must fit in it (FR-CFG-21).
+    /// [`worst_case_per_connection`] must fit in it (FR-CFG-21). It budgets
+    /// each connection's own buffers only. Outside it, and not counted: the
+    /// send buffers of refused connections, the 4 KiB lingering scratch
+    /// buffer, and driver-side buffers (disk readahead, the log buffer).
     pub memory_limit: u64,
 }
 

@@ -288,7 +288,7 @@ Structure and values:
     (an explicit per-IP value above `max_connections` is an error at the
     per-IP setting; when the key is not written its default is
     `min(64, max_connections)`, owner decision 2026-10-27); `max_headers` 1–1000; every duration (including
-    `shutdown_timeout`) 1 ms – 24 h; `disk_threads` 1–64; `memory_limit`
+    `shutdown_timeout`) 1 ms – 24 h (written `1440m`); `disk_threads` 1–64; `memory_limit`
     1 MiB – 1 TiB (written `1024GiB`).
   - The config is rejected when `max_connections` × worst case per
     connection > `memory_limit`. The worst case is NFR-RES-01's buffer sum
@@ -296,6 +296,10 @@ Structure and values:
     terms count only if some route is a proxy. The error
     (`ConfigErrorKind::MemoryBudget`) names both numbers and sits at the
     `limits` block, or at the first `host` block when there is none.
+  - `memory_limit` budgets each connection's own buffers only (owner
+    decision 2026-10-27). Outside it, and not counted: the send buffers of
+    refused (503) connections, the shared 4 KiB lingering scratch buffer,
+    and driver-side buffers (disk readahead, the log buffer).
   - Arithmetic saturates; nothing wraps.
 - **FR-CFG-22** [done] Durations are `<u64>` followed by `ms`, `s` or `m`;
   sizes are plain bytes or `<u64>` followed by `KiB`, `MiB` or `GiB`; any
@@ -1098,7 +1102,14 @@ Failures, persistence, timeouts:
   So total buffer memory ≤ `max_connections` × (receive + send + upstream
   buffers) + `max_connections` × send + 4 KiB, plus small fixed per-entry
   state. Config load enforces the first term against `memory_limit` with
-  `worst_case_per_connection` (FR-CFG-21, owner decision 2026-10-27). A 50 GB transfer uses the same memory as a 5 KB one.
+  `worst_case_per_connection` (FR-CFG-21, owner decision 2026-10-27).
+
+  `memory_limit` budgets each connection's own buffers only (owner decision
+  2026-10-27): the refused-connection send buffers, the 4 KiB lingering
+  scratch and driver-side buffers (disk readahead, the log buffer) lie
+  outside it.
+
+  A 50 GB transfer uses the same memory as a 5 KB one.
 - **NFR-RES-02** [done] No body is ever held whole;
   file bytes never pass through core memory (only heads go through the
   send buffer).
