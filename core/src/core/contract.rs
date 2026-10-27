@@ -246,7 +246,8 @@
 //!   client that half-closes after its complete request is noticed only
 //!   after the exchange, when the connection reads again (consistent with
 //!   FR-PROXY-26's half-close rule). An end of stream in the middle of a
-//!   body closes both connections.
+//!   body closes both connections, with no response, logged as
+//!   [`Log::Rejected`] with `Body(ClosedEarly)`.
 //! - The buffer, readiness and reporting rules of client sockets apply
 //!   unchanged to upstreams: reads go
 //!   straight into `upstream_recv_buffer(up)` and are reported by

@@ -144,6 +144,11 @@ const EXTRA: &[(&str, &[u8])] = &[
     ("X-Forwarded-For", b" 198.51.100.2, 203.0.113.9 "),
     ("X-Forwarded-For", b""),
     ("X-Forwarded-Proto", b"https"),
+    // Identity headers the backend never gets from a client (D-A).
+    ("Forwarded", b"for=198.51.100.7;proto=https"),
+    ("X-Real-IP", b"198.51.100.7"),
+    ("X-Forwarded-Host", b"evil.test"),
+    ("x-forwarded-port", b"443"),
 ];
 
 /// Request paths below a route prefix.
@@ -572,6 +577,16 @@ pub(crate) fn trim_ows(v: &[u8]) -> &[u8] {
     &v[start..end.max(start)]
 }
 
+/// The identity headers a client sends that the backend never gets
+/// (FR-PROXY-06, -09; owner decision 2026-10-27).
+const CLIENT_IDENTITY: [&str; 5] = [
+    "x-forwarded-proto",
+    "forwarded",
+    "x-real-ip",
+    "x-forwarded-host",
+    "x-forwarded-port",
+];
+
 /// The hop-by-hop list of FR-PROXY-06/-12, plus the names `Connection`
 /// lists.
 pub(crate) fn is_hop(name_lower: &str, tokens: &[String]) -> bool {
@@ -705,7 +720,10 @@ fn forward(j: &Judged, route: &RouteConfig) -> Forward {
     let mut xff = None;
     for l in j.lines {
         let name = l.name.to_ascii_lowercase();
-        if is_hop(&name, j.tokens) || name == "x-forwarded-proto" {
+        // FR-PROXY-06, -09: hop-by-hop headers and the client's identity
+        // headers (`X-Forwarded-Proto`, `Forwarded`, `X-Real-IP`,
+        // `X-Forwarded-Host`, `X-Forwarded-Port`) are not forwarded.
+        if is_hop(&name, j.tokens) || CLIENT_IDENTITY.contains(&name.as_str()) {
             continue;
         }
         let value = trim_ows(&l.value);

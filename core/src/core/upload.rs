@@ -11,7 +11,7 @@ use crate::http::request::{Method, Persistence};
 use crate::http::response::render_fixed;
 use crate::http::status::Status;
 use crate::log::{Log, RejectReason, RequestBodyError, TimeoutKind};
-use crate::request_body::{RequestBody, Stage};
+use crate::request_body::{Arrived, RequestBody, Stage};
 use crate::time::Instant;
 use crate::upstream::UpstreamId;
 
@@ -125,7 +125,41 @@ impl Core {
                     deadline: send_deadline,
                 };
             }
-            RequestBodyError::TooLarge => self.cut_body(conn, error, actions),
+            // (`ClosedEarly` never comes from the bytes with the head; it
+            // would be cut like the rest.)
+            RequestBodyError::TooLarge | RequestBodyError::ClosedEarly => {
+                self.cut_body(conn, error, actions);
+            }
+        }
+    }
+
+    /// The client ended its stream. In the middle of a proxied request body
+    /// the backend got a truncated request: that is logged (`Rejected {
+    /// Body(ClosedEarly) }`, owner decision 2026-10-27) and both
+    /// connections close, with no response. Anywhere else the connection
+    /// closes silently (FR-CONN-12; the end of a lingering close).
+    pub(super) fn read_closed(&mut self, conn: ConnId, actions: &mut Vec<Action>) {
+        let Some(c) = self.conns.get(&conn) else {
+            return;
+        };
+        match &c.state {
+            ConnState::AwaitingResponse { request, .. }
+                if request.body.all_arrived() == Arrived::Partly =>
+            {
+                self.cut_body(conn, RequestBodyError::ClosedEarly, actions);
+            }
+            ConnState::AwaitingResponse { .. }
+            | ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::Relaying { .. }
+            | ConnState::Lingering { .. } => {
+                self.forget(conn, actions);
+                actions.push(Action::Close { conn });
+            }
         }
     }
 

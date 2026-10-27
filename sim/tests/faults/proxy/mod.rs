@@ -199,6 +199,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "status 502",
     "status 504",
     "100 Continue",
+    "client end of stream mid-body",
     "body None",
     "body Length",
     "body Chunked",

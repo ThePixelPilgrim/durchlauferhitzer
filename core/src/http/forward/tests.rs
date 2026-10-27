@@ -181,6 +181,36 @@ fn forwarded_proto_from_the_client_is_replaced() {
     );
 }
 
+/// Owner decision 2026-10-27 (D-A): client-sent identity headers other
+/// than the two the proxy sets never reach the backend, so it only sees
+/// identity headers set by the proxy (FR-PROXY-06).
+#[test]
+fn client_identity_headers_are_removed() {
+    let raw = b"GET /p HTTP/1.1\r\nHost: a\r\nForwarded: for=6.6.6.6\r\nX-Real-IP: 6.6.6.6\r\n\
+        X-Forwarded-Host: evil\r\nx-forwarded-port: 1\r\nX-Forwarded-Hosts: kept\r\n\
+        Forwarded-X: kept\r\n\r\n";
+    assert_eq!(
+        rendered_request(raw, "/p", v4(1, 2, 3, 4)),
+        format!(
+            "GET /p HTTP/1.1\r\nhost: a\r\nx-forwarded-hosts: kept\r\nforwarded-x: kept\r\n\
+             x-forwarded-for: 1.2.3.4\r\n{TAIL}"
+        )
+    );
+}
+
+/// The identity rule is for the request only: a backend's own headers of
+/// those names reach the client (FR-PROXY-12 strips the hop-by-hop list).
+#[test]
+fn identity_headers_in_a_response_pass_through() {
+    assert_eq!(
+        rendered_response(
+            b"HTTP/1.1 200 OK\r\nX-Real-IP: 10.0.0.1\r\nForwarded: by=b\r\n\r\n",
+            Persistence::KeepAlive
+        ),
+        "HTTP/1.1 200 OK\r\nx-real-ip: 10.0.0.1\r\nforwarded: by=b\r\n\r\n"
+    );
+}
+
 #[test]
 fn content_length_is_rendered_without_leading_zeros() {
     for (sent, shown) in [

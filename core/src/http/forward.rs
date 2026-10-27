@@ -77,6 +77,20 @@ fn is_hop_by_hop_bytes(name: &[u8], connection_tokens: &[&[u8]]) -> bool {
             .any(|token| token.eq_ignore_ascii_case(name))
 }
 
+/// Identity headers a client may send that never reach the backend
+/// (FR-PROXY-06, -09; owner decision 2026-10-27): the backend sees only
+/// the identity headers the proxy sets, `x-forwarded-for` (the client's
+/// value with the peer appended) and `x-forwarded-proto`. Request only:
+/// a backend's response keeps headers of these names. Names are the
+/// parser's lowercased ones.
+const CLIENT_IDENTITY: [&str; 5] = [
+    "x-forwarded-proto",
+    "forwarded",
+    "x-real-ip",
+    "x-forwarded-host",
+    "x-forwarded-port",
+];
+
 /// Appends the head sent to the backend (FR-PROXY-04…11). `path` is the
 /// raw path as forwarded (after `strip_prefix`, see
 /// [`strip_segments`](crate::routing::strip_segments)); `peer` is the
@@ -86,8 +100,10 @@ fn is_hop_by_hop_bytes(name: &[u8], connection_tokens: &[&[u8]]) -> bool {
 /// unchanged and the client's version: `HTTP/1.0` for an HTTP/1.0 client,
 /// so the backend never answers it with a chunked body (owner decision
 /// 2026-10-27), `HTTP/1.1` otherwise. The client's headers follow in
-/// order without the hop-by-hop ones, `x-forwarded-for` and
-/// `x-forwarded-proto`; `content-length` is
+/// order without the hop-by-hop ones, `x-forwarded-for` and the client
+/// identity headers ([`CLIENT_IDENTITY`]: `x-forwarded-proto`,
+/// `forwarded`, `x-real-ip`, `x-forwarded-host`, `x-forwarded-port`);
+/// `content-length` is
 /// re-rendered without leading zeros, everything else (`host`,
 /// `transfer-encoding`, …) as received. Then come `x-forwarded-for` (the
 /// client's non-empty value, `, `, the peer in canonical form),
@@ -195,7 +211,8 @@ fn backend_request(head: &RequestHead, path: &str, peer: IpAddr, sink: &mut impl
 
     let listed = listed_tokens(&head.headers);
     let forwardable = head.headers.iter().filter(|h| {
-        !is_hop_by_hop_bytes(h.name.as_bytes(), &listed) && h.name != "x-forwarded-proto"
+        !is_hop_by_hop_bytes(h.name.as_bytes(), &listed)
+            && !CLIENT_IDENTITY.contains(&h.name.as_str())
     });
     for header in forwardable.clone() {
         match header.name.as_str() {

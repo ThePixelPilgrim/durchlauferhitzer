@@ -199,6 +199,9 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
                     RequestBodyError::TooLarge => {
                         (Vec::new(), "request body over the limit, silent")
                     }
+                    RequestBodyError::ClosedEarly => {
+                        unreachable!("the model judges no end of stream as a body defect")
+                    }
                 };
                 let mut t = tags.clone();
                 if before_connect {

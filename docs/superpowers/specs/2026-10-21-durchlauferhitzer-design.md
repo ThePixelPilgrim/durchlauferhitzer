@@ -529,7 +529,15 @@ Request head toward the backend:
 - **FR-PROXY-06** [done] Hop-by-hop headers are removed: `Connection`
   and every header it names, `Keep-Alive`, every `Proxy-*` (incl.
   `Proxy-Connection`, `Proxy-Authorization`), `TE`, `Trailer`, `Upgrade`,
-  and `Expect`.
+  and `Expect`. The client's identity headers `Forwarded`, `X-Real-IP`,
+  `X-Forwarded-Host` and `X-Forwarded-Port` are removed toward the
+  backend too, like `Proxy-*`, so a backend only sees identity headers
+  the proxy sets (`X-Forwarded-For`, FR-PROXY-08; `X-Forwarded-Proto`,
+  FR-PROXY-09). *Owner decision 2026-10-27 (stage 3 final review M8).*
+  They are not hop-by-hop: a backend's response keeps headers of these
+  names (FR-PROXY-12). Tests `client_identity_headers_are_removed`,
+  `identity_headers_in_a_response_pass_through`; the proxy net sends
+  them.
 - **FR-PROXY-07** [done] `Host` is forwarded unchanged.
 - **FR-PROXY-08** [done] `X-Forwarded-For` = the client's existing value
   (if any) + `, ` + the peer address in canonical form (IPv4-mapped IPv6
@@ -745,7 +753,10 @@ Failures, persistence, timeouts:
   driver contract's upstream-only `Interest::ReadWrite`), so a backend
   that stops taking the body and answers has its response relayed at once
   (FR-PROXY-27); only one that neither reads nor answers gets the 504. A
-  client that ends its stream mid-body closes both connections at once.
+  client that ends its stream mid-body closes both connections at once,
+  with no response; since the backend got a truncated request, that is
+  logged as `Rejected { Body(ClosedEarly) }` (owner decision 2026-10-27,
+  stage 3 final review M2; test `client_eof_mid_body_closes_both`).
   Builder calls (stage 3 Task 7): failures after the head are logged with
   precise kinds — `BadChunk(..)` for bad chunked framing, `BodyTooLarge`
   for `max_response_body`, `Reset` for a reset or an end of stream before
@@ -899,7 +910,9 @@ Failures, persistence, timeouts:
   "per-IP slot released at close") A host looping request-then-reset
   against a hung disk is capped at `max_connections_per_ip` orphans.*
 - **FR-CONN-12** [done] A client reset closes the connection and is logged;
-  a client EOF outside the lingering close closes it silently.
+  a client EOF outside the lingering close closes it silently, except in
+  the middle of a proxied request body, where it is logged
+  (FR-PROXY-26, owner decision 2026-10-27).
 - **FR-CONN-13** [stage 5] Per-IP grouping of IPv6 peers by prefix (e.g.
   /64), and fairness of the refused-connection pool; both before internet
   exposure.
@@ -919,8 +932,9 @@ Failures, persistence, timeouts:
   `BodyTooLarge` and `TransferEncodingToHttp10` included). A 502 or 504 the core
   generates for a failed backend is a `Response`, preceded by its
   `BackendFailed`. [Stage 3 Task 6:] `Rejected` also covers a request body
-  that broke a rule (`Body(Chunked(..) | TooLarge)`) and a stalled request
-  body (`Timeout(RequestBody)`).
+  that broke a rule (`Body(Chunked(..) | TooLarge)`), a stalled request
+  body (`Timeout(RequestBody)`) and (owner decision 2026-10-27) a client
+  that ended its stream mid-body (`Body(ClosedEarly)`, FR-PROXY-26).
 - **FR-LOG-03** [done] One entry per request: a routed request or route
   miss logs `Response`; a parse error logs `Rejected` only. A later failure
   of the same exchange (timeout, abort) adds its own entry.

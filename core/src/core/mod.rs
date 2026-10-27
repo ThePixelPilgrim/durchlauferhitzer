@@ -135,11 +135,7 @@ impl Core {
         match event {
             Event::Accepted { conn, peer } => self.accepted(now, conn, peer, actions),
             Event::Received { conn, len } => self.received(now, conn, len, actions),
-            Event::ReadClosed { conn } => {
-                if self.forget(conn, actions).is_some() {
-                    actions.push(Action::Close { conn });
-                }
-            }
+            Event::ReadClosed { conn } => self.read_closed(conn, actions),
             Event::Sent { conn, len } => self.sent(now, conn, len, actions),
             Event::Failed { conn, error: _ } => {
                 // Log first (peek at the state), then forget, which closes

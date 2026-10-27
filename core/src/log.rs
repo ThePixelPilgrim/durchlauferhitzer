@@ -121,7 +121,8 @@ pub enum RejectReason {
     Timeout(TimeoutKind),
     Limit(LimitKind),
     /// The request body on a proxy route broke a rule: answered 400 while
-    /// its head had not been forwarded yet, else both connections were cut.
+    /// its head had not been forwarded yet, else both connections were cut
+    /// (also when the client ended its stream mid-body).
     Body(RequestBodyError),
 }
 
@@ -133,6 +134,10 @@ pub enum RequestBodyError {
     /// Its chunked payload passed the route's `max_request_body`
     /// (FR-PROXY-23).
     TooLarge,
+    /// The client ended its stream before the body was complete, after
+    /// part of it may have been forwarded: both connections were closed,
+    /// with no response (FR-PROXY-26, owner decision 2026-10-27).
+    ClosedEarly,
 }
 
 /// Which timeout fired.

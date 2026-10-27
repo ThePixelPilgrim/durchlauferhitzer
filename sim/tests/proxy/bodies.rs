@@ -548,19 +548,38 @@ fn response_timeout_runs_once_the_body_is_written() {
 }
 
 /// A client that ends its stream in the middle of its body leaves an
-/// incomplete request: both connections close at once.
+/// incomplete request: both connections close at once, with no response,
+/// and the truncated request the backend got is logged (owner decision
+/// 2026-10-27, D-B: `Rejected { Body(ClosedEarly) }`), for a
+/// `Content-Length` body and a chunked one alike.
 #[test]
 fn client_eof_mid_body_closes_both() {
-    let mut sim = Sim::new(BODIES);
-    let c = request(
-        &mut sim,
-        b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 10\r\n\r\n012",
-    );
-    assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
-    sim.send_eof(c);
-    sim.run_until_idle();
-    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
-    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    for framing in [
+        "Content-Length: 10\r\n\r\n012",
+        "Transfer-Encoding: chunked\r\n\r\n5\r\nab",
+    ] {
+        let mut sim = Sim::new(BODIES);
+        let c = request(
+            &mut sim,
+            format!("POST /api/x HTTP/1.1\r\nHost: example.test\r\n{framing}").as_bytes(),
+        );
+        assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
+        sim.send_eof(c);
+        sim.run_until_idle();
+        assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+        assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+        assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+        assert_eq!(
+            sim.logs(),
+            &[Log::Rejected {
+                conn: c,
+                peer: peer(),
+                reason: RejectReason::Body(RequestBodyError::ClosedEarly),
+            }],
+            "{}",
+            sim.trace()
+        );
+    }
 }
 
 /// A backend that fails while the whole body is read but not yet written:

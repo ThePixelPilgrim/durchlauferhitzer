@@ -184,6 +184,27 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
     }
     if story.eof_anywhere {
         coverage.add("client end of stream");
+        // FR-PROXY-26 (owner decision 2026-10-27): an end of stream in
+        // the middle of a forwarded request body is logged, and nothing
+        // follows it. Only a story with such a body may end with it.
+        let closed_early = Log::Rejected {
+            conn: story.conn,
+            peer: story.peer,
+            reason: RejectReason::Body(RequestBodyError::ClosedEarly),
+        };
+        if logs.last() == Some(&closed_early) {
+            let body_forwarded = story.exchanges.iter().any(|ex| match &ex.req.verdict {
+                Verdict::Forward(fwd) | Verdict::BadBody { fwd, .. } => {
+                    fwd.bytes.len() > fwd.head_len
+                }
+                Verdict::Parse(_) | Verdict::Answer(..) => false,
+            });
+            if !body_forwarded {
+                fail("logged an end of stream mid-body, but no request has a body".to_owned());
+            }
+            logs.pop();
+            coverage.add("client end of stream mid-body");
+        }
     }
     let mut c = Cursor {
         received: &story.received,
@@ -254,7 +275,7 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
                 RejectReason::Http(e) => Some(model_code(model_http_status(e))),
                 RejectReason::Body(RequestBodyError::Chunked(_)) => Some(400),
                 RejectReason::Timeout(TimeoutKind::RequestBody) => Some(408),
-                RejectReason::Body(RequestBodyError::TooLarge)
+                RejectReason::Body(RequestBodyError::TooLarge | RequestBodyError::ClosedEarly)
                 | RejectReason::Route(_)
                 | RejectReason::Timeout(_)
                 | RejectReason::Limit(_) => None,
