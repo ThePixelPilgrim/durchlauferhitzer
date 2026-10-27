@@ -153,3 +153,35 @@ fn max_head_upper_bound() {
         (invalid("max_head", "1048577"), 3, 3)
     );
 }
+
+/// `LimitKey::ALL` is the one list of `limits` keys: every variant is in
+/// it exactly once (the match below breaks when a variant is added), and
+/// each name parses back to its key.
+#[test]
+fn limit_key_list_is_complete() {
+    fn index(key: LimitKey) -> usize {
+        match key {
+            LimitKey::MaxConnections => 0,
+            LimitKey::MaxConnectionsPerIp => 1,
+            LimitKey::MaxRequestLine => 2,
+            LimitKey::MaxHead => 3,
+            LimitKey::MaxHeaders => 4,
+            LimitKey::HeaderTimeout => 5,
+            LimitKey::KeepaliveTimeout => 6,
+            LimitKey::SendIdleTimeout => 7,
+            LimitKey::BackendConnectTimeout => 8,
+            LimitKey::BackendResponseTimeout => 9,
+            LimitKey::BodyIdleTimeout => 10,
+        }
+    }
+    let mut seen = [false; LimitKey::ALL.len()];
+    for (name, key) in LimitKey::ALL {
+        assert_eq!(LimitKey::from_name(name), Some(key), "{name}");
+        let slot = seen.get_mut(index(key));
+        assert_eq!(slot.as_deref(), Some(&false), "{name} listed twice");
+        if let Some(slot) = slot {
+            *slot = true;
+        }
+    }
+    assert!(seen.iter().all(|s| *s), "a limits key is missing from ALL");
+}

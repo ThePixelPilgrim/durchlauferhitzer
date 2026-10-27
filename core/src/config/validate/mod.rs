@@ -171,7 +171,7 @@ fn parse_listen(setting: &Setting) -> Result<Vec<SocketAddr>, ConfigError> {
     Ok(addrs)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LimitKey {
     MaxConnections,
     MaxConnectionsPerIp,
@@ -187,21 +187,27 @@ enum LimitKey {
 }
 
 impl LimitKey {
+    /// Every `limits` key with its name: the one list the parser and the
+    /// example config's test read.
+    const ALL: [(&'static str, LimitKey); 11] = [
+        ("max_connections", Self::MaxConnections),
+        ("max_connections_per_ip", Self::MaxConnectionsPerIp),
+        ("max_request_line", Self::MaxRequestLine),
+        ("max_head", Self::MaxHead),
+        ("max_headers", Self::MaxHeaders),
+        ("header_timeout", Self::HeaderTimeout),
+        ("keepalive_timeout", Self::KeepaliveTimeout),
+        ("send_idle_timeout", Self::SendIdleTimeout),
+        ("backend_connect_timeout", Self::BackendConnectTimeout),
+        ("backend_response_timeout", Self::BackendResponseTimeout),
+        ("body_idle_timeout", Self::BodyIdleTimeout),
+    ];
+
     fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "max_connections" => Some(Self::MaxConnections),
-            "max_connections_per_ip" => Some(Self::MaxConnectionsPerIp),
-            "max_request_line" => Some(Self::MaxRequestLine),
-            "max_head" => Some(Self::MaxHead),
-            "max_headers" => Some(Self::MaxHeaders),
-            "header_timeout" => Some(Self::HeaderTimeout),
-            "keepalive_timeout" => Some(Self::KeepaliveTimeout),
-            "send_idle_timeout" => Some(Self::SendIdleTimeout),
-            "backend_connect_timeout" => Some(Self::BackendConnectTimeout),
-            "backend_response_timeout" => Some(Self::BackendResponseTimeout),
-            "body_idle_timeout" => Some(Self::BodyIdleTimeout),
-            _ => None,
-        }
+        Self::ALL
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, key)| *key)
     }
 }
 
