@@ -947,13 +947,16 @@ Failures, persistence, timeouts:
   `Transfer-Encoding`, duplicate lengths, chunk-extension and trailer
   tricks, and a second request hidden in a body never get through
   (FR-PROXY-10, -19, -22). Proven by the randomized proxy net
-  (`sim/tests/faults/proxy/`): every forwarded byte against an independent
-  model of the rewritten request.
+  (`sim/tests/faults/proxy/`): every forwarded byte against a model of
+  the rewritten request written from this spec, independent of the
+  core's renderers (the core's own 4xx/5xx included,
+  `sim/tests/faults/fixed.rs`).
 - **NFR-SEC-03** [done in stage 3 Task 9] No response splitting or desync
   from a hostile backend: extra bytes after a body, a second response,
   CR/LF in reasons or header values are never forwarded (FR-PROXY-15, -22,
   -30). Proven by the randomized proxy net: every byte the client gets
-  against an independent model of the rewritten response.
+  against a model of the rewritten response written from this spec,
+  independent of the core's renderers.
 - **NFR-SEC-04** [done in core; driver stage 4] No escape from a static
   root: dot segments and their encodings, encoded `/`, `\`, NUL and
   controls are rejected (FR-HTTP-13/14), dotfiles are 404

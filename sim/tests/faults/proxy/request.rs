@@ -218,13 +218,16 @@ pub(crate) fn random_proxy_request(
     };
     let mut defect = None;
     if !allow.forward_only && rng.u8(0..4) == 0 {
-        defect = Some(match rng.u8(0..22) {
+        // 14, 15 and 22..26: chunk defects, where the backends accept.
+        defect = Some(match rng.u8(0..26) {
             16 => Defect::ObsFold,
             17 => Defect::SpaceBeforeColon,
             18 => Defect::BareLfLine,
             19 => Defect::ClList,
             20 => Defect::ClOverflow,
             21 => Defect::NulInValue,
+            22.. if allow.body_defects => Defect::Chunk(ChunkDefect::random(rng)),
+            22.. => Defect::HiddenRequest,
             0 => Defect::ClTe,
             1 => Defect::DupCl,
             2 => Defect::BadCl,
