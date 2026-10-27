@@ -34,6 +34,48 @@ pub struct Limits {
     /// How long a proxied body may make no progress in either direction
     /// (FR-PROXY-29).
     pub body_idle_timeout: Duration,
+    /// Size of the disk worker pool (FR-CFG-20).
+    pub disk_threads: u32,
+    /// How long a graceful shutdown may take before connections are
+    /// aborted (FR-PROC-05).
+    pub shutdown_timeout: Duration,
+    /// The memory budget in bytes: `max_connections` times
+    /// [`worst_case_per_connection`] must fit in it (FR-CFG-21).
+    pub memory_limit: u64,
+}
+
+/// Bytes of the per-connection send buffer (`conn::SEND_CAPACITY`).
+const SEND_BUFFER: u64 = 1024;
+/// Floor of the upstream receive buffer (`upstream::UPSTREAM_RECV_MIN`).
+const UPSTREAM_RECV_FLOOR: u64 = 16 * 1024;
+/// Slack in the proxy head buffer (`max_head + max_headers + 128`).
+const HEAD_SLACK: u64 = 128;
+
+/// The most buffer memory one counted connection can hold, from the
+/// NFR-RES-01 formulas the core allocates by:
+///
+/// - client receive buffer `max(max_head, max_request_line + 2)`
+///   (`Core::recv_capacity`);
+/// - client send buffer 1 KiB (`SEND_CAPACITY`);
+/// - only when `proxied` (the config has a proxy route) an active exchange
+///   adds the upstream receive buffer `max(16 KiB, max_head)`
+///   (`upstream::recv_capacity`) and the head buffer
+///   `max_head + max_headers + 128` (contract.rs, Task 5 builder call).
+///
+/// Saturating arithmetic: the result never wraps.
+pub fn worst_case_per_connection(limits: &Limits, proxied: bool) -> u64 {
+    let widen = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    let max_head = widen(limits.max_head);
+    let recv = max_head.max(widen(limits.max_request_line).saturating_add(2));
+    let client = recv.saturating_add(SEND_BUFFER);
+    if !proxied {
+        return client;
+    }
+    let upstream_recv = UPSTREAM_RECV_FLOOR.max(max_head);
+    let head = max_head
+        .saturating_add(widen(limits.max_headers))
+        .saturating_add(HEAD_SLACK);
+    client.saturating_add(upstream_recv).saturating_add(head)
 }
 
 impl Default for Limits {
@@ -50,6 +92,9 @@ impl Default for Limits {
             backend_connect_timeout: Duration::from_secs(5),
             backend_response_timeout: Duration::from_secs(60),
             body_idle_timeout: Duration::from_secs(30),
+            disk_threads: 4,
+            shutdown_timeout: Duration::from_secs(30),
+            memory_limit: 1 << 30,
         }
     }
 }
@@ -121,7 +166,10 @@ pub enum ConfigErrorKind {
     UnknownKey(String),
     DuplicateKey(String),
     MissingKey(&'static str),
-    InvalidValue { key: String, value: String },
+    InvalidValue {
+        key: String,
+        value: String,
+    },
     WrongValueCount(String),
     DuplicateHost(String),
     DuplicatePath(String),
@@ -130,6 +178,12 @@ pub enum ConfigErrorKind {
     BodyLimitOnStatic,
     OnFileChangeOnProxy,
     MissingBodyLimit(&'static str),
+    /// `max_connections` times the worst case per connection exceeds
+    /// `memory_limit` (FR-CFG-21).
+    MemoryBudget {
+        needed: u64,
+        limit: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,6 +223,11 @@ impl fmt::Display for ConfigError {
             ConfigErrorKind::MissingBodyLimit(key) => {
                 write!(f, "proxy route is missing `{key}`")
             }
+            ConfigErrorKind::MemoryBudget { needed, limit } => write!(
+                f,
+                "memory budget exceeded: max_connections x worst case per connection \
+                 needs {needed} bytes but memory_limit is {limit} bytes"
+            ),
         }
     }
 }

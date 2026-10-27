@@ -2,6 +2,7 @@
 
 use super::super::model::{
     BodyLimit, Limits, OnFileChange, ProxyRoute, Route, RouteAction, StripPrefix, VirtualHost,
+    worst_case_per_connection,
 };
 use super::super::syntax::SyntaxErrorKind;
 use super::*;

@@ -11,13 +11,21 @@ use crate::routing::same_segments;
 use super::lexer::Pos;
 use super::model::{
     BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, OnFileChange, ProxyRoute, Route,
-    RouteAction, StripPrefix, VirtualHost,
+    RouteAction, StripPrefix, VirtualHost, worst_case_per_connection,
 };
 use super::syntax::{Block, Item, Setting, parse};
 use super::units::{parse_duration, parse_size};
 
 /// Upper bound for `max_head`: one connection's head buffer.
 const MAX_HEAD_LIMIT: usize = 1 << 20;
+/// Caps of FR-CFG-21 (owner decision 2026-10-27).
+const MAX_CONNECTIONS_CAP: u32 = 65536;
+const MAX_HEADERS_CAP: usize = 1000;
+const MAX_DISK_THREADS: u32 = 64;
+const MIN_DURATION: Duration = Duration::from_millis(1);
+const MAX_DURATION: Duration = Duration::from_secs(24 * 3600);
+const MIN_MEMORY_LIMIT: u64 = 1 << 20;
+const MAX_MEMORY_LIMIT: u64 = 1 << 40;
 
 fn fail<T>(kind: ConfigErrorKind, pos: Pos) -> Result<T, ConfigError> {
     Err(ConfigError { kind, pos })
@@ -183,12 +191,15 @@ enum LimitKey {
     BackendConnectTimeout,
     BackendResponseTimeout,
     BodyIdleTimeout,
+    DiskThreads,
+    ShutdownTimeout,
+    MemoryLimit,
 }
 
 impl LimitKey {
     /// Every `limits` key with its name: the one list the parser and the
     /// example config's test read.
-    const ALL: [(&'static str, LimitKey); 11] = [
+    const ALL: [(&'static str, LimitKey); 14] = [
         ("max_connections", Self::MaxConnections),
         ("max_connections_per_ip", Self::MaxConnectionsPerIp),
         ("max_request_line", Self::MaxRequestLine),
@@ -200,6 +211,9 @@ impl LimitKey {
         ("backend_connect_timeout", Self::BackendConnectTimeout),
         ("backend_response_timeout", Self::BackendResponseTimeout),
         ("body_idle_timeout", Self::BodyIdleTimeout),
+        ("disk_threads", Self::DiskThreads),
+        ("shutdown_timeout", Self::ShutdownTimeout),
+        ("memory_limit", Self::MemoryLimit),
     ];
 
     fn from_name(name: &str) -> Option<Self> {
@@ -245,6 +259,8 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
     let mut seen: Vec<&str> = Vec::new();
     let mut request_line: Option<&Setting> = None;
     let mut head: Option<&Setting> = None;
+    let mut connections: Option<&Setting> = None;
+    let mut per_ip: Option<&Setting> = None;
     for item in &block.items {
         let setting = match item {
             Item::Setting(setting) => setting,
@@ -265,13 +281,19 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
                 .filter(|n| *n != 0)
                 .and_then(|n| usize::try_from(n).ok())
         };
-        let duration = || parse_duration(value).filter(|d: &Duration| !d.is_zero());
+        let duration = || {
+            parse_duration(value).filter(|d: &Duration| (MIN_DURATION..=MAX_DURATION).contains(d))
+        };
         match key {
             LimitKey::MaxConnections => {
-                limits.max_connections = parse_count(value).ok_or_else(bad)?;
+                limits.max_connections = parse_count(value)
+                    .filter(|n| *n <= MAX_CONNECTIONS_CAP)
+                    .ok_or_else(bad)?;
+                connections = Some(setting);
             }
             LimitKey::MaxConnectionsPerIp => {
                 limits.max_connections_per_ip = parse_count(value).ok_or_else(bad)?;
+                per_ip = Some(setting);
             }
             LimitKey::MaxRequestLine => {
                 limits.max_request_line = size().ok_or_else(bad)?;
@@ -281,7 +303,11 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
                 limits.max_head = size().filter(|n| *n <= MAX_HEAD_LIMIT).ok_or_else(bad)?;
                 head = Some(setting);
             }
-            LimitKey::MaxHeaders => limits.max_headers = parse_count(value).ok_or_else(bad)?,
+            LimitKey::MaxHeaders => {
+                limits.max_headers = parse_count(value)
+                    .filter(|n| *n <= MAX_HEADERS_CAP)
+                    .ok_or_else(bad)?;
+            }
             LimitKey::HeaderTimeout => limits.header_timeout = duration().ok_or_else(bad)?,
             LimitKey::KeepaliveTimeout => {
                 limits.keepalive_timeout = duration().ok_or_else(bad)?;
@@ -298,6 +324,19 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
             LimitKey::BodyIdleTimeout => {
                 limits.body_idle_timeout = duration().ok_or_else(bad)?;
             }
+            LimitKey::DiskThreads => {
+                limits.disk_threads = parse_count(value)
+                    .filter(|n| *n <= MAX_DISK_THREADS)
+                    .ok_or_else(bad)?;
+            }
+            LimitKey::ShutdownTimeout => {
+                limits.shutdown_timeout = duration().ok_or_else(bad)?;
+            }
+            LimitKey::MemoryLimit => {
+                limits.memory_limit = parse_size(value)
+                    .filter(|n| (MIN_MEMORY_LIMIT..=MAX_MEMORY_LIMIT).contains(n))
+                    .ok_or_else(bad)?;
+            }
         }
     }
     if limits.max_request_line > limits.max_head {
@@ -306,7 +345,36 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
             return Err(invalid_value(&setting.key, value, setting.pos));
         }
     }
+    if limits.max_connections_per_ip > limits.max_connections {
+        if let Some(setting) = per_ip.or(connections) {
+            let value = setting.values.first().map_or("", String::as_str);
+            return Err(invalid_value(&setting.key, value, setting.pos));
+        }
+    }
     Ok(limits)
+}
+
+/// FR-CFG-21 (owner decision 2026-10-27): `max_connections` times the worst
+/// case per connection must fit in `memory_limit`.
+fn check_memory_budget(config: &Config, pos: Pos) -> Result<(), ConfigError> {
+    let proxied = config.hosts.iter().any(|host| {
+        host.routes
+            .iter()
+            .any(|route| matches!(route.action, RouteAction::Proxy(_)))
+    });
+    let limits = &config.limits;
+    let needed = u64::from(limits.max_connections)
+        .saturating_mul(worst_case_per_connection(limits, proxied));
+    if needed > limits.memory_limit {
+        return fail(
+            ConfigErrorKind::MemoryBudget {
+                needed,
+                limit: limits.memory_limit,
+            },
+            pos,
+        );
+    }
+    Ok(())
 }
 
 /// A validated setting together with where it was written.
@@ -498,6 +566,8 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
     let mut listen: Option<Vec<SocketAddr>> = None;
     let mut user: Option<String> = None;
     let mut limits: Option<Limits> = None;
+    let mut limits_pos: Option<Pos> = None;
+    let mut first_host_pos: Option<Pos> = None;
     let mut hosts: Vec<VirtualHost> = Vec::new();
     let mut seen_hosts: Vec<String> = Vec::new();
     for item in &items {
@@ -527,8 +597,12 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
                         return duplicate_key("limits", block.pos);
                     }
                     limits = Some(parse_limits(block)?);
+                    limits_pos = Some(block.pos);
                 }
-                "host" => hosts.push(parse_host(block, &mut seen_hosts)?),
+                "host" => {
+                    first_host_pos.get_or_insert(block.pos);
+                    hosts.push(parse_host(block, &mut seen_hosts)?);
+                }
                 other => return unknown_key(other, block.pos),
             },
         }
@@ -540,12 +614,14 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
     if hosts.is_empty() {
         return fail(ConfigErrorKind::MissingKey("host"), start);
     }
-    Ok(Config {
+    let config = Config {
         listen,
         user,
         limits: limits.unwrap_or_default(),
         hosts,
-    })
+    };
+    check_memory_budget(&config, limits_pos.or(first_host_pos).unwrap_or(start))?;
+    Ok(config)
 }
 
 #[cfg(test)]

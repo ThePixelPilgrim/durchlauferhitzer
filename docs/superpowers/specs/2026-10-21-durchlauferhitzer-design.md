@@ -277,10 +277,26 @@ Structure and values:
   | `backend_connect_timeout` | 5s | [done] |
   | `backend_response_timeout` | 60s | [done] |
   | `body_idle_timeout` | 30s | [done] |
+  | `disk_threads` | 4 (disk worker pool size) | [done] |
+  | `shutdown_timeout` | 30s (FR-PROC-05) | [done] |
+  | `memory_limit` | 1GiB (budget for per-connection buffers, FR-CFG-21) | [done] |
 
 - **FR-CFG-21** [done] Counts and sizes in `limits` are ≥ 1, durations are
   non-zero, `max_request_line` ≤ `max_head`, and `max_head` ≤ 1 MiB.
-  (Upper bounds for the other limits: open decision.)
+  Caps and memory budget (owner decision 2026-10-27):
+  - `max_connections` 1–65536; `max_connections_per_ip` 1–`max_connections`
+    (a config with the per-IP limit, default 64, above `max_connections` is
+    an error at the per-IP setting, or at `max_connections` when only that
+    is written); `max_headers` 1–1000; every duration (including
+    `shutdown_timeout`) 1 ms – 24 h; `disk_threads` 1–64; `memory_limit`
+    1 MiB – 1 TiB (written `1024GiB`).
+  - The config is rejected when `max_connections` × worst case per
+    connection > `memory_limit`. The worst case is NFR-RES-01's buffer sum
+    (`worst_case_per_connection` in `core/src/config/model.rs`); the proxy
+    terms count only if some route is a proxy. The error
+    (`ConfigErrorKind::MemoryBudget`) names both numbers and sits at the
+    `limits` block, or at the first `host` block when there is none.
+  - Arithmetic saturates; nothing wraps.
 - **FR-CFG-22** [done] Durations are `<u64>` followed by `ms`, `s` or `m`;
   sizes are plain bytes or `<u64>` followed by `KiB`, `MiB` or `GiB`; any
   other form, or an overflowing value, is an error.
@@ -1081,7 +1097,8 @@ Failures, persistence, timeouts:
 
   So total buffer memory ≤ `max_connections` × (receive + send + upstream
   buffers) + `max_connections` × send + 4 KiB, plus small fixed per-entry
-  state. A 50 GB transfer uses the same memory as a 5 KB one.
+  state. Config load enforces the first term against `memory_limit` with
+  `worst_case_per_connection` (FR-CFG-21, owner decision 2026-10-27). A 50 GB transfer uses the same memory as a 5 KB one.
 - **NFR-RES-02** [done] No body is ever held whole;
   file bytes never pass through core memory (only heads go through the
   send buffer).
@@ -1406,7 +1423,8 @@ project working and tested.
 Each blocks or shapes the requirement named; until decided, the
 recommendation (if any) is not implemented.
 
-1. FR-CFG-21 — upper bounds for `max_connections`, `max_request_line` and
-   the other limits (each connection's receive buffer is allocated eagerly).
+1. ~~FR-CFG-21 — upper bounds for `max_connections`, `max_request_line` and
+   the other limits~~ — **decided 2026-10-27**: per-key caps plus a
+   `memory_limit` budget, see FR-CFG-21 and NFR-RES-01.
 2. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
     lengths, IPv6 spellings).
