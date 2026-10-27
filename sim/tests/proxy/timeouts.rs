@@ -231,3 +231,81 @@ fn partial_response_head_during_upload_restarts_body_idle_timeout() {
         assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
     }
 }
+
+/// When the client half-closes in `client_half_close_still_gets_response`.
+#[derive(Debug, Clone, Copy)]
+enum HalfClose {
+    /// Right behind the request (with its body, if any).
+    WithRequest,
+    /// Behind the last body bytes, which come after the head was forwarded.
+    AfterStreamedBody,
+    /// Once the response head and part of its body reached the client.
+    AfterResponseHead,
+}
+
+/// FR-PROXY-26 (owner decision): a client that only closes its sending
+/// side after a complete request keeps its upstream; the response is
+/// delivered in full, then both close. The core does not read the client
+/// while it proxies (except for the body), so its end of stream is only
+/// seen once the response is out.
+#[test]
+fn client_half_close_still_gets_response() {
+    let get: &[u8] = b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    let response: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+    let relayed: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello";
+    for (request, body, when) in [
+        (get, b"".as_slice(), HalfClose::WithRequest),
+        (get, b"", HalfClose::AfterResponseHead),
+        (POST_10, b"0123456789", HalfClose::WithRequest),
+        (POST_10, b"0123456789", HalfClose::AfterStreamedBody),
+        (POST_10, b"0123456789", HalfClose::AfterResponseHead),
+    ] {
+        let mut sim = Sim::new(TIMEOUTS);
+        let c = sim.connect(peer());
+        sim.send(c, request);
+        match when {
+            HalfClose::WithRequest => {
+                sim.send(c, body);
+                sim.send_eof(c);
+            }
+            HalfClose::AfterStreamedBody => {
+                sim.run_until_idle();
+                sim.send(c, body);
+                sim.send_eof(c);
+            }
+            HalfClose::AfterResponseHead => sim.send(c, body),
+        }
+        sim.run_until_idle();
+        let up = only_upstream(&sim);
+        let forwarded = sim.take_backend_request(up);
+        assert!(forwarded.ends_with(body), "{when:?}\n{}", sim.trace());
+        sim.backend_send(up, response.get(..response.len() - 3).unwrap_or_default());
+        sim.run_until_idle();
+        if let HalfClose::AfterResponseHead = when {
+            sim.send_eof(c);
+            sim.run_until_idle();
+        }
+        assert_eq!(
+            sim.state(c),
+            SimConnState::Open,
+            "{when:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(sim.open_upstreams(), 1, "{when:?}\n{}", sim.trace());
+        sim.backend_send(up, response.get(response.len() - 3..).unwrap_or_default());
+        sim.run_until_idle();
+        assert_eq!(sim.take_received(c), relayed, "{when:?}\n{}", sim.trace());
+        assert_eq!(
+            sim.state(c),
+            SimConnState::Closed,
+            "{when:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(sim.open_upstreams(), 0, "{when:?}\n{}", sim.trace());
+        assert!(
+            matches!(sim.logs(), [Log::ProxiedResponse { status: 200, .. }]),
+            "{when:?}\n{}",
+            sim.trace()
+        );
+    }
+}

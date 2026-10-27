@@ -708,6 +708,14 @@ Failures, persistence, timeouts:
   `Reset`, both before the head (502) and before a `Content-Length` or
   chunked body is complete (cut): the log tells a backend that closed
   from one whose socket failed.
+  *Builder call (stage 3 Task 8):* the half-close rule holds because
+  the client is not read while its request is proxied, except for the
+  body (the driver contract's interest rules): an end of stream behind a
+  complete request is seen only once the response is out, and then
+  closes the connection like any client EOF (silently, FR-CONN-12, or as
+  the end of a lingering close). This holds with and without a body,
+  and whether the end of stream comes before or after the response head
+  (test `client_half_close_still_gets_response`).
 - **FR-PROXY-27** [done] A backend that answers before the request body
   is complete: the response is forwarded, body forwarding stops, and the
   client closes after the response (its body is unread). This holds also
