@@ -840,3 +840,61 @@ fn tail_only_read_keeps_the_send_timeout_while_the_head_is_unsent() {
         sim.trace()
     );
 }
+
+/// FR-PROXY-26 (review fix M3): a reset in the middle of a close-delimited
+/// body, and a reset or end of stream in the middle of a chunked body,
+/// after the head cut both connections (no lingering close): the client
+/// holds the head and the bytes relayed so far.
+#[test]
+fn reset_or_eof_mid_body_after_the_head_cuts_both() {
+    enum End {
+        Reset,
+        Eof,
+    }
+    let close_head: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n";
+    let close_relayed: &[u8] = b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n";
+    for (head, piece, relayed_head, relayed, end) in [
+        (
+            close_head,
+            b"hello".as_slice(),
+            close_relayed,
+            b"hello".as_slice(),
+            End::Reset,
+        ),
+        (
+            CHUNKED_HEAD,
+            b"5\r\nhel",
+            CHUNKED_RELAYED,
+            b"5\r\nhel",
+            End::Eof,
+        ),
+        (
+            CHUNKED_HEAD,
+            b"5\r\nhel",
+            CHUNKED_RELAYED,
+            b"5\r\nhel",
+            End::Reset,
+        ),
+    ] {
+        let mut sim = Sim::new(CONFIG);
+        let c = request(&mut sim, GET_X);
+        let up = only_upstream(&sim);
+        sim.backend_send(up, &cat(&[head, piece]));
+        sim.run_until_idle();
+        let before = sim.trace().len();
+        match end {
+            End::Reset => sim.backend_reset(up),
+            End::Eof => {
+                sim.backend_eof(up);
+                sim.run_until_idle();
+            }
+        }
+        assert_eq!(
+            sim.take_received(c),
+            cat(&[relayed_head, relayed]),
+            "{}",
+            sim.trace()
+        );
+        assert_cut(&sim, c, before, BackendFailure::Reset);
+    }
+}
