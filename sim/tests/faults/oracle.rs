@@ -13,6 +13,8 @@ pub(crate) struct Client {
     /// Templates whose first byte was sent, and how many were `HEAD`.
     pub(crate) started: usize,
     pub(crate) started_head: usize,
+    /// Every template whose first byte was sent, in order.
+    pub(crate) templates: Vec<Vec<u8>>,
     /// Sends that carried the end of one template and the start of the next.
     pub(crate) pipelined_sends: usize,
     pub(crate) eof: bool,
@@ -320,6 +322,31 @@ pub(crate) fn log_conn(log: &Log) -> ConnId {
     }
 }
 
+/// The persistences a response to request `template` may have
+/// (FR-HTTP-09, FR-CONN-04): close for HTTP/1.0, for `Connection: close`
+/// and for a body the core does not read; keep-alive otherwise. A proxied
+/// 502 to a request with a body may be either: the body is read only if
+/// it came with the head.
+pub(crate) fn expected_persistence(template: &[u8], status: Status) -> &'static [Persistence] {
+    let text = String::from_utf8_lossy(template);
+    let head = text.split("\r\n\r\n").next().unwrap_or_default();
+    let http10 = head.lines().next().is_some_and(|l| l.ends_with("HTTP/1.0"));
+    let close = head
+        .lines()
+        .any(|l| l.eq_ignore_ascii_case("connection: close"));
+    let body = head.lines().any(|l| {
+        l.to_ascii_lowercase()
+            .strip_prefix("content-length: ")
+            .is_some_and(|n| n.trim() != "0")
+    });
+    match (body, status) {
+        (true, Status::BadGateway) => &BOTH,
+        (true, _) => &[Persistence::Close],
+        (false, _) if http10 || close => &[Persistence::Close],
+        (false, _) => &[Persistence::KeepAlive],
+    }
+}
+
 /// A response cut short: which announced response, in which rendering,
 /// and how many of its bytes arrived.
 pub(crate) struct Cut {
@@ -340,9 +367,42 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
         .filter(|l| log_conn(l) == client.id)
         .collect();
     let mut expected = Vec::new();
+    // Every announced response but a connection refusal answers the next
+    // request template: its persistence follows from that request.
+    let mut templates = client.templates.iter();
     for log in &logs {
         match announced(log, tree) {
-            Ok(Some(a)) => expected.push(a),
+            Ok(Some(mut a)) => {
+                let refusal = matches!(
+                    log,
+                    Log::Rejected {
+                        reason: RejectReason::Limit(_),
+                        ..
+                    }
+                );
+                if !refusal {
+                    let Some(template) = templates.next() else {
+                        fail(format!("{log:?} answers no request sent"));
+                    };
+                    // Rejections always close (their renderings already do).
+                    if let Log::Response { request, .. } = log {
+                        // The pairing holds: the logged path is the
+                        // template's.
+                        let line = String::from_utf8_lossy(template);
+                        let target = line.split(' ').nth(1).unwrap_or_default();
+                        let path = target.split('?').next().unwrap_or_default();
+                        if let Some(r) = request.as_ref().filter(|r| r.path != path) {
+                            fail(format!(
+                                "{log:?} paired with request {path:?}, not {:?}",
+                                r.path
+                            ));
+                        }
+                        let allowed = expected_persistence(template, a.status);
+                        a.renderings.retain(|r| allowed.contains(&r.persistence));
+                    }
+                }
+                expected.push(a);
+            }
             Ok(None) => {}
             Err(e) => fail(e),
         }

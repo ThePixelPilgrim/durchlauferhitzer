@@ -38,6 +38,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
                 front_started: false,
                 started: 0,
                 started_head: 0,
+                templates: Vec::new(),
                 pipelined_sends: 0,
                 eof: false,
                 received: Vec::new(),

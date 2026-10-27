@@ -232,6 +232,7 @@ pub(crate) fn send_piece(
         if !client.front_started {
             client.front_started = true;
             client.started += 1;
+            client.templates.push(front.clone());
             if front.starts_with(b"HEAD ") {
                 client.started_head += 1;
             }
