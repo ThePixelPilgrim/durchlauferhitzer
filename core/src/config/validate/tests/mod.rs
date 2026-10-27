@@ -311,4 +311,22 @@ fn example_config_loads() {
         config.is_ok(),
         "examples/durchlauferhitzer.conf: {config:?}"
     );
+    // FR-CFG-24: every `limits` key is written out with its default.
+    for key in [
+        "max_connections",
+        "max_connections_per_ip",
+        "max_request_line",
+        "max_head",
+        "max_headers",
+        "header_timeout",
+        "keepalive_timeout",
+        "send_idle_timeout",
+        "backend_connect_timeout",
+        "backend_response_timeout",
+        "body_idle_timeout",
+    ] {
+        let setting = format!("\n  {key} ");
+        assert!(text.contains(&setting), "`{key}` is not documented");
+    }
+    assert_eq!(config.map(|c| c.limits), Ok(Limits::default()));
 }

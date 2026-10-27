@@ -181,6 +181,9 @@ enum LimitKey {
     HeaderTimeout,
     KeepaliveTimeout,
     SendIdleTimeout,
+    BackendConnectTimeout,
+    BackendResponseTimeout,
+    BodyIdleTimeout,
 }
 
 impl LimitKey {
@@ -194,6 +197,9 @@ impl LimitKey {
             "header_timeout" => Some(Self::HeaderTimeout),
             "keepalive_timeout" => Some(Self::KeepaliveTimeout),
             "send_idle_timeout" => Some(Self::SendIdleTimeout),
+            "backend_connect_timeout" => Some(Self::BackendConnectTimeout),
+            "backend_response_timeout" => Some(Self::BackendResponseTimeout),
+            "body_idle_timeout" => Some(Self::BodyIdleTimeout),
             _ => None,
         }
     }
@@ -277,6 +283,15 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
             }
             LimitKey::SendIdleTimeout => {
                 limits.send_idle_timeout = duration().ok_or_else(bad)?;
+            }
+            LimitKey::BackendConnectTimeout => {
+                limits.backend_connect_timeout = duration().ok_or_else(bad)?;
+            }
+            LimitKey::BackendResponseTimeout => {
+                limits.backend_response_timeout = duration().ok_or_else(bad)?;
+            }
+            LimitKey::BodyIdleTimeout => {
+                limits.body_idle_timeout = duration().ok_or_else(bad)?;
             }
         }
     }

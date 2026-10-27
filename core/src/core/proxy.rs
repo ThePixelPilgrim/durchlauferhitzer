@@ -5,8 +5,6 @@
 //! `upload.rs`; relaying the response head and body to the client is in
 //! `relay.rs`.
 
-use std::time::Duration;
-
 use super::request::HeadEnd;
 use super::{Action, ConnId, Core};
 use crate::config::{BackendAddr, BodyLimit, ProxyRoute, Route, StripPrefix};
@@ -23,20 +21,6 @@ use crate::request_body::{BodyEnd, RequestBody, Stage};
 use crate::routing::strip_segments;
 use crate::time::Instant;
 use crate::upstream::{BackendId, ExchangeBuffers, UpstreamId, UpstreamTable};
-
-/// How long a connect may take (FR-PROXY-29's default of
-/// `backend_connect_timeout`; Task 8 makes it a limit).
-pub(super) const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long the backend may take from the request head being fully
-/// written until its response head is complete (the default of
-/// `backend_response_timeout`). It also bounds writing the request head.
-pub(super) const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// How long a body may make no progress, in either direction: a relayed
-/// response body while the upstream is open, a request body before the
-/// response head (the default of `body_idle_timeout`).
-pub(super) const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How a request on a proxy route is answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +98,9 @@ impl Core {
         after: HeadEnd,
         actions: &mut Vec<Action>,
     ) {
-        let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let limits = &self.config.limits;
+        let send_deadline = now.saturating_add(limits.send_idle_timeout);
+        let connect_deadline = now.saturating_add(limits.backend_connect_timeout);
         let (recv_capacity, head_capacity) = (self.upstream_recv_capacity, self.head_capacity);
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
@@ -194,7 +180,7 @@ impl Core {
                 expect,
             },
             buffers,
-            deadline: now.saturating_add(BACKEND_CONNECT_TIMEOUT),
+            deadline: connect_deadline,
         };
     }
 }
@@ -238,6 +224,7 @@ impl Core {
         up: UpstreamId,
         actions: &mut Vec<Action>,
     ) {
+        let response_deadline = now.saturating_add(self.config.limits.backend_response_timeout);
         let Some(conn) = self.upstreams.conn(up) else {
             return;
         };
@@ -262,7 +249,7 @@ impl Core {
                     filled: 0,
                     parser: ResponseParser::new(),
                     interim: 0,
-                    deadline: now.saturating_add(BACKEND_RESPONSE_TIMEOUT),
+                    deadline: response_deadline,
                 }
             }
             other @ (ConnState::Connecting { .. }

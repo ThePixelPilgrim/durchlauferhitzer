@@ -1,11 +1,13 @@
 //! Proxy routes end to end: the upstream interface between core and
 //! driver, with scripted backends behind it. Heads, failures and timeouts
 //! here; request bodies in `bodies.rs`, `Expect` in `expect.rs`, response
-//! bodies in `responses.rs`.
+//! bodies in `responses.rs`, configured timeouts and the client's
+//! half-close in `timeouts.rs`.
 
 mod bodies;
 mod expect;
 mod responses;
+mod timeouts;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -472,8 +474,8 @@ fn assert_504(sim: &Sim, c: ConnId, kind: BackendFailure) {
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
 }
 
-/// Every proxy state carries a deadline (the spec's defaults until Task 8
-/// makes them limits): a connect that never completes is a 504 after 5 s.
+/// Every proxy state carries a deadline (`backend_connect_timeout`, 5 s
+/// by default): a connect that never completes is a 504 after 5 s.
 #[test]
 fn hung_connect_is_504() {
     let mut sim = Sim::new(CONFIG);

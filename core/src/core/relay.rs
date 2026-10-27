@@ -4,11 +4,10 @@
 //! (FR-PROXY-19…22, -24, -28; NFR-RES-04), and the failures after the head
 //! (FR-PROXY-26: the connection is cut).
 
-use std::time::Duration;
-
-use super::proxy::{BODY_IDLE_TIMEOUT, close_upstream};
+use super::proxy::close_upstream;
 use super::request::{AfterResponse, finish};
 use super::{Action, ConnId, Core};
+use crate::config::Limits;
 use crate::conn::{Conn, ConnState, ProxyRequest, UnreadBody};
 use crate::http::forward::{client_response_len, render_client_response};
 use crate::http::request::{Persistence, Version};
@@ -35,7 +34,7 @@ impl Core {
         actions: &mut Vec<Action>,
     ) {
         let head_capacity = self.head_capacity;
-        let send_idle_timeout = self.config.limits.send_idle_timeout;
+        let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -113,7 +112,7 @@ impl Core {
         }
         // The rewritten head is for the client to take now.
         c.state = ConnState::Relaying {
-            deadline: relay_deadline(now, true, &body, send_idle_timeout),
+            deadline: relay_deadline(now, true, &body, limits),
             body,
             buffers,
             persistence,
@@ -132,7 +131,7 @@ impl Core {
         len: usize,
         actions: &mut Vec<Action>,
     ) {
-        let send_idle_timeout = self.config.limits.send_idle_timeout;
+        let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -159,7 +158,7 @@ impl Core {
         // that grew. The client may still have the head (or its own send
         // buffer) to take even when no body byte is new (FR-PROXY-29).
         let pending = client_pending(&c.send, buffers, body);
-        *deadline = relay_deadline(now, pending, body, send_idle_timeout);
+        *deadline = relay_deadline(now, pending, body, limits);
         self.sync_interest(conn, actions);
     }
 
@@ -173,7 +172,7 @@ impl Core {
         up: UpstreamId,
         actions: &mut Vec<Action>,
     ) -> bool {
-        let send_idle_timeout = self.config.limits.send_idle_timeout;
+        let limits = &self.config.limits;
         let Some(conn) = self.upstreams.conn(up) else {
             return false;
         };
@@ -199,7 +198,7 @@ impl Core {
         };
         close_upstream(&mut self.upstreams, up, actions);
         let pending = client_pending(&c.send, buffers, body);
-        *deadline = relay_deadline(now, pending, body, send_idle_timeout);
+        *deadline = relay_deadline(now, pending, body, limits);
         self.finish_relay(now, conn, actions);
         self.sync_interest(conn, actions);
         true
@@ -241,7 +240,7 @@ impl Core {
         len: usize,
         actions: &mut Vec<Action>,
     ) {
-        let send_idle_timeout = self.config.limits.send_idle_timeout;
+        let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -269,7 +268,7 @@ impl Core {
             return;
         }
         let pending = client_pending(&c.send, buffers, body);
-        *deadline = relay_deadline(now, pending, body, send_idle_timeout);
+        *deadline = relay_deadline(now, pending, body, limits);
         self.finish_relay(now, conn, actions);
         self.sync_interest(conn, actions);
     }
@@ -315,15 +314,10 @@ fn client_pending(send: &[u8], buffers: &ExchangeBuffers, body: &RelayBody) -> b
 /// client's `send_idle_timeout` while it has bytes to take (`pending`) or
 /// nothing more is due from the backend, the body idle timeout while it
 /// waits for the backend's next bytes (FR-PROXY-29).
-fn relay_deadline(
-    now: Instant,
-    pending: bool,
-    body: &RelayBody,
-    send_idle_timeout: Duration,
-) -> Instant {
+fn relay_deadline(now: Instant, pending: bool, body: &RelayBody, limits: &Limits) -> Instant {
     match (pending, body.upstream()) {
-        (true, _) | (false, None) => now.saturating_add(send_idle_timeout),
-        (false, Some(_)) => now.saturating_add(BODY_IDLE_TIMEOUT),
+        (true, _) | (false, None) => now.saturating_add(limits.send_idle_timeout),
+        (false, Some(_)) => now.saturating_add(limits.body_idle_timeout),
     }
 }
 

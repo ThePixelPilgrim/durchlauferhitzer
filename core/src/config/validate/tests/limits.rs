@@ -14,6 +14,9 @@ limits {
   header_timeout 500ms;
   keepalive_timeout 2m;
   send_idle_timeout 5s;
+  backend_connect_timeout 2s;
+  backend_response_timeout 90s;
+  body_idle_timeout 1500ms;
 }
 host a { path / { static /s; } }
 "));
@@ -28,6 +31,30 @@ host a { path / { static /s; } }
             header_timeout: Duration::from_millis(500),
             keepalive_timeout: Duration::from_secs(120),
             send_idle_timeout: Duration::from_secs(5),
+            backend_connect_timeout: Duration::from_secs(2),
+            backend_response_timeout: Duration::from_secs(90),
+            body_idle_timeout: Duration::from_millis(1500),
+        }
+    );
+}
+
+/// FR-CFG-20: the defaults are the spec's table.
+#[test]
+fn default_limits_are_the_spec_table() {
+    assert_eq!(
+        Limits::default(),
+        Limits {
+            max_connections: 1024,
+            max_connections_per_ip: 64,
+            max_request_line: 8 * 1024,
+            max_head: 16 * 1024,
+            max_headers: 100,
+            header_timeout: Duration::from_secs(10),
+            keepalive_timeout: Duration::from_secs(60),
+            send_idle_timeout: Duration::from_secs(30),
+            backend_connect_timeout: Duration::from_secs(5),
+            backend_response_timeout: Duration::from_secs(60),
+            body_idle_timeout: Duration::from_secs(30),
         }
     );
 }
@@ -47,6 +74,12 @@ fn limits_must_be_positive_and_valid() {
         "header_timeout 0s;",
         "keepalive_timeout 0ms;",
         "send_idle_timeout 5;",
+        "backend_connect_timeout 0s;",
+        "backend_connect_timeout 5;",
+        "backend_response_timeout 0ms;",
+        "backend_response_timeout 1KiB;",
+        "body_idle_timeout 0m;",
+        "body_idle_timeout 18446744073709551616s;",
     ] {
         let mut words = line.trim_end_matches(';').split(' ');
         let key = words.next().unwrap_or("");

@@ -3,8 +3,9 @@
 //! fill, drain, refill (NFR-RES-04), its framing and limit errors
 //! (FR-PROXY-19, -23) and a client that stalls it (FR-PROXY-26).
 
-use super::proxy::{BACKEND_RESPONSE_TIMEOUT, BODY_IDLE_TIMEOUT, body_mode};
+use super::proxy::body_mode;
 use super::{Action, ConnId, Core};
+use crate::config::Limits;
 use crate::conn::{ConnState, UnreadBody};
 use crate::http::request::{Method, Persistence};
 use crate::http::response::render_fixed;
@@ -24,6 +25,7 @@ impl Core {
         len: usize,
         actions: &mut Vec<Action>,
     ) {
+        let limits = &self.config.limits;
         let Some(conn) = self.upstreams.conn(up) else {
             return;
         };
@@ -50,7 +52,7 @@ impl Core {
             return;
         }
         if buffers.head.is_empty() {
-            *deadline = awaiting_deadline(now, &request.body);
+            *deadline = awaiting_deadline(now, &request.body, limits);
         }
         self.sync_interest(conn, actions);
     }
@@ -63,6 +65,7 @@ impl Core {
         len: usize,
         actions: &mut Vec<Action>,
     ) {
+        let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -83,7 +86,7 @@ impl Core {
         match request.body.received(len, &mut c.recv) {
             Ok(0) => {}
             Ok(_) => {
-                *deadline = awaiting_deadline(now, &request.body);
+                *deadline = awaiting_deadline(now, &request.body, limits);
                 self.sync_interest(conn, actions);
             }
             Err(error) => self.cut_body(conn, error, actions),
@@ -180,9 +183,9 @@ impl Core {
 /// head was written, after progress at `now`: the body idle timeout while
 /// the body streams, the response timeout once the whole request is
 /// written (FR-PROXY-29).
-fn awaiting_deadline(now: Instant, body: &RequestBody) -> Instant {
+pub(super) fn awaiting_deadline(now: Instant, body: &RequestBody, limits: &Limits) -> Instant {
     match body.stage() {
-        Stage::Receiving | Stage::Writing => now.saturating_add(BODY_IDLE_TIMEOUT),
-        Stage::Written => now.saturating_add(BACKEND_RESPONSE_TIMEOUT),
+        Stage::Receiving | Stage::Writing => now.saturating_add(limits.body_idle_timeout),
+        Stage::Written => now.saturating_add(limits.backend_response_timeout),
     }
 }

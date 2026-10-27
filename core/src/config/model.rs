@@ -26,6 +26,14 @@ pub struct Limits {
     pub header_timeout: Duration,
     pub keepalive_timeout: Duration,
     pub send_idle_timeout: Duration,
+    /// How long a backend connect may take (FR-PROXY-29).
+    pub backend_connect_timeout: Duration,
+    /// How long a backend may take from the whole request being written
+    /// until its response head is complete (FR-PROXY-29).
+    pub backend_response_timeout: Duration,
+    /// How long a proxied body may make no progress in either direction
+    /// (FR-PROXY-29).
+    pub body_idle_timeout: Duration,
 }
 
 impl Default for Limits {
@@ -39,6 +47,9 @@ impl Default for Limits {
             header_timeout: Duration::from_secs(10),
             keepalive_timeout: Duration::from_secs(60),
             send_idle_timeout: Duration::from_secs(30),
+            backend_connect_timeout: Duration::from_secs(5),
+            backend_response_timeout: Duration::from_secs(60),
+            body_idle_timeout: Duration::from_secs(30),
         }
     }
 }

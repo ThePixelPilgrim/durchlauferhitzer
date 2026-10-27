@@ -54,6 +54,8 @@ tests/
     expect.rs           `Expect` on every route
     responses.rs        response bodies: chunked, close-delimited, none,
                         limits, interim heads, cuts, HTTP/1.0 clients
+    timeouts.rs         the backend timeouts as configured `limits`, the
+                        client's half-close, the failure log kinds
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers
     split.rs            deterministic split, byte-by-byte and pipelined runs

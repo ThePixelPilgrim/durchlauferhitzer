@@ -250,7 +250,7 @@ Structure and values:
   Static routes may set neither.
 - **FR-CFG-19** [done] `on_file_change abort | allow_growth;` is optional
   on static routes (default `abort`) and an error on proxy routes.
-- **FR-CFG-20** The `limits` block may override these defaults:
+- **FR-CFG-20** [done] The `limits` block may override these defaults:
 
   | key | default | status |
   |---|---|---|
@@ -262,9 +262,9 @@ Structure and values:
   | `header_timeout` | 10s | [done] |
   | `keepalive_timeout` | 60s | [done] |
   | `send_idle_timeout` | 30s | [done] |
-  | `backend_connect_timeout` | 5s | [stage 3] |
-  | `backend_response_timeout` | 60s | [stage 3] |
-  | `body_idle_timeout` | 30s | [stage 3] |
+  | `backend_connect_timeout` | 5s | [done] |
+  | `backend_response_timeout` | 60s | [done] |
+  | `body_idle_timeout` | 30s | [done] |
 
 - **FR-CFG-21** [done] Counts and sizes in `limits` are ≥ 1, durations are
   non-zero, `max_request_line` ≤ `max_head`, and `max_head` ≤ 1 MiB.
@@ -724,8 +724,9 @@ Failures, persistence, timeouts:
   a body, `backend_response_timeout` runs from the whole request (head and
   body) being written; while the body streams, `body_idle_timeout`
   applies, reset by every body byte read from the client or written to
-  the backend. (Stage 3 Tasks 5–7 may use the defaults as named
-  constants; Task 8 makes them `limits` keys.)
+  the backend. *Builder call (stage 3 Task 8):* the three
+  are `limits` keys (FR-CFG-20) and the core reads them from the config;
+  no named default constant is left.
 - **FR-PROXY-30** [done] Nothing from a backend reaches the client
   unvalidated: heads are parsed strictly, bodies framed strictly, and
   nothing after a framing error is written.

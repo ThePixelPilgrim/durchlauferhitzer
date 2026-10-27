@@ -440,8 +440,8 @@ fn chunk_extension_from_client_is_400() {
 }
 
 /// FR-PROXY-26: a client that stalls its body before the response head is
-/// at fault: 408 after the body idle timeout (30 s, a named default until
-/// Task 8), and the upstream is closed.
+/// at fault: 408 after the body idle timeout (`body_idle_timeout`, 30 s
+/// by default), and the upstream is closed.
 #[test]
 fn stalled_request_body_is_408() {
     let mut sim = Sim::new(BODIES);

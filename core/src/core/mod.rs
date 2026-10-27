@@ -325,23 +325,22 @@
 //!   flight becomes an orphaned open, an open file is closed with it. (A
 //!   readahead in flight counts as waiting on the disk even while the send
 //!   buffer still holds part of the head.)
-//! - connecting to a backend: the backend connect timeout (5 s), then a
-//!   504 ([`BackendFailure::ConnectTimeout`]);
+//! - connecting to a backend: `backend_connect_timeout`, then a 504
+//!   ([`BackendFailure::ConnectTimeout`]);
 //! - writing the request to a backend and waiting for its response head:
-//!   the backend response timeout (60 s), restarted once the request head
-//!   is fully written, then a 504 ([`BackendFailure::ResponseTimeout`]);
-//!   while a request body streams, the body idle timeout (30 s) instead,
+//!   `backend_response_timeout`, restarted once the request head is fully
+//!   written, then a 504 ([`BackendFailure::ResponseTimeout`]); while a
+//!   request body streams, `body_idle_timeout` instead,
 //!   reset on progress either way, then a 408 if the core waited for the
 //!   client's body bytes, a 504 ([`BackendFailure::BodyTimeout`]) if they
 //!   waited for the backend; once the
 //!   whole request is written, the response timeout again;
 //! - relaying a response: the client's `send_idle_timeout` while the client
-//!   has bytes to take (or nothing more is due from the backend), the body
-//!   idle timeout (30 s) while it waits for the backend's next body bytes;
+//!   has bytes to take (or nothing more is due from the backend),
+//!   `body_idle_timeout` while it waits for the backend's next body bytes;
 //!   reset on progress either way. On expiry the connection is cut, logged
 //!   as a send timeout when the client had bytes to take, as a backend
-//!   response timeout otherwise. The three backend timeouts
-//!   are the spec's defaults (FR-PROXY-29) until they become limits;
+//!   response timeout otherwise;
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
 //!
