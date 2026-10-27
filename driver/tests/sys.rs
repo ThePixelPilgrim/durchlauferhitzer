@@ -208,6 +208,22 @@ fn ipv6_listen_and_local_addr_when_available() {
     }
 }
 
+#[test]
+fn ipv6_and_ipv4_wildcards_bind_the_same_port_when_available() {
+    // An IPv6 listener is IPv6-only (FR-CFG-10), so `[::]:p` leaves
+    // `0.0.0.0:p` free whatever the host's `bindv6only` default.
+    let v6 = match tcp_listen("[::]:0".parse().unwrap(), 16) {
+        Ok(v6) => v6,
+        Err(err) => {
+            eprintln!("skipped: no IPv6 here ({err})");
+            return;
+        }
+    };
+    let port = local_addr(v6.as_fd()).unwrap().port();
+    let v4 = tcp_listen(format!("0.0.0.0:{port}").parse().unwrap(), 16).unwrap();
+    assert_eq!(local_addr(v4.as_fd()).unwrap().port(), port);
+}
+
 /// Waits until a connecting socket is writable, then reads `SO_ERROR`.
 fn finish_connect(fd: &OwnedFd) -> Option<std::io::Error> {
     let epoll = Epoll::new().unwrap();

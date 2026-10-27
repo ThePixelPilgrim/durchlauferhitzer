@@ -221,7 +221,10 @@ Structure and values:
   more IP socket addresses; no duplicates; no port 0), `user` (optional),
   at most one `limits` block and one or more `host` blocks.
   Overlapping binds such as `0.0.0.0:80` + `127.0.0.1:80` are only detected
-  at bind time [stage 4].
+  at bind time [stage 4]. An IPv6 `listen` address accepts IPv6 only (the
+  listener sets `IPV6_V6ONLY`, whatever the host's `bindv6only`); IPv4
+  needs its own `listen` line, so `0.0.0.0:80` + `[::]:80` bind together
+  (owner decision 2026-10-27) [stage 4].
 - **FR-CFG-11** [done] `user` matches `[a-z_][a-z0-9_-]{0,31}`.
 - **FR-CFG-12** [done] A `host` block takes one or more names: ASCII
   letters, digits, `-` and `.` without a leading or trailing `.`, an IPv4

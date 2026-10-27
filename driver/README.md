@@ -38,7 +38,8 @@ src/
     epoll.rs          `Epoll` (level-triggered), `Readiness` (mirrors the
                       core's `Interest`), `EpollEvent`, `Trouble`
                       (EPOLLERR / EPOLLHUP)
-    socket.rs         non-blocking TCP: `tcp_listen` (SO_REUSEADDR),
+    socket.rs         non-blocking TCP: `tcp_listen` (SO_REUSEADDR; IPv6
+                      listeners IPV6_V6ONLY),
                       `accept_nonblocking`, `connect_nonblocking`
                       (`ConnectStart`), `take_error`, `set_nodelay`, `read`,
                       `write` (MSG_NOSIGNAL), `shutdown_write`, `local_addr`,
@@ -66,6 +67,8 @@ Notes on the wrappers:
   before a deadline, and reports an interrupted wait as 0 events.
 - `SignalFd::new` blocks the signals in the calling thread only: call it on
   the main thread before starting any other thread, so they inherit the mask.
+- Tests: the IPv6 tests skip where the host has no IPv6 (for example a
+  kernel booted with `ipv6.disable=1`); CI runs them.
 - Tests: the signalfd test is a unit test in `src/sys/signal.rs`, because it
   raises a thread-directed signal (`pthread_kill` on its own thread) — a
   process-directed one could reach another test thread and kill the run.

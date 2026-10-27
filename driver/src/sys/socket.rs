@@ -47,10 +47,17 @@ fn tcp_socket(addr: &SocketAddr) -> io::Result<OwnedFd> {
 }
 
 /// Binds a non-blocking listening socket with `SO_REUSEADDR` (and not
-/// `SO_REUSEPORT`). `IPV6_V6ONLY` is left at the system default.
+/// `SO_REUSEPORT`). An IPv6 listener sets `IPV6_V6ONLY`, so it accepts
+/// IPv6 only, whatever the host's default (FR-CFG-10, A6).
 pub fn tcp_listen(addr: SocketAddr, backlog: u32) -> io::Result<OwnedFd> {
     let fd = tcp_socket(&addr)?;
     set_int_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_REUSEADDR, 1)?;
+    match addr {
+        SocketAddr::V4(_) => {}
+        SocketAddr::V6(_) => {
+            set_int_option(fd.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, 1)?;
+        }
+    }
     let (storage, len) = to_sockaddr(&addr);
     // SAFETY: `storage` holds a valid socket address of `len` bytes.
     cvt(unsafe {
@@ -322,5 +329,30 @@ fn from_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
             io::ErrorKind::InvalidData,
             format!("not an IP socket address (family {family})"),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsRawFd;
+
+    use super::{get_int_option, tcp_listen};
+
+    #[test]
+    fn ipv6_listeners_are_ipv6_only() {
+        let listener = match tcp_listen("[::1]:0".parse().unwrap(), 16) {
+            Ok(listener) => listener,
+            Err(err)
+                if err.raw_os_error() == Some(libc::EAFNOSUPPORT)
+                    || err.raw_os_error() == Some(libc::EADDRNOTAVAIL) =>
+            {
+                eprintln!("skipped: no IPv6 loopback here ({err})");
+                return;
+            }
+            Err(err) => panic!("IPv6 listen failed: {err}"),
+        };
+        let v6only =
+            get_int_option(listener.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_V6ONLY).unwrap();
+        assert_eq!(v6only, 1);
     }
 }
