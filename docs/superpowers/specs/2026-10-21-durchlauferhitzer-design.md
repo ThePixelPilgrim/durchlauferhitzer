@@ -911,7 +911,8 @@ Failures, persistence, timeouts:
   2026-10-27, DRV-06: these deadlines, the total response timeout and a
   head's cap included, are judged when `TimerFired` is handled; a body
   byte or a completed head handled before an overdue `TimerFired` counts,
-  so each may be overrun by up to one loop wake. Tests
+  so each may be overrun by as long as the loop was late: the events
+  handled in that one late wake, before `TimerFired`, still count. Tests
   `last_body_byte_with_the_body_idle_deadline`,
   `complete_response_head_with_the_response_timeout`; a head left
   incomplete is still a 504,
@@ -956,7 +957,8 @@ Failures, persistence, timeouts:
   it. On expiry: 408 and close if any byte of the request arrived, else a
   silent close. *(Owner decision 2026-10-27, DRV-06: a head completed by
   an event handled before the overdue `TimerFired` is served; the total
-  deadline may be overrun by up to one loop wake. Test
+  deadline may be overrun by as long as the loop was late: the events
+  handled in that one late wake, before `TimerFired`, still count. Test
   `head_completed_after_its_header_timeout`.)*
 - **FR-CONN-07** [done] `keepalive_timeout`: an idle keep-alive connection
   is closed silently.
@@ -966,8 +968,10 @@ Failures, persistence, timeouts:
   logged as a send timeout (or disk timeout while waiting on the disk,
   also when a readahead is in flight while head bytes are still queued).
   *(Owner decision 2026-10-27, DRV-06: a disk answer handled before the
-  overdue `TimerFired` counts, so the disk wait may be overrun by up to one
-  loop wake. Test `file_opened_with_its_disk_timeout`.)*
+  overdue `TimerFired` counts, so the disk wait (an idle deadline) may be
+  overrun by as long as the loop was late: the events handled in that one
+  late wake, before `TimerFired`, still count. Test
+  `file_opened_with_its_disk_timeout`.)*
 - **FR-CONN-09** [done] A connection accepted while `max_connections`
   connections, or `max_connections_per_ip` from the same peer, are counted
   is answered 503 and closed (lingering), and logged. Refused connections
@@ -1429,12 +1433,13 @@ sim implements and checks it; the epoll driver is [stage 4].
   decision 2026-10-27: delivery order decides.* Deadlines are judged only
   when `TimerFired` is handled: an event handled before it counts (as
   progress, a completed head, an open answered, …) even when `now` is
-  already past its connection's deadline. A loop that wakes late with I/O
-  and an overdue timer both ready may therefore overrun any deadline,
-  total ones included (`header_timeout`, `backend_response_timeout`, a
-  response head's cap, the disk wait), by up to one loop wake. The sim's
-  late-timer mode (NFR-TEST-07) pins both orders (tests in
-  `sim/tests/late_timers.rs`).
+  already past its connection's deadline. So for a loop that wakes late
+  with I/O and an overdue timer both ready, every deadline, the total ones
+  (`header_timeout`, `backend_response_timeout`, a response head's cap)
+  included, and the disk wait may be overrun by as long as the loop was
+  late: the events handled in that one late wake, before `TimerFired`,
+  still count. The sim's late-timer mode (NFR-TEST-07) pins both orders
+  (tests in `sim/tests/late_timers.rs`).
 - **DRV-07** Static roots are opened once at startup (`RootId` indexes
   `static_roots()`); an empty segment list means the root itself (open
   `"."`).

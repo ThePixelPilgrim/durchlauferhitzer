@@ -230,7 +230,9 @@ fn response_head_byte_with_the_response_timeout_is_504_either_way() {
 // Owner decision 2026-10-27 (DRV-06): delivery order decides. An event
 // handled before the `TimerFired` counts, even when `now` is past its
 // connection's deadline; a deadline, total ones included, may be overrun
-// by up to one loop wake. The four cases below differ between the orders
+// by as long as the loop was late: the events handled in that one late
+// wake, before `TimerFired`, still count. The four cases below differ
+// between the orders
 // for that reason, and each order's outcome is pinned.
 
 fn summary(method: Method, path: &str) -> RequestSummary {

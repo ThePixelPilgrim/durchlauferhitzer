@@ -200,7 +200,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
 - Modify: `sim/src/lib.rs`, `sim/tests/faults/` (run a share of the seeds in late-timer mode), `sim/README.md`, spec NFR-TEST-07.
 
 **Interfaces:**
-- Produces: `Sim::set_late_timers(&mut self, on: bool)`. When it is on, `advance` delivers every queued I/O and disk completion that is due before an overdue `TimerFired`. This is how a real loop wakes with both ready at once. The core's handling must be correct either way.
+- Produces: `Sim::set_late_timers(&mut self, on: bool)` (*changed in execution, controller ruling R1: enums over bools, so it is `Sim::set_timer_order(TimerOrder::OnTime | TimerOrder::Late)`, default `OnTime`*). When it is on, `advance` delivers every queued I/O and disk completion that is due before an overdue `TimerFired`. This is how a real loop wakes with both ready at once. The core's handling must be correct either way.
 
 - [ ] **Step 1:** Write directed tests where the order matters:
   - the client's last body byte and its body-idle deadline arrive together;

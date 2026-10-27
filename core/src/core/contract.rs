@@ -418,8 +418,9 @@
 //! served, an answered open goes on. A driver that wakes late with I/O
 //! and an overdue timer both ready may deliver either first, so every
 //! deadline, the total ones (`header_timeout`, the response timeout, a
-//! response head's cap, the disk wait) included, may be overrun by up to
-//! one loop wake.
+//! response head's cap) included, and the disk wait may be overrun by as
+//! long as the loop was late: the events handled in that one late wake,
+//! before `TimerFired`, still count.
 //!
 //! # Shutdown
 //!
