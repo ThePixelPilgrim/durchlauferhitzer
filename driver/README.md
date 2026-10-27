@@ -18,11 +18,14 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 - **`unsafe` only in `src/sys/`.** The crate root has
   `#![deny(unsafe_code)]`, and only `mod sys` is `#[allow(unsafe_code)]`.
   Every `unsafe` block carries a `// SAFETY:` comment
-  (`clippy::undocumented_unsafe_blocks`, denied under `-D warnings`) and is
-  kept to the one call it needs. Everything `sys` exports is safe to call.
-- The workspace lints apply, copied into `Cargo.toml` because the workspace
-  `forbid(unsafe_code)` could not be lifted for `sys`: no `unwrap`,
-  `expect`, `panic!`, indexing or wildcard enum matches outside tests.
+  (`clippy::undocumented_unsafe_blocks`) and is kept to the one unsafe
+  operation it needs (`clippy::multiple_unsafe_ops_per_block`); both are
+  denied in the workspace lint table. Everything `sys` exports is safe to
+  call.
+- The workspace lints apply (`lints.workspace = true`): no `unwrap`,
+  `expect`, `panic!`, indexing or wildcard enum matches outside tests. The
+  workspace denies `unsafe_code` rather than forbidding it, so `sys` can
+  allow it; core and sim forbid it at their crate roots.
 - **Linux only** (NFR-PORT-01): the crate fails to build elsewhere.
 
 ## Layout

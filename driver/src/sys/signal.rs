@@ -120,10 +120,12 @@ mod tests {
     /// `kill(getpid(), SIGTERM)` could land on another libtest thread that
     /// has not blocked SIGTERM and end the whole test binary.
     fn raise_here(signo: libc::c_int) {
-        // SAFETY: `pthread_self` has no preconditions, and `pthread_kill`
-        // targets this live thread, which has blocked `signo` (SignalFd::new
-        // ran on it), so the signal stays pending instead of being delivered.
-        let rc = unsafe { libc::pthread_kill(libc::pthread_self(), signo) };
+        // SAFETY: `pthread_self` has no preconditions.
+        let me = unsafe { libc::pthread_self() };
+        // SAFETY: `pthread_kill` targets this live thread, which has blocked
+        // `signo` (SignalFd::new ran on it), so the signal stays pending
+        // instead of being delivered.
+        let rc = unsafe { libc::pthread_kill(me, signo) };
         assert_eq!(rc, 0);
     }
 

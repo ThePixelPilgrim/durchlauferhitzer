@@ -7,8 +7,10 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 
+# `unsafe_code` is `deny`, not `forbid`, so the driver's `sys` module (and
+# only it) can `#[allow]` it; core and sim forbid it at their crate roots.
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 wildcard_enum_match_arm = "deny"
@@ -16,3 +18,5 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 indexing_slicing = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"

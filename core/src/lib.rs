@@ -1,5 +1,7 @@
 //! Core of durchlauferhitzer: pure, I/O-free logic.
 
+#![forbid(unsafe_code)]
+
 pub mod config;
 mod conn;
 mod core;

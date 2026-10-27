@@ -22,6 +22,7 @@
 //! accepted, refused or left hanging by backend address; the test then
 //! reads what the backend received and makes it send bytes, close or reset.
 
+#![forbid(unsafe_code)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

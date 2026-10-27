@@ -5,7 +5,6 @@
 //! All `unsafe` code lives in [`sys`]; the rest of the crate is safe Rust.
 
 #![deny(unsafe_code)]
-#![warn(clippy::undocumented_unsafe_blocks)]
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("durchlauferhitzer runs on Linux only (NFR-PORT-01: epoll, openat2, signalfd)");
