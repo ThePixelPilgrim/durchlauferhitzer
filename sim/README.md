@@ -53,7 +53,8 @@ tests/
     bodies.rs           request bodies, `100 Continue`, early responses
     expect.rs           `Expect` on every route
     responses.rs        response bodies: chunked, close-delimited, none,
-                        limits, interim heads, cuts, HTTP/1.0 clients
+                        limits, interim heads, cuts
+    responses/http10.rs   HTTP/1.0 clients: request line, Transfer-Encoding
     timeouts.rs         the backend timeouts as configured `limits`, the
                         client's half-close, the failure log kinds
   faults/             fault injection and randomized runs (see below)

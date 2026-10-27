@@ -748,7 +748,13 @@ Failures, persistence, timeouts:
   waited for (408 for the client's body bytes, 504 `BodyTimeout` for a
   backend that stopped taking them). Once the whole request is written,
   `backend_response_timeout` is a total deadline: head bytes do not
-  extend it.
+  extend it. Known bound (for the owner to accept or cap): in that
+  streaming phase a backend that trickles response head bytes can
+  postpone the 408/504 by up to one `body_idle_timeout` per byte. The
+  bytes are bounded (at most `MAX_INTERIM_HEADS` + 1 = 9 heads, each
+  at most the upstream receive capacity, `max(16 KiB, max_head)`), but
+  there is no total time cap in that phase; a client trickling its body
+  has the same property.
 - **FR-PROXY-30** [done] Nothing from a backend reaches the client
   unvalidated: heads are parsed strictly, bodies framed strictly, and
   nothing after a framing error is written.

@@ -3,7 +3,9 @@
 //! buffer (FR-PROXY-19…22, NFR-RES-04), bodies that never reach the client
 //! (HEAD, 204, 304, bytes after a body's end), `max_response_body`
 //! (FR-PROXY-24), interim heads and 101 (FR-PROXY-18), framing errors after
-//! the head (FR-PROXY-26) and the HTTP/1.0 request line (FR-PROXY-04).
+//! the head (FR-PROXY-26); HTTP/1.0 clients (FR-PROXY-04) in `http10.rs`.
+
+mod http10;
 
 use std::time::Duration;
 
@@ -690,124 +692,6 @@ fn early_close_delimited_response_lingers() {
     assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
 }
 
-const GET_10: &[u8] = b"GET /api/x HTTP/1.0\r\nHost: example.test\r\n\r\n";
-
-/// FR-PROXY-04 (owner decision 2026-10-27): an HTTP/1.0 client's request
-/// goes to the backend as HTTP/1.0, and a `Content-Length` answer is
-/// relayed as usual.
-#[test]
-fn http10_request_line_is_http10() {
-    let mut sim = Sim::new(CONFIG);
-    let c = request(&mut sim, GET_10);
-    let up = only_upstream(&sim);
-    assert_eq!(
-        sim.take_backend_request(up),
-        b"GET /x HTTP/1.0\r\nhost: example.test\r\nx-forwarded-for: 192.0.2.1\r\n\
-          x-forwarded-proto: http\r\nconnection: close\r\n\r\n",
-        "{}",
-        sim.trace()
-    );
-    sim.backend_send(up, b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok");
-    sim.run_until_idle();
-    assert_eq!(
-        sim.take_received(c),
-        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
-        "{}",
-        sim.trace()
-    );
-    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
-}
-
-/// FR-PROXY-04, -21 (owner decision 2026-10-27): a backend that still
-/// answers an HTTP/1.0 client's request with a chunked body gets a 502
-/// before any byte reaches the client.
-#[test]
-fn chunked_response_to_http10_client_is_502() {
-    let mut sim = Sim::new(CONFIG);
-    let c = request(&mut sim, GET_10);
-    let up = only_upstream(&sim);
-    sim.backend_send(up, &cat(&[CHUNKED_HEAD, b"2\r\nok\r\n0\r\n\r\n"]));
-    sim.run_until_idle();
-    assert_eq!(
-        sim.take_received(c),
-        fixed(Status::BadGateway, Persistence::Close, BodyMode::Full),
-        "{}",
-        sim.trace()
-    );
-    assert_eq!(
-        sim.logs(),
-        &[
-            failed(c, BackendFailure::TransferEncodingToHttp10),
-            Log::Response {
-                conn: c,
-                peer: peer(),
-                status: Status::BadGateway,
-                request: Some(summary(Method::Get, "/api/x")),
-            },
-        ],
-        "{}",
-        sim.trace()
-    );
-    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
-    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
-}
-
-/// FR-PROXY-04 (owner decision 2026-10-27): any `Transfer-Encoding` toward
-/// an HTTP/1.0 client is a 502, also on a reply without a body (to HEAD, a
-/// 304): the backend is at fault. Nothing of the reply reaches the client.
-#[test]
-fn transfer_encoding_to_http10_client_is_502_also_without_a_body() {
-    for (request_bytes, method, response, mode) in [
-        (
-            b"HEAD /api/x HTTP/1.0\r\nHost: example.test\r\n\r\n".as_slice(),
-            Method::Head,
-            CHUNKED_HEAD,
-            BodyMode::HeadOnly,
-        ),
-        (
-            GET_10,
-            Method::Get,
-            b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
-            BodyMode::Full,
-        ),
-        (
-            GET_10,
-            Method::Get,
-            b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
-            BodyMode::Full,
-        ),
-    ] {
-        let mut sim = Sim::new(CONFIG);
-        let c = request(&mut sim, request_bytes);
-        let up = only_upstream(&sim);
-        sim.backend_send(up, response);
-        sim.run_until_idle();
-        assert_eq!(
-            sim.take_received(c),
-            fixed(Status::BadGateway, Persistence::Close, mode),
-            "{}",
-            sim.trace()
-        );
-        assert_eq!(
-            sim.logs(),
-            &[
-                failed(c, BackendFailure::TransferEncodingToHttp10),
-                Log::Response {
-                    conn: c,
-                    peer: peer(),
-                    status: Status::BadGateway,
-                    request: Some(summary(method, "/api/x")),
-                },
-            ],
-            "{}",
-            sim.trace()
-        );
-        assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
-        let closes = sim.trace().matches("-> CloseUpstream").count();
-        assert_eq!(closes, 1, "{}", sim.trace());
-    }
-}
-
 /// FR-PROXY-29 (review fix M1): a read that only grows a chunked tail while
 /// the client still has the rewritten head to take keeps the client's
 /// `send_idle_timeout`: a client that takes nothing is cut after 5 s, not
@@ -847,8 +731,19 @@ fn tail_only_read_keeps_the_send_timeout_while_the_head_is_unsent() {
 /// holds the head and the bytes relayed so far.
 #[test]
 fn reset_or_eof_mid_body_after_the_head_cuts_both() {
-    // How the backend ends is named by the failure it is logged as.
-    let (reset, eof) = (BackendFailure::Reset, BackendFailure::ClosedEarly);
+    enum End {
+        Reset,
+        Eof,
+    }
+    impl End {
+        /// The failure a cut after the head is logged as.
+        fn kind(&self) -> BackendFailure {
+            match self {
+                End::Reset => BackendFailure::Reset,
+                End::Eof => BackendFailure::ClosedEarly,
+            }
+        }
+    }
     let close_head: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n";
     let close_relayed: &[u8] = b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n";
     for (head, piece, relayed_head, relayed, end) in [
@@ -857,15 +752,21 @@ fn reset_or_eof_mid_body_after_the_head_cuts_both() {
             b"hello".as_slice(),
             close_relayed,
             b"hello".as_slice(),
-            reset,
+            End::Reset,
         ),
-        (CHUNKED_HEAD, b"5\r\nhel", CHUNKED_RELAYED, b"5\r\nhel", eof),
         (
             CHUNKED_HEAD,
             b"5\r\nhel",
             CHUNKED_RELAYED,
             b"5\r\nhel",
-            reset,
+            End::Eof,
+        ),
+        (
+            CHUNKED_HEAD,
+            b"5\r\nhel",
+            CHUNKED_RELAYED,
+            b"5\r\nhel",
+            End::Reset,
         ),
     ] {
         let mut sim = Sim::new(CONFIG);
@@ -874,11 +775,12 @@ fn reset_or_eof_mid_body_after_the_head_cuts_both() {
         sim.backend_send(up, &cat(&[head, piece]));
         sim.run_until_idle();
         let before = sim.trace().len();
-        if end == reset {
-            sim.backend_reset(up);
-        } else {
-            sim.backend_eof(up);
-            sim.run_until_idle();
+        match end {
+            End::Reset => sim.backend_reset(up),
+            End::Eof => {
+                sim.backend_eof(up);
+                sim.run_until_idle();
+            }
         }
         assert_eq!(
             sim.take_received(c),
@@ -886,6 +788,6 @@ fn reset_or_eof_mid_body_after_the_head_cuts_both() {
             "{}",
             sim.trace()
         );
-        assert_cut(&sim, c, before, end);
+        assert_cut(&sim, c, before, end.kind());
     }
 }

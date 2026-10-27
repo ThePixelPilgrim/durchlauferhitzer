@@ -12,9 +12,10 @@ use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
 
 use super::{BACKEND, GET_X, assert_504, fixed, only_upstream, peer, request, summary};
 
-/// Every backend timeout off its default (5 s, 60 s, 30 s).
+/// Every backend timeout off its default (5 s, 60 s, 30 s), and each
+/// distinct from the others, so a key read in place of another fails.
 const TIMEOUTS: &str = "listen 127.0.0.1:8080;
-limits { backend_connect_timeout 2s; backend_response_timeout 3s; body_idle_timeout 2s; }
+limits { backend_connect_timeout 2s; backend_response_timeout 3s; body_idle_timeout 4s; }
 host example.test {
   path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
@@ -64,8 +65,8 @@ fn configured_response_timeout_is_504() {
     assert_504(&sim, c, BackendFailure::ResponseTimeout);
 }
 
-/// `body_idle_timeout 2s`, client → backend, the client stalls: 408 after
-/// exactly 2 s without a body byte.
+/// `body_idle_timeout 4s`, client → backend, the client stalls: 408 after
+/// exactly 4 s without a body byte.
 #[test]
 fn configured_body_idle_timeout_cuts_a_stalled_upload() {
     let mut sim = Sim::new(TIMEOUTS);
@@ -73,7 +74,7 @@ fn configured_body_idle_timeout_cuts_a_stalled_upload() {
     sim.send(c, POST_10);
     sim.send(c, b"012");
     sim.run_until_idle();
-    sim.advance(Duration::from_millis(1999));
+    sim.advance(Duration::from_millis(3999));
     assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
     sim.advance(Duration::from_millis(1));
     assert_eq!(
@@ -95,8 +96,8 @@ fn configured_body_idle_timeout_cuts_a_stalled_upload() {
     assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
 }
 
-/// `body_idle_timeout 2s`, client → backend, the backend stops taking the
-/// body: 504 after exactly 2 s.
+/// `body_idle_timeout 4s`, client → backend, the backend stops taking the
+/// body: 504 after exactly 4 s.
 #[test]
 fn configured_body_idle_timeout_cuts_a_backend_not_reading() {
     let mut sim = Sim::new(TIMEOUTS);
@@ -112,7 +113,7 @@ fn configured_body_idle_timeout_cuts_a_backend_not_reading() {
     let mut expected = head.to_vec();
     expected.extend_from_slice(b"012");
     assert_eq!(sim.take_backend_request(up), expected, "{}", sim.trace());
-    sim.advance(Duration::from_millis(1999));
+    sim.advance(Duration::from_millis(3999));
     assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
     sim.advance(Duration::from_millis(1));
     assert_eq!(
@@ -136,8 +137,8 @@ fn configured_body_idle_timeout_cuts_a_backend_not_reading() {
     );
 }
 
-/// `body_idle_timeout 2s`, backend → client: a response body that stalls
-/// after its head cuts both after exactly 2 s.
+/// `body_idle_timeout 4s`, backend → client: a response body that stalls
+/// after its head cuts both after exactly 4 s.
 #[test]
 fn configured_body_idle_timeout_cuts_a_stalled_response() {
     let mut sim = Sim::new(TIMEOUTS);
@@ -146,7 +147,7 @@ fn configured_body_idle_timeout_cuts_a_stalled_response() {
     sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhal");
     sim.run_until_idle();
     assert!(!sim.take_received(c).is_empty());
-    sim.advance(Duration::from_millis(1999));
+    sim.advance(Duration::from_millis(3999));
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     sim.advance(Duration::from_millis(1));
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
@@ -188,8 +189,8 @@ fn partial_response_head_during_upload_restarts_body_idle_timeout() {
         sim.advance(Duration::from_millis(1500));
         sim.backend_send(up, b"HTTP/1.1 200 OK\r\n");
         sim.run_until_idle();
-        // 2 s after the head bytes, not after the last body byte.
-        sim.advance(Duration::from_millis(1999));
+        // 4 s after the head bytes, not after the last body byte.
+        sim.advance(Duration::from_millis(3999));
         assert!(
             sim.take_received(c).is_empty(),
             "backend_stalls={backend_stalls}\n{}",
@@ -228,6 +229,73 @@ fn partial_response_head_during_upload_restarts_body_idle_timeout() {
             sim.trace()
         );
         assert_eq!(sim.logs().first(), Some(&log), "{}", sim.trace());
+        assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    }
+}
+
+/// FR-PROXY-18, -29: once the whole request is written,
+/// `backend_response_timeout` is a total deadline. Response head bytes (an
+/// interim head, part of the final head) do not extend it: the 504 comes
+/// exactly 3 s after the request was written, for a request without a body
+/// and for one whose body was fully written.
+#[test]
+fn head_bytes_after_the_request_do_not_extend_the_response_timeout() {
+    let get: &[u8] = b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    let body: &[u8] = b"0123456789";
+    for (raw, tail, method) in [
+        (get.to_vec(), b"\r\n\r\n".as_slice(), Method::Get),
+        (
+            [POST_10, body].concat(),
+            body,
+            Method::Other("POST".to_owned()),
+        ),
+    ] {
+        let mut sim = Sim::new(TIMEOUTS);
+        let c = request(&mut sim, &raw);
+        let up = only_upstream(&sim);
+        // The whole request (head, and body if any) went out at t = 0.
+        let forwarded = sim.take_backend_request(up);
+        assert!(forwarded.ends_with(tail), "{method:?}\n{}", sim.trace());
+        sim.advance(Duration::from_secs(2));
+        sim.backend_send(up, b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n");
+        sim.run_until_idle();
+        sim.advance(Duration::from_millis(999));
+        assert!(
+            sim.take_received(c).is_empty(),
+            "{method:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(sim.open_upstreams(), 1, "{method:?}\n{}", sim.trace());
+        sim.advance(Duration::from_millis(1));
+        assert_eq!(
+            sim.take_received(c),
+            fixed(
+                Status::GatewayTimeout,
+                Persistence::KeepAlive,
+                BodyMode::Full
+            ),
+            "{method:?}\n{}",
+            sim.trace()
+        );
+        assert_eq!(
+            sim.logs(),
+            &[
+                Log::BackendFailed {
+                    conn: c,
+                    peer: peer(),
+                    backend: BackendId(0),
+                    kind: BackendFailure::ResponseTimeout,
+                },
+                Log::Response {
+                    conn: c,
+                    peer: peer(),
+                    status: Status::GatewayTimeout,
+                    request: Some(summary(method.clone(), "/api/x")),
+                },
+            ],
+            "{method:?}\n{}",
+            sim.trace()
+        );
         assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
     }
 }
