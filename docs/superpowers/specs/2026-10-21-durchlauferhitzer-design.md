@@ -663,6 +663,14 @@ Bodies:
   it, and a refused or timed-out connect is answered 502/504 without a
   `100` first. It is sent only for a request with a body, also when the
   body already arrived.
+  *Builder call (stage 3 Task 9):* while a queued `100 Continue` waits for
+  a client that does not read it, the client is not read either (its
+  interest is to write), so its body stays unread; after
+  `body_idle_timeout` without body progress the client is at fault: a 408
+  queued behind the `100` (logged `Rejected { Timeout(RequestBody) }`),
+  the upstream closed; a client that still takes nothing is then closed
+  after `send_idle_timeout` (`Rejected { Timeout(Send) }`). Test
+  `unread_100_continue_stalls_the_body_into_a_408`.
 - **FR-PROXY-25a** [done] Outside proxy routes (static routes, route
   misses) `Expect: 100-continue` is never answered with `100 Continue`: the
   normal final response (413, 404, …) is sent at once. Any other `Expect`
@@ -775,7 +783,11 @@ Failures, persistence, timeouts:
   `backend_response_timeout` (head's first byte, request fully written)
   the earlier wins. Expiry of the cap is a 504 (`BackendFailed {
   ResponseTimeout }`), even while the core waits for the client's body
-  bytes; once the response head is queued it no longer applies. A
+  bytes; once the response head is queued it no longer applies. *Builder
+  call (stage 3 Task 9, controller ruling):* when the cap and
+  `body_idle_timeout` expire at the same instant, the cap wins: a 504
+  (`ResponseTimeout`), not a 408 (test
+  `head_deadline_tied_with_body_idle_is_504`). A
   backend trickling response head bytes therefore holds the connection
   for at most `MAX_INTERIM_HEADS` + 1 = 9 heads, each at most
   `backend_response_timeout` from its first byte.

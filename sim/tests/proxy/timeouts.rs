@@ -644,3 +644,57 @@ fn client_stall_after_an_interim_head_is_408() {
         );
     }
 }
+
+/// `backend_response_timeout` equal to `body_idle_timeout` (both 4 s).
+const TIE: &str = "listen 127.0.0.1:8080;
+limits { backend_connect_timeout 2s; backend_response_timeout 4s; body_idle_timeout 4s; }
+host example.test {
+  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+}";
+
+/// FR-PROXY-29 (builder call, stage 3 Task 9): the client stalls its
+/// body while the backend has sent part of a response head, and the
+/// head's own deadline falls on the same instant as the body idle
+/// timeout. The head's deadline wins: a 504 (`ResponseTimeout`), not a
+/// 408; the unread body closes the client.
+#[test]
+fn head_deadline_tied_with_body_idle_is_504() {
+    let mut sim = Sim::new(TIE);
+    let c = sim.connect(peer());
+    sim.send(c, POST_10);
+    sim.send(c, b"012");
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-");
+    sim.run_until_idle();
+    sim.advance(Duration::from_millis(3999));
+    assert!(sim.take_received(c).is_empty(), "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(
+        sim.take_received(c),
+        fixed(Status::GatewayTimeout, Persistence::Close, BodyMode::Full),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(
+        sim.logs(),
+        &[
+            Log::BackendFailed {
+                conn: c,
+                peer: peer(),
+                backend: BackendId(0),
+                kind: BackendFailure::ResponseTimeout,
+            },
+            Log::Response {
+                conn: c,
+                peer: peer(),
+                status: Status::GatewayTimeout,
+                request: Some(summary(Method::Other("POST".to_owned()), "/api/x")),
+            },
+        ],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+}

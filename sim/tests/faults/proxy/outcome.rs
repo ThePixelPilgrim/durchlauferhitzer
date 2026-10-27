@@ -280,12 +280,19 @@ fn forward_alts(
         min: n,
         max: n,
     };
-    // The head and `j` body bytes; a chunked body's incomplete framing
-    // tail (at most 35 bytes) stays behind until it is complete.
-    let upload = |j: usize| BackendExp {
-        bytes: fwd.bytes.clone(),
-        min: fwd.head_len + if req.chunked { j.saturating_sub(35) } else { j },
-        max: fwd.head_len + j,
+    // The head and `j` body bytes; a chunked body's incomplete size line
+    // or CRLF stays behind until it is complete (NFR-RES-04).
+    let upload = |j: usize| {
+        let n = if req.chunked {
+            forwardable(&req.chunk_ends, j)
+        } else {
+            j
+        };
+        BackendExp {
+            bytes: fwd.bytes.clone(),
+            min: fwd.head_len + n,
+            max: fwd.head_len + n,
+        }
     };
     let cont: &[u8] = if fwd.expect100 { CONTINUE } else { &[] };
     if fwd.expect100 && ex.connect == ConnectBehaviour::Accept {

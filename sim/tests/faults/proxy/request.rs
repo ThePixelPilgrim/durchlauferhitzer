@@ -33,6 +33,9 @@ pub(crate) struct Request {
     /// The request's body is chunked (pipelining right behind it is a
     /// smuggling probe).
     pub(crate) chunked: bool,
+    /// For a chunked body: where each body byte ends a unit the core may
+    /// forward (a data byte, a complete size line or CRLF).
+    pub(crate) chunk_ends: Vec<usize>,
     /// Coverage tag of the smuggling or edge case it carries, if any.
     pub(crate) tag: Option<&'static str>,
 }
@@ -484,6 +487,7 @@ pub(crate) fn random_proxy_request(
         })
     };
     let chunked = matches!(body, Body::Chunked(_));
+    let chunk_ends = chunk_info.as_ref().map(unit_ends).unwrap_or_default();
     Request {
         wire,
         head_len,
@@ -493,6 +497,7 @@ pub(crate) fn random_proxy_request(
         persistence,
         verdict,
         chunked,
+        chunk_ends,
         tag,
     }
 }

@@ -201,3 +201,34 @@ pub(crate) fn payload(rng: &mut fastrand::Rng, len: usize) -> Vec<u8> {
     out.truncate(len);
     out
 }
+
+/// The offsets in `c.wire` where a unit of chunked framing ends: after
+/// each data byte, and after each complete line (size line, the CRLF
+/// after data, the last CRLF). A body forwarded so far ends at one of
+/// them: an incomplete size line or CRLF is held back, never data
+/// (NFR-RES-04).
+pub(crate) fn unit_ends(c: &Chunked) -> Vec<usize> {
+    let mut data = vec![false; c.wire.len()];
+    for &at in &c.payload_at {
+        data[at] = true;
+    }
+    let mut ends = Vec::new();
+    for i in 0..c.wire.len() {
+        let line_end =
+            c.wire[i] == b'\n' && !data[i] && i > 0 && c.wire[i - 1] == b'\r' && !data[i - 1];
+        if data[i] || line_end {
+            ends.push(i + 1);
+        }
+    }
+    ends
+}
+
+/// How much of a chunked body the core may have forwarded once the first
+/// `j` bytes of it arrived: up to the last unit end at or before `j`.
+pub(crate) fn forwardable(ends: &[usize], j: usize) -> usize {
+    ends.iter()
+        .copied()
+        .take_while(|&e| e <= j)
+        .last()
+        .unwrap_or(0)
+}
