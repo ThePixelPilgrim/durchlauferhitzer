@@ -415,3 +415,49 @@ fn continue_taken_stops_the_send_idle_timeout() {
         sim.trace()
     );
 }
+
+/// The carry-over holds for a 502 as well: a backend that sends a
+/// malformed head at 2 s gets the client a 502 queued behind its unread
+/// `100 Continue`, and the client, which has taken nothing, is closed 7 s
+/// after the `100` was queued.
+#[test]
+fn unread_100_continue_carries_its_send_deadline_into_a_502() {
+    let mut sim = Sim::new(CAP_FIRST);
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(c, POST_EXPECT);
+    sim.run_until_idle();
+    let up = only_upstream(&sim);
+    sim.advance(Duration::from_secs(2));
+    sim.backend_send(up, b"HTTP/1.1 200 OK\nContent-Length: 0\r\n\r\n");
+    sim.run_until_idle();
+    assert_eq!(sim.logs().len(), 2, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    sim.advance(Duration::from_millis(4999));
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(sim.logs().len(), 2, "{}", sim.trace());
+    sim.advance(Duration::from_millis(1));
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Timeout(TimeoutKind::Send),
+        }),
+        "{}",
+        sim.trace()
+    );
+}
+
+/// Send idle tied with body idle (both 3 s, no head cap): the send
+/// timeout wins, no 408.
+#[test]
+fn send_timeout_tied_with_body_idle_wins() {
+    let mut sim = Sim::new(&timeouts(3, 20, 3));
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Stalled);
+    sim.send(c, POST_EXPECT);
+    sim.run_until_idle();
+    assert_send_timeout_at(&mut sim, c, 3000);
+}

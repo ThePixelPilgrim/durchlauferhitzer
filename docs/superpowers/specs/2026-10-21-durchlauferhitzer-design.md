@@ -674,14 +674,15 @@ Bodies:
   timeout is a 408 queued behind the `100` (`Rejected {
   Timeout(RequestBody) }`), a head cap or `backend_response_timeout` a
   504, each with the upstream closed. Ties follow FR-PROXY-29's order
-  (the send timeout first). *Controller ruling:* a 408, 504 or proxied
-  response queued behind an unread `100` does not restart the send idle
-  deadline: the remaining one carries over, so a client that still takes
+  (the send timeout first). *Controller ruling:* any response queued behind
+  an unread `100` (a 408, 502, 504 or a proxied response) does not
+  restart the send idle deadline: the remaining one carries over, so a client that still takes
   nothing is closed when the deadline started with the `100` runs out.
   Tests `unread_100_continue_hits_the_send_idle_timeout_first`,
   `slowly_read_100_continue_restarts_the_send_idle_timeout`,
   `continue_taken_stops_the_send_idle_timeout`,
   `unread_100_continue_stalls_the_body_into_a_408`,
+  `unread_100_continue_carries_its_send_deadline_into_a_502`,
   `unread_100_continue_carries_its_send_deadline_into_a_504`,
   `unread_100_continue_carries_its_send_deadline_into_a_relay`.
   *(Fixed in stage 3 Task 9, review rounds 2 and 3: the send idle timeout
@@ -813,7 +814,10 @@ Failures, persistence, timeouts:
   `head_deadline_tied_with_body_idle_is_504`,
   `send_timeout_tied_with_head_cap_wins`,
   `three_way_tie_goes_to_the_send_timeout`,
-  `send_timeout_tied_with_response_timeout_wins`). A
+  `send_timeout_tied_with_response_timeout_wins`,
+  `send_timeout_tied_with_body_idle_wins`). A response queued behind an
+  unread `100 Continue` keeps the send idle deadline that started with
+  the `100` (FR-PROXY-25's carry-over rule). A
   backend trickling response head bytes therefore holds the connection
   for at most `MAX_INTERIM_HEADS` + 1 = 9 heads, each at most
   `backend_response_timeout` from its first byte.
