@@ -17,5 +17,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+        env:
+          # The IPv6 tests fail instead of skipping (driver/README.md).
+          DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
       - name: Product dependency check
         run: scripts/check-product-deps.sh

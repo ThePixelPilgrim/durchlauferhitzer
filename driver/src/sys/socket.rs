@@ -333,6 +333,11 @@ fn from_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
     }
 }
 
+/// The IPv6 tests' skip rule, shared with `tests/sys.rs`.
+#[cfg(test)]
+#[path = "../../tests/support/ipv6.rs"]
+mod ipv6;
+
 #[cfg(test)]
 mod tests {
     use std::os::fd::AsRawFd;
@@ -340,6 +345,8 @@ mod tests {
     use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 
     use super::{from_sockaddr, get_int_option, tcp_listen, to_sockaddr};
+
+    use super::ipv6;
 
     #[test]
     fn ipv6_flowinfo_is_passed_raw_like_std() {
@@ -367,16 +374,8 @@ mod tests {
 
     #[test]
     fn ipv6_listeners_are_ipv6_only() {
-        let listener = match tcp_listen("[::1]:0".parse().unwrap(), 16) {
-            Ok(listener) => listener,
-            Err(err)
-                if err.raw_os_error() == Some(libc::EAFNOSUPPORT)
-                    || err.raw_os_error() == Some(libc::EADDRNOTAVAIL) =>
-            {
-                eprintln!("skipped: no IPv6 loopback here ({err})");
-                return;
-            }
-            Err(err) => panic!("IPv6 listen failed: {err}"),
+        let Some(listener) = ipv6::or_skip(tcp_listen("[::1]:0".parse().unwrap(), 16)) else {
+            return;
         };
         let v6only =
             get_int_option(listener.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_V6ONLY).unwrap();

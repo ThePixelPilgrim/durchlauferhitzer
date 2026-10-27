@@ -60,6 +60,7 @@ src/
     rlimit.rs         `nofile`, `raise_nofile` (RLIMIT_NOFILE)
 tests/
   sys.rs            the wrappers on the real kernel, unprivileged
+  support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
 ```
 
 Notes on the wrappers:
@@ -71,8 +72,12 @@ Notes on the wrappers:
   before a deadline, and reports an interrupted wait as 0 events.
 - `SignalFd::new` blocks the signals in the calling thread only: call it on
   the main thread before starting any other thread, so they inherit the mask.
-- Tests: the IPv6 tests skip where the host has no IPv6 (for example a
-  kernel booted with `ipv6.disable=1`); CI runs them.
+- Tests: the IPv6 tests skip, with a printed reason, where the host has no
+  IPv6 (for example a kernel booted with `ipv6.disable=1`). With
+  `DURCHLAUFERHITZER_REQUIRE_IPV6=1` a missing IPv6 is a failure instead;
+  CI sets it, so CI cannot pass by skipping. The rule lives in one helper,
+  `tests/support/ipv6.rs`, which `src/sys/socket.rs` and `tests/sys.rs`
+  both include with `#[path]`.
 - Tests: the signalfd test is a unit test in `src/sys/signal.rs`, because it
   raises a thread-directed signal (`pthread_kill` on its own thread) — a
   process-directed one could reach another test thread and kill the run.

@@ -39,6 +39,9 @@ use durchlauferhitzer::sys::socket::{
 use durchlauferhitzer::sys::user::{euid, lookup_user};
 use durchlauferhitzer_core::{FileError, FileKind};
 
+#[path = "support/ipv6.rs"]
+mod ipv6;
+
 const WAIT: Option<Duration> = Some(Duration::from_secs(5));
 
 /// A directory under the system temp dir, removed on drop.
@@ -192,32 +195,26 @@ fn listen_on_an_address_in_use_fails() {
 
 #[test]
 fn ipv6_listen_and_local_addr_when_available() {
-    match tcp_listen("[::1]:0".parse().unwrap(), 16) {
-        Ok(listener) => {
-            let addr = local_addr(listener.as_fd()).unwrap();
-            assert!(matches!(addr, SocketAddr::V6(_)));
-            assert!(addr.ip().is_loopback());
-            let client = TcpStream::connect(addr).unwrap();
-            let epoll = Epoll::new().unwrap();
-            epoll.add(listener.as_fd(), 1, Readiness::Read).unwrap();
-            wait_one(&epoll);
-            let (_, peer) = accept_nonblocking(listener.as_fd()).unwrap().unwrap();
-            assert_eq!(peer, client.local_addr().unwrap());
-        }
-        Err(err) => eprintln!("skipped: no IPv6 loopback here ({err})"),
-    }
+    let Some(listener) = ipv6::or_skip(tcp_listen("[::1]:0".parse().unwrap(), 16)) else {
+        return;
+    };
+    let addr = local_addr(listener.as_fd()).unwrap();
+    assert!(matches!(addr, SocketAddr::V6(_)));
+    assert!(addr.ip().is_loopback());
+    let client = TcpStream::connect(addr).unwrap();
+    let epoll = Epoll::new().unwrap();
+    epoll.add(listener.as_fd(), 1, Readiness::Read).unwrap();
+    wait_one(&epoll);
+    let (_, peer) = accept_nonblocking(listener.as_fd()).unwrap().unwrap();
+    assert_eq!(peer, client.local_addr().unwrap());
 }
 
 #[test]
 fn ipv6_and_ipv4_wildcards_bind_the_same_port_when_available() {
     // An IPv6 listener is IPv6-only (FR-CFG-10), so `[::]:p` leaves
     // `0.0.0.0:p` free whatever the host's `bindv6only` default.
-    let v6 = match tcp_listen("[::]:0".parse().unwrap(), 16) {
-        Ok(v6) => v6,
-        Err(err) => {
-            eprintln!("skipped: no IPv6 here ({err})");
-            return;
-        }
+    let Some(v6) = ipv6::or_skip(tcp_listen("[::]:0".parse().unwrap(), 16)) else {
+        return;
     };
     let port = local_addr(v6.as_fd()).unwrap().port();
     let v4 = tcp_listen(format!("0.0.0.0:{port}").parse().unwrap(), 16).unwrap();
