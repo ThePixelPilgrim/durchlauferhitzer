@@ -29,7 +29,8 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 
 ```
 src/
-  lib.rs            crate root: lint rules, the Linux-only check, `mod sys`
+  lib.rs            crate root: lint rules, the Linux and 64-bit checks,
+                    `mod sys`
   main.rs           the binary (a usage stub until the CLI, Task 8)
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules

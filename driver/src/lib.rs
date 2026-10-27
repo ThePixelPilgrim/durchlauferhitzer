@@ -10,5 +10,10 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("durchlauferhitzer runs on Linux only (NFR-PORT-01: epoll, openat2, signalfd)");
 
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!(
+    "durchlauferhitzer needs a 64-bit target (NFR-PORT-01: x86_64, aarch64; 64-bit off_t)"
+);
+
 #[allow(unsafe_code)]
 pub mod sys;

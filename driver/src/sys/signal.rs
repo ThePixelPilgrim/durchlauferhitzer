@@ -46,7 +46,9 @@ impl SignalFd {
     /// Blocks `signals` in the calling thread (`pthread_sigmask`), then
     /// opens a `signalfd` for them. Call it on the main thread before any
     /// other thread is started: new threads inherit the mask, so the
-    /// signals are then never delivered the default way to any thread.
+    /// signals are then never delivered the default way to any thread. If
+    /// `signalfd` fails, the signals stay blocked with nothing reading
+    /// them; startup exits on that error anyway.
     pub fn new(signals: &[Signal]) -> io::Result<SignalFd> {
         // SAFETY: an all-zero `sigset_t` is a valid value; `sigemptyset`
         // initialises it below anyway.

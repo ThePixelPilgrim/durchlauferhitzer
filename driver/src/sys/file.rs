@@ -43,12 +43,9 @@ pub struct Stat {
 /// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`; an empty list opens `"."` (the
 /// directory itself). The segments are not checked here: the kernel refuses
 /// `..`, absolute paths and symlinks (`EXDEV`, `ELOOP`). A NUL byte in a
-/// segment is `InvalidInput`. `flags` is normally [`OPEN_FLAGS`].
-pub fn openat2_beneath<S: AsRef<[u8]>>(
-    dir: BorrowedFd<'_>,
-    segments: &[S],
-    flags: libc::c_int,
-) -> io::Result<OwnedFd> {
+/// segment is `InvalidInput`. The open flags are always [`OPEN_FLAGS`], so
+/// the descriptor is never inheritable.
+pub fn openat2_beneath<S: AsRef<[u8]>>(dir: BorrowedFd<'_>, segments: &[S]) -> io::Result<OwnedFd> {
     let mut path = Vec::new();
     for (i, segment) in segments.iter().enumerate() {
         if i > 0 {
@@ -61,7 +58,7 @@ pub fn openat2_beneath<S: AsRef<[u8]>>(
     }
     let path = CString::new(path)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL byte in a path"))?;
-    openat2(dir, &path, flags, RESOLVE)
+    openat2(dir, &path, OPEN_FLAGS, RESOLVE)
 }
 
 fn openat2(
@@ -161,7 +158,7 @@ pub fn readahead(fd: BorrowedFd<'_>, offset: u64, len: u64) -> io::Result<()> {
 
 /// Sends up to `len` bytes of `file` from `offset` to the socket `out`
 /// (`sendfile`, leaving the file's own offset alone). `Closed` means the
-/// file ended before `offset` (a 0 return: truncated); `len` 0 is `Done(0)`
+/// file ended at or before `offset` (a 0 return: truncated); `len` 0 is `Done(0)`
 /// without a system call. A non-blocking `out` gives `WouldBlock`.
 pub fn sendfile(out: BorrowedFd<'_>, file: BorrowedFd<'_>, offset: u64, len: u64) -> Io {
     if len == 0 {

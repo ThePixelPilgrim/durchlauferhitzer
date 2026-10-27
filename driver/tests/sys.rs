@@ -28,8 +28,8 @@ use durchlauferhitzer::sys::epoll::{Epoll, EpollEvent, Readiness, Trouble};
 use durchlauferhitzer::sys::eventfd::EventFd;
 use durchlauferhitzer::sys::fd::Io;
 use durchlauferhitzer::sys::file::{
-    OPEN_FLAGS, Openat2, Stat, file_error, fstat, open_dir_path, openat2_beneath,
-    openat2_supported, readahead, sendfile,
+    Openat2, Stat, file_error, fstat, open_dir_path, openat2_beneath, openat2_supported, readahead,
+    sendfile,
 };
 use durchlauferhitzer::sys::rlimit::{nofile, raise_nofile};
 use durchlauferhitzer::sys::socket::{
@@ -332,7 +332,7 @@ fn file_tree() -> (TempDir, OwnedFd) {
 }
 
 fn open(root: &OwnedFd, segments: &[&[u8]]) -> std::io::Result<OwnedFd> {
-    openat2_beneath(root.as_fd(), segments, OPEN_FLAGS)
+    openat2_beneath(root.as_fd(), segments)
 }
 
 #[test]
@@ -427,7 +427,7 @@ fn sendfile_delivers_the_exact_bytes_then_reports_end_of_file() {
     let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
     fs::write(tmp.path().join("data"), &data).unwrap();
     let root = open_dir_path(tmp.path()).unwrap();
-    let file = openat2_beneath(root.as_fd(), &[b"data"], OPEN_FLAGS).unwrap();
+    let file = openat2_beneath(root.as_fd(), &[b"data"]).unwrap();
     readahead(file.as_fd(), 0, data.len() as u64).unwrap();
 
     let (client, mut server) = loopback_pair();
