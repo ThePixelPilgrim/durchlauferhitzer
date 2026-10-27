@@ -112,8 +112,9 @@ pub(crate) fn chunked(
                 out.wire
                     .extend_from_slice(format!(" {size}\r\n").as_bytes());
             }
+            // The 17th significant digit is the first that cannot fit.
             Some(ChunkDefect::Overflow) => {
-                out.defect_at = Some(start);
+                out.defect_at = Some(start + 16);
                 out.wire
                     .extend_from_slice(format!("1{:016x}\r\n", n).as_bytes());
             }
@@ -160,7 +161,7 @@ pub(crate) fn chunked(
             out.wire.extend_from_slice(b" 0\r\n\r\n");
         }
         Some(ChunkDefect::Overflow) => {
-            out.defect_at = Some(out.wire.len());
+            out.defect_at = Some(out.wire.len() + 16);
             out.wire.extend_from_slice(b"10000000000000000\r\n\r\n");
         }
         Some(ChunkDefect::Extension) => {

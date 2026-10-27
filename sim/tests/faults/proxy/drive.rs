@@ -492,10 +492,17 @@ fn run_timed(
     };
     story.send_off = send_len;
     story.runs[i].ended = true;
+    // Half the time in one piece, so a whole request can arrive with its
+    // head.
+    let whole = rng.bool();
     let mut send = |sim: &mut Sim| {
         let mut at = 0;
         while at < send_len {
-            let n = rng.usize(1..=send_len - at);
+            let n = if whole {
+                send_len
+            } else {
+                rng.usize(1..=send_len - at)
+            };
             sim.send(conn, &wire[at..at + n]);
             at += n;
             if rng.bool() {

@@ -171,24 +171,36 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
         }
         Verdict::BadBody { errors, fwd, bound } => {
             let mut out = Vec::new();
+            // Judged before the connect only if the offending byte can
+            // arrive with the head, in the same buffer (FR-PROXY-19, -23).
+            let before_connect = req.head_len + bound < net.client_recv_capacity();
             for e in errors {
                 let (before, tag) = match e {
                     RequestBodyError::Chunked(_) => (
                         fixed(Status::BadRequest, Persistence::Close, mode(req)),
                         "400 bad request chunk",
                     ),
-                    RequestBodyError::TooLarge => (Vec::new(), "request body over the limit"),
+                    RequestBodyError::TooLarge => {
+                        (Vec::new(), "request body over the limit, silent")
+                    }
                 };
                 let mut t = tags.clone();
-                t.push(tag);
-                out.push(Alt {
-                    bytes: before,
-                    cut: false,
-                    logs: vec![rejected(RejectReason::Body(*e))],
-                    closes: true,
-                    upstream: None,
-                    tags: t.clone(),
-                });
+                if before_connect {
+                    let mut a = t.clone();
+                    a.push(tag);
+                    a.push("body error before connect");
+                    out.push(Alt {
+                        bytes: before,
+                        cut: false,
+                        logs: vec![rejected(RejectReason::Body(*e))],
+                        closes: true,
+                        upstream: None,
+                        tags: a,
+                    });
+                }
+                if matches!(e, RequestBodyError::TooLarge) {
+                    t.push("request body over the limit");
+                }
                 if ex.connect == ConnectBehaviour::Refuse {
                     // Not judged with the head: the connect is refused
                     // before the rest of the body is read.
@@ -211,11 +223,14 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
                             min: 0,
                             max: 0,
                         }),
-                        tags: t,
+                        tags: {
+                            t.push("body error, then refused");
+                            t
+                        },
                     });
                     continue;
                 }
-                t.push("request body cut after connect");
+                t.push("body error after connect");
                 out.push(Alt {
                     bytes: if fwd.expect100 {
                         CONTINUE.to_vec()
@@ -326,22 +341,41 @@ fn forward_alts(
             .collect::<Vec<Alt>>()
     };
     // Whether a body that may not have been read stays unread: the client
-    // closes, unless all of it came with the head.
+    // closes, unless all of it was read. Before the connect completes only
+    // the bytes that came with the head are read, so all of the body can
+    // be read only if the whole request fits the receive buffer.
+    let with_head = if has_body && req.wire.len() <= net.client_recv_capacity() {
+        vec![req.persistence, Persistence::Close]
+    } else if has_body {
+        vec![Persistence::Close]
+    } else {
+        vec![req.persistence]
+    };
     let maybe_unread = if has_body {
         vec![req.persistence, Persistence::Close]
     } else {
         vec![req.persistence]
     };
-    match (ex.connect, ex.timing) {
-        (ConnectBehaviour::Refuse, _) => {
-            core_fail(BackendFailure::Refused, maybe_unread, &[], none, &tags)
+    // One coverage tag per branch of a body that may or may not have been
+    // read, so a branch that never happens shows up.
+    let mark = |mut alts: Vec<Alt>, read: &'static str, unread: &'static str| {
+        if has_body && req.persistence == Persistence::KeepAlive {
+            for a in &mut alts {
+                a.tags.push(if a.closes { unread } else { read });
+            }
         }
-        (ConnectBehaviour::Hang, _) => core_fail(
-            BackendFailure::ConnectTimeout,
-            maybe_unread,
-            &[],
-            none,
-            &tags,
+        alts
+    };
+    match (ex.connect, ex.timing) {
+        (ConnectBehaviour::Refuse, _) => mark(
+            core_fail(BackendFailure::Refused, with_head, &[], none, &tags),
+            "refused, body read with the head",
+            "refused, body unread",
+        ),
+        (ConnectBehaviour::Hang, _) => mark(
+            core_fail(BackendFailure::ConnectTimeout, with_head, &[], none, &tags),
+            "connect timeout, body read with the head",
+            "connect timeout, body unread",
         ),
         (ConnectBehaviour::Accept, Timing::Silent | Timing::PartialHead(_)) => core_fail(
             BackendFailure::ResponseTimeout,
@@ -350,12 +384,16 @@ fn forward_alts(
             full,
             &tags,
         ),
-        (ConnectBehaviour::Accept, Timing::BackendBodyStall(j)) => core_fail(
-            BackendFailure::BodyTimeout,
-            maybe_unread,
-            cont,
-            only(fwd.head_len + j),
-            &tags,
+        (ConnectBehaviour::Accept, Timing::BackendBodyStall(j)) => mark(
+            core_fail(
+                BackendFailure::BodyTimeout,
+                maybe_unread,
+                cont,
+                only(fwd.head_len + j),
+                &tags,
+            ),
+            "backend body stall, body all read",
+            "backend body stall, body unread",
         ),
         (ConnectBehaviour::Accept, Timing::HeadDuringUpload { sent, k })
             if ex
@@ -450,7 +488,7 @@ fn forward_alts(
             } else {
                 vec![base]
             };
-            match &script.reply {
+            let alts = match &script.reply {
                 Reply::Fail(kind) => core_fail(*kind, bases, cont, up, &tags),
                 Reply::Relay(r) => {
                     let mut out = relay_alts(
@@ -464,6 +502,7 @@ fn forward_alts(
                         backend,
                         tags.clone(),
                         &core_fail,
+                        net.upstream_recv_capacity(),
                     );
                     if racing {
                         let closed = if r.persistence == Persistence::Close {
@@ -482,11 +521,24 @@ fn forward_alts(
                             backend,
                             tags,
                             &core_fail,
+                            net.upstream_recv_capacity(),
                         ));
                     }
                     out
                 }
+            };
+            if !racing {
+                return alts;
             }
+            // An eager answer races the upload: the body may be read in
+            // full (keep-alive) or not (close), even past one buffer.
+            let mut alts = mark(alts, "eager, body all read", "eager, body unread");
+            if req.wire.len() > net.client_recv_capacity() {
+                for a in alts.iter_mut().filter(|a| !a.closes) {
+                    a.tags.push("eager, body all read past one buffer");
+                }
+            }
+            alts
         }
     }
 }
@@ -507,6 +559,7 @@ fn relay_alts(
     backend: BackendId,
     mut tags: Vec<&'static str>,
     core_fail: &CoreFail,
+    upstream_capacity: usize,
 ) -> Vec<Alt> {
     let proxied = Log::ProxiedResponse {
         conn: who.conn,
@@ -590,10 +643,20 @@ fn relay_alts(
             | Timing::Eager
             | Timing::HeadDuringUpload { .. } => req.persistence,
         };
+        // Only bytes within the upstream's receive buffer can arrive with
+        // the head and be judged before it is queued (FR-PROXY-19, -24).
+        let head_start = script.interim_ends.last().copied().unwrap_or(0);
+        let with_head = script.head_end - head_start + bound < upstream_capacity;
         let mut out = Vec::new();
         for e in errors {
-            out.extend(core_fail(*e, vec![base], cont, up.clone(), &tags));
-            out.push(cut_alt(*e, *bound, &tags));
+            if with_head {
+                let mut t = tags.clone();
+                t.push("body error with the response head");
+                out.extend(core_fail(*e, vec![base], cont, up.clone(), &t));
+            }
+            let mut t = tags.clone();
+            t.push("body error after the response head");
+            out.push(cut_alt(*e, *bound, &t));
         }
         return out;
     }

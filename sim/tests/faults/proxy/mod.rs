@@ -42,6 +42,9 @@ use response::*;
 /// Seeds the proxy net runs (debug build: a few seconds).
 pub(crate) const PROXY_SEEDS: u64 = 400;
 
+/// `max_request_line` of every generated config.
+pub(crate) const MAX_REQUEST_LINE: usize = 1024;
+
 /// A proxy route of the generated config.
 #[derive(Debug)]
 pub(crate) struct RouteConfig {
@@ -81,6 +84,20 @@ fn limit_text(limit: Option<u64>) -> String {
 }
 
 impl NetConfig {
+    /// A client connection's receive buffer, by NFR-RES-01:
+    /// `max(max_head, max_request_line + 2)`. Only bytes within it can
+    /// arrive together with the request head.
+    pub(crate) fn client_recv_capacity(&self) -> usize {
+        self.max_head.max(MAX_REQUEST_LINE + 2)
+    }
+
+    /// An upstream's receive buffer, by NFR-RES-01: `max(16 KiB,
+    /// max_head)`. Only bytes within it can arrive together with a
+    /// response head.
+    pub(crate) fn upstream_recv_capacity(&self) -> usize {
+        self.max_head.max(16 * 1024)
+    }
+
     pub(crate) fn random(rng: &mut fastrand::Rng) -> NetConfig {
         let routes = [
             RouteConfig {
@@ -120,7 +137,7 @@ impl NetConfig {
         let text = format!(
             "listen 127.0.0.1:8080;
 limits {{
-  max_request_line 1KiB;
+  max_request_line {MAX_REQUEST_LINE};
   max_head {max_head};
   header_timeout 20s;
   keepalive_timeout 120s;
@@ -195,6 +212,20 @@ pub(crate) const REQUIRED: &[&str] = &[
     "chunk extension",
     "chunk trailer",
     "request hidden in a body",
+    // Each branch of an outcome that depends on the split.
+    "body error before connect",
+    "body error after connect",
+    "body error, then refused",
+    "refused, body read with the head",
+    "refused, body unread",
+    "connect timeout, body read with the head",
+    "connect timeout, body unread",
+    "backend body stall, body all read",
+    "backend body stall, body unread",
+    "eager, body all read",
+    "eager, body unread",
+    "body error with the response head",
+    "body error after the response head",
     // NFR-SEC-03.
     "bytes after a backend response",
     "CR in a backend head",
