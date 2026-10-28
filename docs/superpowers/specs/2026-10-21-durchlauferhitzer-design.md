@@ -1128,7 +1128,18 @@ Failures, persistence, timeouts:
 
 - **FR-PROC-01** [stage 4] `durchlauferhitzer <config-path>` runs the
   server; `durchlauferhitzer --check <config-path>` validates the config
-  (FR-CFG-06 errors) and exits.
+  (FR-CFG-06 errors) and exits. *(Stage 4 Task 8, builder calls:)*
+  `--check` loads the config and nothing else (no socket, no root is
+  touched); it prints `ok` on stdout (exit 0) or the error on stderr as
+  `<config-path>:<line>:<column>: <message>` (exit 1). A config file that
+  cannot be read is a config error too (`durchlauferhitzer: <config-path>:
+  <reason>`, exit 1). Any other command line (no argument, an unknown
+  flag, any argument starting with `-` other than a leading `--check`, too
+  many arguments) prints the usage on stderr and exits 1:
+  ```
+  usage: durchlauferhitzer <config-path>
+         durchlauferhitzer --check <config-path>
+  ```
 - **FR-PROC-02** [stage 4] If systemd passes listening sockets (socket
   activation, `LISTEN_FDS`), they are used and the process never needs
   root.
@@ -1209,7 +1220,8 @@ Failures, persistence, timeouts:
   `RejectReason::ShuttingDown`.
 - **FR-PROC-05a** [stage 4] Exit codes: 0 success (including `--check` on a
   valid config), 1 invalid config, 2 startup failure (e.g. a port in use,
-  a missing static root).
+  a missing static root). *(Stage 4 Task 8, builder call recorded per the
+  plan:)* bad arguments exit 1, with the usage (FR-PROC-01).
 - **FR-PROC-06** [stage 5] Containment: Landlock restricts file access to
   the static roots (a clear warning at startup if unavailable, and the
   server runs); seccomp allow-lists the syscalls.

@@ -36,7 +36,10 @@ src/
                     the modules, re-exports (`Driver`, `Exit`,
                     `StopHandle`, `LogSink`, `Buffered`, `LogEntry`,
                     `DriverLog`)
-  main.rs           the binary (a usage stub until the CLI, Task 8)
+  main.rs           the binary: `process::run` with the arguments
+  process.rs        the command line (FR-PROC-01: serve, `--check`, the
+                    usage), the exit codes (`ExitStatus`, FR-PROC-05a),
+                    the startup sequence (A11)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
                     `next_deadline`, dispatch, `TimerFired`), `deliver`
                     (one `handle` call, its actions in order, then the
@@ -102,6 +105,9 @@ src/
     rlimit.rs         `nofile`, `raise_nofile`, `set_soft_nofile`
                       (RLIMIT_NOFILE)
 tests/
+  cli.rs            the binary in a subprocess: the usage for bad
+                    arguments, `--check` (ok, each kind of error with its
+                    line:column, a missing file; no root or port touched)
   sys.rs            the wrappers on the real kernel, unprivileged
   log.rs            the line format: an exact line per kind, every
                     reason / failure / file error value, the escaping
@@ -131,6 +137,10 @@ tests/
                     file, a sparse file over 4 GiB
   static_fd_leak.rs a client reset mid-`sendfile` closes the file and leaks
                     no descriptor; alone in its binary
+  support/child.rs  running the binary: temp configs, a free port, the
+                    child's setup before exec (`pre_exec`: closed fds,
+                    fd 3, RLIMIT_NOFILE; the test crate's only `unsafe`),
+                    a guard that kills a running server on drop
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
   support/server.rs the loop tests' harness: a `Driver` in a thread on an
                     ephemeral port (`start_static` opens the config's roots

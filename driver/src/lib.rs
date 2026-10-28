@@ -18,6 +18,7 @@ mod conns;
 pub mod event_loop;
 pub mod log;
 mod pool;
+pub mod process;
 #[allow(unsafe_code)]
 pub mod sys;
 
