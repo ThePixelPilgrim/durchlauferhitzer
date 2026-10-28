@@ -137,8 +137,11 @@ fn an_open_upstream_whose_registration_fails_is_reported_failed() {
             registered: None,
         },
     );
+    driver.accepting.failed(driver.clock.now());
     driver.set_upstream_interest(up, Interest::Read).unwrap();
     assert!(matches!(driver.upstreams[&up].phase, Phase::Failed));
+    // The socket was closed: paused listeners resume (DRV-16).
+    assert_eq!(driver.accepting.state(), Accepting::Open);
     assert_eq!(driver.upstreams[&up].registered, None);
     assert_eq!(
         driver.broken.iter().copied().collect::<Vec<_>>(),
@@ -161,11 +164,13 @@ fn a_connecting_upstream_whose_registration_fails_is_a_failed_connect() {
             registered: None,
         },
     );
+    driver.accepting.failed(driver.clock.now());
     driver.sync_upstream(up).unwrap();
     assert!(matches!(
         driver.upstreams[&up].phase,
         Phase::Answering(Answer::Failed)
     ));
+    assert_eq!(driver.accepting.state(), Accepting::Open);
     assert_eq!(driver.answers.iter().copied().collect::<Vec<_>>(), [up]);
     assert_eq!(
         driver.take_answer(up).unwrap(),

@@ -413,22 +413,26 @@ impl Driver {
         let errno = err.raw_os_error().unwrap_or(0);
         self.log
             .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
-        // Closing the socket takes it out of the epoll set.
-        upstream.registered = None;
-        let closed = holds_fd(&upstream.phase);
-        match upstream.phase {
+        // Closing the socket takes it out of the epoll set; only the
+        // branches that drop it count as a closed descriptor (DRV-16).
+        let closed = match upstream.phase {
             Phase::Connecting(_) => {
                 upstream.phase = Phase::Answering(Answer::Failed);
+                upstream.registered = None;
                 self.answers.push_back(up);
+                Closed::Yes
             }
             Phase::Open { .. } => {
                 upstream.phase = Phase::Failed;
+                upstream.registered = None;
                 self.broken
                     .push_back(Broken::Upstream(up, conn_error(&err)));
+                Closed::Yes
             }
-            // Never registered, so never here.
-            Phase::Answering(_) | Phase::Failed => {}
-        }
+            // Never registered (wanted `None`), so never here; the socket,
+            // if any, is kept.
+            Phase::Answering(_) | Phase::Failed => Closed::No,
+        };
         self.closed(closed)
     }
 
