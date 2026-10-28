@@ -5,10 +5,12 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::OwnedFd;
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use durchlauferhitzer_core::config::load;
 use durchlauferhitzer_core::{ConnError, ConnId, Core, Event, Interest, Log, UpstreamId};
 
+use super::accept::Accepting;
 use super::upstreams::{WriteMode, write_mode};
 use super::{Broken, Driver};
 use crate::conns::{Answer, Client, Eof, Phase, Upstream, Writes};
@@ -170,4 +172,47 @@ fn a_connecting_upstream_whose_registration_fails_is_a_failed_connect() {
         })
     );
     assert_eq!(logs.try_iter().collect::<Vec<_>>(), [REGISTER_FAILED]);
+}
+
+/// DRV-16: while the listeners are paused, the wait ends at their retry
+/// (1 s), also when the core has no deadline.
+#[test]
+fn paused_listeners_bound_the_wait_by_their_retry() {
+    let (mut driver, _logs) = driver();
+    assert_eq!(driver.timeout(), None);
+    driver.accepting.failed(driver.clock.now());
+    let timeout = driver.timeout().unwrap();
+    assert!(
+        timeout > Duration::from_millis(900) && timeout <= Duration::from_secs(1),
+        "{timeout:?}"
+    );
+}
+
+/// DRV-16: a descriptor the driver closes resumes paused listeners, an
+/// upstream's as much as a client's.
+#[test]
+fn closing_a_client_or_an_upstream_resumes_paused_listeners() {
+    let (mut driver, _logs) = driver();
+    let conn = ConnId(1);
+    driver.clients.insert(conn, Client::new(unpollable()));
+    driver.accepting.failed(driver.clock.now());
+    driver.close(conn).unwrap();
+    assert_eq!(driver.accepting.state(), Accepting::Open);
+
+    let up = UpstreamId(1);
+    driver.upstreams.insert(
+        up,
+        Upstream {
+            phase: Phase::Open {
+                fd: unpollable(),
+                writes: Writes::Open,
+                eof: Eof::NotYet,
+            },
+            interest: Interest::None,
+            registered: None,
+        },
+    );
+    driver.accepting.failed(driver.clock.now());
+    driver.close_upstream(up).unwrap();
+    assert_eq!(driver.accepting.state(), Accepting::Open);
 }

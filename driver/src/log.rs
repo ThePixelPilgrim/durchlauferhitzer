@@ -13,8 +13,9 @@ use durchlauferhitzer_core::Log;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverLog {
     /// `accept` failed for a reason that is not transient: `EMFILE`,
-    /// `ENFILE`, `ENOBUFS`, `ENOMEM` or an unexpected errno. After
-    /// `EMFILE`/`ENFILE` the listeners pause until a connection closes.
+    /// `ENFILE`, `ENOBUFS`, `ENOMEM` or an unexpected errno (0 without
+    /// one). The listeners pause until the driver closes a descriptor or
+    /// 1 s has passed; logged at most once a second (DRV-16).
     AcceptFailed { errno: i32 },
     /// `socket()` for a backend connect failed with `EMFILE` or `ENFILE`:
     /// the descriptor budget (NFR-RES-05) is wrong. The connect is answered

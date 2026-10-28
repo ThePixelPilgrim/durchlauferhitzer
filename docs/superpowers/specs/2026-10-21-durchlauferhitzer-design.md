@@ -1038,7 +1038,9 @@ Failures, persistence, timeouts:
   `Expect` error, or a head over `max_head`), and `None` for an error in the
   request line itself (too long, malformed, bad method, version or
   target). Driver-bug closes and `EMFILE`/`ENFILE` are driver log kinds,
-  not core `Log`s.
+  not core `Log`s. (Owner decisions 2026-10-28:) accept failures are
+  logged at most once a second (DRV-16); a failed `epoll_ctl` for one
+  socket is a driver log too (DRV-15).
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
@@ -1514,6 +1516,16 @@ sim implements and checks it; the epoll driver is [stage 4].
   `Accepted`, DRV-01). Only `epoll_wait` failing, or `epoll_ctl` on the
   loop's own descriptors (listeners, wake eventfd, signalfd), ends the
   loop.
+- **DRV-16** [stage 4] *(Owner decision 2026-10-28, O1.)* An `accept`
+  failure that is not transient (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`
+  and any unexpected errno) is logged (FR-LOG-07) and pauses every
+  listener. They resume at the first of: the driver closing any descriptor
+  (a client `Close`, `CloseUpstream`, a failed upstream socket or connect,
+  later a closed file), or a driver-owned retry 1 s after the pause (the
+  wait's timeout is the earlier of it and `next_deadline`). A failure on
+  resume pauses again; at most one log line per second, never a spin,
+  never a permanent outage. `ECONNABORTED`, `EPROTO` and `EPERM` are
+  transient: skipped, accepting goes on.
 
 ---
 

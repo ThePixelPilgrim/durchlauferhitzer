@@ -4,7 +4,7 @@ The product binary: the Linux `epoll` driver that runs the sans-IO core in
 [`../core`](../core) over real sockets, files, threads and signals (stage 4).
 The core decides everything about HTTP; this crate owns all I/O and carries
 out the core's actions exactly as the driver contract in
-[`../core/src/core/contract.rs`](../core/src/core/contract.rs) says (DRV-01…15
+[`../core/src/core/contract.rs`](../core/src/core/contract.rs) says (DRV-01…16
 in the [design spec](../docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md)).
 
 The package is `durchlauferhitzer`: a library (so tests can drive its parts)
@@ -42,8 +42,11 @@ src/
                     queued connect answers), `apply` (every `Action`
                     matched), the clock and `set_date`, `Exit`,
                     `StopHandle`
-    clients.rs        accept (errors: transient, EMFILE/ENFILE pause),
-                      client reads, writes and errors, client actions
+    accept.rs         the accept pause (DRV-16): `classify` (transient or
+                      pause), `AcceptGate` (paused until a descriptor
+                      closes or the 1 s retry; one log line a second)
+    clients.rs        accept, client reads, writes and errors, client
+                      actions, resuming the listeners
     upstreams.rs      `Connect` and its later answer, upstream reads and
                       writes by interest, error deferral, upstream actions
     tests.rs          unit tests of the loop's decisions on a driver that
@@ -76,7 +79,8 @@ src/
     signal.rs         `SignalFd` for SIGTERM / SIGINT / SIGPIPE (blocked with
                       `pthread_sigmask` first)
     user.rs           `lookup_user` (getpwnam_r), `drop_to`, `euid`
-    rlimit.rs         `nofile`, `raise_nofile` (RLIMIT_NOFILE)
+    rlimit.rs         `nofile`, `raise_nofile`, `set_soft_nofile`
+                      (RLIMIT_NOFILE)
 tests/
   sys.rs            the wrappers on the real kernel, unprivileged
   loop_static_less.rs  the event loop on loopback, no static roots: fixed
@@ -85,6 +89,9 @@ tests/
                     reset under interest `None`, the header timeout
   loop_fd_leak.rs   a client reset mid-relay leaks no descriptor; alone in
                     its binary, since the fd count is process-wide
+  loop_accept_pause.rs  out of descriptors: accepting pauses without a
+                    spin and the 1 s retry resumes it; alone in its binary
+                    (it lowers RLIMIT_NOFILE)
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
   support/server.rs the loop tests' harness: a `Driver` in a thread on an
                     ephemeral port, a std backend, response readers
@@ -121,11 +128,14 @@ leaves a choice, this is what the loop does:
   `SO_ERROR` (`ECONNRESET`/`EPIPE` are `Reset`; a hang-up without an error
   is `Reset` too). The end of stream is reported once; the socket is not
   read again after it.
-- **Accept.** Loops until it would block. `ECONNABORTED`, `EPROTO` and
-  `EPERM` are skipped. `EMFILE`/`ENFILE` are logged (`DriverLog::AcceptFailed`)
-  and pause every listener until a client connection closes, so the loop
-  never spins; any other errno (`ENOBUFS`, `ENOMEM`, ...) is logged and
-  ends this turn's accepting.
+- **Accept** (DRV-16). Loops until it would block. `ECONNABORTED`,
+  `EPROTO` and `EPERM` are skipped. Any other failure (`EMFILE`, `ENFILE`,
+  `ENOBUFS`, `ENOMEM`, ...) is logged (`DriverLog::AcceptFailed`, at most
+  once a second) and takes every listener out of the wait, so the loop
+  never spins. They come back when the driver closes any descriptor (a
+  client, an upstream, a failed connect) or 1 s after the pause, whichever
+  is first: the wait's timeout is the earlier of that retry and
+  `next_deadline`. A failure on resume pauses again.
 - **Upstreams** (DRV-10). `Connect` calls `connect()` at once; an outcome
   known at once (connected, refused, `socket()` failed) is queued and
   delivered after the actions of that call. `socket()` failing with

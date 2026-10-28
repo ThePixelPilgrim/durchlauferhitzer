@@ -6,7 +6,8 @@ use std::os::fd::AsFd;
 
 use durchlauferhitzer_core::{ConnError, ConnId, Event, Interest};
 
-use super::{Accepting, Broken, Driver, conn_error, token};
+use super::accept::{AcceptError, Accepting, Logging, Resume, classify};
+use super::{Broken, Driver, conn_error, token};
 use crate::conns::{Client, Eof, Health, Token, has_read, has_write};
 use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
@@ -15,36 +16,15 @@ use crate::sys::socket::{
     accept_nonblocking, read, set_nodelay, shutdown_write, take_error, write,
 };
 
-/// What an `accept` error means for the loop.
-enum AcceptError {
-    /// The connection went away before it was taken (`ECONNABORTED`,
-    /// `EPROTO`) or a firewall refused it (`EPERM`): skip it and go on.
-    Transient,
-    /// Out of descriptors (`EMFILE`, `ENFILE`): log it and pause the
-    /// listeners until a connection closes.
-    OutOfDescriptors(i32),
-    /// Anything else (`ENOBUFS`, `ENOMEM`, ...): log it and stop for this
-    /// turn.
-    Other(i32),
-}
-
-fn classify(err: &io::Error) -> AcceptError {
-    match err.raw_os_error() {
-        Some(libc::ECONNABORTED | libc::EPROTO | libc::EPERM) => AcceptError::Transient,
-        Some(errno @ (libc::EMFILE | libc::ENFILE)) => AcceptError::OutOfDescriptors(errno),
-        Some(errno) => AcceptError::Other(errno),
-        None => AcceptError::Other(0),
-    }
-}
-
 impl Driver {
     /// Accepts every pending connection on listener `i`, until it would
-    /// block.
+    /// block. A failure that is not transient is logged (at most once a
+    /// second) and pauses every listener (DRV-16).
     pub(super) fn accept_all(&mut self, i: u32) -> io::Result<()> {
         loop {
-            match self.accepting {
+            match self.accepting.state() {
                 Accepting::Open => {}
-                Accepting::Paused => return Ok(()),
+                Accepting::Paused { .. } => return Ok(()),
             }
             let Some(listener) = usize::try_from(i).ok().and_then(|i| self.listeners.get(i)) else {
                 return Ok(());
@@ -54,31 +34,40 @@ impl Driver {
                 Ok(None) => return Ok(()),
                 Err(err) => match classify(&err) {
                     AcceptError::Transient => {}
-                    AcceptError::OutOfDescriptors(errno) => {
-                        self.log
-                            .write(LogEntry::Driver(DriverLog::AcceptFailed { errno }));
-                        return self.set_accepting(Accepting::Paused);
-                    }
-                    AcceptError::Other(errno) => {
-                        self.log
-                            .write(LogEntry::Driver(DriverLog::AcceptFailed { errno }));
-                        return Ok(());
+                    AcceptError::Pause(errno) => {
+                        match self.accepting.failed(self.clock.now()) {
+                            Logging::Log => self
+                                .log
+                                .write(LogEntry::Driver(DriverLog::AcceptFailed { errno })),
+                            Logging::Quiet => {}
+                        }
+                        return self.register_listeners(Readiness::None);
                     }
                 },
             }
         }
     }
 
-    /// Takes the listeners out of the wait, or puts them back.
-    fn set_accepting(&mut self, accepting: Accepting) -> io::Result<()> {
-        if self.accepting == accepting {
-            return Ok(());
+    /// The driver closed a descriptor: paused listeners resume at once
+    /// (DRV-16).
+    pub(super) fn descriptor_closed(&mut self) -> io::Result<()> {
+        match self.accepting.descriptor_closed() {
+            Resume::Resumed => self.register_listeners(Readiness::Read),
+            Resume::Unchanged => Ok(()),
         }
-        self.accepting = accepting;
-        let readiness = match accepting {
-            Accepting::Open => Readiness::Read,
-            Accepting::Paused => Readiness::None,
-        };
+    }
+
+    /// Paused listeners whose retry instant has passed resume (DRV-16).
+    pub(super) fn retry_accept(&mut self) -> io::Result<()> {
+        match self.accepting.tick(self.clock.now()) {
+            Resume::Resumed => self.register_listeners(Readiness::Read),
+            Resume::Unchanged => Ok(()),
+        }
+    }
+
+    /// Puts the listeners into the wait (`Read`) or takes them out
+    /// (`None`). A failure here is the loop's own and ends `run`.
+    fn register_listeners(&mut self, readiness: Readiness) -> io::Result<()> {
         for (i, listener) in self.listeners.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else {
                 continue;
@@ -313,10 +302,10 @@ impl Driver {
 
     /// Closes the socket (dropping it removes it from the epoll set) and
     /// forgets the id: nothing more is delivered for it (DRV-05). A
-    /// descriptor is free again, so paused listeners resume.
+    /// descriptor is free again, so paused listeners resume (DRV-16).
     pub(super) fn close(&mut self, conn: ConnId) -> io::Result<()> {
         if self.clients.remove(&conn).is_some() {
-            self.set_accepting(Accepting::Open)?;
+            self.descriptor_closed()?;
         }
         Ok(())
     }

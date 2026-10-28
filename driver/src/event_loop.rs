@@ -14,6 +14,7 @@
 //! Clients are in `clients.rs` (accept, reads, writes, their actions),
 //! upstreams in `upstreams.rs`.
 
+mod accept;
 mod clients;
 mod upstreams;
 
@@ -26,6 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use durchlauferhitzer_core::{Action, ConnError, ConnId, Core, Event, Instant, UpstreamId};
 
+use self::accept::AcceptGate;
 use crate::conns::{Client, Token, Upstream};
 use crate::log::{LogEntry, LogSink};
 use crate::pool::Pool;
@@ -76,15 +78,6 @@ enum Broken {
     Upstream(UpstreamId, ConnError),
 }
 
-/// Whether the listeners take new connections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Accepting {
-    Open,
-    /// `accept` hit `EMFILE`/`ENFILE`: the listeners are out of the wait
-    /// until a connection closes, so the loop never spins on them.
-    Paused,
-}
-
 /// The time sources: the monotonic clock as the core's [`Instant`] (DRV-06)
 /// and the wall-clock second for `Date` (DRV-13).
 #[derive(Debug)]
@@ -122,7 +115,8 @@ pub struct Driver {
     epoll: Epoll,
     wake: Arc<Wake>,
     listeners: Vec<OwnedFd>,
-    accepting: Accepting,
+    /// Whether the listeners take connections (DRV-16).
+    accepting: AcceptGate,
     /// The static roots, opened once at startup, indexed by `RootId`
     /// (DRV-07); used by the file contract (Task 6).
     _roots: Vec<OwnedFd>,
@@ -182,7 +176,7 @@ impl Driver {
             epoll,
             wake,
             listeners,
-            accepting: Accepting::Open,
+            accepting: AcceptGate::new(),
             _roots: roots,
             _pool: pool,
             log,
@@ -221,14 +215,20 @@ impl Driver {
                 self.dispatch(event)?;
             }
             self.fire_timer()?;
+            self.retry_accept()?;
         }
     }
 
-    /// How long to wait: until [`Core::next_deadline`] (DRV-06), forever
-    /// without one. `Epoll::wait` rounds up to whole milliseconds, so the
-    /// loop never wakes before the deadline.
+    /// How long to wait: until [`Core::next_deadline`] (DRV-06) or the
+    /// paused listeners' retry (DRV-16), whichever comes first; forever
+    /// without either. `Epoll::wait` rounds up to whole milliseconds, so
+    /// the loop never wakes before the deadline.
     fn timeout(&self) -> Option<Duration> {
-        let deadline = self.core.next_deadline()?;
+        let deadline = match (self.core.next_deadline(), self.accepting.retry_at()) {
+            (Some(core), Some(retry)) => core.min(retry),
+            (Some(deadline), None) | (None, Some(deadline)) => deadline,
+            (None, None) => return None,
+        };
         let now = self.clock.now();
         Some(Duration::from_nanos(
             deadline.as_nanos().saturating_sub(now.as_nanos()),
@@ -336,10 +336,7 @@ impl Driver {
             Action::SetUpstreamInterest { up, interest } => {
                 self.set_upstream_interest(up, interest)
             }
-            Action::CloseUpstream { up } => {
-                self.close_upstream(up);
-                Ok(())
-            }
+            Action::CloseUpstream { up } => self.close_upstream(up),
             Action::Log(log) => {
                 self.log.write(LogEntry::Core(log));
                 Ok(())

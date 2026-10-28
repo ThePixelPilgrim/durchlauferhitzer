@@ -40,11 +40,29 @@ pub(super) fn write_mode(interest: Interest, writes: Writes, eof: Eof) -> Option
     }
 }
 
+/// Whether a step closed a descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closed {
+    Yes,
+    No,
+}
+
+/// Whether leaving `phase` closes a socket.
+fn holds_fd(phase: &Phase) -> Closed {
+    match phase {
+        Phase::Connecting(_) | Phase::Answering(Answer::Connected(_)) | Phase::Open { .. } => {
+            Closed::Yes
+        }
+        Phase::Answering(Answer::Failed) | Phase::Failed => Closed::No,
+    }
+}
+
 impl Driver {
     /// `Connect`: start the non-blocking connect now; its outcome is always
     /// delivered as a later event (DRV-10), also when `connect()` or
     /// `socket()` decides at once.
     pub(super) fn connect(&mut self, up: UpstreamId, backend: BackendId) -> io::Result<()> {
+        let mut closed = Closed::No;
         let addr = usize::try_from(backend.0)
             .ok()
             .and_then(|i| self.core.backends().get(i))
@@ -71,7 +89,11 @@ impl Driver {
                     Ok(ConnectStart::Connected) => {
                         Phase::Answering(Answer::Connected(connecting.fd))
                     }
-                    Err(_) => Phase::Answering(Answer::Failed),
+                    Err(_) => {
+                        // The socket is closed with `connecting`.
+                        closed = Closed::Yes;
+                        Phase::Answering(Answer::Failed)
+                    }
                 }
             }
         };
@@ -87,7 +109,8 @@ impl Driver {
         if answering {
             self.answers.push_back(up);
         }
-        self.sync_upstream(up)
+        self.sync_upstream(up)?;
+        self.closed(closed)
     }
 
     /// The queued answer of `up`'s connect, if `CloseUpstream` did not come
@@ -184,6 +207,7 @@ impl Driver {
             upstream.phase = phase;
             return Ok(());
         };
+        let mut closed = Closed::No;
         let event = match take_error(fd.as_fd()) {
             Ok(None) => {
                 upstream.phase = Phase::Open {
@@ -197,6 +221,7 @@ impl Driver {
             // socket takes it out of the epoll set.
             Ok(Some(_)) | Err(_) => {
                 drop(fd);
+                closed = Closed::Yes;
                 Event::UpstreamFailed {
                     up,
                     error: ConnError::Other,
@@ -204,6 +229,7 @@ impl Driver {
             }
         };
         self.sync_upstream(up)?;
+        self.closed(closed)?;
         self.deliver(event)
     }
 
@@ -312,10 +338,13 @@ impl Driver {
     /// The socket failed: it is closed now (the core does no more with it
     /// than `CloseUpstream`), and the event to report is returned.
     fn upstream_failed(&mut self, up: UpstreamId, error: ConnError) -> io::Result<Event> {
+        let mut closed = Closed::No;
         if let Some(upstream) = self.upstreams.get_mut(&up) {
+            closed = holds_fd(&upstream.phase);
             upstream.phase = Phase::Failed;
         }
         self.sync_upstream(up)?;
+        self.closed(closed)?;
         Ok(Event::UpstreamFailed { up, error })
     }
 
@@ -369,6 +398,7 @@ impl Driver {
             .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
         // Closing the socket takes it out of the epoll set.
         upstream.registered = None;
+        let closed = holds_fd(&upstream.phase);
         match upstream.phase {
             Phase::Connecting(_) => {
                 upstream.phase = Phase::Answering(Answer::Failed);
@@ -382,12 +412,23 @@ impl Driver {
             // Never registered, so never here.
             Phase::Answering(_) | Phase::Failed => {}
         }
-        Ok(())
+        self.closed(closed)
     }
 
     /// Closes the socket, also while its connect is pending; nothing more
     /// is delivered for the id (a queued answer included).
-    pub(super) fn close_upstream(&mut self, up: UpstreamId) {
-        self.upstreams.remove(&up);
+    pub(super) fn close_upstream(&mut self, up: UpstreamId) -> io::Result<()> {
+        match self.upstreams.remove(&up) {
+            Some(upstream) => self.closed(holds_fd(&upstream.phase)),
+            None => Ok(()),
+        }
+    }
+
+    /// Paused listeners resume when a socket was closed (DRV-16).
+    fn closed(&mut self, closed: Closed) -> io::Result<()> {
+        match closed {
+            Closed::Yes => self.descriptor_closed(),
+            Closed::No => Ok(()),
+        }
     }
 }

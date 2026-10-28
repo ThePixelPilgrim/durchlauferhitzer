@@ -231,6 +231,11 @@
 //!   socket treats it as that socket's error (DRV-15): [`Event::Failed`]
 //!   or [`Event::UpstreamFailed`] after the actions of the current call (a
 //!   pending connect's answer is `UpstreamFailed`); the loop goes on.
+//! - An `accept` failure that is not transient (`EMFILE`, `ENFILE`,
+//!   `ENOBUFS`, `ENOMEM`, anything unexpected) pauses the listeners until
+//!   the driver closes a descriptor or a 1 s retry, logged at most once a
+//!   second (DRV-16); `ECONNABORTED`, `EPROTO` and `EPERM` are skipped. The
+//!   core sees only the connections that were accepted.
 //! - An upstream's socket error is reported as [`Event::UpstreamFailed`]
 //!   only when a read or a write hits it (or, for a connect, from
 //!   `SO_ERROR`), and never ahead of bytes the backend sent before it.
