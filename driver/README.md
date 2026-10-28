@@ -145,7 +145,9 @@ tests/
                     in the child: one short is exit 2 with both numbers,
                     exactly the budget starts and serves, a low soft limit
                     is raised (three configs: proxy, static, both); a stray
-                    inherited fd raises the need by one
+                    inherited fd raises the need by one; the expected
+                    numbers add what the test process itself passes on
+                    (`child::inheritable_fds`, e.g. a CI runner's fds)
   privileges.rs     A8 in the binary: as non-root `user` is kept and
                     logged, a refused bind below 1024 is exit 2 naming it; as root (else
                     skipped with a printed reason) no `user` and an unknown

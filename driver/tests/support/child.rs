@@ -353,6 +353,38 @@ pub fn threads(pid: u32, count: usize) -> Vec<PathBuf> {
     }
 }
 
+/// How many descriptors of this process, from 3 on and not in `except`,
+/// a child inherits: those without `O_CLOEXEC` in `/proc/self/fdinfo`
+/// (cargo's jobserver pipes or a CI runner's descriptors, say; std opens
+/// everything close-on-exec). The server counts them in its budget (O5).
+pub fn inheritable_fds(except: &[RawFd]) -> u64 {
+    const O_CLOEXEC_OCTAL: u32 = 0o2_000_000;
+    let mut count = 0;
+    for entry in fs::read_dir("/proc/self/fdinfo").unwrap() {
+        let entry = entry.unwrap();
+        let Ok(fd) = entry.file_name().to_string_lossy().parse::<RawFd>() else {
+            continue;
+        };
+        if fd < 3 || except.contains(&fd) {
+            continue;
+        }
+        // The directory being read is gone by the time this is read, so a
+        // vanished entry is skipped.
+        let Ok(info) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let flags = info
+            .lines()
+            .find_map(|line| line.strip_prefix("flags:"))
+            .and_then(|flags| u32::from_str_radix(flags.trim(), 8).ok())
+            .unwrap();
+        if flags & O_CLOEXEC_OCTAL == 0 {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// The target of `/proc/<pid>/fd/<fd>`, if it is open.
 pub fn fd_target(pid: u32, fd: RawFd) -> Option<String> {
     fs::read_link(format!("/proc/{pid}/fd/{fd}"))

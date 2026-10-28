@@ -12,7 +12,9 @@
 //! - a proxy route: + 16 (upstream sockets) = 55;
 //! - a static route: + 1 (the root, open) + 1 (the pool's wake
 //!   duplicate) + 16 (files) = 57;
-//! - both: 73.
+//! - both: 73;
+//! plus every descriptor this test process passes on to its children
+//! (`child::inheritable_fds`: cargo's jobserver pipes, a CI runner's).
 
 #![allow(
     clippy::unwrap_used,
@@ -42,12 +44,14 @@ fn configs(dir: &TempDir, addr: SocketAddr) -> Vec<(String, u64)> {
         "listen {addr};\n{LIMITS}\nhost a {{\n  path / {{ static {root}; }}\n  \
          path /api {{ {PROXY_ROUTE} }}\n}}\n"
     );
+    // Whatever this process passes on is open in the server too.
+    let inherited = child::inheritable_fds(&[]);
     [(proxy, 55), (stat, 57), (both, 73)]
         .into_iter()
         .enumerate()
         .map(|(i, (conf, needed))| {
             let path = dir.file(&format!("budget{i}.conf"), &conf);
-            (path.to_str().unwrap().to_owned(), needed)
+            (path.to_str().unwrap().to_owned(), needed + inherited)
         })
         .collect()
 }
@@ -120,6 +124,8 @@ fn an_inherited_descriptor_raises_the_need_by_one() {
     let dir = TempDir::new();
     let addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let (path, needed) = configs(&dir, addr).swap_remove(0);
+    // The stray descriptor replaces an inherited fd 3, if there is one.
+    let needed = needed - (child::inheritable_fds(&[]) - child::inheritable_fds(&[3]));
     let stray = || Some(std::os::fd::OwnedFd::from(fs::File::open(&path).unwrap()));
     let setup = |limit| Setup {
         stray_fd: stray(),
