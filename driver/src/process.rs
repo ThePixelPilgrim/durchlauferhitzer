@@ -9,11 +9,10 @@
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use durchlauferhitzer_core::Core;
 use durchlauferhitzer_core::config::{Config, load};

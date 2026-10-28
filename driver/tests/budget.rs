@@ -94,6 +94,11 @@ fn a_low_soft_limit_is_raised() {
     let addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let (path, needed) = configs(&dir, addr).swap_remove(0);
     let server = Running::start(&[&path], limited(20, 200), addr);
+    // The listener accepts before the check (it comes after binding): an
+    // answered request (any answer: the host is not `example.test`)
+    // shows startup is over.
+    let response = child::get(addr, "/");
+    assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
     let limits = fs::read_to_string(format!("/proc/{}/limits", server.pid())).unwrap();
     let line = limits
         .lines()

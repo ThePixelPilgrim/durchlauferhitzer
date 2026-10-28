@@ -140,6 +140,10 @@ fn as_root_the_server_drops_to_the_user() {
     let addr = loopback(free_port());
     let path = static_config(&dir, addr, "user nobody;");
     let server = Running::start(&[&path], Setup::default(), addr);
+    // The listener accepts before the drop (it comes after binding): a
+    // served request shows startup is over.
+    let response = get(addr, "/index.html");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let status = fs::read_to_string(format!("/proc/{}/status", server.pid())).unwrap();
     let field = |name: &str| {
         status
@@ -153,8 +157,6 @@ fn as_root_the_server_drops_to_the_user() {
     assert_eq!(field("Uid:"), [NOBODY; 4], "{status}");
     assert_eq!(field("Gid:"), [NOBODY; 4], "{status}");
     assert_eq!(field("Groups:"), [NOBODY], "{status}");
-    let response = get(addr, "/index.html");
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let stderr = server.kill();
     assert!(!stderr.contains("kind=privileges"), "{stderr}");
 }

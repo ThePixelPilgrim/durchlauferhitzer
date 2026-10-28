@@ -1474,7 +1474,8 @@ Failures, persistence, timeouts:
 - **NFR-PORT-03** [stage 4] `openat2` is required (startup error without
   it; the probe is FR-PROC-04 step 3).
 - **NFR-PORT-04** [stage 5] Landlock is used when available (FR-PROC-06).
-- **NFR-PORT-05** [stage 4] systemd is optional (FR-PROC-02/03).
+- **NFR-PORT-05** [stage 4] systemd is optional (FR-PROC-02/03): without
+  `LISTEN_PID`/`LISTEN_FDS` the process binds itself (stage 4 Task 8).
 - **NFR-PORT-06** [done] Stable Rust (toolchain pinned in
   `rust-toolchain.toml`), edition 2024.
 

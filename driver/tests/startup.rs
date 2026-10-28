@@ -19,7 +19,8 @@ use std::fs;
 use std::net::{SocketAddr, TcpListener};
 
 use child::{
-    PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, fd_target, free_port, get, run, text,
+    PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, fd_target, free_port, get, run,
+    text, threads,
 };
 
 /// A config serving `dir/www` on `listen`, written to `dir`.
@@ -150,11 +151,8 @@ fn every_thread_blocks_the_handled_signals() {
         .iter()
         .map(|&signo| 1u64 << (signo - 1))
         .sum();
-    let tasks: Vec<_> = fs::read_dir(format!("/proc/{}/task", server.pid()))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
     // The main thread and the 4 disk workers (`disk_threads` default).
+    let tasks = threads(server.pid(), 5);
     assert_eq!(tasks.len(), 5, "{tasks:?}");
     for task in tasks {
         let status = fs::read_to_string(task.join("status")).unwrap();
@@ -180,10 +178,10 @@ fn disk_threads_sets_the_worker_count() {
     );
     let path = dir.file("threads.conf", &conf);
     let server = Running::start(&[path.to_str().unwrap()], Setup::non_root(), addr);
-    let tasks = fs::read_dir(format!("/proc/{}/task", server.pid()))
-        .unwrap()
-        .count();
-    assert_eq!(tasks, 3);
+    let tasks = threads(server.pid(), 3);
+    // No more than that come later either.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(threads(server.pid(), 3).len(), 3, "{tasks:?}");
 }
 
 /// Closed fds 0, 1 and 2 are open on `/dev/null` by the time `main` runs

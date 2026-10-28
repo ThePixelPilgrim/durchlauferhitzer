@@ -327,6 +327,23 @@ pub fn get(addr: SocketAddr, path: &str) -> String {
     text(&response)
 }
 
+/// The thread directories `/proc/<pid>/task/*` once there are `count` of
+/// them: the listener accepts (the readiness check) before the disk
+/// workers are started, so they may still be coming.
+pub fn threads(pid: u32, count: usize) -> Vec<PathBuf> {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let tasks: Vec<PathBuf> = fs::read_dir(format!("/proc/{pid}/task"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        if tasks.len() >= count || Instant::now() >= deadline {
+            return tasks;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// The target of `/proc/<pid>/fd/<fd>`, if it is open.
 pub fn fd_target(pid: u32, fd: RawFd) -> Option<String> {
     fs::read_link(format!("/proc/{pid}/fd/{fd}"))
