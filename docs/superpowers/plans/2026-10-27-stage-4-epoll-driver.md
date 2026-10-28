@@ -70,11 +70,13 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   - Each one's local address must be one of the configured `listen` addresses, and every configured address must be covered, or startup fails (exit 2).
   - `LISTEN_FDNAMES` is ignored.
   - The variables are cleared after use.
+  - *Owner decision 2026-10-28 (Task 8 review, O2), written into the spec (FR-PROC-02):* the activation environment is read strictly: one variable without the other, a non-number, a foreign `LISTEN_PID`, more sockets than addresses or two sockets on one address are exit 2.
 - **A8, privilege drop (FR-PROC-03).**
   - Without systemd sockets: if any `listen` port is < 1024 and euid ≠ 0, startup fails (exit 2).
   - After binding and opening the static roots, if `user` is set, the driver calls `setgroups(1, [gid])`, `setgid` and `setuid` (looked up with `getpwnam_r`). It then checks that `setuid(0)` fails.
   - If euid is 0 and `user` is unset, startup fails (exit 2): never root after binding.
   - With systemd sockets and no root, nothing is dropped.
+  - *Owner decision 2026-10-28 (Task 8 review, O3), written into the spec (FR-PROC-03):* root with systemd sockets and no `user` is exit 2 too.
 - **A9, signals.**
   - SIGTERM, SIGINT and SIGPIPE are handled via `signalfd` in the epoll set. SIGPIPE is blocked; writes use `MSG_NOSIGNAL` or `send`.
   - First SIGTERM: graceful drain. A second SIGTERM, a SIGINT, or `shutdown_timeout` expiry: `abort_all`, then exit 0.
@@ -94,6 +96,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   7. Drop privileges.
   8. Start the workers.
   9. Run the loop.
+  - *Owner decision 2026-10-28 (Task 8 review, O1), written into the spec (FR-PROC-04):* no check of fds 0–2 before step 1: the Rust runtime opens closed fds 0–2 on `/dev/null` before `main`, so nothing lands on them and a server with stderr closed runs with its log discarded (without `/dev/null` the runtime aborts).
 
 ## Global Constraints
 

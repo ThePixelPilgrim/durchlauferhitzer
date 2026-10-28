@@ -1158,12 +1158,13 @@ Failures, persistence, timeouts:
   `AF_INET`/`AF_INET6` stream socket (`SO_ACCEPTCONN`) bound to one of the
   `listen` addresses, and every `listen` address must have one; otherwise
   startup fails (exit 2). The sockets are made non-blocking; the three
-  variables are removed from the environment once read. *Builder calls
-  (the plan is silent):* neither variable set means no activation (the
-  process binds itself); one set without the other, a value that is not
-  a decimal number, a `LISTEN_PID` that is not ours (read strictly, unlike
-  `sd_listen_fds`, which ignores it), more sockets than `listen` addresses
-  and two sockets on one address are startup errors (exit 2). A passed
+  variables are removed from the environment once read. Neither variable
+  set means no activation (the process binds itself). *Strict activation
+  environment (owner decision 2026-10-28, O2, confirming the builder
+  calls):* one variable set without the other, a value that is not a
+  decimal number, a `LISTEN_PID` that is not ours (unlike `sd_listen_fds`,
+  which ignores it), more sockets than `listen` addresses and two sockets
+  on one address are startup errors (exit 2). A passed
   descriptor is only taken if it is open without close-on-exec (every
   descriptor the process opens itself has the flag), so the driver never
   claims one of its own.
@@ -1174,7 +1175,8 @@ Failures, persistence, timeouts:
   1024 while the effective uid is not 0 is a startup error, before
   anything is bound (exit 2). After the roots are open and the sockets
   bound or taken: as root (effective uid 0), `user` is required, with
-  systemd sockets too (never root after binding; exit 2 otherwise); it is
+  systemd sockets too (owner decision 2026-10-28, O3: never root after
+  binding; exit 2 otherwise); it is
   looked up with `getpwnam_r` (an unknown user is exit 2), and the process
   drops to it for good with `setgroups([gid])`, `setgid`, `setuid`, then
   checks that `setuid(0)` fails (exit 2 on any failure). As non-root
@@ -1212,10 +1214,16 @@ Failures, persistence, timeouts:
   Every startup error is one line on stderr, `durchlauferhitzer:
   <message>`, printed before the log sink exists (exit 2). *Builder
   calls:* the listen backlog is `SOMAXCONN`; a failure of the loop itself
-  (DRV-15) is printed once the driver and its sink are gone, exit 2. The
-  Rust runtime opens closed fds 0, 1 and 2 on `/dev/null` before `main`
-  runs, so no socket or file the server opens lands on them (a test pins
-  it).
+  (DRV-15) is printed once the driver and its sink are gone, exit 2.
+  *Standard descriptors (owner decision 2026-10-28, O1, replacing the
+  earlier "check fds 0–2 first, exit 2 if fd 2 is closed"):* the Rust
+  runtime opens every closed fd 0, 1 or 2 on `/dev/null` before `main`
+  runs, so no socket or file the server opens can land on them; a server
+  started with stderr closed runs, and its log is discarded. The driver
+  adds no check of its own (test
+  `no_socket_lands_on_a_standard_descriptor` pins the runtime's
+  behaviour). Caveat: where `/dev/null` cannot be opened (a bare chroot)
+  the runtime aborts the process (SIGABRT) before `main`.
 - **FR-PROC-05** [stage 4] Shutdown has two speeds and two targets (owner
   decision):
   - *Graceful* (SIGTERM): stop accepting work, let in-flight requests
