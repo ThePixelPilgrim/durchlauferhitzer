@@ -40,6 +40,9 @@ src/
   process.rs        the command line (FR-PROC-01: serve, `--check`, the
                     usage), the exit codes (`ExitStatus`, FR-PROC-05a),
                     the startup sequence (A11)
+    budget.rs         NFR-RES-05: `needed` (the formula in its docs and
+                      the spec), `ensure` (raise the soft limit, or fail
+                      naming both numbers)
     privileges.rs     A8: `check_ports` (below 1024 needs root without
                       systemd), `drop_privileges` (root needs `user` and
                       drops to it; non-root keeps, logged)
@@ -130,6 +133,10 @@ tests/
                     address not configured, a configured address without a
                     socket, a foreign `LISTEN_PID`, a file and a connected
                     socket are exit 2
+  budget.rs         NFR-RES-05 in the binary with RLIMIT_NOFILE lowered
+                    in the child: one short is exit 2 with both numbers,
+                    exactly the budget starts, a low soft limit is raised
+                    (three configs: proxy, static, both)
   privileges.rs     A8 in the binary: as non-root `user` is kept and
                     logged, a port below 1024 is exit 2; as root (else
                     skipped with a printed reason) no `user` and an unknown
@@ -186,7 +193,8 @@ tests/
 loads the config, then: the `openat2` probe beneath the first root (or
 `/`), the roots (`O_PATH | O_DIRECTORY`), the listeners (systemd's,
 `systemd.rs`, or bound in config order, the first failure named), the
-privilege drop (`process/privileges.rs`), the signal mask and its `signalfd` (before
+descriptor budget (`process/budget.rs`), the privilege drop
+(`process/privileges.rs`), the signal mask and its `signalfd` (before
 any thread, so the disk workers inherit it), the stderr log sink, then
 `Driver::new` with `limits.disk_threads` and `Driver::run`. Every
 message (the usage, `--check`'s answer, startup errors) is printed

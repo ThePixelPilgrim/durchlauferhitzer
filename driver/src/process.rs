@@ -25,6 +25,7 @@ use crate::sys::signal::{Signal, SignalFd};
 use crate::sys::socket::tcp_listen;
 use crate::systemd::{Activation, take_sockets};
 
+mod budget;
 mod privileges;
 
 /// The usage text, printed to stderr for bad arguments (exit 1).
@@ -146,10 +147,12 @@ struct Ready {
 }
 
 /// A11 steps 3 to 7: the `openat2` probe, the static roots, the listeners
-/// (systemd's, A7, or bound here, A6), the privilege drop (A8).
+/// (systemd's, A7, or bound here, A6), the descriptor budget
+/// (NFR-RES-05), the privilege drop (A8).
 fn start_up(config: Config) -> Result<Ready, Failure> {
     let listen = config.listen.clone();
     let user = config.user.clone();
+    let max_connections = config.limits.max_connections;
     let disk_threads = config.limits.disk_threads;
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
@@ -160,6 +163,12 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
             bind(&listen)?
         }
     };
+    budget::ensure(budget::needed(budget::Descriptors {
+        max_connections,
+        listeners: listeners.len(),
+        roots: roots.len(),
+        backends: core.backends().len(),
+    }))?;
     let notes = privileges::drop_privileges(user.as_deref())?
         .into_iter()
         .collect();

@@ -1195,17 +1195,19 @@ Failures, persistence, timeouts:
      (FR-CFG-15; exit 2 naming the root);
   5. the listeners: systemd's (FR-PROC-02), or bound in config order
      (FR-CFG-10; exit 2 naming the address);
-  6. the privilege drop (FR-PROC-03; exit 2);
-  7. the signal mask: SIGTERM, SIGINT and SIGPIPE are blocked and a
+  6. the descriptor budget (NFR-RES-05; exit 2 naming the needed and the
+     available number);
+  7. the privilege drop (FR-PROC-03; exit 2);
+  8. the signal mask: SIGTERM, SIGINT and SIGPIPE are blocked and a
      `signalfd` opened for them, before any other thread exists, so every
      thread inherits the mask and SIGPIPE can never kill the process (A9;
      until stage 4 Task 9 they stay blocked and are not read, so the
      server is stopped with SIGKILL);
-  8. the stderr log sink (FR-LOG-06), which then gets the startup's
+  9. the stderr log sink (FR-LOG-06), which then gets the startup's
      driver log entries (`privileges`);
-  9. the disk workers (`limits.disk_threads`, started with the driver,
-     DRV-08);
-  10. the event loop.
+  10. the disk workers (`limits.disk_threads`, started with the driver,
+      DRV-08);
+  11. the event loop.
 
   Every startup error is one line on stderr, `durchlauferhitzer:
   <message>`, printed before the log sink exists (exit 2). *Builder
@@ -1418,7 +1420,17 @@ Failures, persistence, timeouts:
   (orphans included, FR-CONN-11); at most 2 × `max_connections` client
   sockets (refused ones included); from stage 3 at most one upstream socket
   per counted connection; plus the static roots, listeners and the eventfd.
-  The driver checks `RLIMIT_NOFILE` against this at startup.
+  The driver checks `RLIMIT_NOFILE` against this at startup. *(Stage 4
+  Task 8:)* the soft limit must be at least
+  `needed = 3 (fds 0–2) + 3 (epoll, wake eventfd, signalfd) + listeners +
+  roots + 2 × max_connections (client sockets) + [roots > 0: 1 (the disk
+  pool's duplicate of the wake eventfd) + max_connections (files)] +
+  [some proxy route: max_connections (upstream sockets)]`, the bracketed
+  terms counting only when the config has static roots or proxy routes.
+  A lower soft limit is raised to `needed` when the hard limit allows;
+  otherwise startup fails (exit 2): `too few file descriptors
+  (RLIMIT_NOFILE): the server needs <needed>, <hard limit> are
+  available`.
 - **NFR-RES-06** [done] Every opened file is closed
   exactly once and every upstream is closed exactly once, on every path
   (normal end, error, reset, timeout, orphan).
