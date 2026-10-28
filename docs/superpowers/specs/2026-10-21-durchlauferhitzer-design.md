@@ -1171,9 +1171,12 @@ Failures, persistence, timeouts:
 - **FR-PROC-03** [stage 4] Otherwise the process binds itself: it starts as
   root only if it needs a port below 1024, binds, then switches to `user`;
   it refuses to keep running as root if `user` is unset. *(Stage 4
-  amendment A8, Task 8:)* without systemd sockets, a `listen` port below
-  1024 while the effective uid is not 0 is a startup error, before
-  anything is bound (exit 2). After the roots are open and the sockets
+  amendment A8, Task 8:)* the port numbers are not checked up front
+  (owner decision 2026-10-28, O7, replacing A8's "a port below 1024 as
+  non-root fails before binding"): a bind the kernel refuses (`EACCES`)
+  is the startup error naming its address (FR-CFG-10, exit 2), and a host
+  that lets non-root bind low ports (`ip_unprivileged_port_start`) is
+  obeyed. After the roots are open and the sockets
   bound or taken: as root (effective uid 0), `user` is required, with
   systemd sockets too (owner decision 2026-10-28, O3: never root after
   binding; exit 2 otherwise); it is

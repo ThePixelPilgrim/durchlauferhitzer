@@ -43,9 +43,8 @@ src/
     budget.rs         NFR-RES-05: `needed` (the formula in its docs and
                       the spec), `ensure` (raise the soft limit, or fail
                       naming both numbers)
-    privileges.rs     A8: `check_ports` (below 1024 needs root without
-                      systemd), `drop_privileges` (root needs `user` and
-                      drops to it; non-root keeps, logged)
+    privileges.rs     A8: `drop_privileges` (root needs `user` and drops
+                      to it; non-root keeps, logged); no port check (O7)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
                     `next_deadline`, dispatch, `TimerFired`), `deliver`
                     (one `handle` call, its actions in order, then the
@@ -138,7 +137,7 @@ tests/
                     exactly the budget starts, a low soft limit is raised
                     (three configs: proxy, static, both)
   privileges.rs     A8 in the binary: as non-root `user` is kept and
-                    logged, a port below 1024 is exit 2; as root (else
+                    logged, a refused bind below 1024 is exit 2 naming it; as root (else
                     skipped with a printed reason) no `user` and an unknown
                     user are exit 2, `user nobody` drops every id
                     (`drop_to` in the server's process) and serves, and a

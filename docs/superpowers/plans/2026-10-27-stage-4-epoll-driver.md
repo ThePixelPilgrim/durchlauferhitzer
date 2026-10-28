@@ -72,7 +72,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   - The variables are cleared after use.
   - *Owner decision 2026-10-28 (Task 8 review, O2), written into the spec (FR-PROC-02):* the activation environment is read strictly: one variable without the other, a non-number, a foreign `LISTEN_PID`, more sockets than addresses or two sockets on one address are exit 2.
 - **A8, privilege drop (FR-PROC-03).**
-  - Without systemd sockets: if any `listen` port is < 1024 and euid ≠ 0, startup fails (exit 2).
+  - ~~Without systemd sockets: if any `listen` port is < 1024 and euid ≠ 0, startup fails (exit 2).~~ *Retired by owner decision 2026-10-28 (Task 8 review, O7), written into the spec (FR-PROC-03):* no up-front port check; a bind refused with `EACCES` is the startup error naming the address (A6).
   - After binding and opening the static roots, if `user` is set, the driver calls `setgroups(1, [gid])`, `setgid` and `setuid` (looked up with `getpwnam_r`). It then checks that `setuid(0)` fails.
   - If euid is 0 and `user` is unset, startup fails (exit 2): never root after binding.
   - With systemd sockets and no root, nothing is dropped.

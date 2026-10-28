@@ -157,10 +157,7 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
     let roots = open_roots(core.static_roots())?;
     let listeners = match take_sockets(&listen).map_err(Failure)? {
         Activation::Sockets(sockets) => sockets,
-        Activation::None => {
-            privileges::check_ports(&listen)?;
-            bind(&listen)?
-        }
+        Activation::None => bind(&listen)?,
     };
     budget::ensure(budget::needed(budget::Descriptors {
         max_connections,

@@ -3,7 +3,7 @@
 //! - as non-root (as `nobody` when the tests run as root) with `user`
 //!   set and every port at or above 1024, nothing is dropped, the server
 //!   runs and logs `kind=privileges action=kept reason=not_root`;
-//! - as non-root, a port below 1024 without systemd sockets is exit 2;
+//! - as non-root, a refused bind to a port below 1024 is exit 2 naming it;
 //! - as root (these tests skip with a printed reason unless the tests run
 //!   as root; GitHub's runners do not): `user` unset is exit 2, an unknown
 //!   user is exit 2, and with `user nobody` the server drops to nobody
@@ -74,8 +74,21 @@ fn as_non_root_with_a_user_nothing_is_dropped_and_that_is_logged() {
     );
 }
 
+/// A8 as amended (owner decision 2026-10-28, O7): no up-front check of
+/// the port numbers; a bind refused with `EACCES` is the startup error
+/// naming its address (A6). Skipped where the host lets non-root bind
+/// port 1023 (`net.ipv4.ip_unprivileged_port_start` at or below it).
 #[test]
-fn as_non_root_a_port_below_1024_is_exit_2() {
+fn as_non_root_a_privileged_port_is_exit_2_naming_it() {
+    let start: u16 = fs::read_to_string("/proc/sys/net/ipv4/ip_unprivileged_port_start")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    if start <= 1023 {
+        eprintln!("skipped: ip_unprivileged_port_start is {start}, so non-root may bind 1023");
+        return;
+    }
     let dir = TempDir::new();
     let path = dir.file(
         "low.conf",
@@ -87,13 +100,9 @@ fn as_non_root_a_port_below_1024_is_exit_2() {
     );
     let output = run(&[path.to_str().unwrap()], Setup::non_root());
     assert_exit(&output, 2);
-    let stderr = text(&output.stderr);
-    assert!(
-        stderr.starts_with(
-            "durchlauferhitzer: listen 127.0.0.1:1023 needs root (a port below 1024) \
-             or a socket from systemd, but the effective uid is "
-        ),
-        "{stderr}"
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: cannot listen on 127.0.0.1:1023: Permission denied (os error 13)\n"
     );
 }
 
