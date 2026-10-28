@@ -1147,7 +1147,21 @@ Failures, persistence, timeouts:
   ```
 - **FR-PROC-02** [stage 4] If systemd passes listening sockets (socket
   activation, `LISTEN_FDS`), they are used and the process never needs
-  root.
+  root. *(Stage 4 amendment A7, Task 8:)* `LISTEN_PID` must be the
+  process's pid and `LISTEN_FDS` at least 1; the descriptors start at 3
+  and `LISTEN_FDNAMES` is ignored. Each must be a listening
+  `AF_INET`/`AF_INET6` stream socket (`SO_ACCEPTCONN`) bound to one of the
+  `listen` addresses, and every `listen` address must have one; otherwise
+  startup fails (exit 2). The sockets are made non-blocking; the three
+  variables are removed from the environment once read. *Builder calls
+  (the plan is silent):* neither variable set means no activation (the
+  process binds itself); one set without the other, a value that is not
+  a decimal number, a `LISTEN_PID` that is not ours (read strictly, unlike
+  `sd_listen_fds`, which ignores it), more sockets than `listen` addresses
+  and two sockets on one address are startup errors (exit 2). A passed
+  descriptor is only taken if it is open without close-on-exec (every
+  descriptor the process opens itself has the flag), so the driver never
+  claims one of its own.
 - **FR-PROC-03** [stage 4] Otherwise the process binds itself: it starts as
   root only if it needs a port below 1024, binds, then switches to `user`;
   it refuses to keep running as root if `user` is unset.
@@ -1163,7 +1177,8 @@ Failures, persistence, timeouts:
      none (exit 2);
   4. every static root, opened `O_PATH | O_DIRECTORY` in config order
      (FR-CFG-15; exit 2 naming the root);
-  5. the listeners (FR-CFG-10; exit 2 naming the address);
+  5. the listeners: systemd's (FR-PROC-02), or bound in config order
+     (FR-CFG-10; exit 2 naming the address);
   6. the signal mask: SIGTERM, SIGINT and SIGPIPE are blocked and a
      `signalfd` opened for them, before any other thread exists, so every
      thread inherits the mask and SIGPIPE can never kill the process (A9;

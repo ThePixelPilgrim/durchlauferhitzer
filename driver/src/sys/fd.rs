@@ -4,7 +4,7 @@
 //! (`O_NONBLOCK`), and `pipe2` (its tests write to a pipe).
 
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 /// The outcome of one non-blocking read, write or `sendfile`.
 #[derive(Debug)]
@@ -141,4 +141,45 @@ pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     // SAFETY: as above, for `write`.
     let write = unsafe { OwnedFd::from_raw_fd(write) };
     Ok((read, write))
+}
+
+/// Serialises [`claim_inherited`]: its check and its marking must not
+/// interleave with another claim of the same number.
+static CLAIMS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes ownership of `raw`, a descriptor this process inherited from
+/// the one that started it (systemd's sockets, FR-PROC-02), and marks it
+/// close-on-exec.
+///
+/// Sound because of how the descriptor is told apart from the process's
+/// own: every descriptor Rust's std and this crate create is close-on-exec
+/// from the start, so an open descriptor without the flag was inherited
+/// and nothing owns it yet; once claimed it has the flag, so a second
+/// claim fails. Refused: the standard descriptors (0–2), a number that is
+/// not open (`EBADF`), and one with close-on-exec set (`InvalidInput`).
+pub fn claim_inherited(raw: RawFd) -> io::Result<OwnedFd> {
+    if raw < 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a standard descriptor cannot be claimed",
+        ));
+    }
+    let _guard = CLAIMS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: `F_GETFD` takes no pointer argument; a number that is not
+    // open is reported as `EBADF`.
+    let flags = cvt(unsafe { libc::fcntl(raw, libc::F_GETFD) })?;
+    if flags & libc::FD_CLOEXEC != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "close-on-exec is set: the descriptor was not inherited",
+        ));
+    }
+    // SAFETY: `F_SETFD` takes an integer, no pointer.
+    cvt(unsafe { libc::fcntl(raw, libc::F_SETFD, flags | libc::FD_CLOEXEC) })?;
+    // SAFETY: `raw` is open and was inherited without close-on-exec, so
+    // nothing in this process owns it (see above); the flag now set makes
+    // every later claim of it fail, so this is its only owner.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }

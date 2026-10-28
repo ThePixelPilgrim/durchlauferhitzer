@@ -6,6 +6,7 @@
 //! return and reports it as an `io::Error` (an [`fd::Io`] for transfers),
 //! and every `unsafe` block states why it is sound (`// SAFETY:`).
 
+pub mod env;
 pub mod epoll;
 pub mod eventfd;
 pub mod fd;

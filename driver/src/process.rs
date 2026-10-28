@@ -23,6 +23,7 @@ use crate::log::LogSink;
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
 use crate::sys::signal::{Signal, SignalFd};
 use crate::sys::socket::tcp_listen;
+use crate::systemd::{Activation, take_sockets};
 
 /// The usage text, printed to stderr for bad arguments (exit 1).
 const USAGE: &str =
@@ -140,13 +141,17 @@ struct Ready {
     disk_threads: u32,
 }
 
-/// A11 steps 3 to 7: the `openat2` probe, the static roots, the listeners.
+/// A11 steps 3 to 7: the `openat2` probe, the static roots, the listeners
+/// (systemd's, A7, or bound here, A6).
 fn start_up(config: Config) -> Result<Ready, Failure> {
     let listen = config.listen.clone();
     let disk_threads = config.limits.disk_threads;
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
-    let listeners = bind(&listen)?;
+    let listeners = match take_sockets(&listen).map_err(Failure)? {
+        Activation::Sockets(sockets) => sockets,
+        Activation::None => bind(&listen)?,
+    };
     Ok(Ready {
         core,
         listeners,

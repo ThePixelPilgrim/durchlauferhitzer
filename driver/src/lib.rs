@@ -21,6 +21,7 @@ mod pool;
 pub mod process;
 #[allow(unsafe_code)]
 pub mod sys;
+mod systemd;
 
 pub use event_loop::{Driver, Exit, StopHandle};
 pub use log::{Buffered, DriverLog, LogEntry, LogSink};

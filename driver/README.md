@@ -73,6 +73,10 @@ src/
     buffer.rs         `EntryBuffer`: 64 KiB of whole entries, drop and
                       count when full, the `dropped` line once there is
                       room, before newer entries
+  systemd.rs        socket activation (A7, crate-private): `take_sockets`
+                    reads and removes `LISTEN_PID`/`LISTEN_FDS`, claims
+                    fds 3.. and checks them against `listen`
+                    (`Activation`)
   pool.rs           `Pool` (crate-private): the disk workers (A10):
                     `start`, `submit` (`Job::Open` / `Job::Readahead`),
                     `results` (`JobResult`), `shutdown` (joins)
@@ -82,7 +86,10 @@ src/
                       checks and EINTR retries the others share; for the
                       log sink: `write_fd` (write(2)), `status_flags` /
                       `set_status_flags` (`StatusFlags`, `Blocking`:
-                      O_NONBLOCK), `pipe` (pipe2, O_CLOEXEC)
+                      O_NONBLOCK), `pipe` (pipe2, O_CLOEXEC);
+                      `claim_inherited` (an inherited descriptor: open
+                      without FD_CLOEXEC, then marked)
+    env.rs            `remove_vars`: only while the process has one thread
     epoll.rs          `Epoll` (level-triggered), `Readiness` (mirrors the
                       core's `Interest`), `EpollEvent`, `Trouble`
                       (EPOLLERR / EPOLLHUP)
@@ -115,6 +122,11 @@ tests/
                     every thread blocks SIGTERM/SIGINT/SIGPIPE;
                     `disk_threads` workers; fds 0-2 closed at exec are
                     `/dev/null` (the Rust runtime), so no socket lands there
+  systemd.rs        socket activation of the binary: a listener passed as
+                    fd 3 (`sh -c` sets `LISTEN_PID=$$`) is served; an
+                    address not configured, a configured address without a
+                    socket, a foreign `LISTEN_PID`, a file and a connected
+                    socket are exit 2
   stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
                     the test binary: non-blocking while it lives, a second
                     one refused (`AlreadyExists`), the mode back after it
@@ -163,8 +175,8 @@ tests/
 
 `process::run` (FR-PROC-01, FR-PROC-04, A11) parses the arguments,
 loads the config, then: the `openat2` probe beneath the first root (or
-`/`), the roots (`O_PATH | O_DIRECTORY`), the listeners (config order,
-the first failure named), the signal mask and its `signalfd` (before
+`/`), the roots (`O_PATH | O_DIRECTORY`), the listeners (systemd's,
+`systemd.rs`, or bound in config order, the first failure named), the signal mask and its `signalfd` (before
 any thread, so the disk workers inherit it), the stderr log sink, then
 `Driver::new` with `limits.disk_threads` and `Driver::run`. Every
 message (the usage, `--check`'s answer, startup errors) is printed
