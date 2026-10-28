@@ -255,6 +255,9 @@ fn run_loop(ready: Ready) -> ExitStatus {
             return ExitStatus::Startup;
         }
     };
+    // Written before `Driver::new` (review M6, accepted): the driver owns
+    // the sink from then on. If `new` fails, the `privileges` line stands
+    // before the error line; both are true.
     for note in notes {
         log.write(LogEntry::Driver(note));
     }

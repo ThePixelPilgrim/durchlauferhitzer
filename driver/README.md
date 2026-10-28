@@ -186,7 +186,10 @@ tests/
                     file, a sparse file over 4 GiB
   static_fd_leak.rs a client reset mid-`sendfile` closes the file and leaks
                     no descriptor; alone in its binary
-  support/child.rs  running the binary: temp configs, a free port, the
+  support/child.rs  running the binary: temp configs, a free port (bound,
+                    read and released, so another process could take it
+                    before the server binds: a known, rare race, left as
+                    it is), the
                     child's setup before exec (`pre_exec`: closed fds,
                     fd 3, RLIMIT_NOFILE; the test crate's only `unsafe`),
                     a guard that kills a running server on drop
@@ -213,6 +216,9 @@ before the sink exists or after the driver holding it is gone; nothing
 prints through std while it lives (FR-LOG-06). Exit codes are
 `ExitStatus` (0 ok, 1 config or usage, 2 startup), private to
 `process.rs`.
+The startup's driver log entries (`privileges`) are written to the sink
+just before `Driver::new`, which takes the sink: if `new` fails, that
+line comes before the error line.
 
 ## The event loop
 
