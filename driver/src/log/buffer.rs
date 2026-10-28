@@ -55,10 +55,12 @@ impl EntryBuffer {
     }
 
     /// Queues one whole line, after the `dropped` line if one is due and
-    /// fits; a line that does not fit is dropped and counted.
+    /// fits; a line that does not fit is dropped and counted. While a due
+    /// count line does not fit yet, every new line is dropped and counted
+    /// too, so none comes out ahead of the count (R4).
     pub(crate) fn push(&mut self, line: &[u8]) {
         self.catch_up();
-        if !self.queue(line, Stands::Entry) {
+        if self.dropped > 0 || !self.queue(line, Stands::Entry) {
             self.dropped = self.dropped.saturating_add(1);
         }
     }
@@ -200,6 +202,23 @@ mod tests {
         assert!(buffer.is_empty());
         buffer.catch_up();
         assert_eq!(take_all(&mut buffer), "kind=dropped count=1\n");
+    }
+
+    /// R4 (review I1): while the count line does not fit yet, a newer
+    /// entry short enough to fit is not queued ahead of it: it is
+    /// dropped and counted too.
+    #[test]
+    fn no_newer_entry_overtakes_a_waiting_count() {
+        let mut buffer = EntryBuffer::new(24);
+        buffer.push(b"01234567890123456789012\n");
+        buffer.push(b"x=1\n");
+        buffer.consume(4);
+        // 4 bytes free: room for `x=2`, not for the count line.
+        buffer.push(b"x=2\n");
+        assert_eq!(
+            take_all(&mut buffer),
+            "4567890123456789012\nkind=dropped count=2\n"
+        );
     }
 
     /// An entry larger than the whole buffer can never be written: it is
