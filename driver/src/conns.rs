@@ -22,8 +22,8 @@ pub(crate) enum Token {
     Listener(u32),
     Client(ConnId),
     Upstream(UpstreamId),
-    /// The eventfd that wakes the loop (the stop handle; from Task 6 also
-    /// the disk workers).
+    /// The eventfd that wakes the loop (the stop handle and the disk
+    /// workers).
     Wake,
     /// The signalfd (Task 9).
     Signal,

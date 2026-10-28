@@ -1,8 +1,9 @@
 //! A driver on loopback for the event-loop tests: the real `Driver`
-//! running in a thread on an ephemeral listener, a config with no static
-//! roots (one proxy route to a std `TcpListener` backend), and a channel
-//! log sink. Shared by `tests/loop_static_less.rs` and
-//! `tests/loop_fd_leak.rs` (`#[path]` include).
+//! running in a thread on an ephemeral listener, and a channel log sink.
+//! [`config`] has no static roots (one proxy route to a std `TcpListener`
+//! backend); [`Server::start_static`] opens the static roots of its config
+//! and starts the disk pool. Shared by the `loop_*` and `static_*` test
+//! binaries (`#[path]` include).
 
 #![allow(
     clippy::unwrap_used,
@@ -19,6 +20,7 @@ use std::sync::mpsc::Receiver;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use durchlauferhitzer::sys::file::open_dir_path;
 use durchlauferhitzer::sys::socket::{local_addr, tcp_listen};
 use durchlauferhitzer::{Driver, Exit, LogEntry, LogSink, StopHandle};
 use durchlauferhitzer_core::Core;
@@ -48,13 +50,29 @@ pub struct Server {
 }
 
 impl Server {
-    /// Starts a driver for `config` on an ephemeral loopback port.
+    /// Starts a driver for `config` (no static roots) on an ephemeral
+    /// loopback port, without a disk pool.
     pub fn start(config: &str) -> Server {
+        Server::launch(config, None)
+    }
+
+    /// Starts a driver for `config` with its static roots opened (as the
+    /// binary does at startup, DRV-07) and `disk_threads` disk workers.
+    pub fn start_static(config: &str, disk_threads: u32) -> Server {
+        Server::launch(config, Some(disk_threads))
+    }
+
+    fn launch(config: &str, disk_threads: Option<u32>) -> Server {
         let core = Core::new(load(config).unwrap());
+        let roots = core
+            .static_roots()
+            .iter()
+            .map(|root| open_dir_path(root).unwrap())
+            .collect();
         let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 128).unwrap();
         let addr = local_addr(std::os::fd::AsFd::as_fd(&listener)).unwrap();
         let (log, logs) = LogSink::channel();
-        let mut driver = Driver::new(core, vec![listener], Vec::new(), None, log).unwrap();
+        let mut driver = Driver::new(core, vec![listener], roots, disk_threads, log).unwrap();
         let stop = driver.stop_handle();
         let thread = thread::spawn(move || driver.run());
         Server {

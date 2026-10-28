@@ -9,13 +9,14 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use durchlauferhitzer_core::config::load;
-use durchlauferhitzer_core::{ConnError, ConnId, Core, Event, Interest, Log, UpstreamId};
+use durchlauferhitzer_core::{ConnError, ConnId, Core, Event, FileId, Interest, Log, UpstreamId};
 
 use super::accept::Accepting;
 use super::upstreams::{WriteMode, write_mode};
 use super::{Broken, Driver};
 use crate::conns::{Answer, Client, Eof, Phase, Token, Upstream, Writes};
 use crate::log::{DriverLog, LogEntry, LogSink};
+use crate::pool::JobResult;
 use crate::sys::epoll::{EpollEvent, Readiness};
 
 /// A config without static roots, so a driver needs no pool.
@@ -36,6 +37,81 @@ fn a_core_with_static_roots_and_no_pool_is_refused() {
         panic!("a driver without a pool was built for a core with static roots");
     };
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+}
+
+/// DRV-07: the driver gets one opened root per static root of the core,
+/// in order; a list that does not match is refused, not guessed at.
+#[test]
+fn a_root_list_that_does_not_match_the_core_is_refused() {
+    let core = Core::new(load(STATIC).unwrap());
+    let (log, _logs) = LogSink::channel();
+    let Err(err) = Driver::new(core, Vec::new(), Vec::new(), Some(1), log) else {
+        panic!("a driver without its root was built");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    let core = Core::new(load(STATIC_LESS).unwrap());
+    let (log, _logs) = LogSink::channel();
+    let Err(err) = Driver::new(core, Vec::new(), vec![unpollable()], None, log) else {
+        panic!("a driver with a root the core does not have was built");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn zero_disk_threads_are_refused() {
+    let core = Core::new(load(STATIC).unwrap());
+    let (log, _logs) = LogSink::channel();
+    let Err(err) = Driver::new(core, Vec::new(), vec![unpollable()], Some(0), log) else {
+        panic!("a driver with no disk thread was built");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+}
+
+/// A driver for [`STATIC`] (its root stood in for by `/dev/null`: no
+/// open reaches it here) with one disk worker, and its log.
+fn static_driver() -> (Driver, Receiver<LogEntry>) {
+    let core = Core::new(load(STATIC).unwrap());
+    let (log, logs) = LogSink::channel();
+    let driver = Driver::new(core, Vec::new(), vec![unpollable()], Some(1), log).unwrap();
+    (driver, logs)
+}
+
+/// R6: the driver shuts its disk pool down when `run` ends.
+#[test]
+fn run_shuts_the_pool_down_when_it_ends() {
+    let (mut driver, _logs) = static_driver();
+    assert!(driver.pool.is_some());
+    driver.stop_handle().stop().unwrap();
+    assert_eq!(driver.run().unwrap(), super::Exit::Stopped);
+    assert!(driver.pool.is_none());
+}
+
+/// `EMFILE`/`ENFILE` from an open are logged by the driver (the budget
+/// is wrong, NFR-RES-05); the core still gets `FileFailed`. Other
+/// errors are the core's to log (as a 404).
+#[test]
+fn an_open_out_of_descriptors_is_logged() {
+    let (mut driver, logs) = static_driver();
+    for (file, errno) in [(1, libc::EMFILE), (2, libc::ENFILE), (3, libc::ENOENT)] {
+        driver.files.opening(FileId(file));
+        driver
+            .pool_result(JobResult::OpenFailed {
+                file: FileId(file),
+                error: io::Error::from_raw_os_error(errno),
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        logs.try_iter().collect::<Vec<_>>(),
+        [
+            LogEntry::Driver(DriverLog::OpenFailed {
+                errno: libc::EMFILE
+            }),
+            LogEntry::Driver(DriverLog::OpenFailed {
+                errno: libc::ENFILE
+            }),
+        ]
+    );
 }
 
 /// DRV-10: under `ReadWrite` a failed write is left to the reads, which

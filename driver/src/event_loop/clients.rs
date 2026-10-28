@@ -228,9 +228,16 @@ impl Driver {
             }
             let buf = self.core.send_buffer(conn);
             if buf.is_empty() {
-                // `send_file` segments need the disk pool (Task 6); with
-                // no static roots there are none.
-                return Ok(());
+                // The send buffer first, then the file segment (DRV-03).
+                let Some(event) = self.sendfile_segment(conn) else {
+                    return Ok(());
+                };
+                let more = matches!(event, Event::FileSent { .. });
+                self.deliver(event)?;
+                if !more {
+                    return Ok(());
+                }
+                continue;
             }
             let event = match write(client.fd.as_fd(), buf) {
                 Io::Done(0) | Io::WouldBlock => return Ok(()),

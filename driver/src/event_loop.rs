@@ -1,6 +1,6 @@
-//! The epoll event loop: it runs the core over real sockets, following the
-//! driver contract (`core/src/core/contract.rs`, DRV-01…06, DRV-10,
-//! DRV-13) to the letter.
+//! The epoll event loop: it runs the core over real sockets and files,
+//! following the driver contract (`core/src/core/contract.rs`, DRV-01…10,
+//! DRV-13, DRV-15, DRV-16) to the letter.
 //!
 //! One thread owns everything. Each turn waits on the epoll set with a
 //! timeout derived from [`Core::next_deadline`], handles every ready
@@ -12,10 +12,12 @@
 //! that emitted the `Connect`).
 //!
 //! Clients are in `clients.rs` (accept, reads, writes, their actions),
-//! upstreams in `upstreams.rs`.
+//! upstreams in `upstreams.rs`, the file contract (the disk pool's jobs
+//! and results, `sendfile`) in `files.rs`.
 
 mod accept;
 mod clients;
+mod files;
 mod upstreams;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -25,9 +27,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use durchlauferhitzer_core::{Action, ConnError, ConnId, Core, Event, Instant, UpstreamId};
+use durchlauferhitzer_core::{
+    Action, ConnError, ConnId, Core, Event, FileError, FileId, Instant, UpstreamId,
+};
 
 use self::accept::AcceptGate;
+use self::files::Files;
 use crate::conns::{Client, Token, Upstream};
 use crate::log::{LogEntry, LogSink};
 use crate::pool::Pool;
@@ -118,10 +123,16 @@ pub struct Driver {
     /// Whether the listeners take connections (DRV-16).
     accepting: AcceptGate,
     /// The static roots, opened once at startup, indexed by `RootId`
-    /// (DRV-07); used by the file contract (Task 6).
-    _roots: Vec<OwnedFd>,
-    /// The disk worker pool; a stub until Task 6.
-    _pool: Option<Pool>,
+    /// (DRV-07); each open job holds a reference while it runs.
+    roots: Vec<Arc<OwnedFd>>,
+    /// The disk worker pool (DRV-08); `None` without static roots, and
+    /// once `run` has ended (it shuts the pool down).
+    pool: Option<Pool>,
+    /// Every file id between its `OpenFile` and its `CloseFile`.
+    files: Files,
+    /// Opens answered `FileFailed { Other }` after the current call, for
+    /// a root or pool the driver does not have (never, past `new`).
+    file_failures: VecDeque<FileId>,
     log: LogSink,
     clients: BTreeMap<ConnId, Client>,
     upstreams: BTreeMap<UpstreamId, Upstream>,
@@ -139,22 +150,33 @@ pub struct Driver {
 impl Driver {
     /// A driver for `core`, accepting on `listeners` (bound, listening,
     /// non-blocking sockets), with the static roots opened at startup in
-    /// [`Core::static_roots`] order, the disk pool and the log sink.
+    /// [`Core::static_roots`] order (DRV-07), `disk_threads` disk workers
+    /// (`limits.disk_threads`; `None` for no pool) and the log sink.
+    ///
+    /// The pool's workers wake the loop through a duplicate of its wake
+    /// eventfd (R1): one more descriptor in the budget (NFR-RES-05).
     ///
     /// A core with static roots needs the pool: every `OpenFile` gets an
     /// answer (DRV-09), so without one the driver refuses to start
-    /// (`InvalidInput`) rather than drop file actions.
+    /// (`InvalidInput`) rather than drop file actions. So does a root list
+    /// that does not match [`Core::static_roots`], or zero threads.
     pub fn new(
         core: Core,
         listeners: Vec<OwnedFd>,
         roots: Vec<OwnedFd>,
-        pool: Option<Pool>,
+        disk_threads: Option<u32>,
         log: LogSink,
     ) -> io::Result<Driver> {
-        if !core.static_roots().is_empty() && pool.is_none() {
+        if !core.static_roots().is_empty() && disk_threads.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "static roots need the disk pool (DRV-09)",
+            ));
+        }
+        if roots.len() != core.static_roots().len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "one opened root per static root of the core (DRV-07)",
             ));
         }
         let epoll = Epoll::new()?;
@@ -171,14 +193,22 @@ impl Driver {
                 Readiness::Read,
             )?;
         }
+        // Last, so nothing above can fail with threads running (a `Pool`
+        // dropped on an error path joins its threads anyway).
+        let pool = match disk_threads {
+            Some(threads) => Some(Pool::start(threads, wake.fd.try_clone()?)?),
+            None => None,
+        };
         Ok(Driver {
             core,
             epoll,
             wake,
             listeners,
             accepting: AcceptGate::new(),
-            _roots: roots,
-            _pool: pool,
+            roots: roots.into_iter().map(Arc::new).collect(),
+            pool,
+            files: Files::new(),
+            file_failures: VecDeque::new(),
             log,
             clients: BTreeMap::new(),
             upstreams: BTreeMap::new(),
@@ -202,8 +232,18 @@ impl Driver {
 
     /// Runs the loop until it is asked to stop. An `Err` is a failure of
     /// the loop itself (`epoll_wait`, or `epoll_ctl` on the listeners or
-    /// the wake eventfd), never of one socket (DRV-15).
+    /// the wake eventfd), never of one socket (DRV-15). Either way the disk
+    /// pool is shut down (its threads joined) before `run` returns (R6);
+    /// opens still with it are never answered, since the loop has ended.
     pub fn run(&mut self) -> io::Result<Exit> {
+        let exit = self.run_loop();
+        if let Some(pool) = self.pool.take() {
+            pool.shutdown();
+        }
+        exit
+    }
+
+    fn run_loop(&mut self) -> io::Result<Exit> {
         let mut events = vec![EpollEvent::EMPTY; EVENTS_PER_WAIT];
         loop {
             if self.wake.stop.load(Ordering::SeqCst) {
@@ -262,9 +302,11 @@ impl Driver {
             Token::Client(conn) => self.client_event(conn, event.readiness(), event.trouble()),
             Token::Upstream(up) => self.upstream_event(up, event.readiness(), event.trouble()),
             Token::Wake => {
-                // The stop request is read at the top of the loop.
+                // The stop request is read at the top of the loop. The
+                // counter is reset before the results are taken, so a
+                // result pushed after this drain wakes the loop again.
                 self.wake.fd.drain()?;
-                Ok(())
+                self.pool_results()
             }
             // Not registered before Task 9.
             Token::Signal => Ok(()),
@@ -280,8 +322,8 @@ impl Driver {
         self.flush_queued()
     }
 
-    /// Delivers the queued connect answers and socket failures, each as
-    /// its own event, until none is left.
+    /// Delivers the queued connect answers, socket failures and failed
+    /// opens, each as its own event, until none is left.
     fn flush_queued(&mut self) -> io::Result<()> {
         loop {
             if let Some(up) = self.answers.pop_front() {
@@ -292,6 +334,11 @@ impl Driver {
                 if let Some(failed) = self.broken_event(broken) {
                     self.call(failed)?;
                 }
+            } else if let Some(file) = self.file_failures.pop_front() {
+                self.call(Event::FileFailed {
+                    file,
+                    error: FileError::Other,
+                })?;
             } else {
                 return Ok(());
             }
@@ -343,10 +390,15 @@ impl Driver {
                 Ok(())
             }
             Action::Close { conn } => self.close(conn),
-            // The file contract arrives with the pool (Task 6). Until then
-            // `new` refuses a core with static roots, and without them the
-            // core never opens a file.
-            Action::OpenFile { .. } | Action::Readahead { .. } | Action::CloseFile { .. } => Ok(()),
+            Action::OpenFile { file, root, path } => {
+                self.open_file(file, root, path);
+                Ok(())
+            }
+            Action::Readahead { file, offset, len } => {
+                self.readahead(file, offset, len);
+                Ok(())
+            }
+            Action::CloseFile { file } => self.close_file(file),
             Action::Connect { up, backend } => self.connect(up, backend),
             Action::SetUpstreamInterest { up, interest } => {
                 self.set_upstream_interest(up, interest)

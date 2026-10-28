@@ -49,6 +49,10 @@ src/
                       actions, resuming the listeners
     upstreams.rs      `Connect` and its later answer, upstream reads and
                       writes by interest, error deferral, upstream actions
+    files.rs          the file contract (DRV-07…09): `Files` (each file id
+                      from `OpenFile` to `CloseFile`; `Closing` while a
+                      readahead is in flight), file actions to the pool,
+                      pool results to events, `sendfile` of the segment
     tests.rs          unit tests of the loop's decisions on a driver that
                       is built but not run
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
@@ -56,7 +60,9 @@ src/
                     records and the registration each wants
   log.rs            `LogSink` (a channel sink for tests until Task 7),
                     `LogEntry`, `DriverLog` (FR-LOG-07)
-  pool.rs           `Pool`: a stub until the disk worker pool (Task 6)
+  pool.rs           `Pool`: the disk workers (A10): `start`, `submit`
+                    (`Job::Open` / `Job::Readahead`), `results`
+                    (`JobResult`), `shutdown` (joins)
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules
     fd.rs             `Io` (Done / WouldBlock / Closed / Err), the -1/errno
@@ -93,17 +99,31 @@ tests/
   loop_accept_pause.rs  out of descriptors: accepting pauses without a
                     spin and the 1 s retry resumes it; alone in its binary
                     (it lowers RLIMIT_NOFILE)
+  static_files.rs   the file contract on loopback: a 10 MiB file to a slow
+                    reader, directory 301 and index, 404 for a symlink, a
+                    dotfile, a FIFO and a missing file, a FIFO that must not
+                    hold the only worker, HEAD, a file truncated mid-transfer,
+                    64 concurrent downloads through two workers
+  static_fd_leak.rs a client reset mid-`sendfile` closes the file and leaks
+                    no descriptor; alone in its binary
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
   support/server.rs the loop tests' harness: a `Driver` in a thread on an
-                    ephemeral port, a std backend, response readers
+                    ephemeral port (`start_static` opens the config's roots
+                    and starts the pool), a std backend, response readers
+  support/tree.rs   a temp-dir static root: files, symlinks, FIFOs (the
+                    `mkfifo` command), deterministic contents
 ```
 
 ## The event loop
 
-`Driver::new(core, listeners, roots, pool, log)` registers the listeners
-and the wake eventfd (it refuses a core with static roots but no pool,
-`InvalidInput`, since every `OpenFile` needs its answer, DRV-09); `Driver::run` loops until a `StopHandle` asks it to
-stop (`Exit::Stopped`; the signal-driven endings come with Task 9). It
+`Driver::new(core, listeners, roots, disk_threads, log)` registers the
+listeners and the wake eventfd and, with `Some(n)` disk threads
+(`limits.disk_threads`), starts the pool. It refuses (`InvalidInput`) a
+core with static roots but no pool, since every `OpenFile` needs its
+answer (DRV-09), a root list that does not match `Core::static_roots`
+one to one, and zero threads. `Driver::run` loops until a `StopHandle`
+asks it to stop (`Exit::Stopped`; the signal-driven endings come with
+Task 9), then shuts the pool down (its threads joined). It
 follows the contract in `core/src/core/contract.rs`; where the contract
 leaves a choice, this is what the loop does:
 
@@ -160,12 +180,47 @@ leaves a choice, this is what the loop does:
   before `Accepted`. A failure queued outside any call (a write that stops
   under `ReadWrite`) is delivered once that ready descriptor is handled. A
   queued failure is not delivered if the core closed the socket first.
+- **Files** (DRV-07…09, A10). `OpenFile` and `Readahead` are jobs for the
+  pool; each job holds its descriptor (`Arc<OwnedFd>`: the root for an
+  open, the file for a readahead) only while it runs. Workers push each
+  result to a channel and `notify` a duplicate of the loop's wake eventfd
+  (`EventFd::try_clone`, one more descriptor in the NFR-RES-05 budget);
+  when the wake fires the loop resets the counter, then turns every
+  result in into its event (`FileOpened` with the `fstat` kind and
+  stamp, `FileFailed` by the errno table, `ChunkReady` with the stamp at
+  read time), in arrival order. An open failing with `EMFILE`/`ENFILE`
+  is logged (`DriverLog::OpenFailed`) and is still `FileFailed { Other }`.
+  `CloseFile` closes the descriptor at once, or, while a readahead is in
+  flight, marks the file `Closing`: the descriptor stays open until that
+  result arrives, which is then dropped (no event). Closing a file
+  resumes paused listeners (DRV-16). One readahead per file at a time,
+  as the core asks; a `Readahead` for a file that is not open and idle
+  is ignored, and a `CloseFile` before the open's answer (the core never
+  sends one) drops that answer and its descriptor.
+- **`sendfile`** (DRV-03, DRV-09). Once `send_buffer` is empty the loop
+  `sendfile`s `send_file`'s segment until it is done or the socket would
+  block, each call reported as the very next `handle` call: `FileSent`
+  with the count; a 0 return is `FileFailed { Truncated }`;
+  `EPIPE`/`ECONNRESET` are the socket's `Failed { Reset }`; any other
+  error is `FileFailed { Other }`. A segment of a file the driver does not
+  hold open (never, from the core) is `FileFailed { Other }` rather than
+  a wait for a writability the loop would never use.
+- **Pool rules** (`pool.rs`). Every job gets exactly one result; a failure
+  is a result, never a panic (R6). The queue is unbounded in the type but
+  bounded by the core (one job per connection at a time, orphaned opens
+  included: at most `max_connections`). `shutdown` stops the workers and
+  joins them: a running job finishes, queued jobs are dropped (the loop
+  that wanted them has ended); dropping the pool does the same. A worker
+  blocked in the kernel (a hung disk) blocks the join; the bounded wait
+  at exit is Task 9's.
 - **Failures of the loop itself** (`epoll_wait`, or `epoll_ctl` on the
   listeners or the wake eventfd) end `run` with the error; a failure of
   one socket never does.
 
 Notes on the wrappers:
 
+- Tests: the FIFO test is the guard for `O_NONBLOCK` (Review Focus 2):
+  without it the open would block its worker until a writer came.
 - Reads and writes with an empty buffer return `Io::Done(0)` without a
   system call (a 0-byte `read` would look like the end of stream).
   `sendfile` returning 0 (the file ended early) is `Io::Closed`.

@@ -21,6 +21,11 @@ pub enum DriverLog {
     /// the descriptor budget (NFR-RES-05) is wrong. The connect is answered
     /// `UpstreamFailed` (a 502) as the contract says.
     SocketFailed { errno: i32 },
+    /// Opening a static file failed with `EMFILE` or `ENFILE`: the
+    /// descriptor budget (NFR-RES-05) is wrong, not the file missing. The
+    /// core still gets `FileFailed { Other }`, so the client gets a 404
+    /// (the contract's errno table).
+    OpenFailed { errno: i32 },
     /// `epoll_ctl` failed for one client or upstream socket (DRV-15): that
     /// socket is reported failed (a client accepted but not yet announced
     /// is dropped); the loop goes on.
