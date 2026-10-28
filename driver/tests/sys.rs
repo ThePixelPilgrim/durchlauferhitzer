@@ -665,3 +665,19 @@ fn uids_match_proc_status() {
     assert_eq!(vec![ids.real, ids.effective, ids.saved], proc);
     assert_eq!(ids.effective, euid());
 }
+
+/// `gids` (getresgid) agrees with `/proc/self/status`.
+#[test]
+fn gids_match_proc_status() {
+    use durchlauferhitzer::sys::user::gids;
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    let line = status.lines().find(|l| l.starts_with("Gid:")).unwrap();
+    let proc: Vec<u32> = line
+        .split_whitespace()
+        .skip(1)
+        .take(3)
+        .map(|id| id.parse().unwrap())
+        .collect();
+    let ids = gids().unwrap();
+    assert_eq!(vec![ids.real, ids.effective, ids.saved], proc);
+}

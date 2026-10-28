@@ -65,11 +65,32 @@ pub fn uids() -> io::Result<Uids> {
     })
 }
 
+/// The real, effective and saved group ids (`getresgid`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gids {
+    pub real: u32,
+    pub effective: u32,
+    pub saved: u32,
+}
+
+/// `getresgid`.
+pub fn gids() -> io::Result<Gids> {
+    let (mut real, mut effective, mut saved) = (0, 0, 0);
+    // SAFETY: the three pointers are to writable `gid_t`s.
+    cvt(unsafe { libc::getresgid(&mut real, &mut effective, &mut saved) })?;
+    Ok(Gids {
+        real,
+        effective,
+        saved,
+    })
+}
+
 /// Drops to `uid`/`gid` for good, from a process with some uid 0: takes
 /// the effective uid back to 0 if it is not (allowed while the real or
 /// saved uid is 0), then `setgroups([gid])`, `setgid(gid)`, `setuid(uid)`
 /// (as effective root these set the real, effective and saved ids), and
-/// checks that `setuid(0)` fails and that all three uids are `uid`.
+/// checks that `setuid(0)` fails, that all three uids are `uid` and that
+/// all three gids are `gid`.
 /// Changes the whole process (glibc applies the ids to every thread);
 /// never call it in a process whose privileges must stay.
 pub fn drop_to(uid: u32, gid: u32) -> io::Result<()> {
@@ -100,6 +121,18 @@ pub fn drop_to(uid: u32, gid: u32) -> io::Result<()> {
     {
         return Err(io::Error::other(format!(
             "uids after the privilege drop: {after:?}"
+        )));
+    }
+    let after = gids()?;
+    if after
+        != (Gids {
+            real: gid,
+            effective: gid,
+            saved: gid,
+        })
+    {
+        return Err(io::Error::other(format!(
+            "gids after the privilege drop: {after:?}"
         )));
     }
     Ok(())

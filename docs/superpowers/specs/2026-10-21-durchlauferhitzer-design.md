@@ -1189,7 +1189,7 @@ Failures, persistence, timeouts:
   looked up with `getpwnam_r` (an unknown user is exit 2), and the process
   drops to it for good: the effective uid back to 0 first if it is not,
   then `setgroups([gid])`, `setgid`, `setuid`, then it checks that
-  `setuid(0)` fails and that the real, effective and saved uids are all
+  `setuid(0)` fails and that the real, effective and saved uids, and the three gids, are all
   the user's (exit 2 on any failure). As non-root
   nothing is dropped; with `user` set, that is logged once (controller
   ruling R5): `kind=privileges action=kept reason=not_root`
@@ -1453,7 +1453,10 @@ Failures, persistence, timeouts:
   limit is raised to exactly `needed` when the hard limit allows;
   otherwise startup fails (exit 2): `too few file descriptors
   (RLIMIT_NOFILE): the server needs <needed>, <hard limit> are
-  available`.
+  available`. Known gap: a descriptor that the user lookup of the
+  privilege drop leaves open (an NSS client socket, e.g. sssd) is opened
+  after the check and not counted; it costs at most a slot, and running
+  out only logs `EMFILE` (DRV-16), never fails.
 - **NFR-RES-06** [done] Every opened file is closed
   exactly once and every upstream is closed exactly once, on every path
   (normal end, error, reset, timeout, orphan).
