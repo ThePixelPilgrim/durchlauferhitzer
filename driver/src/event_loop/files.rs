@@ -51,6 +51,20 @@ pub(super) enum Answer {
     Drop(Freed),
 }
 
+/// What a `Readahead` found.
+#[derive(Debug)]
+pub(super) enum StartRead {
+    /// The file was open and idle: the readahead is in flight now, and the
+    /// job holds this reference to the descriptor.
+    Started(Arc<OwnedFd>),
+    /// A readahead is already in flight (the core never asks for two):
+    /// the second is answered `FileFailed { Other }`.
+    Busy,
+    /// The file is not open (opening, closed or unknown): nothing to read
+    /// and, after `CloseFile`, nothing may be delivered for it.
+    NotOpen,
+}
+
 /// Whether a step closed a descriptor (paused listeners resume, DRV-16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Freed {
@@ -113,20 +127,18 @@ impl Files {
         }
     }
 
-    /// A `Readahead` for an open, idle file: it is now in flight, and the
-    /// job gets a reference to the descriptor. `None` for any other file
-    /// (the core asks only for an open file, one readahead at a time).
-    pub(super) fn start_read(&mut self, file: FileId) -> Option<Arc<OwnedFd>> {
+    /// A `Readahead`: for an open, idle file it is now in flight.
+    pub(super) fn start_read(&mut self, file: FileId) -> StartRead {
         match self.map.get_mut(&file) {
             Some(FileState::Open { fd, reading }) => match reading {
                 Reading::Idle => {
                     *reading = Reading::InFlight;
-                    Some(Arc::clone(fd))
+                    StartRead::Started(Arc::clone(fd))
                 }
-                Reading::InFlight => None,
+                Reading::InFlight => StartRead::Busy,
             },
             Some(FileState::Opening | FileState::Abandoned | FileState::Closing { .. }) | None => {
-                None
+                StartRead::NotOpen
             }
         }
     }
@@ -251,18 +263,24 @@ impl Driver {
         }
     }
 
-    /// `Readahead`: to the pool, for an open file with none in flight.
+    /// `Readahead`: to the pool, for an open file with none in flight. A
+    /// second one while one is in flight (never, from the core) is answered
+    /// `FileFailed { Other }` after the current call; one for a file that
+    /// is not open is ignored (after `CloseFile` nothing may be delivered).
     pub(super) fn readahead(&mut self, file: FileId, offset: u64, len: u64) {
-        let Some(pool) = &self.pool else {
-            return;
-        };
-        if let Some(fd) = self.files.start_read(file) {
-            pool.submit(Job::Readahead {
-                file,
-                fd,
-                offset,
-                len,
-            });
+        match self.files.start_read(file) {
+            StartRead::Started(fd) => match &self.pool {
+                Some(pool) => pool.submit(Job::Readahead {
+                    file,
+                    fd,
+                    offset,
+                    len,
+                }),
+                // An open file means the pool opened it.
+                None => self.file_failures.push_back(file),
+            },
+            StartRead::Busy => self.file_failures.push_back(file),
+            StartRead::NotOpen => {}
         }
     }
 
@@ -366,7 +384,7 @@ mod tests {
 
     use durchlauferhitzer_core::{ConnError, ConnId, Event, FileError, FileId};
 
-    use super::{Answer, Files, Freed, sendfile_event};
+    use super::{Answer, Files, Freed, StartRead, sendfile_event};
     use crate::sys::fd::Io;
 
     fn fd() -> OwnedFd {
@@ -399,7 +417,9 @@ mod tests {
     fn close_during_a_readahead_waits_for_its_result_and_drops_it() {
         let mut files = Files::new();
         let weak = open_file(&mut files);
-        let job_fd = files.start_read(F).unwrap();
+        let StartRead::Started(job_fd) = files.start_read(F) else {
+            panic!("no readahead started");
+        };
         // The worker returns its reference before it sends the result.
         drop(job_fd);
         assert_eq!(files.close(F), Freed::Nothing);
@@ -414,11 +434,12 @@ mod tests {
     fn a_readahead_answer_reopens_the_file_for_the_next() {
         let mut files = Files::new();
         let _weak = open_file(&mut files);
-        assert!(files.start_read(F).is_some());
+        assert!(matches!(files.start_read(F), StartRead::Started(_)));
         // One readahead at a time (the core never asks for two).
-        assert!(files.start_read(F).is_none());
+        assert!(matches!(files.start_read(F), StartRead::Busy));
         assert_eq!(files.read_done(F), Answer::Deliver);
-        assert!(files.start_read(F).is_some());
+        assert!(matches!(files.start_read(F), StartRead::Started(_)));
+        assert!(matches!(files.start_read(FileId(9)), StartRead::NotOpen));
         assert!(
             files.fd(F).is_some(),
             "sendfile goes on while reading ahead"

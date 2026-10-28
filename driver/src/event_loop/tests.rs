@@ -93,6 +93,26 @@ fn run_shuts_the_pool_down_when_it_ends() {
     assert!(driver.pool.is_none());
 }
 
+/// M2: the core asks for one readahead at a time; a second one while the
+/// first is in flight is not dropped in silence (the connection would wait
+/// for an answer that never comes) but answered `FileFailed { Other }`
+/// after the current call, through the queue of failed file requests.
+#[test]
+fn a_second_readahead_in_flight_is_answered_failed() {
+    let (mut driver, _logs) = static_driver();
+    let file = FileId(1);
+    driver.files.opening(file);
+    let null = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+    driver.files.opened(file, null);
+    driver.readahead(file, 0, 5);
+    assert!(driver.file_failures.is_empty());
+    driver.readahead(file, 5, 5);
+    assert_eq!(
+        driver.file_failures.iter().copied().collect::<Vec<_>>(),
+        [file]
+    );
+}
+
 /// `EMFILE`/`ENFILE` from an open are logged by the driver (the budget
 /// is wrong, NFR-RES-05); the core still gets `FileFailed`. Other
 /// errors are the core's to log (as a 404).

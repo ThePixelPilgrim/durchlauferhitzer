@@ -197,8 +197,10 @@ leaves a choice, this is what the loop does:
   flight, marks the file `Closing`: the descriptor stays open until that
   result arrives, which is then dropped (no event). Closing a file
   resumes paused listeners (DRV-16). One readahead per file at a time,
-  as the core asks; a `Readahead` for a file that is not open and idle
-  is ignored, and a `CloseFile` before the open's answer (the core never
+  as the core asks: a second one while one is in flight is answered
+  `FileFailed { Other }` after the current call, a `Readahead` for a file
+  that is not open is ignored (after `CloseFile` nothing may be
+  delivered for it), and a `CloseFile` before the open's answer (the core never
   sends one) drops that answer and its descriptor.
 - **`sendfile`** (DRV-03, DRV-09). Once `send_buffer` is empty the loop
   `sendfile`s `send_file`'s segment until it is done or the socket would
