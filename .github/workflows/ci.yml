@@ -24,3 +24,7 @@ jobs:
         run: scripts/check-product-deps.sh
       - name: Product dependency check self-test
         run: scripts/test-check-product-deps.sh
+      - name: Docs (warnings are errors)
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: "-D warnings"

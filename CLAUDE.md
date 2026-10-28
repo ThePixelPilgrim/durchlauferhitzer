@@ -109,4 +109,7 @@ The superpowers skills are vendored as project skills in `.claude/skills/`
   the same commit when modules are added, moved or removed.
 - Before every commit run `cargo fmt --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace` and `scripts/check-product-deps.sh`.
+  `cargo test --workspace`, `scripts/check-product-deps.sh` and
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`.
+  CI runs all of these plus `scripts/test-check-product-deps.sh`; a green
+  CI run is enough for that self-test (owner, 2026-10-28).

@@ -32,7 +32,7 @@ The stage 3 review record lists every owner decision, every ruling taken on the 
 - Per-socket `epoll_ctl` failure (owner, 2026-10-28; DRV-15): fails only that socket (`Failed`/`UpstreamFailed` + `DriverLog::RegisterFailed`); only `epoll_wait` or the loop's own descriptors end `run`.
 - Carry to Task 6: the pool gets the loop's wake eventfd via `EventFd::try_clone` (std `OwnedFd::try_clone`, no new unsafe; one descriptor in the NFR-RES-05 budget); drop `Driver::new`'s "static roots need a pool" guard once the pool exists; the sim checks only `Read` (not `Write`) with an empty buffer for clients — relevant once `send_file` is driven. Task 8's process exit enum is `ExitStatus` (plan amended, e40c7e3). Carry to Task 8: the A11 probe opens `/` with `O_PATH` when no root is configured; `SignalFd::new` before worker threads spawn; `drop_to` tested in a subprocess.
 - Process notes: the `Date` sim tests (Task 2, 66a8f77) and the first late-timer tests (Task 3, ddc859f) were written after the code; their teeth were shown by mutation.
-- Open owner questions: should the pre-commit gate in CLAUDE.md also run `scripts/test-check-product-deps.sh` (CI runs it)? Add `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` to the gate? (A private doc link from Task 1 slipped through; fixed in 1c8257f.)
+- Gate (owner, 2026-10-28): the docs build with warnings as errors is part of the pre-commit gate and CI; the deps self-test runs in CI only, and green CI is enough.
 
 ## Carry-forwards to later stages
 
@@ -61,6 +61,6 @@ The stage 3 review record lists every owner decision, every ruling taken on the 
 
 1. Workspace: `bash .claude/skills/subagent-driven-development/scripts/sdd-workspace <plan>` (git-ignored `.superpowers/sdd/<plan>/`), with its ledger `progress.md`.
 2. Record `Task N: BASE <sha>`; `scripts/task-brief <plan> N` writes the brief.
-3. Dispatch an implementer (Opus for interface/security-heavy tasks, Sonnet for small ones) with: brief path, context files, controller rulings, the mandatory process block (TDD, gate `cargo fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && scripts/check-product-deps.sh`, commit trailers, push to the task branch), and a report file path.
+3. Dispatch an implementer (Opus for interface/security-heavy tasks, Sonnet for small ones) with: brief path, context files, controller rulings, the mandatory process block (TDD, gate `cargo fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && scripts/check-product-deps.sh && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, commit trailers, push to the task branch), and a report file path.
 4. `scripts/review-package <plan> BASE HEAD`, dispatch a reviewer (task-reviewer template), adjudicate; fix rounds resume the implementer, then a scoped re-review.
 5. Run the gate on a fresh build (touch the sources), update this file, fast-forward `main`, ledger lines for rulings and completion; report to the owner.
