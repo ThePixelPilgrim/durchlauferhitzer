@@ -160,8 +160,8 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
         Activation::None => bind(&listen)?,
     };
     budget::ensure(budget::needed(budget::Descriptors {
+        open: budget::open_now()?,
         max_connections,
-        listeners: listeners.len(),
         roots: roots.len(),
         backends: core.backends().len(),
     }))?;

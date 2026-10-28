@@ -97,6 +97,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   7. Drop privileges.
   8. Start the workers.
   9. Run the loop.
+  - *Owner decision 2026-10-28 (Task 8 review, O5), written into the spec (NFR-RES-05):* step 6 counts the descriptors really open at the check (`/proc/self/fd`) plus what the run adds, and raises the soft limit to exactly that need.
   - *Owner decision 2026-10-28 (Task 8 review, O1), written into the spec (FR-PROC-04):* no check of fds 0–2 before step 1: the Rust runtime opens closed fds 0–2 on `/dev/null` before `main`, so nothing lands on them and a server with stderr closed runs with its log discarded (without `/dev/null` the runtime aborts).
 
 ## Global Constraints

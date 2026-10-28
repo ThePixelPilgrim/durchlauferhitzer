@@ -1436,13 +1436,17 @@ Failures, persistence, timeouts:
   sockets (refused ones included); from stage 3 at most one upstream socket
   per counted connection; plus the static roots, listeners and the eventfd.
   The driver checks `RLIMIT_NOFILE` against this at startup. *(Stage 4
-  Task 8:)* the soft limit must be at least
-  `needed = 3 (fds 0–2) + 3 (epoll, wake eventfd, signalfd) + listeners +
-  roots + 2 × max_connections (client sockets) + [roots > 0: 1 (the disk
-  pool's duplicate of the wake eventfd) + max_connections (files)] +
-  [some proxy route: max_connections (upstream sockets)]`, the bracketed
-  terms counting only when the config has static roots or proxy routes.
-  A lower soft limit is raised to `needed` when the hard limit allows;
+  Task 8; owner decision 2026-10-28, O5, which replaced a constant 3 for
+  fds 0–2 by the real count:)* the soft limit must be at least
+  `needed = open + 3 (epoll, wake eventfd, signalfd) + 2 × max_connections
+  (client sockets) + [roots > 0: 1 (the disk pool's duplicate of the wake
+  eventfd) + max_connections (files)] + [some proxy route:
+  max_connections (upstream sockets)]`, where `open` is the number of
+  descriptors open at the check (after the roots are opened and the
+  sockets bound or taken), counted in `/proc/self/fd`: fds 0–2, the
+  roots, the listeners and anything inherited. The bracketed terms count
+  only when the config has static roots or proxy routes. A lower soft
+  limit is raised to exactly `needed` when the hard limit allows;
   otherwise startup fails (exit 2): `too few file descriptors
   (RLIMIT_NOFILE): the server needs <needed>, <hard limit> are
   available`.

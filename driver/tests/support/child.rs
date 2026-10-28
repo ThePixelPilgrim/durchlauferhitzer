@@ -127,6 +127,9 @@ pub struct Setup {
     /// first socket), with `LISTEN_PID` (the child's pid) and
     /// `LISTEN_FDS=1` set through `sh -c '... exec'`.
     pub listen_fd: Option<OwnedFd>,
+    /// A descriptor that becomes the child's fd 3, inheritable, without
+    /// any systemd variable: a stray descriptor the server inherits.
+    pub stray_fd: Option<OwnedFd>,
     /// The `LISTEN_PID` value instead of the child's pid.
     pub listen_pid: Option<String>,
     /// `RLIMIT_NOFILE` (soft, hard) in the child.
@@ -181,7 +184,7 @@ pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
         cmd.uid(NOBODY).gid(NOBODY);
     }
     let mut keep = Vec::new();
-    if let Some(fd) = setup.listen_fd {
+    if let Some(fd) = setup.listen_fd.or(setup.stray_fd) {
         // `dup2(3, 3)` would keep close-on-exec set: make sure the source
         // is another descriptor (a clone gets the lowest free number,
         // which cannot be 3 while the original holds it).

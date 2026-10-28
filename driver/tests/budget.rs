@@ -5,12 +5,13 @@
 //! limit below it is raised when the hard limit allows. Run as non-root
 //! (as `nobody` when the tests run as root), so the hard limit binds.
 //!
-//! The budget, with `max_connections` = 16 and one listener:
-//! 3 (fds 0–2) + 3 (epoll, wake eventfd, signalfd) + 1 (listener)
+//! The budget (O5: the descriptors open at the check, plus what the run
+//! adds), with `max_connections` = 16 and one listener:
+//! 4 open (fds 0–2, the listener) + 3 (epoll, wake eventfd, signalfd)
 //! + 2 × 16 (client sockets) = 39, then
 //! - a proxy route: + 16 (upstream sockets) = 55;
-//! - a static route: + 1 (root) + 1 (the pool's wake duplicate) + 16
-//!   (files) = 57;
+//! - a static route: + 1 (the root, open) + 1 (the pool's wake
+//!   duplicate) + 16 (files) = 57;
 //! - both: 73.
 
 #![allow(
@@ -83,6 +84,10 @@ fn exactly_the_budget_starts() {
     let addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
     for (path, needed) in configs(&dir, addr) {
         let server = Running::start(&[&path], limited(needed, needed), addr);
+        // The listener accepts before the check: an answer (404, the host
+        // is not `example.test`) shows startup got past it.
+        let response = child::get(addr, "/");
+        assert!(response.starts_with("HTTP/1.1 404 "), "{path}: {response}");
         drop(server);
     }
 }
@@ -106,4 +111,32 @@ fn a_low_soft_limit_is_raised() {
         .unwrap();
     let numbers: Vec<&str> = line.split_whitespace().skip(3).take(2).collect();
     assert_eq!(numbers, [needed.to_string(), "200".to_owned()], "{line}");
+}
+
+/// O5 (owner decision 2026-10-28): the budget counts the descriptors
+/// really open at the check, so a stray inherited one raises it by one.
+#[test]
+fn an_inherited_descriptor_raises_the_need_by_one() {
+    let dir = TempDir::new();
+    let addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let (path, needed) = configs(&dir, addr).swap_remove(0);
+    let stray = || Some(std::os::fd::OwnedFd::from(fs::File::open(&path).unwrap()));
+    let setup = |limit| Setup {
+        stray_fd: stray(),
+        ..limited(limit, limit)
+    };
+    let output = run(&[&path], setup(needed));
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "durchlauferhitzer: too few file descriptors (RLIMIT_NOFILE): \
+             the server needs {}, {needed} are available\n",
+            needed + 1
+        )
+    );
+    let server = Running::start(&[&path], setup(needed + 1), addr);
+    let response = child::get(addr, "/");
+    assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
+    drop(server);
 }

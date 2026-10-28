@@ -40,9 +40,10 @@ src/
   process.rs        the command line (FR-PROC-01: serve, `--check`, the
                     usage), the exit codes (`ExitStatus`, FR-PROC-05a),
                     the startup sequence (A11)
-    budget.rs         NFR-RES-05: `needed` (the formula in its docs and
-                      the spec), `ensure` (raise the soft limit, or fail
-                      naming both numbers)
+    budget.rs         NFR-RES-05: `open_now` (`/proc/self/fd`, O5),
+                      `needed` (the formula in its docs and the spec),
+                      `ensure` (raise the soft limit, or fail naming both
+                      numbers)
     privileges.rs     A8: `drop_privileges` (root, any uid 0 (O6), needs
                       `user` and drops to it; non-root keeps, logged); no
                       port check (O7)
@@ -136,8 +137,9 @@ tests/
                     socket are exit 2
   budget.rs         NFR-RES-05 in the binary with RLIMIT_NOFILE lowered
                     in the child: one short is exit 2 with both numbers,
-                    exactly the budget starts, a low soft limit is raised
-                    (three configs: proxy, static, both)
+                    exactly the budget starts and serves, a low soft limit
+                    is raised (three configs: proxy, static, both); a stray
+                    inherited fd raises the need by one
   privileges.rs     A8 in the binary: as non-root `user` is kept and
                     logged, a refused bind below 1024 is exit 2 naming it; as root (else
                     skipped with a printed reason) no `user` and an unknown
