@@ -125,8 +125,8 @@ pub struct Driver {
     /// The static roots, opened once at startup, indexed by `RootId`
     /// (DRV-07); each open job holds a reference while it runs.
     roots: Vec<Arc<OwnedFd>>,
-    /// The disk worker pool (DRV-08); `None` without static roots, and
-    /// once `run` has ended (it shuts the pool down).
+    /// The disk worker pool (DRV-08); `None` exactly when the core has no
+    /// static roots, and once `run` has ended (it shuts the pool down).
     pool: Option<Pool>,
     /// Every file id between its `OpenFile` and its `CloseFile`.
     files: Files,
@@ -150,29 +150,27 @@ pub struct Driver {
 impl Driver {
     /// A driver for `core`, accepting on `listeners` (bound, listening,
     /// non-blocking sockets), with the static roots opened at startup in
-    /// [`Core::static_roots`] order (DRV-07), `disk_threads` disk workers
-    /// (`limits.disk_threads`; `None` for no pool) and the log sink.
+    /// [`Core::static_roots`] order (DRV-07), the number of disk workers
+    /// (`limits.disk_threads`) and the log sink.
     ///
-    /// The pool's workers wake the loop through a duplicate of its wake
-    /// eventfd (R1): one more descriptor in the budget (NFR-RES-05).
+    /// The disk pool is started exactly when the core has static roots:
+    /// every `OpenFile` gets an answer (DRV-09), and a static-less core
+    /// gets no idle threads (its `disk_threads` is not used). The pool's
+    /// workers wake the loop through a duplicate of its wake eventfd (R1):
+    /// one more descriptor in the budget (NFR-RES-05). The workers are
+    /// spawned here, so a signal mask must be set (`SignalFd::new`)
+    /// before this call.
     ///
-    /// A core with static roots needs the pool: every `OpenFile` gets an
-    /// answer (DRV-09), so without one the driver refuses to start
-    /// (`InvalidInput`) rather than drop file actions. So does a root list
-    /// that does not match [`Core::static_roots`], or zero threads.
+    /// Refused (`InvalidInput`): a root list that does not match
+    /// [`Core::static_roots`] one to one, and zero threads for a core
+    /// with static roots.
     pub fn new(
         core: Core,
         listeners: Vec<OwnedFd>,
         roots: Vec<OwnedFd>,
-        disk_threads: Option<u32>,
+        disk_threads: u32,
         log: LogSink,
     ) -> io::Result<Driver> {
-        if !core.static_roots().is_empty() && disk_threads.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "static roots need the disk pool (DRV-09)",
-            ));
-        }
         if roots.len() != core.static_roots().len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -195,9 +193,10 @@ impl Driver {
         }
         // Last, so nothing above can fail with threads running (a `Pool`
         // dropped on an error path joins its threads anyway).
-        let pool = match disk_threads {
-            Some(threads) => Some(Pool::start(threads, wake.fd.try_clone()?)?),
-            None => None,
+        let pool = if roots.is_empty() {
+            None
+        } else {
+            Some(Pool::start(disk_threads, wake.fd.try_clone()?)?)
         };
         Ok(Driver {
             core,

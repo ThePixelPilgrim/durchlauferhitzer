@@ -75,6 +75,7 @@ pub enum JobResult {
     ReadFailed { file: FileId, error: io::Error },
 }
 
+#[cfg(test)]
 impl JobResult {
     /// The file the job was for.
     pub fn file(&self) -> FileId {
@@ -261,6 +262,9 @@ fn run(job: Job) -> JobResult {
         } => match openat2_beneath(root_fd.as_fd(), &segments) {
             Ok(fd) => match fstat(fd.as_fd()) {
                 Ok(stat) => JobResult::Opened { file, fd, stat },
+                // `fd` closes here, on the worker: net zero descriptors, so
+                // the loop has nothing to resume; paused listeners (DRV-16)
+                // still come back by the 1 s retry.
                 Err(error) => JobResult::OpenFailed { file, error },
             },
             Err(error) => JobResult::OpenFailed { file, error },

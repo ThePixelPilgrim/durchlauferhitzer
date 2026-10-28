@@ -34,7 +34,7 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 src/
   lib.rs            crate root: lint rules, the Linux and 64-bit checks,
                     the modules, re-exports (`Driver`, `Exit`,
-                    `StopHandle`, `LogSink`, `LogEntry`, `DriverLog`, `Pool`)
+                    `StopHandle`, `LogSink`, `LogEntry`, `DriverLog`)
   main.rs           the binary (a usage stub until the CLI, Task 8)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
                     `next_deadline`, dispatch, `TimerFired`), `deliver`
@@ -60,9 +60,9 @@ src/
                     records and the registration each wants
   log.rs            `LogSink` (a channel sink for tests until Task 7),
                     `LogEntry`, `DriverLog` (FR-LOG-07)
-  pool.rs           `Pool`: the disk workers (A10): `start`, `submit`
-                    (`Job::Open` / `Job::Readahead`), `results`
-                    (`JobResult`), `shutdown` (joins)
+  pool.rs           `Pool` (crate-private): the disk workers (A10):
+                    `start`, `submit` (`Job::Open` / `Job::Readahead`),
+                    `results` (`JobResult`), `shutdown` (joins)
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules
     fd.rs             `Io` (Done / WouldBlock / Closed / Err), the -1/errno
@@ -117,11 +117,14 @@ tests/
 ## The event loop
 
 `Driver::new(core, listeners, roots, disk_threads, log)` registers the
-listeners and the wake eventfd and, with `Some(n)` disk threads
-(`limits.disk_threads`), starts the pool. It refuses (`InvalidInput`) a
-core with static roots but no pool, since every `OpenFile` needs its
-answer (DRV-09), a root list that does not match `Core::static_roots`
-one to one, and zero threads. `Driver::run` loops until a `StopHandle`
+listeners and the wake eventfd and starts the disk pool with
+`disk_threads` workers (`limits.disk_threads`) exactly when the core has
+static roots, since every `OpenFile` needs its answer (DRV-09); a
+static-less core gets no threads and ignores the count. It spawns the
+workers, so `SignalFd::new` must come before it (the mask is
+inherited). It refuses (`InvalidInput`) a root list that does not match
+`Core::static_roots` one to one, and zero threads for a core with
+roots. `Driver::run` loops until a `StopHandle`
 asks it to stop (`Exit::Stopped`; the signal-driven endings come with
 Task 9), then shuts the pool down (its threads joined). It
 follows the contract in `core/src/core/contract.rs`; where the contract

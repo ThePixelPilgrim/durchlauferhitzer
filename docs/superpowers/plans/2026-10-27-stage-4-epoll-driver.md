@@ -256,7 +256,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
 
 **Interfaces:**
 - Consumes: `sys` (Task 4) and the core API.
-- Produces: `pub struct Driver` with `Driver::new(core: Core, listeners: Vec<OwnedFd>, roots: Vec<OwnedFd>, pool: Option<Pool>, log: LogSink) -> io::Result<Driver>` and `Driver::run(&mut self) -> io::Result<Exit>`. In this task the pool is a stub that answers nothing and the log is a `Vec` sink for tests; Tasks 6 and 7 replace them.
+- Produces: `pub struct Driver` with `Driver::new(core: Core, listeners: Vec<OwnedFd>, roots: Vec<OwnedFd>, pool: Option<Pool>, log: LogSink) -> io::Result<Driver>` and `Driver::run(&mut self) -> io::Result<Exit>`. In this task the pool is a stub that answers nothing and the log is a `Vec` sink for tests; Tasks 6 and 7 replace them. *(Amended in Task 6, review M1:)* the signature is `Driver::new(core, listeners, roots, disk_threads: u32, log)`; `new` starts the disk pool itself, exactly when the core has static roots (with a duplicate of its wake eventfd), refuses zero threads for a core with roots and a root list that does not match `Core::static_roots`; `run` shuts the pool down when it ends. The pool is crate-private.
 
   Epoll tokens encode `Listener(i) | Client(ConnId) | Upstream(UpstreamId) | Wake | Signal` in a `u64`. Ids are allocated by the driver from 1 and never reused (DRV-01).
 - Rules, implemented exactly as the contract says:
@@ -353,7 +353,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
 
 **Interfaces:**
 - Produces: `pub fn run(args: impl Iterator<Item = OsString>) -> ExitCode`, with `ExitStatus { Ok = 0, Config = 1, Startup = 2 }` (private to `process.rs`, not re-exported; renamed from `Exit` in Task 5's review, since `Exit` is the event loop's ending, `Driver::run -> io::Result<Exit>`). The usage text goes to stderr with exit 1 for bad arguments; that is a builder call recorded in the spec.
-- Rules: A6, A7, A8 and A11. `--check` loads the config and prints `ok` or the error with line:column, then exits 0 or 1 without touching the network or the roots.
+- Rules: A6, A7, A8 and A11. A11 step 8 ("Start the workers") is `Driver::new`, which spawns the disk workers (Task 6): `SignalFd::new` comes before `Driver::new`, so the workers inherit the blocked signal mask. Pass `limits.disk_threads` to it, and count the pool's duplicate wake eventfd (one, whatever the thread count) in the NFR-RES-05 budget. `--check` loads the config and prints `ok` or the error with line:column, then exits 0 or 1 without touching the network or the roots.
 
 - [ ] **Step 1: Write the failing tests:**
   - `--check` on a valid config gives 0, and on each invalid case 1 with the message.

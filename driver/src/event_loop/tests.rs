@@ -26,17 +26,24 @@ const STATIC_LESS: &str = "listen 127.0.0.1:8080; host a.test { path / { proxy 1
 /// A config with a static root: the core may emit `OpenFile`.
 const STATIC: &str = "listen 127.0.0.1:8080; host a.test { path / { static /srv; } }";
 
-/// DRV-09: every `OpenFile` gets an answer, so a core with static roots
-/// needs the disk pool; without one the driver refuses to start rather
-/// than drop file actions.
+/// DRV-09 (R2, M1): the pool exists exactly when the core has static
+/// roots, so "roots without a pool" cannot be built and a static-less
+/// core costs no idle threads and no extra eventfd.
 #[test]
-fn a_core_with_static_roots_and_no_pool_is_refused() {
-    let core = Core::new(load(STATIC).unwrap());
+fn the_pool_starts_exactly_when_the_core_has_static_roots() {
+    let (without, _logs) = driver();
+    assert!(without.pool.is_none());
+    let (with, _logs) = static_driver();
+    assert!(with.pool.is_some());
+}
+
+/// Without static roots the thread count is not used, not even 0.
+#[test]
+fn a_static_less_core_ignores_the_thread_count() {
+    let core = Core::new(load(STATIC_LESS).unwrap());
     let (log, _logs) = LogSink::channel();
-    let Err(err) = Driver::new(core, Vec::new(), Vec::new(), None, log) else {
-        panic!("a driver without a pool was built for a core with static roots");
-    };
-    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    let driver = Driver::new(core, Vec::new(), Vec::new(), 0, log).unwrap();
+    assert!(driver.pool.is_none());
 }
 
 /// DRV-07: the driver gets one opened root per static root of the core,
@@ -45,13 +52,13 @@ fn a_core_with_static_roots_and_no_pool_is_refused() {
 fn a_root_list_that_does_not_match_the_core_is_refused() {
     let core = Core::new(load(STATIC).unwrap());
     let (log, _logs) = LogSink::channel();
-    let Err(err) = Driver::new(core, Vec::new(), Vec::new(), Some(1), log) else {
+    let Err(err) = Driver::new(core, Vec::new(), Vec::new(), 1, log) else {
         panic!("a driver without its root was built");
     };
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     let core = Core::new(load(STATIC_LESS).unwrap());
     let (log, _logs) = LogSink::channel();
-    let Err(err) = Driver::new(core, Vec::new(), vec![unpollable()], None, log) else {
+    let Err(err) = Driver::new(core, Vec::new(), vec![unpollable()], 1, log) else {
         panic!("a driver with a root the core does not have was built");
     };
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
@@ -61,7 +68,7 @@ fn a_root_list_that_does_not_match_the_core_is_refused() {
 fn zero_disk_threads_are_refused() {
     let core = Core::new(load(STATIC).unwrap());
     let (log, _logs) = LogSink::channel();
-    let Err(err) = Driver::new(core, Vec::new(), vec![unpollable()], Some(0), log) else {
+    let Err(err) = Driver::new(core, Vec::new(), vec![unpollable()], 0, log) else {
         panic!("a driver with no disk thread was built");
     };
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
@@ -72,7 +79,7 @@ fn zero_disk_threads_are_refused() {
 fn static_driver() -> (Driver, Receiver<LogEntry>) {
     let core = Core::new(load(STATIC).unwrap());
     let (log, logs) = LogSink::channel();
-    let driver = Driver::new(core, Vec::new(), vec![unpollable()], Some(1), log).unwrap();
+    let driver = Driver::new(core, Vec::new(), vec![unpollable()], 1, log).unwrap();
     (driver, logs)
 }
 
@@ -145,7 +152,7 @@ fn a_failed_write_after_the_end_of_stream_is_reported_at_once() {
 fn driver() -> (Driver, Receiver<LogEntry>) {
     let core = Core::new(load(STATIC_LESS).unwrap());
     let (log, logs) = LogSink::channel();
-    let driver = Driver::new(core, Vec::new(), Vec::new(), None, log).unwrap();
+    let driver = Driver::new(core, Vec::new(), Vec::new(), 4, log).unwrap();
     (driver, logs)
 }
 

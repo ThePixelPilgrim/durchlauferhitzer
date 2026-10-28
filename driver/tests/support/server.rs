@@ -50,19 +50,15 @@ pub struct Server {
 }
 
 impl Server {
-    /// Starts a driver for `config` (no static roots) on an ephemeral
-    /// loopback port, without a disk pool.
+    /// Starts a driver for `config` on an ephemeral loopback port; with
+    /// no static roots it starts no disk pool.
     pub fn start(config: &str) -> Server {
-        Server::launch(config, None)
+        Server::start_static(config, 1)
     }
 
     /// Starts a driver for `config` with its static roots opened (as the
     /// binary does at startup, DRV-07) and `disk_threads` disk workers.
     pub fn start_static(config: &str, disk_threads: u32) -> Server {
-        Server::launch(config, Some(disk_threads))
-    }
-
-    fn launch(config: &str, disk_threads: Option<u32>) -> Server {
         let core = Core::new(load(config).unwrap());
         let roots = core
             .static_roots()
