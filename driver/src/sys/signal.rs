@@ -1,5 +1,6 @@
 //! Signals as readable events: the handled signals are blocked and read
-//! from a `signalfd` in the epoll set (A9).
+//! from a `signalfd` in the epoll set (A9): SIGTERM, SIGINT, SIGPIPE and
+//! SIGHUP.
 
 use std::io;
 use std::mem::{size_of, zeroed};
@@ -17,22 +18,27 @@ pub enum Signal {
     /// `SIGPIPE`: blocked so it cannot kill the process (`sendfile` has no
     /// `MSG_NOSIGNAL`); read and ignored.
     Pipe,
+    /// `SIGHUP`: ignored in stage 4 (A9; the restart signal is stage 6),
+    /// blocked and read so its default action cannot end the server.
+    Hup,
 }
 
 impl Signal {
+    /// Every signal the driver blocks and reads from its signalfd.
+    pub const HANDLED: [Signal; 4] = [Signal::Term, Signal::Int, Signal::Pipe, Signal::Hup];
+
     fn number(self) -> libc::c_int {
         match self {
             Signal::Term => libc::SIGTERM,
             Signal::Int => libc::SIGINT,
             Signal::Pipe => libc::SIGPIPE,
+            Signal::Hup => libc::SIGHUP,
         }
     }
 
     fn from_number(signo: u32) -> Option<Signal> {
         let signo = libc::c_int::try_from(signo).ok()?;
-        [Signal::Term, Signal::Int, Signal::Pipe]
-            .into_iter()
-            .find(|s| s.number() == signo)
+        Signal::HANDLED.into_iter().find(|s| s.number() == signo)
     }
 }
 
@@ -131,7 +137,7 @@ mod tests {
 
     #[test]
     fn signalfd_receives_thread_directed_signals() {
-        let fd = SignalFd::new(&[Signal::Term, Signal::Int, Signal::Pipe]).unwrap();
+        let fd = SignalFd::new(&Signal::HANDLED).unwrap();
         assert!(matches!(fd.read(), Ok(None)));
         raise_here(libc::SIGTERM);
         assert!(matches!(fd.read(), Ok(Some(Signal::Term))));
@@ -140,6 +146,8 @@ mod tests {
         assert!(matches!(fd.read(), Ok(Some(Signal::Pipe))));
         raise_here(libc::SIGINT);
         assert!(matches!(fd.read(), Ok(Some(Signal::Int))));
+        raise_here(libc::SIGHUP);
+        assert!(matches!(fd.read(), Ok(Some(Signal::Hup))));
         assert!(matches!(fd.read(), Ok(None)));
     }
 }

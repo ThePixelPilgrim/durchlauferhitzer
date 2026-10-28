@@ -29,11 +29,14 @@ use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use durchlauferhitzer_core::Log;
 
 use self::buffer::{CAPACITY, EntryBuffer};
-use crate::sys::fd::{Blocking, Io, StatusFlags, set_status_flags, status_flags, write_fd};
+use crate::sys::fd::{
+    Blocking, Io, StatusFlags, Writable, set_status_flags, status_flags, wait_writable, write_fd,
+};
 
 mod buffer;
 mod format;
@@ -71,6 +74,22 @@ pub enum DriverLog {
     /// `user` is set but the privileges were kept (FR-PROC-03, A8),
     /// logged once at startup.
     PrivilegesKept { reason: KeptReason },
+    /// A step of the shutdown (FR-PROC-05, A9).
+    Shutdown { phase: ShutdownPhase },
+}
+
+/// The steps of a shutdown the log reports (FR-PROC-05, A9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownPhase {
+    /// The first SIGTERM: the listeners are closed and the drain begins.
+    Draining,
+    /// A second SIGTERM, a SIGINT or the end of `shutdown_timeout`: every
+    /// connection is cut (`abort_all`).
+    Aborting,
+    /// The loop has ended and the disk pool is shut down: `detached`
+    /// workers were still running after the 1 s grace and are left to
+    /// the process exit (R3).
+    Done { detached: usize },
 }
 
 /// Why the privileges were kept although `user` is set.
@@ -248,6 +267,18 @@ impl LogSink {
         }
     }
 
+    /// The final flush (R3): writes what waits, waiting for the
+    /// descriptor to become writable as long as bytes wait, but at most
+    /// `limit` in all; then it gives up and the bytes stay buffered. The
+    /// driver calls it once, after the loop and the pool, so the last
+    /// lines reach a slow reader without blocking the exit for long.
+    pub fn flush_within(&mut self, limit: Duration) {
+        match &mut self.kind {
+            SinkKind::Channel(_) => {}
+            SinkKind::Fd(sink) => sink.flush_within(limit),
+        }
+    }
+
     /// The backends the core's entries name by index: the driver passes
     /// [`Core::backends`](durchlauferhitzer_core::Core::backends), so a
     /// line carries the address (FR-LOG-05). Until then an id is written
@@ -303,11 +334,32 @@ impl FdSink {
     }
 }
 
+impl FdSink {
+    fn flush_within(&mut self, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        loop {
+            self.flush();
+            if self.buffer.is_empty() {
+                return;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            match wait_writable(self.out.as_fd(), left) {
+                Ok(Writable::Ready) => {}
+                // A descriptor `poll` refuses cannot be waited for.
+                Ok(Writable::TimedOut) | Err(_) => return,
+            }
+        }
+    }
+}
+
 impl Drop for FdSink {
     /// Writes what it can without blocking, then puts the original
     /// blocking mode back (best effort; the other flags are left as they
-    /// are now). Lines still buffered after that are lost; the
-    /// shutdown flush is Task 9's.
+    /// are now). Lines still buffered after that are lost; the driver's
+    /// bounded final flush ([`LogSink::flush_within`]) comes before.
     fn drop(&mut self) {
         self.flush();
         // Only the mode: another flag changed meanwhile stays as it is.

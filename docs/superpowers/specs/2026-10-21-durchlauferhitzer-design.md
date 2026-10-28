@@ -1063,7 +1063,9 @@ Failures, persistence, timeouts:
       `kind=socket_failed errno`, `kind=open_failed errno`,
       `kind=register_failed errno`, `kind=dropped count` (FR-LOG-06),
       `kind=privileges action reason` (FR-PROC-03: `action=kept
-      reason=not_root`, the only values so far).
+      reason=not_root`, the only values so far), `kind=shutdown phase
+      [detached]` (FR-PROC-05: `phase=draining`, `phase=aborting`,
+      `phase=done detached=N`).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
     `192.0.2.7`); `status` the three-digit code; `backend` the backend's
     address, `Core::backends[id]` as it prints (`127.0.0.1:9000`,
@@ -1108,7 +1110,9 @@ Failures, persistence, timeouts:
   way). If stderr cannot be polled (a regular file or `/dev/null`, whose
   writes never wait), waiting bytes go out with the next entry. Lines
   still buffered when the sink is dropped get one last non-blocking
-  write.
+  write. *(Stage 4 Task 9, R3:)* before that, at the end of the run, the
+  driver's final flush waits for stderr to become writable (`poll`) for
+  at most 1 s in all, writing as it can, then gives up (FR-PROC-05).
 - **FR-LOG-07** [core half done; the driver half: stage 4] `Rejected` for
   a parse error after the request line carries the method and path. The
   driver logs `EMFILE`/`ENFILE` and driver-bug closes distinctly. (Stage 4
@@ -1131,8 +1135,17 @@ Failures, persistence, timeouts:
   added with its first producer. *(Stage 4 Task 8:)* the one startup
   kind is `privileges` (privileges kept although `user` is set,
   FR-PROC-03); startup errors are not log entries but lines printed
-  before the sink exists (FR-PROC-04). The shutdown kinds come with
-  stage 4 Task 9.
+  before the sink exists (FR-PROC-04). *(Stage 4 Task 9, controller
+  ruling R4:)* the one shutdown kind is `shutdown`, one line per step
+  (FR-PROC-05): `kind=shutdown phase=draining` once the first SIGTERM
+  has closed the listeners, before the drain begins;
+  `kind=shutdown phase=aborting` before `abort_all` (a second SIGTERM, a
+  SIGINT or `shutdown_timeout`), so the `rejected ... reason=shutting_down`
+  lines of the cut exchanges follow it; `kind=shutdown phase=done
+  detached=N` once the loop and the disk pool are shut down, `N` the
+  workers still running after the pool's 1 s grace and left to the
+  process exit. The phase does not say which signal or the deadline
+  caused it.
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
@@ -1211,11 +1224,11 @@ Failures, persistence, timeouts:
   6. the descriptor budget (NFR-RES-05; exit 2 naming the needed and the
      available number);
   7. the privilege drop (FR-PROC-03; exit 2);
-  8. the signal mask: SIGTERM, SIGINT and SIGPIPE are blocked and a
-     `signalfd` opened for them, before any other thread exists, so every
-     thread inherits the mask and SIGPIPE can never kill the process (A9;
-     until stage 4 Task 9 they stay blocked and are not read, so the
-     server is stopped with SIGKILL);
+  8. the signal mask: SIGTERM, SIGINT, SIGPIPE and SIGHUP are blocked
+     and a `signalfd` opened for them, before any other thread exists, so
+     every thread inherits the mask and neither SIGPIPE nor SIGHUP can
+     ever kill the process (A9); the loop reads the signalfd
+     (FR-PROC-05);
   9. the stderr log sink (FR-LOG-06), which then gets the startup's
      driver log entries (`privileges`);
   10. the disk workers (`limits.disk_threads`, started with the driver,
@@ -1275,6 +1288,28 @@ Failures, persistence, timeouts:
     until their answer arrives, but the driver does not wait for them
     (DRV-14). The core drains afterwards, and `handle` keeps working
     after all three calls.
+  - *Driver half* (stage 4 Task 9, amendment A9 with controller rulings
+    R1–R3 of 2026-10-28): the loop reads the signals from its signalfd
+    (FR-PROC-04 step 8). The first SIGTERM closes the listeners (a new
+    connect is refused from then on), logs `phase=draining` (FR-LOG-07),
+    calls `begin_drain` and sets the drain's deadline to now plus
+    `shutdown_timeout`, a driver-owned deadline folded into the wait's
+    timeout like the accept retry (DRV-16). Once `is_drained` the loop
+    ends. A second SIGTERM, a SIGINT (with or without a drain before it)
+    or the deadline logs `phase=aborting`, closes the listeners if they
+    are still open, calls `abort_all`, performs its actions and ends the
+    loop at once, without waiting for orphaned opens (DRV-14). SIGPIPE is
+    read and ignored. SIGHUP is ignored in stage 4 (the restart signal
+    of FR-PROC-07 is stage 6): it is blocked and read, so its default
+    action can never end the server. Then, in this order: the disk pool
+    is shut down, waiting at most 1 s for its workers, the ones still
+    running (stuck in the kernel) are detached and counted; the line
+    `phase=done detached=N` is logged; the log gets a final flush that
+    waits for stderr to become writable for at most 1 s (a separate
+    bound, so the teardown takes at most 2 s even with a hung disk and a
+    stalled stderr), then gives up; the process exits 0, whether the
+    drain finished or was cut (FR-PROC-05a). A failure of the loop
+    itself stays exit 2.
 - **FR-PROC-05b** [done in the core; the epoll driver: stage 4] (Owner
   decision 2026-10-27, stage 4 Task 2 review D1.) During the drain, a
   complete request pipelined behind the response in flight is answered

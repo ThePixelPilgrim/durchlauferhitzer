@@ -83,6 +83,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   - SIGTERM, SIGINT and SIGPIPE are handled via `signalfd` in the epoll set. SIGPIPE is blocked; writes use `MSG_NOSIGNAL` or `send`.
   - First SIGTERM: graceful drain. A second SIGTERM, a SIGINT, or `shutdown_timeout` expiry: `abort_all`, then exit 0.
   - SIGHUP is ignored in stage 4. The restart signal is stage 6.
+  - *Controller ruling 2026-10-28 (Task 9, R1), written into the spec (FR-PROC-04, FR-PROC-05):* SIGHUP is blocked and read from the signalfd too, and ignored, so its default action cannot kill the server; the teardown after the loop is bounded (pool 1 s then detach, log flush 1 s), and every ending exits 0.
 - **A10, worker pool contract.**
   - `disk_threads` OS threads take jobs (open, readahead) from one `Mutex<VecDeque>` with a `Condvar`, and post results to a second queue plus one `eventfd` write.
   - The loop drains all results on each eventfd readiness, in any order (DRV-08). A `CloseFile` while a readahead is in flight marks the file "closing". Its descriptor is closed only when that worker's result arrives, which is then dropped (DRV-09).

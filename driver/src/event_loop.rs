@@ -13,11 +13,13 @@
 //!
 //! Clients are in `clients.rs` (accept, reads, writes, their actions),
 //! upstreams in `upstreams.rs`, the file contract (the disk pool's jobs
-//! and results, `sendfile`) in `files.rs`.
+//! and results, `sendfile`) in `files.rs`, the shutdown state machine
+//! (signals and the drain's deadline, DRV-14) in `shutdown.rs`.
 
 mod accept;
 mod clients;
 mod files;
+mod shutdown;
 mod upstreams;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -33,22 +35,33 @@ use durchlauferhitzer_core::{
 
 use self::accept::AcceptGate;
 use self::files::Files;
+use self::shutdown::{Phase, ShutdownGate, Step};
 use crate::conns::{Client, Token, Upstream};
-use crate::log::{Buffered, LogEntry, LogSink};
+use crate::log::{Buffered, DriverLog, LogEntry, LogSink, ShutdownPhase};
 use crate::pool::Pool;
 use crate::sys::epoll::{Epoll, EpollEvent, Readiness};
 use crate::sys::eventfd::EventFd;
+use crate::sys::signal::SignalFd;
 
 /// How many ready descriptors one `epoll_wait` returns at most.
 const EVENTS_PER_WAIT: usize = 256;
+
+/// How long the final log flush may wait for a slow stderr at most (R3).
+const LOG_GRACE: Duration = Duration::from_secs(1);
 
 /// How [`Driver::run`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     /// A [`StopHandle`] asked the loop to stop. The connections still
-    /// open are closed when the driver is dropped. (Task 9 adds the
-    /// signal-driven endings: drained, aborted.)
+    /// open are closed when the driver is dropped.
     Stopped,
+    /// The drain after a SIGTERM finished: the core held nothing any more
+    /// (`is_drained`, DRV-14).
+    Drained,
+    /// A second SIGTERM, a SIGINT or the end of `shutdown_timeout` cut
+    /// every connection (`abort_all`); the loop left without waiting for
+    /// orphaned opens (DRV-14).
+    Aborted,
 }
 
 /// Asks a running [`Driver`] to stop: the loop returns
@@ -90,6 +103,14 @@ enum Broken {
 enum LogWait {
     Idle,
     Writable,
+}
+
+/// The signalfd the loop reads (A9), with what the signals have done so
+/// far.
+#[derive(Debug)]
+struct Signals {
+    fd: SignalFd,
+    gate: ShutdownGate,
 }
 
 /// A file request the driver answers `FileFailed { Other }` itself, after
@@ -158,6 +179,10 @@ pub struct Driver {
     file_failures: VecDeque<FileFailure>,
     log: LogSink,
     log_wait: LogWait,
+    /// The signals and the shutdown (A9); `None` until
+    /// [`Driver::watch_signals`] (the tests stop the loop with a
+    /// [`StopHandle`] instead).
+    signals: Option<Signals>,
     clients: BTreeMap<ConnId, Client>,
     upstreams: BTreeMap<UpstreamId, Upstream>,
     /// Upstreams whose connect outcome waits to be delivered.
@@ -235,6 +260,7 @@ impl Driver {
             file_failures: VecDeque::new(),
             log,
             log_wait: LogWait::Idle,
+            signals: None,
             clients: BTreeMap::new(),
             upstreams: BTreeMap::new(),
             answers: VecDeque::new(),
@@ -255,46 +281,159 @@ impl Driver {
         }
     }
 
-    /// Runs the loop until it is asked to stop. An `Err` is a failure of
-    /// the loop itself (`epoll_wait`, or `epoll_ctl` on the listeners or
-    /// the wake eventfd), never of one socket (DRV-15). Either way the disk
-    /// pool is shut down (its threads joined) before `run` returns (R6);
-    /// opens still with it are never answered, since the loop has ended.
+    /// Reads `signals` (blocked by [`SignalFd::new`] before
+    /// [`Driver::new`]) from the loop from now on (A9), with
+    /// `shutdown_timeout` (`limits.shutdown_timeout`) as the drain's
+    /// bound: the first SIGTERM drains, a second SIGTERM, a SIGINT or the
+    /// timeout abort, SIGPIPE and SIGHUP are ignored (FR-PROC-05,
+    /// DRV-14). A failed registration is the loop's own failure.
+    pub fn watch_signals(&mut self, fd: SignalFd, shutdown_timeout: Duration) -> io::Result<()> {
+        self.epoll
+            .add(fd.as_fd(), token(Token::Signal)?, Readiness::Read)?;
+        self.signals = Some(Signals {
+            fd,
+            gate: ShutdownGate::new(shutdown_timeout),
+        });
+        Ok(())
+    }
+
+    /// Runs the loop until it is asked to stop or the shutdown ends it.
+    /// An `Err` is a failure of the loop itself (`epoll_wait`, a read of
+    /// the signalfd, or `epoll_ctl` on the listeners or the wake
+    /// eventfd), never of one socket (DRV-15). Then, whatever the ending,
+    /// the disk pool is shut down (waiting at most 1 s for its threads,
+    /// the rest detached, R3); opens still with it are never answered,
+    /// since the loop has ended. A signal-driven ending logs `done` with
+    /// the detached count. Last, the log gets a final flush of at most
+    /// 1 s (`LOG_GRACE`, separate from the pool's), so the exit is
+    /// never blocked indefinitely.
     pub fn run(&mut self) -> io::Result<Exit> {
         let exit = self.run_loop();
-        if let Some(pool) = self.pool.take() {
-            pool.shutdown();
+        let detached = self.pool.take().map_or(0, Pool::shutdown);
+        match exit {
+            Ok(Exit::Drained | Exit::Aborted) => {
+                self.log_shutdown(ShutdownPhase::Done { detached })
+            }
+            Ok(Exit::Stopped) | Err(_) => {}
         }
+        self.log.flush_within(LOG_GRACE);
         exit
     }
 
     fn run_loop(&mut self) -> io::Result<Exit> {
         let mut events = vec![EpollEvent::EMPTY; EVENTS_PER_WAIT];
         loop {
-            if self.wake.stop.load(Ordering::SeqCst) {
-                return Ok(Exit::Stopped);
+            if let Some(exit) = self.ending() {
+                return Ok(exit);
             }
             self.sync_log();
             let timeout = self.timeout();
             let n = self.epoll.wait(&mut events, timeout)?;
             for event in events.iter().take(n) {
                 self.handle_ready(event)?;
+                // DRV-14: nothing more is handled after `abort_all`, or
+                // once a drain has emptied the core.
+                if let Some(exit) = self.ending() {
+                    return Ok(exit);
+                }
             }
             self.fire_timer()?;
             self.retry_accept()?;
+            self.check_shutdown_deadline()?;
         }
     }
 
-    /// How long to wait: until [`Core::next_deadline`] (DRV-06) or the
-    /// paused listeners' retry (DRV-16), whichever comes first; forever
-    /// without either. `Epoll::wait` rounds up to whole milliseconds, so
-    /// the loop never wakes before the deadline.
-    fn timeout(&self) -> Option<Duration> {
-        let deadline = match (self.core.next_deadline(), self.accepting.retry_at()) {
-            (Some(core), Some(retry)) => core.min(retry),
-            (Some(deadline), None) | (None, Some(deadline)) => deadline,
-            (None, None) => return None,
+    /// Whether the loop ends now: a stop request, an abort, or a drain
+    /// that found the core empty. Asked after each ready descriptor and
+    /// before each wait, so the loop ends as soon as a call emptied the
+    /// core (contract `# Shutdown`).
+    fn ending(&self) -> Option<Exit> {
+        if self.wake.stop.load(Ordering::SeqCst) {
+            return Some(Exit::Stopped);
+        }
+        match self.phase() {
+            Some(Phase::Aborted) => Some(Exit::Aborted),
+            Some(Phase::Draining { .. }) if self.core.is_drained() => Some(Exit::Drained),
+            Some(Phase::Draining { .. } | Phase::Running) | None => None,
+        }
+    }
+
+    fn phase(&self) -> Option<Phase> {
+        self.signals.as_ref().map(|signals| signals.gate.phase())
+    }
+
+    /// Reads every pending signal and acts on it (A9). An abort stops the
+    /// reading: the loop leaves right after this descriptor.
+    fn read_signals(&mut self) -> io::Result<()> {
+        loop {
+            let Some(signals) = &mut self.signals else {
+                return Ok(());
+            };
+            let Some(signal) = signals.fd.read()? else {
+                return Ok(());
+            };
+            let now = self.clock.now();
+            match signals.gate.signal(signal, now) {
+                Step::Drain => self.begin_drain()?,
+                Step::Abort => return self.abort(),
+                Step::Ignore => {}
+            }
+        }
+    }
+
+    /// The drain's deadline has passed: the fast path (FR-PROC-05).
+    fn check_shutdown_deadline(&mut self) -> io::Result<()> {
+        let now = self.clock.now();
+        let Some(signals) = &mut self.signals else {
+            return Ok(());
         };
+        match signals.gate.tick(now) {
+            Step::Abort => self.abort(),
+            Step::Drain | Step::Ignore => Ok(()),
+        }
+    }
+
+    /// The first SIGTERM (DRV-14): the listeners are closed (a new
+    /// connect is refused from now on), the line is logged, then
+    /// `begin_drain` and its actions.
+    fn begin_drain(&mut self) -> io::Result<()> {
+        self.listeners.clear();
+        self.log_shutdown(ShutdownPhase::Draining);
+        let now = self.clock.now();
+        self.run_core(|core, actions| core.begin_drain(now, actions))?;
+        self.flush_queued()
+    }
+
+    /// The fast path (DRV-14): the listeners are closed (if a drain has
+    /// not closed them yet), the line is logged, then `abort_all` and its
+    /// actions; the loop leaves after it.
+    fn abort(&mut self) -> io::Result<()> {
+        self.listeners.clear();
+        self.log_shutdown(ShutdownPhase::Aborting);
+        self.run_core(Core::abort_all)?;
+        self.flush_queued()
+    }
+
+    fn log_shutdown(&mut self, phase: ShutdownPhase) {
+        self.log
+            .write(LogEntry::Driver(DriverLog::Shutdown { phase }));
+    }
+
+    /// How long to wait: until [`Core::next_deadline`] (DRV-06), the
+    /// paused listeners' retry (DRV-16) or the drain's deadline
+    /// (FR-PROC-05), whichever comes first; forever without any.
+    /// `Epoll::wait` rounds up to whole milliseconds, so the loop never
+    /// wakes before the deadline.
+    fn timeout(&self) -> Option<Duration> {
+        let shutdown = self.signals.as_ref().and_then(|s| s.gate.deadline());
+        let deadline = [
+            self.core.next_deadline(),
+            self.accepting.retry_at(),
+            shutdown,
+        ]
+        .into_iter()
+        .flatten()
+        .min()?;
         let now = self.clock.now();
         Some(Duration::from_nanos(
             deadline.as_nanos().saturating_sub(now.as_nanos()),
@@ -334,8 +473,7 @@ impl Driver {
                 self.wake.fd.drain()?;
                 self.pool_results()
             }
-            // Not registered before Task 9.
-            Token::Signal => Ok(()),
+            Token::Signal => self.read_signals(),
             // Writable, or an error the next write reports (FR-LOG-06).
             // `event.trouble()` is not looked at: on `EPOLLERR`/`EPOLLHUP`
             // this flush gets `EPIPE`/`EIO` and discards the buffer, which
@@ -436,16 +574,22 @@ impl Driver {
         }
     }
 
-    /// One `handle` call and its actions. The wall-clock second is passed
-    /// on first whenever it changed (DRV-13).
+    /// One `handle` call and its actions.
     fn call(&mut self, event: Event) -> io::Result<()> {
+        let now = self.clock.now();
+        self.run_core(|core, actions| core.handle(now, event, actions))
+    }
+
+    /// One call into the core (`handle`, `begin_drain`, `abort_all`) and
+    /// its actions, in order. The wall-clock second is passed on first
+    /// whenever it changed (DRV-13).
+    fn run_core(&mut self, call: impl FnOnce(&mut Core, &mut Vec<Action>)) -> io::Result<()> {
         if let Some(second) = self.clock.changed_second() {
             self.core.set_date(second);
         }
-        let now = self.clock.now();
         let mut actions = std::mem::take(&mut self.actions);
         actions.clear();
-        self.core.handle(now, event, &mut actions);
+        call(&mut self.core, &mut actions);
         let mut result = Ok(());
         for action in actions.drain(..) {
             if result.is_ok() {

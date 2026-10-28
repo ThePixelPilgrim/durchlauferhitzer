@@ -35,11 +35,12 @@ src/
   lib.rs            crate root: lint rules, the Linux and 64-bit checks,
                     the modules, re-exports (`Driver`, `Exit`,
                     `StopHandle`, `LogSink`, `Buffered`, `LogEntry`,
-                    `DriverLog`)
+                    `DriverLog`, `KeptReason`, `ShutdownPhase`)
   main.rs           the binary: `process::run` with the arguments
   process.rs        the command line (FR-PROC-01: serve, `--check`, the
                     usage), the exit codes (`ExitStatus`, FR-PROC-05a),
-                    the startup sequence (A11)
+                    the startup sequence (A11), the signalfd handed to
+                    the driver with `shutdown_timeout`
     budget.rs         NFR-RES-05: `open_now` (`/proc/self/fd`, O5),
                       `needed` (the formula in its docs and the spec),
                       `ensure` (raise the soft limit, or fail naming both
@@ -51,8 +52,10 @@ src/
                     `next_deadline`, dispatch, `TimerFired`), `deliver`
                     (one `handle` call, its actions in order, then the
                     queued connect answers), `apply` (every `Action`
-                    matched), the clock and `set_date`, `Exit`,
-                    `StopHandle`
+                    matched), the clock and `set_date`, `Exit`
+                    (`Stopped | Drained | Aborted`), `StopHandle`,
+                    `watch_signals`, the drain and the abort, the
+                    bounded teardown
     accept.rs         the accept pause (DRV-16): `classify` (transient or
                       pause), `AcceptGate` (paused until a descriptor
                       closes or the 1 s retry; one log line a second)
@@ -64,16 +67,21 @@ src/
                       from `OpenFile` to `CloseFile`; `Closing` while a
                       readahead is in flight), file actions to the pool,
                       pool results to events, `sendfile` of the segment
+    shutdown.rs       the shutdown state machine (FR-PROC-05, DRV-14):
+                      `ShutdownGate` (`Running | Draining { deadline } |
+                      Aborted`; each signal and the deadline to a `Step`:
+                      drain, abort or ignore)
     tests.rs          unit tests of the loop's decisions on a driver that
                       is built but not run
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
                     Signal | Log` in a `u64`), the per-client and per-upstream
                     records and the registration each wants
   log.rs            `LogSink` (`stderr()`, `fd(OwnedFd)`, `channel()` for
-                    tests; `write`, `flush`, `buffered` → `Buffered`):
+                    tests; `write`, `flush`, `buffered` → `Buffered`,
+                    `flush_within`: the bounded final flush):
                     O_NONBLOCK with the original mode put back on drop,
                     one stderr sink at a time, whole lines, never blocking (FR-LOG-06); `LogEntry`,
-                    `DriverLog` (FR-LOG-07), `KeptReason`
+                    `DriverLog` (FR-LOG-07), `KeptReason`, `ShutdownPhase`
     format.rs         the line format (FR-LOG-05): `format_entry` (a
                       backend by its address in `Core::backends`),
                       `format_driver`, the escaping
@@ -87,14 +95,16 @@ src/
                     all against `listen` (`check_coverage`, pure)
   pool.rs           `Pool` (crate-private): the disk workers (A10):
                     `start`, `submit` (`Job::Open` / `Job::Readahead`),
-                    `results` (`JobResult`), `shutdown` (joins)
+                    `results` (`JobResult`), `shutdown` (joins within
+                    1 s, detaches the rest, returns how many)
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules
     fd.rs             `Io` (Done / WouldBlock / Closed / Err), the -1/errno
                       checks and EINTR retries the others share; for the
                       log sink: `write_fd` (write(2)), `status_flags` /
                       `set_status_flags` (`StatusFlags`, `Blocking`:
-                      O_NONBLOCK), `pipe` (pipe2, O_CLOEXEC);
+                      O_NONBLOCK), `wait_writable` (poll(2), the final
+                      flush), `pipe` (pipe2, O_CLOEXEC);
                       `claim_inherited` (an inherited descriptor: open
                       without FD_CLOEXEC, then marked)
     env.rs            `remove_vars`: only while the process has one thread
@@ -115,8 +125,9 @@ src/
                       errno → `FileError` table)
     eventfd.rs        `EventFd`: workers wake the loop (`notify`, `drain`,
                       `try_clone` for the pool's duplicate)
-    signal.rs         `SignalFd` for SIGTERM / SIGINT / SIGPIPE (blocked with
-                      `pthread_sigmask` first)
+    signal.rs         `SignalFd` for `Signal::HANDLED`: SIGTERM / SIGINT /
+                      SIGPIPE / SIGHUP (blocked with `pthread_sigmask`
+                      first)
     user.rs           `lookup_user` (getpwnam_r), `drop_to` (all three
                       uids checked after), `uids` (getresuid), `euid`
     rlimit.rs         `nofile`, `raise_nofile`, `set_soft_nofile`
@@ -129,7 +140,7 @@ tests/
                     (as `nobody` when the tests run as root): it serves; a
                     missing or non-directory root, a port in use and
                     overlapping listen addresses are exit 2 naming them;
-                    every thread blocks SIGTERM/SIGINT/SIGPIPE;
+                    every thread blocks SIGTERM/SIGINT/SIGPIPE/SIGHUP;
                     `disk_threads` workers; fds 0-2 closed at exec are
                     `/dev/null` (the Rust runtime), so no socket lands there
   systemd.rs        socket activation of the binary: a listener passed as
@@ -138,6 +149,16 @@ tests/
                     socket, a foreign `LISTEN_PID`, a file, a connected
                     socket and a dual-stack IPv6 socket are exit 2; an
                     IPv6-only one is served (IPv6 cases: CI)
+  shutdown.rs       signals in the binary (Review Focus 4): SIGTERM
+                    during two slow 50 MiB downloads (byte-exact, a new
+                    connect refused, an idle keep-alive closed, a
+                    pipelined request completed after the signal gets
+                    503 + close, exit 0), during a proxied upload (it
+                    completes, the response is relayed), a second
+                    SIGTERM and SIGINT (cut, exit 0 within 1 s),
+                    `shutdown_timeout 500ms` with a stalled client, SIGHUP
+                    and SIGPIPE ignored; each waits for the server's
+                    `phase=draining` line, so the order is deterministic
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process
@@ -194,7 +215,9 @@ tests/
                     it is), the
                     child's setup before exec (`pre_exec`: closed fds,
                     fd 3, RLIMIT_NOFILE; the test crate's only `unsafe`),
-                    a guard that kills a running server on drop
+                    a guard that kills a running server on drop; signals
+                    by the shell's `kill`, stderr read line by line while
+                    the server runs (`Lines`), a bounded wait for the exit
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
   support/server.rs the loop tests' harness: a `Driver` in a thread on an
                     ephemeral port (`start_static` opens the config's roots
@@ -212,12 +235,14 @@ loads the config, then: the `openat2` probe beneath the first root (or
 descriptor budget (`process/budget.rs`), the privilege drop
 (`process/privileges.rs`), the signal mask and its `signalfd` (before
 any thread, so the disk workers inherit it), the stderr log sink, then
-`Driver::new` with `limits.disk_threads` and `Driver::run`. Every
+`Driver::new` with `limits.disk_threads`, `Driver::watch_signals` with
+the signalfd and `limits.shutdown_timeout`, and `Driver::run`. Every
 message (the usage, `--check`'s answer, startup errors) is printed
 before the sink exists or after the driver holding it is gone; nothing
 prints through std while it lives (FR-LOG-06). Exit codes are
 `ExitStatus` (0 ok, 1 config or usage, 2 startup), private to
-`process.rs`.
+`process.rs`; every ending of the loop (`Stopped`, `Drained`, `Aborted`)
+is 0, a failure of the loop itself 2.
 The startup's driver log entries (`privileges`) are written to the sink
 just before `Driver::new`, which takes the sink: if `new` fails, that
 line comes before the error line.
@@ -233,8 +258,9 @@ workers, so `SignalFd::new` must come before it (the mask is
 inherited). It refuses (`InvalidInput`) a root list that does not match
 `Core::static_roots` one to one, and zero threads for a core with
 roots. `Driver::run` loops until a `StopHandle`
-asks it to stop (`Exit::Stopped`; the signal-driven endings come with
-Task 9), then shuts the pool down (its threads joined). It
+asks it to stop (`Exit::Stopped`) or the shutdown ends it
+(`Exit::Drained`, `Exit::Aborted`), then shuts the pool down and
+flushes the log, both bounded (see Shutdown below). It
 follows the contract in `core/src/core/contract.rs`; where the contract
 leaves a choice, this is what the loop does:
 
@@ -324,9 +350,10 @@ leaves a choice, this is what the loop does:
   bounded by the core (one job per connection at a time, orphaned opens
   included: at most `max_connections`). `shutdown` stops the workers and
   joins them: a running job finishes, queued jobs are dropped (the loop
-  that wanted them has ended); dropping the pool does the same. A worker
-  blocked in the kernel (a hung disk) blocks the join; the bounded wait
-  at exit is Task 9's.
+  that wanted them has ended); dropping the pool does the same. It waits
+  at most 1 s (polling each thread's `is_finished` every millisecond:
+  std has no timed join); a worker still blocked in the kernel then (a
+  hung disk) is detached, and the count is returned for the log.
 - **Logging** (FR-LOG-05/06, DRV-12). Every core `Log` and every
   `DriverLog` goes to the `LogSink` as one `key=value` line. The sink
   writes at once as far as the descriptor takes it and keeps the rest
@@ -335,9 +362,26 @@ leaves a choice, this is what the loop does:
   `Log`) and flushes on readiness. The log never ends the loop: a
   failed registration leaves the bytes for the next entry's write and
   is retried next turn.
-- **Failures of the loop itself** (`epoll_wait`, or `epoll_ctl` on the
-  listeners or the wake eventfd) end `run` with the error; a failure of
-  one socket never does.
+- **Shutdown** (FR-PROC-05, DRV-14, A9). `watch_signals` puts the
+  signalfd into the epoll set (token `Signal`); every pending signal is
+  read when it is readable and goes to `ShutdownGate`. The first SIGTERM
+  closes the listeners (dropping them: a connect is refused from then
+  on), logs `kind=shutdown phase=draining`, calls `begin_drain` and
+  performs its actions; the drain's deadline (now plus
+  `shutdown_timeout`) joins the wait's timeout. Each turn, before the
+  wait, a drained core (`is_drained`) ends the loop (`Drained`). A
+  second SIGTERM, a SIGINT or the deadline logs `phase=aborting`, closes
+  the listeners if still open, calls `abort_all`, performs its actions
+  and ends the loop right after that descriptor (`Aborted`), without
+  waiting for orphaned opens. SIGPIPE and SIGHUP are read and ignored
+  (SIGHUP: stage 4). After the loop: the pool is shut down (≤ 1 s, the
+  rest detached), `phase=done detached=N` is logged (signal-driven
+  endings only; a `StopHandle` stop logs nothing), and the log gets
+  `flush_within(1 s)`: it waits for stderr with `poll` while bytes
+  wait, then gives up. The teardown is bounded by 2 s in all.
+- **Failures of the loop itself** (`epoll_wait`, a read of the signalfd,
+  or `epoll_ctl` on the listeners, the wake eventfd or the signalfd) end
+  `run` with the error; a failure of one socket never does.
 
 Notes on the wrappers:
 

@@ -139,15 +139,16 @@ fn overlapping_listen_addresses_fail_at_the_second() {
 }
 
 /// The signal mask (A9) is set before the disk workers start, so every
-/// thread blocks SIGTERM, SIGINT and SIGPIPE: SIGPIPE can never kill the
-/// process (signal handling itself is Task 9's).
+/// thread blocks SIGTERM, SIGINT, SIGPIPE and SIGHUP: SIGPIPE and SIGHUP
+/// can never kill the process, and the signalfd gets every one (their
+/// handling is in `shutdown.rs`).
 #[test]
 fn every_thread_blocks_the_handled_signals() {
     let dir = TempDir::new();
     let addr = loopback(free_port());
     let path = static_config(&dir, &addr.to_string());
     let server = Running::start(&[&path], Setup::non_root(), addr);
-    let wanted: u64 = [libc::SIGTERM, libc::SIGINT, libc::SIGPIPE]
+    let wanted: u64 = [libc::SIGTERM, libc::SIGINT, libc::SIGPIPE, libc::SIGHUP]
         .iter()
         .map(|&signo| 1u64 << (signo - 1))
         .sum();

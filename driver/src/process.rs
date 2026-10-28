@@ -1,5 +1,5 @@
 //! The process: the command line (FR-PROC-01), the startup sequence
-//! (FR-PROC-04, A11) and the exit codes (FR-PROC-05a).
+//! (FR-PROC-04, A11), the signals (A9) and the exit codes (FR-PROC-05a).
 //!
 //! Everything this module prints (the usage, `--check`'s answer, every
 //! startup error) is printed before the stderr log sink exists, and
@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use durchlauferhitzer_core::Core;
 use durchlauferhitzer_core::config::{Config, load};
@@ -141,6 +142,8 @@ struct Ready {
     /// In [`Core::static_roots`] order.
     roots: Vec<OwnedFd>,
     disk_threads: u32,
+    /// `limits.shutdown_timeout`: how long the drain may take (FR-PROC-05).
+    shutdown_timeout: Duration,
     /// Driver log entries of startup, written once the sink exists.
     notes: Vec<DriverLog>,
 }
@@ -153,6 +156,7 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
     let user = config.user.clone();
     let max_connections = config.limits.max_connections;
     let disk_threads = config.limits.disk_threads;
+    let shutdown_timeout = config.limits.shutdown_timeout;
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
     let listeners = match take_sockets(&listen).map_err(Failure)? {
@@ -173,6 +177,7 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
         listeners,
         roots,
         disk_threads,
+        shutdown_timeout,
         notes,
     })
 }
@@ -229,19 +234,22 @@ fn bind(listen: &[SocketAddr]) -> Result<Vec<OwnedFd>, Failure> {
 
 /// A11 steps 8 and 9: the signal mask and its signalfd (before the disk
 /// workers start, so they inherit the mask; A9), the stderr log sink, the
-/// driver, then the loop. Every message is printed while no sink lives:
-/// before it is created, or after the driver holding it is gone.
+/// driver reading the signals, then the loop. Every message is printed
+/// while no sink lives: before it is created, or after the driver holding
+/// it is gone. Every ending of the loop exits 0, a drain, an abort or a
+/// stop (A9); a failure of the loop itself exits 2.
 fn run_loop(ready: Ready) -> ExitStatus {
     let Ready {
         core,
         listeners,
         roots,
         disk_threads,
+        shutdown_timeout,
         notes,
     } = ready;
-    // Signal handling is Task 9's; until then the signals stay blocked
-    // and pending, and SIGPIPE can never kill the process.
-    let signals = match SignalFd::new(&[Signal::Term, Signal::Int, Signal::Pipe]) {
+    // SIGTERM, SIGINT, SIGPIPE and SIGHUP: blocked in every thread, read
+    // by the loop (SIGPIPE and SIGHUP ignored there).
+    let signals = match SignalFd::new(&Signal::HANDLED) {
         Ok(signals) => signals,
         Err(err) => {
             report(format_args!("signalfd: {err}"));
@@ -269,12 +277,14 @@ fn run_loop(ready: Ready) -> ExitStatus {
             return ExitStatus::Startup;
         }
     };
-    let result = driver.run();
-    // The sink goes with the driver; only then may std print again.
+    let result = driver
+        .watch_signals(signals, shutdown_timeout)
+        .and_then(|()| driver.run());
+    // The sink goes with the driver (the signalfd too); only then may std
+    // print again.
     drop(driver);
-    drop(signals);
     match result {
-        Ok(Exit::Stopped) => ExitStatus::Ok,
+        Ok(Exit::Stopped | Exit::Drained | Exit::Aborted) => ExitStatus::Ok,
         Err(err) => {
             report(format_args!("event loop: {err}"));
             ExitStatus::Startup

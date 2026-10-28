@@ -2,9 +2,10 @@
 //! CLI and startup tests: a config in a temp file, a free loopback port,
 //! the child's setup before `exec` (closed descriptors, a listener as fd 3,
 //! a lowered `RLIMIT_NOFILE`, a non-root user when the tests run as root),
-//! and a guard that kills a running server (SIGKILL) when dropped, so no
-//! test leaves a child behind (R4: until Task 9 the server has no signal
-//! handling; SIGTERM and SIGINT are blocked).
+//! a guard that kills a running server (SIGKILL) when dropped, so no
+//! test leaves a child behind, and for the shutdown tests: signals sent
+//! with the shell's `kill`, the server's stderr read line by line while
+//! it runs ([`Lines`]), and a bounded wait for its exit.
 //!
 //! The setup before `exec` needs `pre_exec`, which is `unsafe`: it lives in
 //! the one module [`pre_exec`] below, the only `unsafe` code of the test
@@ -21,13 +22,14 @@
 )]
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -301,6 +303,47 @@ impl Running {
         self.child.id()
     }
 
+    /// Takes the server's stderr and reads it line by line in a thread,
+    /// so the test can wait for a line while the server runs.
+    pub fn lines(&mut self) -> Lines {
+        let stderr = self.child.stderr.take().expect("stderr already taken");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { return };
+                if sender.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        Lines {
+            receiver,
+            seen: Vec::new(),
+        }
+    }
+
+    /// Sends `signal` (`TERM`, `INT`, `HUP`, ...) to the server; returns
+    /// once it is sent.
+    pub fn signal(&self, signal: &str) {
+        signal_pid(self.pid(), signal);
+    }
+
+    /// Waits until the server has exited, at most `limit` (it is killed
+    /// and the test fails after that), and returns its status.
+    pub fn wait_exit(&mut self, limit: Duration) -> ExitStatus {
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the server did not exit within {limit:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /// Kills the server and returns its stderr.
     pub fn kill(mut self) -> String {
         let _ = self.child.kill();
@@ -317,6 +360,66 @@ impl Drop for Running {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Sends `signal` to `pid` with the shell's `kill` builtin (no `unsafe`
+/// in the tests, R2).
+pub fn signal_pid(pid: u32, signal: &str) {
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg("kill -s \"$1\" \"$2\"")
+        .arg("sh")
+        .arg(signal)
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -s {signal} {pid}: {status}");
+}
+
+/// The server's stderr, line by line (without the `\n`), as it comes.
+pub struct Lines {
+    receiver: Receiver<String>,
+    /// Every line received so far.
+    seen: Vec<String>,
+}
+
+impl Lines {
+    /// Waits for `line` (at most [`PATIENCE`]); fails with what came.
+    pub fn wait_for(&mut self, line: &str) {
+        if self.seen.iter().any(|seen| seen == line) {
+            return;
+        }
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.receiver.recv_timeout(left) {
+                Ok(got) => {
+                    let found = got == line;
+                    self.seen.push(got);
+                    if found {
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                    panic!("no line {line:?}; got {:?}", self.seen)
+                }
+            }
+        }
+    }
+
+    /// Every line the server wrote, once its stderr has closed (it has
+    /// exited); at most [`PATIENCE`].
+    pub fn all(mut self) -> Vec<String> {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.receiver.recv_timeout(left) {
+                Ok(got) => self.seen.push(got),
+                Err(RecvTimeoutError::Disconnected) => return self.seen,
+                Err(RecvTimeoutError::Timeout) => panic!("stderr never closed: {:?}", self.seen),
+            }
+        }
     }
 }
 

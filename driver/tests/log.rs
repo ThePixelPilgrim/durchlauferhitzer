@@ -14,7 +14,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use durchlauferhitzer::log::{format_driver, format_entry};
-use durchlauferhitzer::{DriverLog, KeptReason};
+use durchlauferhitzer::{DriverLog, KeptReason, ShutdownPhase};
 use durchlauferhitzer_core::http::chunked::ChunkedError;
 use durchlauferhitzer_core::http::request::{HttpError, Method};
 use durchlauferhitzer_core::http::response_head::ResponseError;
@@ -235,6 +235,24 @@ fn driver_kinds() {
                 reason: KeptReason::NotRoot,
             },
             "kind=privileges action=kept reason=not_root\n",
+        ),
+        (
+            DriverLog::Shutdown {
+                phase: ShutdownPhase::Draining,
+            },
+            "kind=shutdown phase=draining\n",
+        ),
+        (
+            DriverLog::Shutdown {
+                phase: ShutdownPhase::Aborting,
+            },
+            "kind=shutdown phase=aborting\n",
+        ),
+        (
+            DriverLog::Shutdown {
+                phase: ShutdownPhase::Done { detached: 3 },
+            },
+            "kind=shutdown phase=done detached=3\n",
         ),
     ];
     for (entry, expected) in cases {

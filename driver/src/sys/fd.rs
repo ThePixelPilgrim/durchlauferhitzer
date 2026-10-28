@@ -1,7 +1,8 @@
 //! Shared plumbing: the outcome of a non-blocking transfer ([`Io`]) and the
 //! `-1`/errno checks every wrapper uses; plus the descriptor-level calls
 //! of the log sink (FR-LOG-06): `write(2)`, the file status flags
-//! (`O_NONBLOCK`), and `pipe2` (its tests write to a pipe).
+//! (`O_NONBLOCK`), `poll(2)` for writability (the bounded final flush),
+//! and `pipe2` (its tests write to a pipe).
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -127,6 +128,36 @@ pub fn write_fd(fd: BorrowedFd<'_>, buf: &[u8]) -> Io {
         // SAFETY: `buf` is readable for `buf.len()` bytes.
         unsafe { libc::write(fd.as_raw_fd(), buf.as_ptr().cast(), buf.len()) }
     })
+}
+
+/// Whether [`wait_writable`] saw the descriptor writable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Writable {
+    /// Writable, or in error or hung up (the next write reports which),
+    /// or the wait was interrupted (`EINTR`): try a write.
+    Ready,
+    /// The timeout passed first.
+    TimedOut,
+}
+
+/// Waits with `poll(2)` until `fd` is writable or `timeout` has passed
+/// (rounded up to whole milliseconds, capped at `i32::MAX` ms): the log
+/// sink's bounded final flush (R3). Unlike epoll, `poll` takes any
+/// descriptor; a regular file or `/dev/null` is always writable.
+pub fn wait_writable(fd: BorrowedFd<'_>, timeout: std::time::Duration) -> io::Result<Writable> {
+    let ms = i32::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: `poll` is one valid, writable `pollfd`, and the count is 1.
+    match cvt(unsafe { libc::poll(&mut poll, 1, ms) }) {
+        Ok(0) => Ok(Writable::TimedOut),
+        Ok(_) => Ok(Writable::Ready),
+        Err(err) if errno_is(&err, libc::EINTR) => Ok(Writable::Ready),
+        Err(err) => Err(err),
+    }
 }
 
 /// A pipe, close-on-exec, both ends blocking: `(read end, write end)`.

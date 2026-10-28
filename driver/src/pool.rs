@@ -21,9 +21,11 @@
 //! - The queue is not bounded here: the core asks for at most one open or
 //!   readahead per connection at a time, orphaned opens included, so at
 //!   most `max_connections` jobs are queued or running (NFR-RES-05).
-//! - [`Pool::shutdown`] (also on drop) stops the workers and joins them.
-//!   A job a worker is running finishes first; queued jobs are dropped
-//!   without a result, since the loop that wanted them has ended.
+//! - [`Pool::shutdown`] (also on drop) stops the workers and joins them,
+//!   waiting at most 1 s: a worker still running then (stuck in the
+//!   kernel) is detached and counted. A job a worker is running finishes
+//!   first; queued jobs are dropped without a result, since the loop that
+//!   wanted them has ended.
 
 use std::collections::VecDeque;
 use std::io;
@@ -31,6 +33,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use durchlauferhitzer_core::FileId;
 
@@ -208,27 +211,64 @@ impl Pool {
         self.results.try_iter()
     }
 
-    /// Stops the workers and joins them (R6). A worker in the middle of a
-    /// job finishes it first; queued jobs are dropped.
-    pub fn shutdown(mut self) {
-        self.stop();
+    /// Stops the workers (R6, R3): a worker in the middle of a job
+    /// finishes it first, queued jobs are dropped. It waits at most
+    /// [`GRACE`] for the workers, joins those that ended and detaches the
+    /// rest (a worker stuck in the kernel, a hung disk say): the process
+    /// exits around them. Returns how many were detached, for the log.
+    pub fn shutdown(mut self) -> usize {
+        self.stop().detached
     }
 
-    /// Stops and joins the workers; the number that panicked (never, R6:
-    /// it is counted for the tests, not acted on).
-    fn stop(&mut self) -> usize {
+    fn stop(&mut self) -> Stopped {
+        self.stop_within(GRACE)
+    }
+
+    /// Stops the workers, waiting at most `grace` for them to end. The
+    /// wait polls each thread's `is_finished` every [`POLL`]: std has no
+    /// timed join, and this runs once, at exit.
+    fn stop_within(&mut self, grace: Duration) -> Stopped {
         {
             let mut queue = self.shared.lock();
             queue.run = Run::Stopping;
             queue.jobs.clear();
         }
         self.shared.ready.notify_all();
-        self.threads
-            .drain(..)
-            .map(JoinHandle::join)
-            .filter(Result::is_err)
-            .count()
+        let deadline = Instant::now() + grace;
+        while !self.threads.iter().all(JoinHandle::is_finished) && Instant::now() < deadline {
+            thread::sleep(POLL);
+        }
+        let mut stopped = Stopped {
+            panicked: 0,
+            detached: 0,
+        };
+        for handle in self.threads.drain(..) {
+            if handle.is_finished() {
+                if handle.join().is_err() {
+                    stopped.panicked += 1;
+                }
+            } else {
+                // Dropping the handle detaches the thread.
+                stopped.detached += 1;
+            }
+        }
+        stopped
     }
+}
+
+/// How long [`Pool::shutdown`] waits for the workers at most (R3).
+const GRACE: Duration = Duration::from_secs(1);
+
+/// How often the shutdown looks whether the workers have ended.
+const POLL: Duration = Duration::from_millis(1);
+
+/// How the workers ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stopped {
+    /// Joined, having panicked (never, R6: counted for the tests).
+    panicked: usize,
+    /// Still running after the grace, and detached.
+    detached: usize,
 }
 
 impl Drop for Pool {
@@ -292,7 +332,7 @@ mod tests {
 
     use durchlauferhitzer_core::{FileId, FileKind};
 
-    use super::{Job, JobResult, Pool};
+    use super::{GRACE, Job, JobResult, Pool, Stopped};
     use crate::sys::eventfd::EventFd;
     use crate::sys::file::open_dir_path;
 
@@ -454,9 +494,48 @@ mod tests {
         let shared = Arc::clone(&pool.shared);
         // The pool's, ours, and one per worker.
         assert_eq!(Arc::strong_count(&shared), 6);
-        assert_eq!(pool.stop(), 0, "a worker panicked");
+        let stopped = pool.stop();
+        assert_eq!(
+            stopped,
+            Stopped {
+                panicked: 0,
+                detached: 0
+            }
+        );
         assert_eq!(Arc::strong_count(&shared), 2, "a worker still runs");
         drop(pool);
+    }
+
+    /// R3: a worker stuck in the kernel (here a thread that blocks far
+    /// longer) holds the shutdown for at most its grace, then is detached
+    /// and counted; the others are joined. Production waits [`GRACE`],
+    /// 1 s; here 200 ms, with 500 ms of margin for CI.
+    #[test]
+    fn shutdown_detaches_a_stuck_worker_after_its_grace() {
+        assert_eq!(GRACE, Duration::from_secs(1));
+        let wake = EventFd::new().unwrap();
+        let mut pool = Pool::start(2, wake).unwrap();
+        let (release, stuck) = std::sync::mpsc::channel::<()>();
+        pool.threads.push(std::thread::spawn(move || {
+            let _ = stuck.recv_timeout(Duration::from_secs(10));
+        }));
+        let grace = Duration::from_millis(200);
+        let start = Instant::now();
+        let stopped = pool.stop_within(grace);
+        let elapsed = start.elapsed();
+        assert_eq!(
+            stopped,
+            Stopped {
+                panicked: 0,
+                detached: 1
+            }
+        );
+        assert!(
+            elapsed >= grace && elapsed < grace + Duration::from_millis(500),
+            "{elapsed:?}"
+        );
+        assert!(pool.threads.is_empty());
+        drop(release);
     }
 
     /// R6: results nobody takes (the loop ended) never make a worker

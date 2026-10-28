@@ -16,7 +16,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use durchlauferhitzer::log::{Buffered, format_driver, format_entry};
 use durchlauferhitzer::sys::fd::{Blocking, Io, pipe, set_status_flags, status_flags};
@@ -208,6 +208,76 @@ fn a_reader_that_went_away_leaves_nothing_buffered() {
     }
     sink.flush();
     assert_eq!(sink.buffered(), Buffered::Nothing);
+}
+
+/// Fills the pipe and part of the sink's buffer, with nothing read.
+fn backed_up_sink() -> (OwnedFd, LogSink) {
+    let (reader, writer) = pipe().unwrap();
+    non_blocking_reader(&reader);
+    let mut sink = LogSink::fd(writer).unwrap();
+    let mut conn = 1;
+    while sink.buffered() == Buffered::Nothing {
+        sink.write(reset(conn));
+        conn += 1;
+    }
+    // A few more lines wait behind the first.
+    for more in conn..conn + 10 {
+        sink.write(reset(more));
+    }
+    (reader, sink)
+}
+
+/// The final flush (R3): with a reader that catches up, it waits for
+/// the descriptor and writes everything the buffer holds.
+#[test]
+fn the_final_flush_waits_for_a_reader_that_catches_up() {
+    let (reader, mut sink) = backed_up_sink();
+    let drain = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        let mut got = Vec::new();
+        let mut buf = [0u8; 8192];
+        let deadline = Instant::now() + PATIENCE;
+        // Until the sink is dropped (the end of stream).
+        while Instant::now() < deadline {
+            match read(reader.as_fd(), &mut buf) {
+                Io::Done(n) => got.extend_from_slice(&buf[..n]),
+                Io::WouldBlock => thread::sleep(Duration::from_millis(1)),
+                Io::Closed => return got,
+                Io::Err(err) => panic!("{err}"),
+            }
+        }
+        panic!("the sink was never dropped");
+    });
+    sink.flush_within(PATIENCE);
+    assert_eq!(sink.buffered(), Buffered::Nothing);
+    drop(sink);
+    let got = drain.join().unwrap();
+    assert_eq!(got.last(), Some(&b'\n'));
+    let text = String::from_utf8(got).unwrap();
+    assert!(
+        text.lines()
+            .last()
+            .is_some_and(|line| line.starts_with("kind=reset ")),
+        "{text}"
+    );
+    assert!(!text.contains("kind=dropped"), "nothing may be lost");
+}
+
+/// The final flush (R3) is bounded: with a reader that never reads, it
+/// gives up at its limit (here 200 ms; 500 ms of margin for CI) and the
+/// bytes stay buffered.
+#[test]
+fn the_final_flush_gives_up_at_its_limit() {
+    let (_reader, mut sink) = backed_up_sink();
+    let limit = Duration::from_millis(200);
+    let start = Instant::now();
+    sink.flush_within(limit);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= limit && elapsed < limit + Duration::from_millis(500),
+        "{elapsed:?}"
+    );
+    assert_eq!(sink.buffered(), Buffered::Bytes);
 }
 
 /// The channel sink of the tests never buffers.
