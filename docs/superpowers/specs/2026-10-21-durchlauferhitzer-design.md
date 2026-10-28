@@ -1082,9 +1082,15 @@ Failures, persistence, timeouts:
 - **FR-LOG-06** [stage 4] Logging never blocks: if stderr is backed up,
   entries are dropped and counted, and the count is logged once output
   catches up. *(Stage 4 Task 7:)* stderr's file description is set to
-  `O_NONBLOCK`; its original flags are put back when the sink is dropped
-  (best effort; the description may be shared with the parent's
-  terminal). Each entry is written at once as far as stderr takes it;
+  `O_NONBLOCK`; its original blocking mode is put back when the sink is
+  dropped, other flags left as they are then (best effort; the
+  description may be shared with the parent's terminal). One stderr sink
+  lives at a time: a second is refused while the first lives. On a
+  terminal fds 0/1/2 often share one description, so stdout is
+  non-blocking too while the sink lives and std's `println!`/`eprintln!`
+  can panic on `EAGAIN`: usage, `--check` output and startup errors are
+  printed before the sink is created, and nothing prints through std
+  while it lives. Each entry is written at once as far as stderr takes it;
   the rest waits in a 64 KiB buffer, written in order whenever the loop
   sees stderr writable (it waits for that only while bytes wait, so an
   idle loop never wakes for it). A new entry that does not fit is dropped

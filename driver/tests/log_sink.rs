@@ -80,6 +80,29 @@ fn the_sink_sets_non_blocking_and_restores_the_flags() {
     assert_eq!(status_flags(other.as_fd()).unwrap(), before);
 }
 
+/// Review m1: on drop the sink puts back only the blocking mode, so a
+/// flag someone else changed while it lived (here `O_APPEND`, copied from
+/// a descriptor opened for appending) stays as they set it.
+#[test]
+fn the_sink_restores_only_the_blocking_mode() {
+    let (_reader, writer) = pipe().unwrap();
+    let other = writer.try_clone().unwrap();
+    let sink = LogSink::fd(writer).unwrap();
+    let append = std::fs::OpenOptions::new()
+        .append(true)
+        .open("/dev/null")
+        .unwrap();
+    let appending = status_flags(append.as_fd()).unwrap();
+    set_status_flags(other.as_fd(), appending.with(Blocking::NonBlocking)).unwrap();
+    let changed = status_flags(other.as_fd()).unwrap();
+    assert_eq!(changed.mode(), Blocking::NonBlocking);
+    drop(sink);
+    assert_eq!(
+        status_flags(other.as_fd()).unwrap(),
+        changed.with(Blocking::Blocking)
+    );
+}
+
 /// A sink on a reader that keeps up writes each entry as one line, at
 /// once, and has nothing buffered.
 #[test]

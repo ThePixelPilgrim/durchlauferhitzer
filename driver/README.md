@@ -61,8 +61,8 @@ src/
                     records and the registration each wants
   log.rs            `LogSink` (`stderr()`, `fd(OwnedFd)`, `channel()` for
                     tests; `write`, `flush`, `buffered` → `Buffered`):
-                    O_NONBLOCK with the original flags put back on drop,
-                    whole lines, never blocking (FR-LOG-06); `LogEntry`,
+                    O_NONBLOCK with the original mode put back on drop,
+                    one stderr sink at a time, whole lines, never blocking (FR-LOG-06); `LogEntry`,
                     `DriverLog` (FR-LOG-07)
     format.rs         the line format (FR-LOG-05): `format_entry` (a
                       backend by its address in `Core::backends`),

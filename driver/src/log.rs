@@ -11,13 +11,23 @@
 //!
 //! `O_NONBLOCK` belongs to the file description, which stderr shares with
 //! whoever started the process (an interactive shell's terminal, say):
-//! the sink remembers the original flags and puts them back when it is
-//! dropped (best effort: a failure there is ignored). A process killed
-//! before that leaves the description non-blocking.
+//! the sink remembers the original blocking mode and puts it back when it
+//! is dropped, leaving the other flags as they are then (best effort: a
+//! failure there is ignored). A process killed before that leaves the
+//! description non-blocking. Only one stderr sink lives at a time
+//! ([`LogSink::stderr`] refuses a second), so two cannot undo each
+//! other's mode.
+//!
+//! On a terminal, fds 0, 1 and 2 are often one file description, so
+//! stdout is non-blocking too while the sink lives, and std's `println!`
+//! and `eprintln!` panic on the `EAGAIN` that can bring. Nothing may print
+//! through std while a stderr sink lives: usage, `--check` output and
+//! startup errors are printed before the sink is created (Task 8).
 
 use std::io::{self, Stderr};
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use durchlauferhitzer_core::Log;
@@ -29,6 +39,11 @@ mod buffer;
 mod format;
 
 pub use self::format::{format_driver, format_entry};
+
+/// Whether a sink on fd 2 is live: two would undo each other's
+/// `O_NONBLOCK` (one restoring blocking mode while the other still
+/// writes), so [`LogSink::stderr`] refuses a second (review m1).
+static STDERR_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// A log entry of the driver itself, not of the core (FR-LOG-07).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +120,8 @@ impl AsFd for Out {
 #[derive(Debug)]
 struct FdSink {
     out: Out,
-    /// The status flags before the sink set `O_NONBLOCK`, put back on drop.
+    /// The status flags before the sink set `O_NONBLOCK`; their blocking
+    /// mode is put back on drop.
     original: StatusFlags,
     buffer: EntryBuffer,
     /// [`Core::backends`](durchlauferhitzer_core::Core::backends), which
@@ -113,6 +129,33 @@ struct FdSink {
     backends: Vec<SocketAddr>,
     /// Each entry is formatted here first.
     line: Vec<u8>,
+    /// Released when the sink is gone (after its `Drop` put the mode
+    /// back): fd 2's claim for [`LogSink::stderr`], none for
+    /// [`LogSink::fd`].
+    _claim: Option<Claim>,
+}
+
+/// One live sink per claim flag. A field of the sink, so it is released
+/// after the sink's `Drop` restored the flags.
+#[derive(Debug)]
+struct Claim(&'static AtomicBool);
+
+impl Claim {
+    fn take(flag: &'static AtomicBool) -> io::Result<Claim> {
+        if flag.swap(true, Ordering::AcqRel) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "a log sink on this descriptor is live already",
+            ));
+        }
+        Ok(Claim(flag))
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl LogSink {
@@ -128,17 +171,25 @@ impl LogSink {
     /// The production sink: lines to stderr (fd 2, which stays open when
     /// the sink is dropped). Fails if fd 2 is not open.
     pub fn stderr() -> io::Result<LogSink> {
-        LogSink::on(Out::Stderr(io::stderr()))
+        LogSink::claimed(&STDERR_CLAIMED, Out::Stderr(io::stderr()))
+    }
+
+    /// A sink on `out` that holds the claim `flag` while it lives:
+    /// refused (`AlreadyExists`), before `out` is touched, while another
+    /// sink holds it.
+    fn claimed(flag: &'static AtomicBool, out: Out) -> io::Result<LogSink> {
+        let claim = Claim::take(flag)?;
+        LogSink::on(out, Some(claim))
     }
 
     /// A sink writing lines to `fd`, any descriptor `write(2)` works on
     /// (the tests use a pipe). The description is set to `O_NONBLOCK`
     /// until the sink is dropped.
     pub fn fd(fd: OwnedFd) -> io::Result<LogSink> {
-        LogSink::on(Out::Owned(fd))
+        LogSink::on(Out::Owned(fd), None)
     }
 
-    fn on(out: Out) -> io::Result<LogSink> {
+    fn on(out: Out, claim: Option<Claim>) -> io::Result<LogSink> {
         let original = status_flags(out.as_fd())?;
         set_status_flags(out.as_fd(), original.with(Blocking::NonBlocking))?;
         Ok(LogSink {
@@ -148,6 +199,7 @@ impl LogSink {
                 buffer: EntryBuffer::new(CAPACITY),
                 backends: Vec::new(),
                 line: Vec::new(),
+                _claim: claim,
             }),
         })
     }
@@ -238,11 +290,50 @@ impl FdSink {
 }
 
 impl Drop for FdSink {
-    /// Writes what it can without blocking, then puts the original flags
-    /// back (best effort). Lines still buffered after that are lost; the
+    /// Writes what it can without blocking, then puts the original
+    /// blocking mode back (best effort; the other flags are left as they
+    /// are now). Lines still buffered after that are lost; the
     /// shutdown flush is Task 9's.
     fn drop(&mut self) {
         self.flush();
-        let _ = set_status_flags(self.out.as_fd(), self.original);
+        // Only the mode: another flag changed meanwhile stays as it is.
+        if let Ok(now) = status_flags(self.out.as_fd()) {
+            let _ = set_status_flags(self.out.as_fd(), now.with(self.original.mode()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::os::fd::AsFd;
+    use std::sync::atomic::AtomicBool;
+
+    use super::{LogSink, Out};
+    use crate::sys::fd::{Blocking, pipe, status_flags};
+
+    /// Stands in for fd 2's flag, so no test touches the real stderr.
+    static CLAIMED: AtomicBool = AtomicBool::new(false);
+
+    /// Review m1: two live sinks on one description would undo each
+    /// other's flags, so while one holds the claim a second is refused,
+    /// before it touches its descriptor; once the first is dropped the
+    /// claim is free again.
+    #[test]
+    fn a_second_sink_on_a_claimed_descriptor_is_refused() {
+        let (_reader, writer) = pipe().unwrap();
+        let first = LogSink::claimed(&CLAIMED, Out::Owned(writer)).unwrap();
+        let (_reader, writer) = pipe().unwrap();
+        let other = writer.try_clone().unwrap();
+        let Err(err) = LogSink::claimed(&CLAIMED, Out::Owned(writer)) else {
+            panic!("a second sink got the claim");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            status_flags(other.as_fd()).unwrap().mode(),
+            Blocking::Blocking
+        );
+        drop(first);
+        LogSink::claimed(&CLAIMED, Out::Owned(other)).unwrap();
     }
 }
