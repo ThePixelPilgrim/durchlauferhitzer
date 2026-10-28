@@ -352,7 +352,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
 - Modify: `driver/src/main.rs`; spec FR-PROC-01…04, -05a, FR-CFG-10, FR-CFG-15, NFR-RES-05, NFR-PORT-*, and A6–A8, A11.
 
 **Interfaces:**
-- Produces: `pub fn run(args: impl Iterator<Item = OsString>) -> ExitCode`, with `Exit { Ok = 0, Config = 1, Startup = 2 }`. The usage text goes to stderr with exit 1 for bad arguments; that is a builder call recorded in the spec.
+- Produces: `pub fn run(args: impl Iterator<Item = OsString>) -> ExitCode`, with `ExitStatus { Ok = 0, Config = 1, Startup = 2 }` (private to `process.rs`, not re-exported; renamed from `Exit` in Task 5's review, since `Exit` is the event loop's ending, `Driver::run -> io::Result<Exit>`). The usage text goes to stderr with exit 1 for bad arguments; that is a builder call recorded in the spec.
 - Rules: A6, A7, A8 and A11. `--check` loads the config and prints `ok` or the error with line:column, then exits 0 or 1 without touching the network or the roots.
 
 - [ ] **Step 1: Write the failing tests:**
