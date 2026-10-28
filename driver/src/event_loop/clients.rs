@@ -280,16 +280,26 @@ impl Driver {
             .modify(client.fd.as_fd(), token(Token::Client(conn))?, wanted)
         {
             Ok(()) => client.registered = wanted,
-            Err(err) => {
-                let errno = err.raw_os_error().unwrap_or(0);
-                self.log
-                    .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
-                client.health = Health::Broken;
-                self.broken
-                    .push_back(Broken::Client(conn, conn_error(&err)));
-            }
+            Err(err) => self.break_client(conn, &err),
         }
         Ok(())
+    }
+
+    /// A client's registration failed (DRV-15): logged, no more I/O, out
+    /// of the epoll set (so a core that does not close it at once cannot
+    /// make the loop wake for it), its `Failed` queued.
+    pub(super) fn break_client(&mut self, conn: ConnId, err: &io::Error) {
+        let Some(client) = self.clients.get_mut(&conn) else {
+            return;
+        };
+        // Best effort: if this fails too, the socket stays registered
+        // until `Close` drops it.
+        let _ = self.epoll.delete(client.fd.as_fd());
+        let errno = err.raw_os_error().unwrap_or(0);
+        self.log
+            .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
+        client.health = Health::Broken;
+        self.broken.push_back(Broken::Client(conn, conn_error(err)));
     }
 
     pub(super) fn shutdown_write(&mut self, conn: ConnId) {

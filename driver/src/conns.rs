@@ -95,9 +95,9 @@ pub(crate) struct Client {
     pub(crate) interest: Interest,
     pub(crate) eof: Eof,
     pub(crate) health: Health,
-    /// What the socket is registered for. A client always stays in the
-    /// epoll set, so its errors and hang-ups are seen whatever the
-    /// interest (DRV-10).
+    /// What the socket is registered for. A client stays in the epoll
+    /// set, so its errors and hang-ups are seen whatever the interest
+    /// (DRV-10), until it is broken (DRV-15).
     pub(crate) registered: Readiness,
 }
 

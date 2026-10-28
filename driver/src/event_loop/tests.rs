@@ -318,3 +318,30 @@ fn a_failure_queued_while_handling_a_descriptor_is_delivered_after_it() {
         [LogEntry::Core(Log::Reset { conn, peer: peer() })]
     );
 }
+
+/// A broken client leaves the epoll set at once, so a core that does not
+/// close it straight away cannot make the loop wake for it again.
+#[test]
+fn a_broken_client_leaves_the_epoll_set() {
+    let (mut driver, _logs) = driver();
+    let conn = ConnId(1);
+    let mut peer_end = known_client(&mut driver, conn);
+    // `Accepted` made the core ask to read; the peer makes it readable.
+    std::io::Write::write_all(&mut peer_end, b"x").unwrap();
+    let mut events = [EpollEvent::EMPTY; 4];
+    assert_eq!(
+        driver
+            .epoll
+            .wait(&mut events, Some(Duration::ZERO))
+            .unwrap(),
+        1
+    );
+    driver.break_client(conn, &io::Error::from_raw_os_error(libc::ENOMEM));
+    assert_eq!(
+        driver
+            .epoll
+            .wait(&mut events, Some(Duration::ZERO))
+            .unwrap(),
+        0
+    );
+}

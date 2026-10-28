@@ -152,7 +152,7 @@ leaves a choice, this is what the loop does:
   `UpstreamFailed` is delivered; `CloseUpstream` forgets the entry.
 - **Registration failures** (DRV-15). A failed `epoll_ctl` for one
   socket fails only that socket and is logged
-  (`DriverLog::RegisterFailed`). A client is marked broken (no more I/O)
+  (`DriverLog::RegisterFailed`). A client is marked broken (no more I/O, taken out of the epoll set)
   and gets `Failed` after the actions of the current call; an open
   upstream is closed and gets `UpstreamFailed` the same way; a pending
   connect is answered `UpstreamFailed`; a socket just accepted is dropped
