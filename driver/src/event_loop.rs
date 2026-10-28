@@ -337,6 +337,10 @@ impl Driver {
             // Not registered before Task 9.
             Token::Signal => Ok(()),
             // Writable, or an error the next write reports (FR-LOG-06).
+            // `event.trouble()` is not looked at: on `EPOLLERR`/`EPOLLHUP`
+            // this flush gets `EPIPE`/`EIO` and discards the buffer, which
+            // ends the wait (`sync_log`). So the flush must not be
+            // skipped on trouble, or the loop would spin on it.
             Token::Log => {
                 self.log.flush();
                 Ok(())

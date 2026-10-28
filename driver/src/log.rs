@@ -220,6 +220,10 @@ impl LogSink {
                     LogEntry::Driver(log) => format_driver(log, &mut sink.line),
                 }
                 sink.buffer.push(&sink.line);
+                // An oversized entry (an all-escaped path is four bytes
+                // per byte) does not keep its capacity (review m5).
+                sink.line.clear();
+                sink.line.shrink_to(CAPACITY);
                 sink.flush();
             }
         }
@@ -309,7 +313,12 @@ mod tests {
     use std::os::fd::AsFd;
     use std::sync::atomic::AtomicBool;
 
-    use super::{LogSink, Out};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use durchlauferhitzer_core::http::request::{HttpError, Method};
+    use durchlauferhitzer_core::{ConnId, Log, RejectReason, RequestLine};
+
+    use super::{CAPACITY, LogEntry, LogSink, Out, SinkKind};
     use crate::sys::fd::{Blocking, pipe, status_flags};
 
     /// Stands in for fd 2's flag, so no test touches the real stderr.
@@ -335,5 +344,32 @@ mod tests {
         );
         drop(first);
         LogSink::claimed(&CLAIMED, Out::Owned(other)).unwrap();
+    }
+
+    /// Review m5: the scratch line does not keep the capacity of an
+    /// oversized entry (an all-escaped path is four bytes per byte).
+    #[test]
+    fn the_scratch_line_shrinks_after_an_oversized_entry() {
+        let (_reader, writer) = pipe().unwrap();
+        let mut sink = LogSink::fd(writer).unwrap();
+        sink.write(LogEntry::Core(Log::Rejected {
+            conn: ConnId(1),
+            peer: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            reason: RejectReason::Http {
+                error: HttpError::BadHeaderValue,
+                request: Some(RequestLine {
+                    method: Method::Get,
+                    path: " ".repeat(CAPACITY),
+                }),
+            },
+        }));
+        let SinkKind::Fd(fd_sink) = &sink.kind else {
+            panic!("not an fd sink");
+        };
+        assert!(
+            fd_sink.line.capacity() <= CAPACITY,
+            "{}",
+            fd_sink.line.capacity()
+        );
     }
 }
