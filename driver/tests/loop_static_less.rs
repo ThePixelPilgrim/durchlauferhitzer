@@ -242,9 +242,11 @@ fn early_413_then_reset_during_a_4_mib_upload_reaches_the_client() {
     // to write. No event tells us, so watch the queue. Bytes queued unread
     // also make the close below a reset.
     let mut queue = vec![0u8; total];
+    // A pipeline that holds less than 64 KiB has not filled: the stall
+    // check fired early.
     let queued = stalled(|| upstream.peek(&mut queue).unwrap());
     assert!(
-        queued > 0 && queued < total,
+        queued >= 64 * 1024 && queued < total,
         "{queued} of {total} bytes queued"
     );
     upstream
