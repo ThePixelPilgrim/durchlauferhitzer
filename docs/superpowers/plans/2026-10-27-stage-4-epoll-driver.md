@@ -391,7 +391,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
 
 - [ ] **Step 1: Write the failing tests** (the real binary on loopback):
   - SIGTERM during a slow 50 MiB download: the download completes byte-exact, and a new connect is refused.
-  - On another keep-alive connection, a request sent after the SIGTERM gets 503 with `connection: close`.
+  - On another keep-alive connection, a request sent after the SIGTERM gets 503 with `connection: close`. *(Tested in the sense of "buffered" in FR-PROC-05b, controller clarification 2026-10-28: its head's first bytes are buffered behind the download before the SIGTERM, the rest is sent after it; a complete request buffered before the SIGTERM gets the 503 too, D1.)*
   - The process exits 0 after the download (Review Focus 4).
   - SIGTERM during a proxied upload: the upload completes and the response is relayed.
   - A second SIGTERM mid-download: the connection is cut and the exit follows within 1 s.

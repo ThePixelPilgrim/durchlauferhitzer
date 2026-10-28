@@ -42,8 +42,10 @@ const DRAINING: &str = "kind=shutdown phase=draining";
 const ABORTING: &str = "kind=shutdown phase=aborting";
 const DONE: &str = "kind=shutdown phase=done detached=0";
 
-/// The longest a fast shutdown may take: the server promises 1 s at most
-/// (the pool's bound), plus 500 ms of margin for CI.
+/// The longest a fast shutdown may take here: a healthy teardown is
+/// instant; this is the pool's 1 s bound plus 500 ms of margin for CI
+/// (the worst case, a stuck worker and a stalled stderr, is 2 s, which
+/// these tests do not create).
 const FAST_EXIT: Duration = Duration::from_millis(1500);
 
 fn loopback(port: u16) -> SocketAddr {
@@ -165,18 +167,21 @@ fn assert_refused(addr: SocketAddr) {
     }
 }
 
-/// Review Focus 4: SIGTERM during two slow 50 MiB downloads. The
+/// Review Focus 4: SIGTERM during three slow 50 MiB downloads. The
 /// listener is closed (a new connect is refused); an idle keep-alive
-/// connection is closed at once (A4); both downloads finish byte-exact;
-/// on the second connection a request whose head was pipelined behind
-/// the download (only its first bytes before the SIGTERM, the rest after
-/// it), behind a response whose head said keep-alive, gets 503 with
-/// `Connection: close` (FR-PROC-05b); then the server exits 0.
+/// connection is closed at once (A4); all downloads finish byte-exact;
+/// behind a response whose head said keep-alive (FR-PROC-05b), a
+/// pipelined request gets 503 with `Connection: close` after the
+/// download: on the second connection a head whose first bytes were
+/// buffered before the SIGTERM and whose rest is sent after it (brief
+/// Step 1, line 2, in the sense of "buffered" in FR-PROC-05b), on the
+/// third a complete request buffered before the SIGTERM (D1); then the
+/// server exits 0.
 ///
-/// The request's first bytes go in the download's own write, so they are
-/// in the core's buffer once the download's head is back: the core reads
-/// a pipelined request only from what it holds when the response ends
-/// (it does not read while it sends), and a partly received head is
+/// The pipelined bytes go in the download's own write, so they are in
+/// the core's buffer once the download's head is back: the core reads a
+/// pipelined request only from what it holds when the response ends (it
+/// does not read while it sends), and a partly received head is
 /// completed, then refused (FR-PROC-05b).
 #[test]
 fn sigterm_lets_slow_downloads_finish_and_refuses_new_work() {
@@ -196,6 +201,7 @@ fn sigterm_lets_slow_downloads_finish_and_refuses_new_work() {
     let mut first = start_download(addr);
     let (pipelined_start, pipelined_rest) = small.split_at(20);
     let mut second = start_download_with(addr, pipelined_start);
+    let mut third = start_download_with(addr, small);
     server.signal("TERM");
     lines.wait_for(DRAINING);
     assert_refused(addr);
@@ -203,27 +209,39 @@ fn sigterm_lets_slow_downloads_finish_and_refuses_new_work() {
     second.write_all(pipelined_rest).unwrap();
     assert!(read_body(&mut first, BIG) == big, "first download differs");
     assert_eq!(read_rest(&mut first), b"");
+    // The complete request (D1) first, so a mutation of that path fails
+    // here and not at the partial head below.
+    assert!(read_body(&mut third, BIG) == big, "third download differs");
+    let complete = text(&read_rest(&mut third));
+    assert!(
+        complete.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+        "{complete}"
+    );
+    assert!(complete.contains("\r\nConnection: close\r\n"), "{complete}");
     assert!(
         read_body(&mut second, BIG) == big,
         "second download differs"
     );
-    let refusal = text(&read_rest(&mut second));
+    let partial = text(&read_rest(&mut second));
     assert!(
-        refusal.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
-        "{refusal}"
+        partial.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+        "{partial}"
     );
-    assert!(refusal.contains("\r\nConnection: close\r\n"), "{refusal}");
-    drop((idle, first, second));
+    assert!(partial.contains("\r\nConnection: close\r\n"), "{partial}");
+    drop((idle, first, second, third));
     let status = server.wait_exit(PATIENCE);
     assert_eq!(status.code(), Some(0), "{status}");
     let lines = lines.all();
     assert!(lines.iter().any(|l| l == DONE), "{lines:?}");
     assert!(!lines.iter().any(|l| l == ABORTING), "{lines:?}");
-    assert!(
-        lines.iter().any(|l| l.starts_with("kind=response ")
-            && l.contains(" status=503 method=GET host=example.test path=/small.txt")),
-        "{lines:?}"
-    );
+    let refusals = lines
+        .iter()
+        .filter(|l| {
+            l.starts_with("kind=response ")
+                && l.contains(" status=503 method=GET host=example.test path=/small.txt")
+        })
+        .count();
+    assert_eq!(refusals, 2, "{lines:?}");
 }
 
 /// A backend that reads one request with a `Content-Length` body, says

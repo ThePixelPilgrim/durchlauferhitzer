@@ -150,10 +150,11 @@ tests/
                     socket and a dual-stack IPv6 socket are exit 2; an
                     IPv6-only one is served (IPv6 cases: CI)
   shutdown.rs       signals in the binary (Review Focus 4): SIGTERM
-                    during two slow 50 MiB downloads (byte-exact, a new
-                    connect refused, an idle keep-alive closed, a
-                    pipelined request completed after the signal gets
-                    503 + close, exit 0), during a proxied upload (it
+                    during three slow 50 MiB downloads (byte-exact, a
+                    new connect refused, an idle keep-alive closed; a
+                    complete pipelined request buffered before the
+                    signal and one completed after it get 503 + close;
+                    exit 0), during a proxied upload (it
                     completes, the response is relayed), a second
                     SIGTERM and SIGINT (cut, exit 0 within 1 s),
                     `shutdown_timeout 500ms` with a stalled client, SIGHUP
@@ -353,7 +354,9 @@ leaves a choice, this is what the loop does:
   that wanted them has ended); dropping the pool does the same. It waits
   at most 1 s (polling each thread's `is_finished` every millisecond:
   std has no timed join); a worker still blocked in the kernel then (a
-  hung disk) is detached, and the count is returned for the log.
+  hung disk) is detached, and the count is returned for the log. One in
+  uninterruptible sleep (D state) still delays the process's exit until
+  its system call returns.
 - **Logging** (FR-LOG-05/06, DRV-12). Every core `Log` and every
   `DriverLog` goes to the `LogSink` as one `key=value` line. The sink
   writes at once as far as the descriptor takes it and keeps the rest
@@ -374,7 +377,8 @@ leaves a choice, this is what the loop does:
   the listeners if still open, calls `abort_all`, performs its actions
   and ends the loop right after that descriptor (`Aborted`), without
   waiting for orphaned opens. SIGPIPE and SIGHUP are read and ignored
-  (SIGHUP: stage 4). After the loop: the pool is shut down (≤ 1 s, the
+  (SIGHUP: stage 4). Two SIGTERMs sent before the loop reads the first
+  coalesce into one drain (standard signals are not queued). After the loop: the pool is shut down (≤ 1 s, the
   rest detached), `phase=done detached=N` is logged (signal-driven
   endings only; a `StopHandle` stop logs nothing), and the log gets
   `flush_within(1 s)`: it waits for stderr with `poll` while bytes

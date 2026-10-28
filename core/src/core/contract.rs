@@ -448,6 +448,13 @@
 //!   pipelined behind such a head is not answered), then take the normal
 //!   close path (lingering close). An `Accepted` after it is answered 503 and
 //!   closed like a refused connection (`Rejected` with `ShuttingDown`).
+//!   *Buffered* (controller clarification 2026-10-28 of the owner
+//!   decision of 2026-10-27, no behaviour change): a pipelined request
+//!   counts only with what the core has already read when the in-flight
+//!   response ends; bytes the kernel still holds are not read (the core
+//!   does not read while it sends), the lingering close discards them,
+//!   and the client sees a clean close (RFC 9112 §9.6) after which it may
+//!   retry an idempotent request (§9.3.1).
 //! - [`Core::is_drained`]: true once no connection, upstream, open file or
 //!   orphaned open is left; during the drain the driver polls it after
 //!   every call and exits when it is true.

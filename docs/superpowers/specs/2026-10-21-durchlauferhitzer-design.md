@@ -1144,7 +1144,8 @@ Failures, persistence, timeouts:
   lines of the cut exchanges follow it; `kind=shutdown phase=done
   detached=N` once the loop and the disk pool are shut down, `N` the
   workers still running after the pool's 1 s grace and left to the
-  process exit. The phase does not say which signal or the deadline
+  process exit (one in uninterruptible sleep delays that exit until its
+  system call returns). The phase does not say which signal or the deadline
   caused it.
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
@@ -1303,7 +1304,10 @@ Failures, persistence, timeouts:
     of FR-PROC-07 is stage 6): it is blocked and read, so its default
     action can never end the server. Then, in this order: the disk pool
     is shut down, waiting at most 1 s for its workers, the ones still
-    running (stuck in the kernel) are detached and counted; the line
+    running (stuck in the kernel) are detached and counted (caveat: a
+    worker in uninterruptible sleep, a hung disk's D state, still delays
+    the process's exit until that system call returns; userspace cannot
+    do better); the line
     `phase=done detached=N` is logged; the log gets a final flush that
     waits for stderr to become writable for at most 1 s (a separate
     bound, so the teardown takes at most 2 s even with a hung disk and a
@@ -1324,6 +1328,14 @@ Failures, persistence, timeouts:
   connected to or awaited): it says `Connection: close` per A4, and
   nothing may follow a closing response, so a request pipelined behind it
   is not answered; the client sees the close and may retry.
+  *Controller clarification 2026-10-28 (stage 4 Task 9 review, m1; no
+  behaviour change):* "buffered input" is what the core has already read
+  when the in-flight response ends. Bytes the kernel still holds are not
+  read (the core does not read while it sends); the lingering close
+  discards them, so the client sees a clean close (RFC 9112 §9.6) and may
+  retry an idempotent request (RFC 9112 §9.3.1). A request sent after
+  the SIGTERM is answered 503 in this sense: its first bytes were
+  buffered before the drain, the rest completes the head afterwards.
 - **FR-PROC-05c** [done in the core; the epoll driver: stage 4] (Owner
   decision 2026-10-27, stage 4 Task 2 review D2; it replaces A4's "`Log`
   entries as for a reset".) `abort_all` logs one `Rejected { reason:

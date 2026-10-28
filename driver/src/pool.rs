@@ -23,7 +23,9 @@
 //!   most `max_connections` jobs are queued or running (NFR-RES-05).
 //! - [`Pool::shutdown`] (also on drop) stops the workers and joins them,
 //!   waiting at most 1 s: a worker still running then (stuck in the
-//!   kernel) is detached and counted. A job a worker is running finishes
+//!   kernel) is detached and counted. A worker in uninterruptible sleep
+//!   (a hung disk's D state) still delays the process's exit until its
+//!   system call returns; userspace cannot do better. A job a worker is running finishes
 //!   first; queued jobs are dropped without a result, since the loop that
 //!   wanted them has ended.
 
