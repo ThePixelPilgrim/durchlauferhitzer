@@ -18,6 +18,19 @@ fn unreported_read_is_a_violation() {
     sim.deliver(Event::TimerFired);
 }
 
+#[test]
+#[should_panic(
+    expected = "conn=1 wants to write but send_buffer is empty and send_file has no segment"
+)]
+fn write_interest_with_nothing_to_send_is_a_violation() {
+    let mut sim = Sim::new(CONFIG);
+    let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    // Simulate a core bug: interest `Write` while neither the send buffer
+    // nor `send_file` has a byte (a fresh connection only wants to read).
+    sim.conn_mut(c).interest = Interest::Write;
+    sim.check_buffers();
+}
+
 fn track(sim: &mut Sim, conn: ConnId, file: u64, phase: Phase) {
     sim.files.insert(
         FileId(file),

@@ -626,6 +626,15 @@ impl Sim {
             let pending = self.core.request_body_pending(conn);
             self.check_request_body(conn, recv, recv_cap, pending);
             let send = self.core.send_buffer(conn).len();
+            // The write-side twin of the empty-`recv_buffer` check: a
+            // level-triggered driver waiting for `EPOLLOUT` with nothing
+            // to write would wake for it forever (NFR-RES-08).
+            if interest == Interest::Write && send == 0 && self.core.send_file(conn).is_none() {
+                self.violation(&format!(
+                    "conn={} wants to write but send_buffer is empty and send_file has no segment",
+                    conn.0
+                ));
+            }
             if send > send_cap {
                 self.violation(&format!(
                     "conn={} send_buffer {send} bytes exceeds capacity {send_cap}",
