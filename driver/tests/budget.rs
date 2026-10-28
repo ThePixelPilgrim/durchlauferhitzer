@@ -13,8 +13,9 @@
 //! - a static route: + 1 (the root, open) + 1 (the pool's wake
 //!   duplicate) + 16 (files) = 57;
 //! - both: 73;
+//!
 //! plus every descriptor this test process passes on to its children
-//! (`child::inheritable_fds`: cargo's jobserver pipes, a CI runner's).
+//! (`child::inheritable_fds`: two on GitHub's runners).
 
 #![allow(
     clippy::unwrap_used,
