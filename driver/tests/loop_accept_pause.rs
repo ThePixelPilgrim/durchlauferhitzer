@@ -93,15 +93,15 @@ fn out_of_descriptors_pauses_accepting_and_the_timer_resumes_it() {
     drop(fillers);
     set_soft_nofile(soft).unwrap();
     assert_eq!(nofile().unwrap(), (soft, hard));
-    assert_eq!(
-        set_soft_nofile(hard.saturating_add(1)).map_err(|e| e.kind()),
-        if hard == u64::MAX {
-            Ok(())
-        } else {
+    // Above the hard limit fails and changes nothing; an unlimited hard
+    // limit has nothing above it.
+    if hard != u64::MAX {
+        assert_eq!(
+            set_soft_nofile(hard + 1).map_err(|e| e.kind()),
             Err(ErrorKind::InvalidInput)
-        }
-    );
-    assert_eq!(nofile().unwrap(), (soft, hard));
+        );
+        assert_eq!(nofile().unwrap(), (soft, hard));
+    }
     client
         .write_all(b"GET /x HTTP/1.1\r\nHost: other.test\r\n\r\n")
         .unwrap();
