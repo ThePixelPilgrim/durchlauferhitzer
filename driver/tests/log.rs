@@ -778,5 +778,12 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
         assert_eq!(get("method"), Some(method.into_bytes()), "seed {seed}");
         assert_eq!(get("path"), Some(path.clone().into_bytes()), "seed {seed}");
         assert_eq!(get("host"), host.map(String::into_bytes), "seed {seed}");
+        if let Log::ProxiedResponse { backend, .. } = &entry {
+            let expected = usize::try_from(backend.0)
+                .ok()
+                .and_then(|index| backends().get(index).copied())
+                .map_or(backend.0.to_string(), |address| address.to_string());
+            assert_eq!(get("backend"), Some(expected.into_bytes()), "seed {seed}");
+        }
     }
 }
