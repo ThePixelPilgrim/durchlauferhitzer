@@ -145,7 +145,8 @@ leaves a choice, this is what the loop does:
   `None`, so an error waits until the core reads or writes again. Under
   `ReadWrite` the loop reads before it writes; a write that fails there is
   not reported, the socket stops writing and goes on reading, and the reads
-  report bytes, end of stream, then the error. Under `Write` alone, or under
+  report bytes, end of stream, then the error (if the reads end with the
+  end of stream, the write's error is delivered right after it). Under `Write` alone, or under
   `ReadWrite` once the end of stream was delivered (no read follows), a
   failed write is reported at once. A failed upstream socket is closed when its
   `UpstreamFailed` is delivered; `CloseUpstream` forgets the entry.

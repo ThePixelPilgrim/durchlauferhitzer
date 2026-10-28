@@ -11,7 +11,7 @@
 
 use std::os::fd::OwnedFd;
 
-use durchlauferhitzer_core::{ConnId, Interest, UpstreamId};
+use durchlauferhitzer_core::{ConnError, ConnId, Interest, UpstreamId};
 
 use crate::sys::epoll::Readiness;
 
@@ -130,11 +130,12 @@ impl Client {
 
 /// Whether an upstream's writes still go through. After a write fails
 /// under `ReadWrite`, the driver stops writing and goes on reading: the
-/// reads report the error after the readable bytes (DRV-10).
+/// reads report the error after the readable bytes (DRV-10), or, once
+/// they reach the end of stream, the error kept here right after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Writes {
     Open,
-    Failed,
+    Failed(ConnError),
 }
 
 /// Where an upstream's connect stands.
@@ -194,7 +195,7 @@ impl Upstream {
                 };
                 let write = match writes {
                     Writes::Open => Readiness::Write,
-                    Writes::Failed => Readiness::None,
+                    Writes::Failed(_) => Readiness::None,
                 };
                 let readiness = match self.interest {
                     Interest::None => Readiness::None,
@@ -314,14 +315,14 @@ mod tests {
             // After a failed write under `ReadWrite`, only the reads go on.
             (
                 Interest::ReadWrite,
-                Writes::Failed,
+                Writes::Failed(ConnError::Reset),
                 Eof::NotYet,
                 Some(Readiness::Read),
             ),
             // Under `Write` alone the failure is reported by the next write.
             (
                 Interest::Write,
-                Writes::Failed,
+                Writes::Failed(ConnError::Reset),
                 Eof::NotYet,
                 Some(Readiness::Write),
             ),

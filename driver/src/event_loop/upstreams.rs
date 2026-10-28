@@ -36,7 +36,9 @@ pub(super) fn write_mode(interest: Interest, writes: Writes, eof: Eof) -> Option
             Some(WriteMode::Alone)
         }
         (Interest::ReadWrite, Writes::Open, Eof::NotYet) => Some(WriteMode::WithReads),
-        (Interest::ReadWrite, Writes::Failed, _) | (Interest::None | Interest::Read, _, _) => None,
+        (Interest::ReadWrite, Writes::Failed(_), _) | (Interest::None | Interest::Read, _, _) => {
+            None
+        }
     }
 }
 
@@ -305,34 +307,49 @@ impl Driver {
                     let event = self.upstream_failed(up, error)?;
                     self.deliver(event)
                 }
-                WriteMode::WithReads => self.stop_writing(up),
+                WriteMode::WithReads => self.stop_writing(up, error),
             };
         }
     }
 
     /// A write failed under `ReadWrite`: no more writes; the socket stays
     /// registered for reading, whose results report the error.
-    fn stop_writing(&mut self, up: UpstreamId) -> io::Result<()> {
+    fn stop_writing(&mut self, up: UpstreamId, error: ConnError) -> io::Result<()> {
         if let Some(Upstream {
             phase: Phase::Open { writes, .. },
             ..
         }) = self.upstreams.get_mut(&up)
         {
-            *writes = Writes::Failed;
+            *writes = Writes::Failed(error);
         }
         self.sync_upstream(up)
     }
 
     /// The end of stream was read: reported once, not read again.
-    fn upstream_eof(&mut self, up: UpstreamId) -> io::Result<()> {
+    /// A write error kept for the reads (`ReadWrite`) can no longer come
+    /// from them: it is queued to follow the `UpstreamReadClosed` being
+    /// delivered (DRV-10: bytes, end of stream, then the error), and the
+    /// socket is closed.
+    pub(super) fn upstream_eof(&mut self, up: UpstreamId) -> io::Result<()> {
+        let mut kept = None;
         if let Some(Upstream {
-            phase: Phase::Open { eof, .. },
+            phase: Phase::Open { eof, writes, .. },
             ..
         }) = self.upstreams.get_mut(&up)
         {
             *eof = Eof::Delivered;
+            match *writes {
+                Writes::Open => {}
+                Writes::Failed(error) => kept = Some(error),
+            }
         }
-        self.sync_upstream(up)
+        let Some(error) = kept else {
+            return self.sync_upstream(up);
+        };
+        // The event is the queued one, delivered after `UpstreamReadClosed`.
+        let _ = self.upstream_failed(up, error)?;
+        self.broken.push_back(Broken::Upstream(up, error));
+        Ok(())
     }
 
     /// The socket failed: it is closed now (the core does no more with it

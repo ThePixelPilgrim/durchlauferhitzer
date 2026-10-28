@@ -54,7 +54,10 @@ fn a_failed_write_after_the_end_of_stream_is_reported_at_once() {
             write_mode(Interest::Write, Writes::Open, eof),
             Some(WriteMode::Alone)
         );
-        assert_eq!(write_mode(Interest::ReadWrite, Writes::Failed, eof), None);
+        assert_eq!(
+            write_mode(Interest::ReadWrite, Writes::Failed(ConnError::Reset), eof),
+            None
+        );
         assert_eq!(write_mode(Interest::Read, Writes::Open, eof), None);
         assert_eq!(write_mode(Interest::None, Writes::Open, eof), None);
     }
@@ -215,4 +218,60 @@ fn closing_a_client_or_an_upstream_resumes_paused_listeners() {
     driver.accepting.failed(driver.clock.now());
     driver.close_upstream(up).unwrap();
     assert_eq!(driver.accepting.state(), Accepting::Open);
+}
+
+/// DRV-10, "bytes, end of stream, then the error": a write that failed
+/// under `ReadWrite` is kept for the reads; when they reach the end of
+/// stream no read follows, so the kept error is queued right behind the
+/// `UpstreamReadClosed` being delivered, and the socket is closed.
+#[test]
+fn a_write_error_kept_for_the_reads_follows_the_end_of_stream() {
+    let (mut driver, _logs) = driver();
+    let up = UpstreamId(1);
+    driver.upstreams.insert(
+        up,
+        Upstream {
+            phase: Phase::Open {
+                fd: unpollable(),
+                writes: Writes::Failed(ConnError::Reset),
+                eof: Eof::NotYet,
+            },
+            interest: Interest::ReadWrite,
+            registered: None,
+        },
+    );
+    driver.upstream_eof(up).unwrap();
+    assert!(matches!(driver.upstreams[&up].phase, Phase::Failed));
+    assert_eq!(
+        driver.broken.iter().copied().collect::<Vec<_>>(),
+        [Broken::Upstream(up, ConnError::Reset)]
+    );
+}
+
+/// Without a kept write error the end of stream reports nothing more.
+#[test]
+fn an_end_of_stream_without_a_kept_write_error_queues_nothing() {
+    let (mut driver, _logs) = driver();
+    let up = UpstreamId(1);
+    driver.upstreams.insert(
+        up,
+        Upstream {
+            phase: Phase::Open {
+                fd: unpollable(),
+                writes: Writes::Open,
+                eof: Eof::NotYet,
+            },
+            interest: Interest::Read,
+            registered: None,
+        },
+    );
+    driver.upstream_eof(up).unwrap();
+    assert!(matches!(
+        driver.upstreams[&up].phase,
+        Phase::Open {
+            eof: Eof::Delivered,
+            ..
+        }
+    ));
+    assert!(driver.broken.is_empty());
 }
