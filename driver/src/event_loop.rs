@@ -212,7 +212,7 @@ impl Driver {
             let timeout = self.timeout();
             let n = self.epoll.wait(&mut events, timeout)?;
             for event in events.iter().take(n) {
-                self.dispatch(event)?;
+                self.handle_ready(event)?;
             }
             self.fire_timer()?;
             self.retry_accept()?;
@@ -243,6 +243,15 @@ impl Driver {
         }
     }
 
+    /// One ready descriptor: its I/O and events, then whatever that left
+    /// queued. A registration change outside any `deliver` (a write that
+    /// fails under `ReadWrite` stops writing) can queue a failure that no
+    /// later call of this descriptor would deliver (DRV-15).
+    fn handle_ready(&mut self, event: &EpollEvent) -> io::Result<()> {
+        self.dispatch(event)?;
+        self.flush_queued()
+    }
+
     fn dispatch(&mut self, event: &EpollEvent) -> io::Result<()> {
         // A value no token encodes to cannot come from our registrations.
         let Some(token) = Token::decode(event.token()) else {
@@ -268,6 +277,12 @@ impl Driver {
     /// registrations hit (DRV-15).
     fn deliver(&mut self, event: Event) -> io::Result<()> {
         self.call(event)?;
+        self.flush_queued()
+    }
+
+    /// Delivers the queued connect answers and socket failures, each as
+    /// its own event, until none is left.
+    fn flush_queued(&mut self) -> io::Result<()> {
         loop {
             if let Some(up) = self.answers.pop_front() {
                 if let Some(answer) = self.take_answer(up)? {

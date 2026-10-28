@@ -3,7 +3,8 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -13,8 +14,9 @@ use durchlauferhitzer_core::{ConnError, ConnId, Core, Event, Interest, Log, Upst
 use super::accept::Accepting;
 use super::upstreams::{WriteMode, write_mode};
 use super::{Broken, Driver};
-use crate::conns::{Answer, Client, Eof, Phase, Upstream, Writes};
+use crate::conns::{Answer, Client, Eof, Phase, Token, Upstream, Writes};
 use crate::log::{DriverLog, LogEntry, LogSink};
+use crate::sys::epoll::{EpollEvent, Readiness};
 
 /// A config without static roots, so a driver needs no pool.
 const STATIC_LESS: &str = "listen 127.0.0.1:8080; host a.test { path / { proxy 127.0.0.1:9; \
@@ -279,4 +281,40 @@ fn an_end_of_stream_without_a_kept_write_error_queues_nothing() {
         }
     ));
     assert!(driver.broken.is_empty());
+}
+
+/// A registered client socket the core knows, with the peer's end.
+fn known_client(driver: &mut Driver, conn: ConnId) -> UnixStream {
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let fd = OwnedFd::from(ours);
+    let raw = Token::Client(conn).encode().unwrap();
+    driver.epoll.add(fd.as_fd(), raw, Readiness::None).unwrap();
+    driver.clients.insert(conn, Client::new(fd));
+    driver.next_conn = conn.0 + 1;
+    driver
+        .deliver(Event::Accepted { conn, peer: peer() })
+        .unwrap();
+    theirs
+}
+
+/// A failure queued outside any `deliver` (say, by a write's
+/// registration change) is delivered once the ready descriptor that
+/// queued it is handled, not left for an unrelated later call.
+#[test]
+fn a_failure_queued_while_handling_a_descriptor_is_delivered_after_it() {
+    let (mut driver, logs) = driver();
+    let conn = ConnId(1);
+    let _peer = known_client(&mut driver, conn);
+    driver
+        .broken
+        .push_back(Broken::Client(conn, ConnError::Reset));
+    // Token 0 is listener 0, and this driver has no listeners: the event
+    // itself does nothing.
+    driver.handle_ready(&EpollEvent::EMPTY).unwrap();
+    assert!(driver.broken.is_empty());
+    assert!(driver.clients.is_empty());
+    assert_eq!(
+        logs.try_iter().collect::<Vec<_>>(),
+        [LogEntry::Core(Log::Reset { conn, peer: peer() })]
+    );
 }

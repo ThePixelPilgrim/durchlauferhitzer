@@ -156,8 +156,9 @@ leaves a choice, this is what the loop does:
   and gets `Failed` after the actions of the current call; an open
   upstream is closed and gets `UpstreamFailed` the same way; a pending
   connect is answered `UpstreamFailed`; a socket just accepted is dropped
-  before `Accepted`. A queued failure is not delivered if the core closed
-  the socket first.
+  before `Accepted`. A failure queued outside any call (a write that stops
+  under `ReadWrite`) is delivered once that ready descriptor is handled. A
+  queued failure is not delivered if the core closed the socket first.
 - **Failures of the loop itself** (`epoll_wait`, or `epoll_ctl` on the
   listeners or the wake eventfd) end `run` with the error; a failure of
   one socket never does.
