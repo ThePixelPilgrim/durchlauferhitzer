@@ -75,6 +75,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   - ~~Without systemd sockets: if any `listen` port is < 1024 and euid ≠ 0, startup fails (exit 2).~~ *Retired by owner decision 2026-10-28 (Task 8 review, O7), written into the spec (FR-PROC-03):* no up-front port check; a bind refused with `EACCES` is the startup error naming the address (A6).
   - After binding and opening the static roots, if `user` is set, the driver calls `setgroups(1, [gid])`, `setgid` and `setuid` (looked up with `getpwnam_r`). It then checks that `setuid(0)` fails.
   - If euid is 0 and `user` is unset, startup fails (exit 2): never root after binding.
+  - *Amended by owner decision 2026-10-28 (Task 8 review, O6), written into the spec (FR-PROC-03):* root is any uid 0 (real, effective or saved, `getresuid`); the drop first takes the effective uid back to 0 and afterwards checks that all three uids are the user's.
   - With systemd sockets and no root, nothing is dropped.
   - *Owner decision 2026-10-28 (Task 8 review, O3), written into the spec (FR-PROC-03):* root with systemd sockets and no `user` is exit 2 too.
 - **A9, signals.**

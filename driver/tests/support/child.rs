@@ -9,7 +9,7 @@
 //! The setup before `exec` needs `pre_exec`, which is `unsafe`: it lives in
 //! the one module [`pre_exec`] below, the only `unsafe` code of the test
 //! crate (controller ruling R2), and calls only async-signal-safe
-//! functions (`close`, `dup2`, `setrlimit`).
+//! functions (`close`, `dup2`, `setrlimit`, and `setresuid`, see there).
 
 #![allow(
     clippy::unwrap_used,
@@ -133,6 +133,9 @@ pub struct Setup {
     pub nofile: Option<(u64, u64)>,
     /// Run the child as uid/gid [`NOBODY`] (only possible as root).
     pub as_nobody: bool,
+    /// Only the effective uid set to this before `exec` (the real uid
+    /// stays; `exec` copies the effective into the saved one).
+    pub effective_uid: Option<u32>,
 }
 
 impl Setup {
@@ -195,6 +198,9 @@ pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
     }
     if !setup.close.is_empty() {
         pre_exec::close_fds(&mut cmd, setup.close);
+    }
+    if let Some(uid) = setup.effective_uid {
+        pre_exec::set_effective_uid(&mut cmd, uid);
     }
     if let Some((soft, hard)) = setup.nofile {
         pre_exec::limit_nofile(&mut cmd, soft, hard);
@@ -397,6 +403,25 @@ mod pre_exec {
         };
         // SAFETY: the hook calls only `dup2` (async-signal-safe) and reads
         // errno; it neither allocates nor locks.
+        unsafe { cmd.pre_exec(hook) };
+    }
+
+    /// Sets only the child's effective uid (`setresuid(-1, uid, -1)`).
+    /// Not in R2's list: `setresuid` is a single system call in a
+    /// single-threaded child (glibc's cross-thread broadcast has no other
+    /// thread to reach), takes no lock and allocates nothing.
+    pub fn set_effective_uid(cmd: &mut Command, uid: u32) {
+        let hook = move || {
+            let keep = libc::uid_t::MAX;
+            // SAFETY: `setresuid` takes no pointers; in the forked child
+            // only this thread exists, so it is one system call.
+            if unsafe { libc::setresuid(keep, uid, keep) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        };
+        // SAFETY: the hook calls only `setresuid` and reads errno; it
+        // neither allocates nor locks.
         unsafe { cmd.pre_exec(hook) };
     }
 

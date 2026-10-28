@@ -43,8 +43,9 @@ src/
     budget.rs         NFR-RES-05: `needed` (the formula in its docs and
                       the spec), `ensure` (raise the soft limit, or fail
                       naming both numbers)
-    privileges.rs     A8: `drop_privileges` (root needs `user` and drops
-                      to it; non-root keeps, logged); no port check (O7)
+    privileges.rs     A8: `drop_privileges` (root, any uid 0 (O6), needs
+                      `user` and drops to it; non-root keeps, logged); no
+                      port check (O7)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
                     `next_deadline`, dispatch, `TimerFired`), `deliver`
                     (one `handle` call, its actions in order, then the
@@ -113,7 +114,8 @@ src/
                       `try_clone` for the pool's duplicate)
     signal.rs         `SignalFd` for SIGTERM / SIGINT / SIGPIPE (blocked with
                       `pthread_sigmask` first)
-    user.rs           `lookup_user` (getpwnam_r), `drop_to`, `euid`
+    user.rs           `lookup_user` (getpwnam_r), `drop_to` (all three
+                      uids checked after), `uids` (getresuid), `euid`
     rlimit.rs         `nofile`, `raise_nofile`, `set_soft_nofile`
                       (RLIMIT_NOFILE)
 tests/
@@ -141,7 +143,9 @@ tests/
                     skipped with a printed reason) no `user` and an unknown
                     user are exit 2, `user nobody` drops every id
                     (`drop_to` in the server's process) and serves, and a
-                    systemd socket below 1024 serves as nobody
+                    systemd socket below 1024 serves as nobody; a real
+                    uid of 0 under an effective nobody counts as root
+                    (exit 2 without `user`, every uid dropped with one)
   stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
                     the test binary: non-blocking while it lives, a second
                     one refused (`AlreadyExists`), the mode back after it

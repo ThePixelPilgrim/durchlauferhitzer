@@ -648,3 +648,20 @@ fn claim_inherited_refuses_own_and_standard_descriptors() {
     let err = claim_inherited(1 << 20).unwrap_err();
     assert_eq!(err.raw_os_error(), Some(libc::EBADF), "{err}");
 }
+
+/// `uids` (getresuid) agrees with `/proc/self/status`.
+#[test]
+fn uids_match_proc_status() {
+    use durchlauferhitzer::sys::user::uids;
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    let line = status.lines().find(|l| l.starts_with("Uid:")).unwrap();
+    let proc: Vec<u32> = line
+        .split_whitespace()
+        .skip(1)
+        .take(3)
+        .map(|id| id.parse().unwrap())
+        .collect();
+    let ids = uids().unwrap();
+    assert_eq!(vec![ids.real, ids.effective, ids.saved], proc);
+    assert_eq!(ids.effective, euid());
+}

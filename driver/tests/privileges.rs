@@ -7,7 +7,8 @@
 //! - as root (these tests skip with a printed reason unless the tests run
 //!   as root; GitHub's runners do not): `user` unset is exit 2, an unknown
 //!   user is exit 2, and with `user nobody` the server drops to nobody
-//!   (`drop_to`, in this subprocess only) and serves.
+//!   (`drop_to`, in this subprocess only) and serves; root is any uid 0
+//!   (O6), so a real uid of 0 under an effective nobody counts as root.
 
 #![allow(
     clippy::unwrap_used,
@@ -196,4 +197,59 @@ fn a_systemd_socket_below_1024_needs_no_root() {
         stderr.starts_with("kind=privileges action=kept reason=not_root\n"),
         "{stderr}"
     );
+}
+
+/// Root is any uid 0 (owner decision 2026-10-28, O6): a process whose
+/// real uid is 0 but whose effective (and so saved) uid is nobody's
+/// counts as root, so `user` is required.
+#[test]
+fn a_real_uid_of_0_is_root_without_a_user_exit_2() {
+    if !root_or_skip() {
+        return;
+    }
+    let dir = TempDir::new();
+    let path = static_config(&dir, loopback(free_port()), "");
+    let setup = Setup {
+        effective_uid: Some(NOBODY),
+        ..Setup::default()
+    };
+    let output = run(&[&path], setup);
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: running as root without `user`: \
+         the server never keeps root after binding\n"
+    );
+}
+
+/// O6: with a real uid of 0 and `user nobody`, every uid ends up
+/// nobody's (the drop takes the effective uid back to 0 first).
+#[test]
+fn a_real_uid_of_0_drops_every_uid() {
+    if !root_or_skip() {
+        return;
+    }
+    let dir = TempDir::new();
+    let addr = loopback(free_port());
+    let path = static_config(&dir, addr, "user nobody;");
+    let setup = Setup {
+        effective_uid: Some(NOBODY),
+        ..Setup::default()
+    };
+    let server = Running::start(&[&path], setup, addr);
+    let response = get(addr, "/index.html");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    let status = fs::read_to_string(format!("/proc/{}/status", server.pid())).unwrap();
+    let uids = status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .unwrap();
+    let uids: Vec<u32> = uids
+        .split_whitespace()
+        .skip(1)
+        .map(|id| id.parse().unwrap())
+        .collect();
+    assert_eq!(uids, [NOBODY; 4], "{status}");
+    let stderr = server.kill();
+    assert!(!stderr.contains("kind=privileges"), "{stderr}");
 }

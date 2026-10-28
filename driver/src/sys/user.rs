@@ -45,11 +45,38 @@ pub fn lookup_user(name: &str) -> io::Result<Option<(u32, u32)>> {
     }
 }
 
-/// Drops to `uid`/`gid` for good: `setgroups([gid])`, `setgid(gid)`,
-/// `setuid(uid)`, then checks that `setuid(0)` fails. Changes the whole
-/// process (glibc applies the ids to every thread); never call it in a
-/// process whose privileges must stay.
+/// The real, effective and saved user ids (`getresuid`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Uids {
+    pub real: u32,
+    pub effective: u32,
+    pub saved: u32,
+}
+
+/// `getresuid`.
+pub fn uids() -> io::Result<Uids> {
+    let (mut real, mut effective, mut saved) = (0, 0, 0);
+    // SAFETY: the three pointers are to writable `uid_t`s.
+    cvt(unsafe { libc::getresuid(&mut real, &mut effective, &mut saved) })?;
+    Ok(Uids {
+        real,
+        effective,
+        saved,
+    })
+}
+
+/// Drops to `uid`/`gid` for good, from a process with some uid 0: takes
+/// the effective uid back to 0 if it is not (allowed while the real or
+/// saved uid is 0), then `setgroups([gid])`, `setgid(gid)`, `setuid(uid)`
+/// (as effective root these set the real, effective and saved ids), and
+/// checks that `setuid(0)` fails and that all three uids are `uid`.
+/// Changes the whole process (glibc applies the ids to every thread);
+/// never call it in a process whose privileges must stay.
 pub fn drop_to(uid: u32, gid: u32) -> io::Result<()> {
+    if uids()?.effective != 0 {
+        // SAFETY: `seteuid` takes no pointers.
+        cvt(unsafe { libc::seteuid(0) })?;
+    }
     let groups = [gid];
     // SAFETY: `groups` is readable for the one entry passed.
     cvt(unsafe { libc::setgroups(groups.len(), groups.as_ptr()) })?;
@@ -62,6 +89,18 @@ pub fn drop_to(uid: u32, gid: u32) -> io::Result<()> {
         return Err(io::Error::other(
             "setuid(0) succeeded after the privilege drop",
         ));
+    }
+    let after = uids()?;
+    if after
+        != (Uids {
+            real: uid,
+            effective: uid,
+            saved: uid,
+        })
+    {
+        return Err(io::Error::other(format!(
+            "uids after the privilege drop: {after:?}"
+        )));
     }
     Ok(())
 }

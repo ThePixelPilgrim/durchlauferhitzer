@@ -1176,13 +1176,17 @@ Failures, persistence, timeouts:
   non-root fails before binding"): a bind the kernel refuses (`EACCES`)
   is the startup error naming its address (FR-CFG-10, exit 2), and a host
   that lets non-root bind low ports (`ip_unprivileged_port_start`) is
-  obeyed. After the roots are open and the sockets
-  bound or taken: as root (effective uid 0), `user` is required, with
+  obeyed. Root is any uid 0: the real, effective or saved uid
+  (`getresuid`; owner decision 2026-10-28, O6), since such a process could
+  become root again. After the roots are open and the sockets
+  bound or taken: as root, `user` is required, with
   systemd sockets too (owner decision 2026-10-28, O3: never root after
   binding; exit 2 otherwise); it is
   looked up with `getpwnam_r` (an unknown user is exit 2), and the process
-  drops to it for good with `setgroups([gid])`, `setgid`, `setuid`, then
-  checks that `setuid(0)` fails (exit 2 on any failure). As non-root
+  drops to it for good: the effective uid back to 0 first if it is not,
+  then `setgroups([gid])`, `setgid`, `setuid`, then it checks that
+  `setuid(0)` fails and that the real, effective and saved uids are all
+  the user's (exit 2 on any failure). As non-root
   nothing is dropped; with `user` set, that is logged once (controller
   ruling R5): `kind=privileges action=kept reason=not_root`
   (FR-LOG-05).
