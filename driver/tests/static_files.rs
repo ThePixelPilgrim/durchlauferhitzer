@@ -70,7 +70,8 @@ fn a_10_mib_file_reaches_a_slow_reader_byte_exact() {
     let mut client = server.connect();
     get(&mut client, "GET", "/big.bin");
     // Let the socket fill, so `sendfile` meets `EAGAIN` and the loop must
-    // wait for writability, then read in small pieces with pauses.
+    // wait for writability, then read in small pieces with a pause every
+    // 64 KiB, so the loop waits for writability again many times.
     thread::sleep(Duration::from_millis(200));
     let head = read_head(&mut client);
     assert_eq!(status_line(&head), "HTTP/1.1 200 OK", "{}", text(&head));
@@ -84,8 +85,8 @@ fn a_10_mib_file_reaches_a_slow_reader_byte_exact() {
         assert_ne!(n, 0, "cut after {} bytes", received.len());
         received.extend_from_slice(&piece[..n]);
         reads += 1;
-        if reads % 64 == 0 {
-            thread::sleep(Duration::from_millis(2));
+        if reads % 4 == 0 {
+            thread::sleep(Duration::from_millis(1));
         }
     }
     assert!(received == content, "the body differs from the file");
@@ -175,8 +176,11 @@ fn a_fifo_does_not_hang_the_only_worker() {
     second
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
-    let start = Instant::now();
+    // The FIFO first, with time for the only worker to take its open;
+    // only then the second request, which that worker must also serve.
     get(&mut first, "GET", "/pipe");
+    thread::sleep(Duration::from_millis(50));
+    let start = Instant::now();
     get(&mut second, "GET", "/small.txt");
     let response = read_response(&mut second);
     let waited = start.elapsed();
@@ -298,5 +302,62 @@ fn sixty_four_concurrent_downloads_through_two_workers_are_byte_exact() {
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK", "f{i}");
         assert!(body(&response) == contents[i], "f{i}.bin differs");
     }
+    server.stop();
+}
+
+/// M5: an empty file is a 200 with `Content-Length: 0` and no body (no
+/// readahead, no `sendfile`): the next response follows at once.
+#[test]
+fn an_empty_file_is_200_with_no_body() {
+    let tree = Tree::new();
+    tree.file("empty", b"");
+    tree.file("small.txt", b"small");
+    let server = Server::start_static(&static_config(tree.path()), 1);
+    let mut client = server.connect();
+    get(&mut client, "GET", "/empty");
+    let head = read_head(&mut client);
+    assert_eq!(status_line(&head), "HTTP/1.1 200 OK");
+    assert_eq!(content_length(&head), Some(0));
+    get(&mut client, "GET", "/small.txt");
+    let response = read_response(&mut client);
+    assert_eq!(
+        status_line(&response),
+        "HTTP/1.1 200 OK",
+        "{}",
+        text(&response)
+    );
+    assert_eq!(body(&response), b"small");
+    server.stop();
+}
+
+/// M5: a sparse file over 4 GiB: HEAD reports its full 64-bit size, and a
+/// GET starts sending it (the first MiB arrives; the rest is not read:
+/// the core has no ranges, and offsets past 4 GiB are covered by the
+/// `sendfile` test at 5 GiB in `tests/sys.rs`).
+#[test]
+fn a_file_over_4_gib_reports_its_size_and_starts_sending() {
+    let tree = Tree::new();
+    let path = tree.file("huge.bin", b"start");
+    let size: u64 = 5 * 1024 * 1024 * 1024 + 7;
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(size)
+        .unwrap();
+    let server = Server::start_static(&static_config(tree.path()), 1);
+    let mut client = server.connect();
+    get(&mut client, "HEAD", "/huge.bin");
+    let head = read_head(&mut client);
+    assert_eq!(status_line(&head), "HTTP/1.1 200 OK");
+    assert_eq!(content_length(&head), Some(usize::try_from(size).unwrap()));
+    get(&mut client, "GET", "/huge.bin");
+    let head = read_head(&mut client);
+    assert_eq!(content_length(&head), Some(usize::try_from(size).unwrap()));
+    let mut first = vec![0u8; MIB];
+    client.read_exact(&mut first).unwrap();
+    assert_eq!(&first[..5], b"start");
+    assert!(first[5..].iter().all(|&b| b == 0));
+    drop(client);
     server.stop();
 }

@@ -459,6 +459,34 @@ fn sendfile_delivers_the_exact_bytes_then_reports_end_of_file() {
     client.shutdown(Shutdown::Both).unwrap();
 }
 
+/// M5: offsets past 4 GiB reach the kernel whole (64-bit `off_t`):
+/// `readahead` and `sendfile` at 5 GiB of a sparse file read the marker
+/// written there, not bytes at the offset modulo 2^32.
+#[test]
+fn readahead_and_sendfile_work_past_4_gib() {
+    use std::os::unix::fs::FileExt;
+    let tmp = TempDir::new();
+    let at: u64 = 5 * 1024 * 1024 * 1024;
+    let data = fs::File::create(tmp.path().join("sparse")).unwrap();
+    data.write_at(b"marker", at).unwrap();
+    // A different marker where a 32-bit offset would land.
+    data.write_at(b"WRONG!", at % (1 << 32)).unwrap();
+    drop(data);
+    let root = open_dir_path(tmp.path()).unwrap();
+    let file = openat2_beneath(root.as_fd(), &[b"sparse"]).unwrap();
+    readahead(file.as_fd(), at, 6).unwrap();
+    let (client, mut server) = loopback_pair();
+    match sendfile(client.as_fd(), file.as_fd(), at, 6) {
+        Io::Done(6) => {}
+        other @ (Io::Done(_) | Io::WouldBlock | Io::Closed | Io::Err(_)) => {
+            panic!("sendfile at 5 GiB: {other:?}")
+        }
+    }
+    let mut got = [0u8; 6];
+    server.read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"marker");
+}
+
 // ---- eventfd -----------------------------------------------------------
 
 #[test]

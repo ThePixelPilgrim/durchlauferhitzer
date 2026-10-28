@@ -103,7 +103,8 @@ tests/
                     reader, directory 301 and index, 404 for a symlink, a
                     dotfile, a FIFO and a missing file, a FIFO that must not
                     hold the only worker, HEAD, a file truncated mid-transfer,
-                    64 concurrent downloads through two workers
+                    64 concurrent downloads through two workers, an empty
+                    file, a sparse file over 4 GiB
   static_fd_leak.rs a client reset mid-`sendfile` closes the file and leaks
                     no descriptor; alone in its binary
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
@@ -226,6 +227,13 @@ Notes on the wrappers:
 
 - Tests: the FIFO test is the guard for `O_NONBLOCK` (Review Focus 2):
   without it the open would block its worker until a writer came.
+- Tests: on loopback `sendfile` of a 256 KiB chunk does not return
+  `EAGAIN` in practice: `EPOLLOUT` is reported only once a third of the
+  (autotuned, MiB-sized) send buffer is free, so each call takes a whole
+  chunk. The slow-reader test makes the loop wait for writability again
+  and again; the `EAGAIN` and short-count mapping is pinned by the unit
+  test in `event_loop/files.rs`. Offsets past 4 GiB are tested on the
+  wrappers (`tests/sys.rs`), since the core has no ranges.
 - Reads and writes with an empty buffer return `Io::Done(0)` without a
   system call (a 0-byte `read` would look like the end of stream).
   `sendfile` returning 0 (the file ended early) is `Io::Closed`.
