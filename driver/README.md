@@ -108,6 +108,16 @@ tests/
   cli.rs            the binary in a subprocess: the usage for bad
                     arguments, `--check` (ok, each kind of error with its
                     line:column, a missing file; no root or port touched)
+  startup.rs        the startup sequence of the binary, run as non-root
+                    (as `nobody` when the tests run as root): it serves; a
+                    missing or non-directory root, a port in use and
+                    overlapping listen addresses are exit 2 naming them;
+                    every thread blocks SIGTERM/SIGINT/SIGPIPE;
+                    `disk_threads` workers; fds 0-2 closed at exec are
+                    `/dev/null` (the Rust runtime), so no socket lands there
+  stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
+                    the test binary: non-blocking while it lives, a second
+                    one refused (`AlreadyExists`), the mode back after it
   sys.rs            the wrappers on the real kernel, unprivileged
   log.rs            the line format: an exact line per kind, every
                     reason / failure / file error value, the escaping
@@ -148,6 +158,20 @@ tests/
   support/tree.rs   a temp-dir static root: files, symlinks, FIFOs (the
                     `mkfifo` command), deterministic contents
 ```
+
+## Startup
+
+`process::run` (FR-PROC-01, FR-PROC-04, A11) parses the arguments,
+loads the config, then: the `openat2` probe beneath the first root (or
+`/`), the roots (`O_PATH | O_DIRECTORY`), the listeners (config order,
+the first failure named), the signal mask and its `signalfd` (before
+any thread, so the disk workers inherit it), the stderr log sink, then
+`Driver::new` with `limits.disk_threads` and `Driver::run`. Every
+message (the usage, `--check`'s answer, startup errors) is printed
+before the sink exists or after the driver holding it is gone; nothing
+prints through std while it lives (FR-LOG-06). Exit codes are
+`ExitStatus` (0 ok, 1 config or usage, 2 startup), private to
+`process.rs`.
 
 ## The event loop
 

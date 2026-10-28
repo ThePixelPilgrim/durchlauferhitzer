@@ -221,7 +221,10 @@ Structure and values:
   more IP socket addresses; no duplicates; no port 0), `user` (optional),
   at most one `limits` block and one or more `host` blocks.
   Overlapping binds such as `0.0.0.0:80` + `127.0.0.1:80` are only detected
-  at bind time [stage 4]. An IPv6 `listen` address accepts IPv6 only (the
+  at bind time [stage 4]: the addresses are bound in config order
+  (`SO_REUSEADDR`, not `SO_REUSEPORT`), and the first failure
+  (`EADDRINUSE`, `EACCES`, ...) is a startup error naming its address
+  (exit 2; stage 4 amendment A6, Task 8). An IPv6 `listen` address accepts IPv6 only (the
   listener sets `IPV6_V6ONLY`, whatever the host's `bindv6only`); IPv4
   needs its own `listen` line, so `0.0.0.0:80` + `[::]:80` bind together
   (owner decision 2026-10-27) [stage 4].
@@ -243,7 +246,9 @@ Structure and values:
   `proxy <backend>`.
 - **FR-CFG-15** [done] A static root is an absolute path without `.`, `..`
   or empty components and without a trailing `/` (except `/` itself). That
-  it exists is checked by the driver at startup [stage 4].
+  it exists is checked by the driver at startup [stage 4]: each root is
+  opened once, `O_PATH | O_DIRECTORY`; one that is missing or not a
+  directory is a startup error naming it (exit 2; stage 4 Task 8).
 - **FR-CFG-16** [done] A proxy backend is an IP literal with a port,
   IPv4 (`127.0.0.1:3000`) or bracketed IPv6 (`[::1]:3000`), parsed like
   `listen`; port 1–65535. A host name is a config error naming its
@@ -1149,7 +1154,33 @@ Failures, persistence, timeouts:
 - **FR-PROC-04** [stage 4] At startup the driver opens every static root
   (backends are IP literals and need no resolution, FR-CFG-16), checks
   `openat2` support and the descriptor budget (NFR-RES-05), and fails
-  with a clear error otherwise.
+  with a clear error otherwise. *(Stage 4 Task 8, amendment A11:)* the
+  order is
+  1. the arguments (FR-PROC-01; the usage, exit 1);
+  2. the config (exit 1);
+  3. the `openat2` probe (NFR-PORT-03): an `O_PATH` open of `.` beneath
+     the first static root, or beneath `/` (opened `O_PATH`) when there is
+     none (exit 2);
+  4. every static root, opened `O_PATH | O_DIRECTORY` in config order
+     (FR-CFG-15; exit 2 naming the root);
+  5. the listeners (FR-CFG-10; exit 2 naming the address);
+  6. the signal mask: SIGTERM, SIGINT and SIGPIPE are blocked and a
+     `signalfd` opened for them, before any other thread exists, so every
+     thread inherits the mask and SIGPIPE can never kill the process (A9;
+     until stage 4 Task 9 they stay blocked and are not read, so the
+     server is stopped with SIGKILL);
+  7. the stderr log sink (FR-LOG-06);
+  8. the disk workers (`limits.disk_threads`, started with the driver,
+     DRV-08);
+  9. the event loop.
+
+  Every startup error is one line on stderr, `durchlauferhitzer:
+  <message>`, printed before the log sink exists (exit 2). *Builder
+  calls:* the listen backlog is `SOMAXCONN`; a failure of the loop itself
+  (DRV-15) is printed once the driver and its sink are gone, exit 2. The
+  Rust runtime opens closed fds 0, 1 and 2 on `/dev/null` before `main`
+  runs, so no socket or file the server opens lands on them (a test pins
+  it).
 - **FR-PROC-05** [stage 4] Shutdown has two speeds and two targets (owner
   decision):
   - *Graceful* (SIGTERM): stop accepting work, let in-flight requests
@@ -1396,7 +1427,7 @@ Failures, persistence, timeouts:
 - **NFR-PORT-01** [stage 4] Linux ≥ 5.14, x86_64 and aarch64.
 - **NFR-PORT-02** [stage 4] Links against the system glibc; no other C.
 - **NFR-PORT-03** [stage 4] `openat2` is required (startup error without
-  it).
+  it; the probe is FR-PROC-04 step 3).
 - **NFR-PORT-04** [stage 5] Landlock is used when available (FR-PROC-06).
 - **NFR-PORT-05** [stage 4] systemd is optional (FR-PROC-02/03).
 - **NFR-PORT-06** [done] Stable Rust (toolchain pinned in
