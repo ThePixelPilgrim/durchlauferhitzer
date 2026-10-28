@@ -46,6 +46,8 @@ src/
                       client reads, writes and errors, client actions
     upstreams.rs      `Connect` and its later answer, upstream reads and
                       writes by interest, error deferral, upstream actions
+    tests.rs          unit tests of the loop's decisions on a driver that
+                      is built but not run
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
                     Signal` in a `u64`), the per-client and per-upstream
                     records and the registration each wants
@@ -91,7 +93,8 @@ tests/
 ## The event loop
 
 `Driver::new(core, listeners, roots, pool, log)` registers the listeners
-and the wake eventfd; `Driver::run` loops until a `StopHandle` asks it to
+and the wake eventfd (it refuses a core with static roots but no pool,
+`InvalidInput`, since every `OpenFile` needs its answer, DRV-09); `Driver::run` loops until a `StopHandle` asks it to
 stop (`Exit::Stopped`; the signal-driven endings come with Task 9). It
 follows the contract in `core/src/core/contract.rs`; where the contract
 leaves a choice, this is what the loop does:

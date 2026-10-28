@@ -135,6 +135,10 @@ impl Driver {
     /// A driver for `core`, accepting on `listeners` (bound, listening,
     /// non-blocking sockets), with the static roots opened at startup in
     /// [`Core::static_roots`] order, the disk pool and the log sink.
+    ///
+    /// A core with static roots needs the pool: every `OpenFile` gets an
+    /// answer (DRV-09), so without one the driver refuses to start
+    /// (`InvalidInput`) rather than drop file actions.
     pub fn new(
         core: Core,
         listeners: Vec<OwnedFd>,
@@ -142,6 +146,12 @@ impl Driver {
         pool: Option<Pool>,
         log: LogSink,
     ) -> io::Result<Driver> {
+        if !core.static_roots().is_empty() && pool.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "static roots need the disk pool (DRV-09)",
+            ));
+        }
         let epoll = Epoll::new()?;
         let wake = Arc::new(Wake {
             fd: EventFd::new()?,
@@ -283,8 +293,9 @@ impl Driver {
                 Ok(())
             }
             Action::Close { conn } => self.close(conn),
-            // The file contract arrives with the pool (Task 6). With no
-            // static roots the core never opens a file.
+            // The file contract arrives with the pool (Task 6). Until then
+            // `new` refuses a core with static roots, and without them the
+            // core never opens a file.
             Action::OpenFile { .. } | Action::Readahead { .. } | Action::CloseFile { .. } => Ok(()),
             Action::Connect { up, backend } => self.connect(up, backend),
             Action::SetUpstreamInterest { up, interest } => {
@@ -322,3 +333,6 @@ fn conn_error(err: &io::Error) -> ConnError {
         Some(_) | None => ConnError::Other,
     }
 }
+
+#[cfg(test)]
+mod tests;

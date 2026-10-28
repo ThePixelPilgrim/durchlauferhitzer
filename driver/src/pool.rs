@@ -6,8 +6,8 @@
 //! real pool (`Pool::start`, `submit`, `results`, `shutdown`).
 
 /// The disk worker pool. A stub until Task 6: there is no way to build
-/// one yet, so a [`crate::Driver`] runs with `None` and any file action
-/// is dropped.
+/// one yet, so a [`crate::Driver`] runs with `None`, which it accepts
+/// only for a core without static roots (DRV-09).
 #[derive(Debug)]
 pub struct Pool {
     _not_yet: (),
