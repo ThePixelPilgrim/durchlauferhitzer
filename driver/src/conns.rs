@@ -77,6 +77,15 @@ pub(crate) enum Eof {
     Delivered,
 }
 
+/// Whether a client's epoll registration holds. After an `epoll_ctl`
+/// failure the client is reported `Failed` and the driver does no more
+/// I/O on it (DRV-15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Health {
+    Ok,
+    Broken,
+}
+
 /// A client connection the core knows (from its `Accepted` until its
 /// `Close`).
 #[derive(Debug)]
@@ -85,6 +94,7 @@ pub(crate) struct Client {
     /// What the core last asked for; `None` until its first `SetInterest`.
     pub(crate) interest: Interest,
     pub(crate) eof: Eof,
+    pub(crate) health: Health,
     /// What the socket is registered for. A client always stays in the
     /// epoll set, so its errors and hang-ups are seen whatever the
     /// interest (DRV-10).
@@ -97,6 +107,7 @@ impl Client {
             fd,
             interest: Interest::None,
             eof: Eof::NotYet,
+            health: Health::Ok,
             registered: Readiness::None,
         }
     }

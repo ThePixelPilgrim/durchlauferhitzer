@@ -7,7 +7,7 @@ use std::os::fd::AsFd;
 
 use durchlauferhitzer_core::{BackendId, ConnError, Event, Interest, UpstreamId};
 
-use super::{Driver, conn_error, token};
+use super::{Broken, Driver, conn_error, token};
 use crate::conns::{Answer, Eof, Phase, Token, Upstream, Writes, has_read, has_write};
 use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
@@ -331,8 +331,12 @@ impl Driver {
     }
 
     /// Brings the upstream's epoll registration in line with what it
-    /// wants: added, modified or removed.
-    fn sync_upstream(&mut self, up: UpstreamId) -> io::Result<()> {
+    /// wants: added, modified or removed. A failed `epoll_ctl` fails only
+    /// this upstream (DRV-15): it is logged and the socket closed; a
+    /// pending connect is answered `UpstreamFailed` like any failed
+    /// connect, an open upstream is reported `UpstreamFailed` after the
+    /// actions of the current call.
+    pub(super) fn sync_upstream(&mut self, up: UpstreamId) -> io::Result<()> {
         let Some(upstream) = self.upstreams.get_mut(&up) else {
             return Ok(());
         };
@@ -350,13 +354,34 @@ impl Driver {
             }
         };
         let raw = token(Token::Upstream(up))?;
-        match (upstream.registered, wanted) {
-            (None, Some(readiness)) => self.epoll.add(fd, raw, readiness)?,
-            (Some(_), Some(readiness)) => self.epoll.modify(fd, raw, readiness)?,
-            (Some(_), None) => self.epoll.delete(fd)?,
-            (None, None) => {}
+        let result = match (upstream.registered, wanted) {
+            (None, Some(readiness)) => self.epoll.add(fd, raw, readiness),
+            (Some(_), Some(readiness)) => self.epoll.modify(fd, raw, readiness),
+            (Some(_), None) => self.epoll.delete(fd),
+            (None, None) => Ok(()),
+        };
+        let Err(err) = result else {
+            upstream.registered = wanted;
+            return Ok(());
+        };
+        let errno = err.raw_os_error().unwrap_or(0);
+        self.log
+            .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
+        // Closing the socket takes it out of the epoll set.
+        upstream.registered = None;
+        match upstream.phase {
+            Phase::Connecting(_) => {
+                upstream.phase = Phase::Answering(Answer::Failed);
+                self.answers.push_back(up);
+            }
+            Phase::Open { .. } => {
+                upstream.phase = Phase::Failed;
+                self.broken
+                    .push_back(Broken::Upstream(up, conn_error(&err)));
+            }
+            // Never registered, so never here.
+            Phase::Answering(_) | Phase::Failed => {}
         }
-        upstream.registered = wanted;
         Ok(())
     }
 

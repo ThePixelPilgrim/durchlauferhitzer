@@ -6,8 +6,8 @@ use std::os::fd::AsFd;
 
 use durchlauferhitzer_core::{ConnError, ConnId, Event, Interest};
 
-use super::{Accepting, Driver, conn_error, token};
-use crate::conns::{Client, Eof, Token, has_read, has_write};
+use super::{Accepting, Broken, Driver, conn_error, token};
+use crate::conns::{Client, Eof, Health, Token, has_read, has_write};
 use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
 use crate::sys::fd::Io;
@@ -92,7 +92,11 @@ impl Driver {
     /// A new connection: `TCP_NODELAY` (NFR-PERF-04; buffer sizes are left
     /// to the kernel), a fresh id (DRV-01), into the epoll set, then
     /// `Accepted`.
-    fn accepted(&mut self, fd: std::os::fd::OwnedFd, peer: std::net::IpAddr) -> io::Result<()> {
+    pub(super) fn accepted(
+        &mut self,
+        fd: std::os::fd::OwnedFd,
+        peer: std::net::IpAddr,
+    ) -> io::Result<()> {
         // Cannot fail on a freshly accepted TCP socket; a socket that
         // somehow refuses it still works.
         let _ = set_nodelay(fd.as_fd());
@@ -102,10 +106,11 @@ impl Driver {
             return Ok(());
         };
         if let Err(err) = self.epoll.add(fd.as_fd(), raw, Readiness::None) {
-            // The core never heard of it: drop the socket, log the reason.
+            // DRV-15: the core never heard of it (its first event must be
+            // `Accepted`), so the socket is dropped and the reason logged.
             let errno = err.raw_os_error().unwrap_or(0);
             self.log
-                .write(LogEntry::Driver(DriverLog::AcceptFailed { errno }));
+                .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
             return Ok(());
         }
         self.next_conn = self.next_conn.saturating_add(1);
@@ -126,6 +131,11 @@ impl Driver {
             // Closed earlier in this batch, or never ours (DRV-05).
             return Ok(());
         };
+        match client.health {
+            Health::Ok => {}
+            // Its `Failed` is queued or delivered (DRV-15).
+            Health::Broken => return Ok(()),
+        }
         match client.interest {
             Interest::None => {}
             Interest::Read => {
@@ -173,9 +183,9 @@ impl Driver {
             let Some(client) = self.clients.get(&conn) else {
                 return Ok(());
             };
-            let reading = match client.interest {
-                Interest::Read | Interest::ReadWrite => client.eof == Eof::NotYet,
-                Interest::None | Interest::Write => false,
+            let reading = match (client.health, client.interest) {
+                (Health::Ok, Interest::Read | Interest::ReadWrite) => client.eof == Eof::NotYet,
+                (Health::Broken, _) | (Health::Ok, Interest::None | Interest::Write) => false,
             };
             if !reading {
                 return Ok(());
@@ -221,9 +231,11 @@ impl Driver {
             let Some(client) = self.clients.get(&conn) else {
                 return Ok(());
             };
-            match client.interest {
-                Interest::Write | Interest::ReadWrite => {}
-                Interest::None | Interest::Read => return Ok(()),
+            match (client.health, client.interest) {
+                (Health::Ok, Interest::Write | Interest::ReadWrite) => {}
+                (Health::Broken, _) | (Health::Ok, Interest::None | Interest::Read) => {
+                    return Ok(());
+                }
             }
             let buf = self.core.send_buffer(conn);
             if buf.is_empty() {
@@ -259,16 +271,34 @@ impl Driver {
         self.sync_client(conn)
     }
 
-    /// Brings the client's registration in line with what it wants.
+    /// Brings the client's registration in line with what it wants. A
+    /// failed `epoll_ctl` fails only this client (DRV-15): it is logged,
+    /// no more I/O is done on the socket, and its `Failed` is delivered
+    /// after the actions of the current call.
     fn sync_client(&mut self, conn: ConnId) -> io::Result<()> {
         let Some(client) = self.clients.get_mut(&conn) else {
             return Ok(());
         };
-        let wanted = client.wanted();
-        if wanted != client.registered {
-            self.epoll
-                .modify(client.fd.as_fd(), token(Token::Client(conn))?, wanted)?;
-            client.registered = wanted;
+        let wanted = match client.health {
+            Health::Ok => client.wanted(),
+            Health::Broken => return Ok(()),
+        };
+        if wanted == client.registered {
+            return Ok(());
+        }
+        match self
+            .epoll
+            .modify(client.fd.as_fd(), token(Token::Client(conn))?, wanted)
+        {
+            Ok(()) => client.registered = wanted,
+            Err(err) => {
+                let errno = err.raw_os_error().unwrap_or(0);
+                self.log
+                    .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
+                client.health = Health::Broken;
+                self.broken
+                    .push_back(Broken::Client(conn, conn_error(&err)));
+            }
         }
         Ok(())
     }

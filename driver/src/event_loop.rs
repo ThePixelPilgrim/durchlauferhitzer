@@ -67,6 +67,15 @@ struct Wake {
     stop: AtomicBool,
 }
 
+/// A socket whose epoll registration failed (DRV-15), with the error to
+/// report: its `Failed` / `UpstreamFailed` is delivered after the actions
+/// of the current call, unless the core closed it first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Broken {
+    Client(ConnId, ConnError),
+    Upstream(UpstreamId, ConnError),
+}
+
 /// Whether the listeners take new connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Accepting {
@@ -124,6 +133,8 @@ pub struct Driver {
     upstreams: BTreeMap<UpstreamId, Upstream>,
     /// Upstreams whose connect outcome waits to be delivered.
     answers: VecDeque<UpstreamId>,
+    /// Sockets whose failed registration waits to be reported.
+    broken: VecDeque<Broken>,
     /// The next connection id: from 1, never reused (DRV-01).
     next_conn: u64,
     clock: Clock,
@@ -178,6 +189,7 @@ impl Driver {
             clients: BTreeMap::new(),
             upstreams: BTreeMap::new(),
             answers: VecDeque::new(),
+            broken: VecDeque::new(),
             next_conn: 1,
             clock: Clock {
                 origin: std::time::Instant::now(),
@@ -195,8 +207,8 @@ impl Driver {
     }
 
     /// Runs the loop until it is asked to stop. An `Err` is a failure of
-    /// the loop itself (`epoll_wait`, `epoll_ctl`), never of one
-    /// connection.
+    /// the loop itself (`epoll_wait`, or `epoll_ctl` on the listeners or
+    /// the wake eventfd), never of one socket (DRV-15).
     pub fn run(&mut self) -> io::Result<Exit> {
         let mut events = vec![EpollEvent::EMPTY; EVENTS_PER_WAIT];
         loop {
@@ -252,15 +264,38 @@ impl Driver {
 
     /// One event into the core (DRV-02): its actions are performed in
     /// order; then every connect answer they queued is delivered, each as
-    /// its own later event (DRV-10).
+    /// its own later event (DRV-10), and every socket failure their
+    /// registrations hit (DRV-15).
     fn deliver(&mut self, event: Event) -> io::Result<()> {
         self.call(event)?;
-        while let Some(up) = self.answers.pop_front() {
-            if let Some(answer) = self.take_answer(up)? {
-                self.call(answer)?;
+        loop {
+            if let Some(up) = self.answers.pop_front() {
+                if let Some(answer) = self.take_answer(up)? {
+                    self.call(answer)?;
+                }
+            } else if let Some(broken) = self.broken.pop_front() {
+                if let Some(failed) = self.broken_event(broken) {
+                    self.call(failed)?;
+                }
+            } else {
+                return Ok(());
             }
         }
-        Ok(())
+    }
+
+    /// The failure to report for a socket whose registration failed
+    /// (DRV-15), unless the core closed it meanwhile (DRV-05).
+    fn broken_event(&self, broken: Broken) -> Option<Event> {
+        match broken {
+            Broken::Client(conn, error) => self
+                .clients
+                .contains_key(&conn)
+                .then_some(Event::Failed { conn, error }),
+            Broken::Upstream(up, error) => self
+                .upstreams
+                .contains_key(&up)
+                .then_some(Event::UpstreamFailed { up, error }),
+        }
     }
 
     /// One `handle` call and its actions. The wall-clock second is passed

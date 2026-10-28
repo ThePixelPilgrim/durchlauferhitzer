@@ -227,6 +227,10 @@
 //! - A client's socket errors and hang-ups (`EPOLLERR`, `EPOLLHUP`) are
 //!   reported whatever the interest, as [`Event::Failed`]: a client error
 //!   means the client is gone.
+//! - An epoll driver whose `epoll_ctl` fails for one client or upstream
+//!   socket treats it as that socket's error (DRV-15): [`Event::Failed`]
+//!   or [`Event::UpstreamFailed`] after the actions of the current call (a
+//!   pending connect's answer is `UpstreamFailed`); the loop goes on.
 //! - An upstream's socket error is reported as [`Event::UpstreamFailed`]
 //!   only when a read or a write hits it (or, for a connect, from
 //!   `SO_ERROR`), and never ahead of bytes the backend sent before it.

@@ -4,7 +4,7 @@ The product binary: the Linux `epoll` driver that runs the sans-IO core in
 [`../core`](../core) over real sockets, files, threads and signals (stage 4).
 The core decides everything about HTTP; this crate owns all I/O and carries
 out the core's actions exactly as the driver contract in
-[`../core/src/core/contract.rs`](../core/src/core/contract.rs) says (DRV-01…14
+[`../core/src/core/contract.rs`](../core/src/core/contract.rs) says (DRV-01…15
 in the [design spec](../docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md)).
 
 The package is `durchlauferhitzer`: a library (so tests can drive its parts)
@@ -139,8 +139,17 @@ leaves a choice, this is what the loop does:
   `ReadWrite` once the end of stream was delivered (no read follows), a
   failed write is reported at once. A failed upstream socket is closed when its
   `UpstreamFailed` is delivered; `CloseUpstream` forgets the entry.
-- **Failures of the loop itself** (`epoll_wait`, `epoll_ctl`) end `run`
-  with the error; a failure of one socket never does.
+- **Registration failures** (DRV-15). A failed `epoll_ctl` for one
+  socket fails only that socket and is logged
+  (`DriverLog::RegisterFailed`). A client is marked broken (no more I/O)
+  and gets `Failed` after the actions of the current call; an open
+  upstream is closed and gets `UpstreamFailed` the same way; a pending
+  connect is answered `UpstreamFailed`; a socket just accepted is dropped
+  before `Accepted`. A queued failure is not delivered if the core closed
+  the socket first.
+- **Failures of the loop itself** (`epoll_wait`, or `epoll_ctl` on the
+  listeners or the wake eventfd) end `run` with the error; a failure of
+  one socket never does.
 
 Notes on the wrappers:
 

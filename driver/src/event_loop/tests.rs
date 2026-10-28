@@ -2,14 +2,21 @@
 //! never run.
 
 use std::io;
+use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::OwnedFd;
+use std::sync::mpsc::Receiver;
 
 use durchlauferhitzer_core::config::load;
-use durchlauferhitzer_core::{Core, Interest};
+use durchlauferhitzer_core::{ConnError, ConnId, Core, Event, Interest, Log, UpstreamId};
 
-use super::Driver;
 use super::upstreams::{WriteMode, write_mode};
-use crate::conns::{Eof, Writes};
-use crate::log::LogSink;
+use super::{Broken, Driver};
+use crate::conns::{Answer, Client, Eof, Phase, Upstream, Writes};
+use crate::log::{DriverLog, LogEntry, LogSink};
+
+/// A config without static roots, so a driver needs no pool.
+const STATIC_LESS: &str = "listen 127.0.0.1:8080; host a.test { path / { proxy 127.0.0.1:9; \
+    max_request_body 1MiB; max_response_body 1MiB; } }";
 
 /// A config with a static root: the core may emit `OpenFile`.
 const STATIC: &str = "listen 127.0.0.1:8080; host a.test { path / { static /srv; } }";
@@ -49,4 +56,118 @@ fn a_failed_write_after_the_end_of_stream_is_reported_at_once() {
         assert_eq!(write_mode(Interest::Read, Writes::Open, eof), None);
         assert_eq!(write_mode(Interest::None, Writes::Open, eof), None);
     }
+}
+
+/// A driver for [`STATIC_LESS`] with no listeners, and its log.
+fn driver() -> (Driver, Receiver<LogEntry>) {
+    let core = Core::new(load(STATIC_LESS).unwrap());
+    let (log, logs) = LogSink::channel();
+    let driver = Driver::new(core, Vec::new(), Vec::new(), None, log).unwrap();
+    (driver, logs)
+}
+
+/// A descriptor `epoll_ctl` refuses (`EPERM`: `/dev/null` cannot be
+/// polled), standing in for a socket whose registration fails.
+fn unpollable() -> OwnedFd {
+    OwnedFd::from(std::fs::File::open("/dev/null").unwrap())
+}
+
+fn peer() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
+const REGISTER_FAILED: LogEntry =
+    LogEntry::Driver(DriverLog::RegisterFailed { errno: libc::EPERM });
+
+/// DRV-15: a client whose registration fails is that client's failure:
+/// the driver logs it, the core gets `Failed` after the actions of the
+/// call (here `Accepted`'s `SetInterest`), closes it, and the loop goes on.
+#[test]
+fn a_client_whose_registration_fails_is_reported_failed() {
+    let (mut driver, logs) = driver();
+    let conn = ConnId(1);
+    driver.clients.insert(conn, Client::new(unpollable()));
+    driver.next_conn = 2;
+    driver
+        .deliver(Event::Accepted { conn, peer: peer() })
+        .unwrap();
+    assert!(driver.clients.is_empty());
+    let logs: Vec<LogEntry> = logs.try_iter().collect();
+    assert_eq!(
+        logs,
+        [
+            REGISTER_FAILED,
+            LogEntry::Core(Log::Reset { conn, peer: peer() })
+        ]
+    );
+}
+
+/// DRV-15: a new socket whose registration fails is dropped before the
+/// core hears of it (its first event must be `Accepted`, DRV-01), and
+/// logged; its id is not used.
+#[test]
+fn an_accepted_socket_whose_registration_fails_is_dropped_and_logged() {
+    let (mut driver, logs) = driver();
+    driver.accepted(unpollable(), peer()).unwrap();
+    assert!(driver.clients.is_empty());
+    assert_eq!(driver.next_conn, 1);
+    assert_eq!(logs.try_iter().collect::<Vec<_>>(), [REGISTER_FAILED]);
+}
+
+/// DRV-15: an open upstream whose registration fails is closed and
+/// queued to be reported `UpstreamFailed` after the current call.
+#[test]
+fn an_open_upstream_whose_registration_fails_is_reported_failed() {
+    let (mut driver, logs) = driver();
+    let up = UpstreamId(1);
+    driver.upstreams.insert(
+        up,
+        Upstream {
+            phase: Phase::Open {
+                fd: unpollable(),
+                writes: Writes::Open,
+                eof: Eof::NotYet,
+            },
+            interest: Interest::None,
+            registered: None,
+        },
+    );
+    driver.set_upstream_interest(up, Interest::Read).unwrap();
+    assert!(matches!(driver.upstreams[&up].phase, Phase::Failed));
+    assert_eq!(driver.upstreams[&up].registered, None);
+    assert_eq!(
+        driver.broken.iter().copied().collect::<Vec<_>>(),
+        [Broken::Upstream(up, ConnError::Other)]
+    );
+    assert_eq!(logs.try_iter().collect::<Vec<_>>(), [REGISTER_FAILED]);
+}
+
+/// DRV-15 with DRV-10: a connecting upstream whose registration fails is
+/// a failed connect, answered `UpstreamFailed` as a later event.
+#[test]
+fn a_connecting_upstream_whose_registration_fails_is_a_failed_connect() {
+    let (mut driver, logs) = driver();
+    let up = UpstreamId(1);
+    driver.upstreams.insert(
+        up,
+        Upstream {
+            phase: Phase::Connecting(unpollable()),
+            interest: Interest::None,
+            registered: None,
+        },
+    );
+    driver.sync_upstream(up).unwrap();
+    assert!(matches!(
+        driver.upstreams[&up].phase,
+        Phase::Answering(Answer::Failed)
+    ));
+    assert_eq!(driver.answers.iter().copied().collect::<Vec<_>>(), [up]);
+    assert_eq!(
+        driver.take_answer(up).unwrap(),
+        Some(Event::UpstreamFailed {
+            up,
+            error: ConnError::Other
+        })
+    );
+    assert_eq!(logs.try_iter().collect::<Vec<_>>(), [REGISTER_FAILED]);
 }

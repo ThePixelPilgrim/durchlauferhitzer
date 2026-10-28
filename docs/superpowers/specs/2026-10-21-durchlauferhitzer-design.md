@@ -1505,6 +1505,15 @@ sim implements and checks it; the epoll driver is [stage 4].
   comes between two `handle` calls, and `handle` keeps working after
   them. After `abort_all` the driver exits without waiting for orphaned
   opens (it does not poll `is_drained` again).
+- **DRV-15** [stage 4] *(Owner decision 2026-10-28, O2.)* A failed
+  `epoll_ctl` for one client or upstream socket fails only that socket: the
+  driver logs it (a driver log, FR-LOG-07) and reports it as for a socket
+  error, `Failed` or `UpstreamFailed`, after the actions of the current
+  call (a pending connect is a failed connect, DRV-10; a socket accepted
+  but not yet announced is dropped, since its first event must be
+  `Accepted`, DRV-01). Only `epoll_wait` failing, or `epoll_ctl` on the
+  loop's own descriptors (listeners, wake eventfd, signalfd), ends the
+  loop.
 
 ---
 
