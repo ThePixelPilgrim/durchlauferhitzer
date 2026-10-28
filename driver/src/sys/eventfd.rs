@@ -21,6 +21,16 @@ impl EventFd {
         Ok(EventFd { fd })
     }
 
+    /// A second descriptor for the same counter (`F_DUPFD_CLOEXEC`, through
+    /// std's `OwnedFd::try_clone`): a `notify` through either wakes an
+    /// epoll set that holds the other. The disk pool's workers get one
+    /// (R1); it counts in the descriptor budget (NFR-RES-05).
+    pub fn try_clone(&self) -> io::Result<EventFd> {
+        Ok(EventFd {
+            fd: self.fd.try_clone()?,
+        })
+    }
+
     /// Adds 1 to the counter. A counter at its maximum (`EAGAIN`) is
     /// already readable, so that is not an error.
     pub fn notify(&self) -> io::Result<()> {

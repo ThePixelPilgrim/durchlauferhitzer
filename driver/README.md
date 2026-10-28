@@ -75,7 +75,8 @@ src/
                       `open_dir_path` (O_PATH roots), `fstat` → `Stat`,
                       `readahead`, `sendfile`, `file_error` (the contract's
                       errno → `FileError` table)
-    eventfd.rs        `EventFd`: workers wake the loop (`notify`, `drain`)
+    eventfd.rs        `EventFd`: workers wake the loop (`notify`, `drain`,
+                      `try_clone` for the pool's duplicate)
     signal.rs         `SignalFd` for SIGTERM / SIGINT / SIGPIPE (blocked with
                       `pthread_sigmask` first)
     user.rs           `lookup_user` (getpwnam_r), `drop_to`, `euid`

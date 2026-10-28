@@ -492,6 +492,23 @@ fn eventfd_notify_from_another_thread() {
     assert_eq!(wake.drain().unwrap(), 1);
 }
 
+/// R1: the disk pool gets a duplicate of the loop's wake eventfd. Both
+/// descriptors name one counter: a notify through the clone wakes an
+/// epoll set that holds the original, and the original drains it.
+#[test]
+fn an_eventfd_clone_shares_the_counter() {
+    let wake = EventFd::new().unwrap();
+    let clone = wake.try_clone().unwrap();
+    assert_ne!(wake.as_fd().as_raw_fd(), clone.as_fd().as_raw_fd());
+    let epoll = Epoll::new().unwrap();
+    epoll.add(wake.as_fd(), 7, Readiness::Read).unwrap();
+    thread::spawn(move || clone.notify().unwrap())
+        .join()
+        .unwrap();
+    assert_eq!(wait_one(&epoll).token(), 7);
+    assert_eq!(wake.drain().unwrap(), 1);
+}
+
 // ---- user and limits ---------------------------------------------------
 
 #[test]
