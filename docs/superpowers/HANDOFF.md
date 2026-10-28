@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-27, after stage 4 Task 4 landed on `main`.
+Last updated 2026-10-28, after stage 4 Task 5 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -10,7 +10,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 1 Foundations | done (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
 | 3 Reverse proxy | done (`576a77c..b583d96` + this handoff) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
-| 4 epoll driver + binary | **in progress** — plan `docs/superpowers/plans/2026-10-27-stage-4-epoll-driver.md` (owner-approved, amendments A1–A11). Task 1 ✅ (config bounds, memory budget, `disk_threads`, `shutdown_timeout`, `memory_limit`); Task 2 ✅ (core: `Date`, drain/abort API, FR-LOG-07 fields); Task 3 ✅ (sim late-timer mode, `TimerOrder`); Task 4 ✅ (`driver` crate, package `durchlauferhitzer`, safe `sys` wrappers; `libc` only); **next: Task 5** (event loop for clients and upstreams) |
+| 4 epoll driver + binary | **in progress** — plan `docs/superpowers/plans/2026-10-27-stage-4-epoll-driver.md` (owner-approved, amendments A1–A11). Task 1 ✅ (config bounds, memory budget, `disk_threads`, `shutdown_timeout`, `memory_limit`); Task 2 ✅ (core: `Date`, drain/abort API, FR-LOG-07 fields); Task 3 ✅ (sim late-timer mode, `TimerOrder`); Task 4 ✅ (`driver` crate, package `durchlauferhitzer`, safe `sys` wrappers; `libc` only); Task 5 ✅ (epoll event loop for clients and upstreams; `Driver::run -> Exit`, `StopHandle`); **next: Task 6** (disk worker pool and `sendfile`) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -28,7 +28,9 @@ The stage 3 review record lists every owner decision, every ruling taken on the 
 - IPv6 listeners always set `IPV6_V6ONLY` (owner, 2026-10-27; FR-CFG-10 note, A6). This container boots with IPv6 disabled: the IPv6 tests skip here and are required in CI (`DURCHLAUFERHITZER_REQUIRE_IPV6=1`).
 - Lints: one workspace table (`unsafe_code = "deny"`, `undocumented_unsafe_blocks`, `multiple_unsafe_ops_per_block`); core, sim and the driver's `main.rs` forbid unsafe at their roots; `unsafe` only in `driver/src/sys/`.
 - Deps check (NFR-MAINT-04 done): workspace crates by path, all targets, allow-listed names only from the registry; offline self-test `scripts/test-check-product-deps.sh` runs in CI.
-- Carry to Task 5: `accept_nonblocking` errors ECONNABORTED/EPROTO/EPERM are transient; EMFILE/ENFILE go to `DriverLog`. Carry to Task 8: the A11 probe opens `/` with `O_PATH` when no root is configured; `SignalFd::new` before worker threads spawn; `drop_to` tested in a subprocess.
+- Accept pause (owner, 2026-10-28; DRV-16): any non-transient accept failure pauses all listeners until the driver closes any descriptor or 1 s passes; at most one log line per second.
+- Per-socket `epoll_ctl` failure (owner, 2026-10-28; DRV-15): fails only that socket (`Failed`/`UpstreamFailed` + `DriverLog::RegisterFailed`); only `epoll_wait` or the loop's own descriptors end `run`.
+- Carry to Task 6: the pool gets the loop's wake eventfd via `EventFd::try_clone` (std `OwnedFd::try_clone`, no new unsafe; one descriptor in the NFR-RES-05 budget); drop `Driver::new`'s "static roots need a pool" guard once the pool exists; the sim checks only `Read` (not `Write`) with an empty buffer for clients — relevant once `send_file` is driven. Task 8's process exit enum is `ExitStatus` (plan amended, e40c7e3). Carry to Task 8: the A11 probe opens `/` with `O_PATH` when no root is configured; `SignalFd::new` before worker threads spawn; `drop_to` tested in a subprocess.
 - Process notes: the `Date` sim tests (Task 2, 66a8f77) and the first late-timer tests (Task 3, ddc859f) were written after the code; their teeth were shown by mutation.
 - Open owner questions: should the pre-commit gate in CLAUDE.md also run `scripts/test-check-product-deps.sh` (CI runs it)? Add `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` to the gate? (A private doc link from Task 1 slipped through; fixed in 1c8257f.)
 
