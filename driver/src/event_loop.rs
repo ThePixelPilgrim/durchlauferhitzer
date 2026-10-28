@@ -34,7 +34,7 @@ use durchlauferhitzer_core::{
 use self::accept::AcceptGate;
 use self::files::Files;
 use crate::conns::{Client, Token, Upstream};
-use crate::log::{LogEntry, LogSink};
+use crate::log::{Buffered, LogEntry, LogSink};
 use crate::pool::Pool;
 use crate::sys::epoll::{Epoll, EpollEvent, Readiness};
 use crate::sys::eventfd::EventFd;
@@ -81,6 +81,15 @@ struct Wake {
 enum Broken {
     Client(ConnId, ConnError),
     Upstream(UpstreamId, ConnError),
+}
+
+/// Whether the loop waits for the log descriptor to become writable
+/// (FR-LOG-06): only while the sink holds bytes, so an idle loop is never
+/// woken by an always-writable stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogWait {
+    Idle,
+    Writable,
 }
 
 /// A file request the driver answers `FileFailed { Other }` itself, after
@@ -148,6 +157,7 @@ pub struct Driver {
     /// from the core).
     file_failures: VecDeque<FileFailure>,
     log: LogSink,
+    log_wait: LogWait,
     clients: BTreeMap<ConnId, Client>,
     upstreams: BTreeMap<UpstreamId, Upstream>,
     /// Upstreams whose connect outcome waits to be delivered.
@@ -223,6 +233,7 @@ impl Driver {
             files: Files::new(),
             file_failures: VecDeque::new(),
             log,
+            log_wait: LogWait::Idle,
             clients: BTreeMap::new(),
             upstreams: BTreeMap::new(),
             answers: VecDeque::new(),
@@ -262,6 +273,7 @@ impl Driver {
             if self.wake.stop.load(Ordering::SeqCst) {
                 return Ok(Exit::Stopped);
             }
+            self.sync_log();
             let timeout = self.timeout();
             let n = self.epoll.wait(&mut events, timeout)?;
             for event in events.iter().take(n) {
@@ -323,6 +335,40 @@ impl Driver {
             }
             // Not registered before Task 9.
             Token::Signal => Ok(()),
+            // Writable, or an error the next write reports (FR-LOG-06).
+            Token::Log => {
+                self.log.flush();
+                Ok(())
+            }
+        }
+    }
+
+    /// Registers the log descriptor for writability while the sink holds
+    /// bytes, and takes it out of the set once it holds none (FR-LOG-06).
+    /// The log never ends the loop: if the registration fails (`EPERM`
+    /// for a descriptor the kernel cannot poll, such as a regular file or
+    /// `/dev/null`, whose writes never return `EAGAIN` anyway; `ENOMEM`,
+    /// `ENOSPC`), the bytes wait for the next entry's write and the
+    /// registration is tried again next turn. A failed removal leaves
+    /// nothing registered that the loop knows of (`ENOENT`), so it counts
+    /// as done.
+    fn sync_log(&mut self) {
+        let Some(fd) = self.log.out_fd() else {
+            return;
+        };
+        match (self.log.buffered(), self.log_wait) {
+            (Buffered::Bytes, LogWait::Idle) => {
+                let added =
+                    token(Token::Log).and_then(|token| self.epoll.add(fd, token, Readiness::Write));
+                if added.is_ok() {
+                    self.log_wait = LogWait::Writable;
+                }
+            }
+            (Buffered::Nothing, LogWait::Writable) => {
+                let _ = self.epoll.delete(fd);
+                self.log_wait = LogWait::Idle;
+            }
+            (Buffered::Bytes, LogWait::Writable) | (Buffered::Nothing, LogWait::Idle) => {}
         }
     }
 

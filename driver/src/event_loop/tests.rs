@@ -17,7 +17,7 @@ use super::accept::Accepting;
 use super::upstreams::{WriteMode, write_mode};
 use super::{Broken, Driver, FileFailure};
 use crate::conns::{Answer, Client, Eof, Phase, Token, Upstream, Writes};
-use crate::log::{DriverLog, LogEntry, LogSink};
+use crate::log::{Buffered, DriverLog, LogEntry, LogSink};
 use crate::pool::JobResult;
 use crate::sys::epoll::{EpollEvent, Readiness};
 
@@ -480,6 +480,71 @@ fn a_broken_client_leaves_the_epoll_set() {
         1
     );
     driver.break_client(conn, &io::Error::from_raw_os_error(libc::ENOMEM));
+    assert_eq!(
+        driver
+            .epoll
+            .wait(&mut events, Some(Duration::ZERO))
+            .unwrap(),
+        0
+    );
+}
+
+/// R4 (FR-LOG-06): the loop waits for the log descriptor to become
+/// writable exactly while the sink holds bytes, so a backed-up log is
+/// written as soon as the reader catches up, and an idle loop never wakes
+/// for an always-writable descriptor (no spin).
+#[test]
+fn the_log_descriptor_is_waited_for_only_while_bytes_are_buffered() {
+    let (reader, writer) = crate::sys::fd::pipe().unwrap();
+    let flags = crate::sys::fd::status_flags(reader.as_fd()).unwrap();
+    crate::sys::fd::set_status_flags(
+        reader.as_fd(),
+        flags.with(crate::sys::fd::Blocking::NonBlocking),
+    )
+    .unwrap();
+    let mut log = LogSink::fd(writer).unwrap();
+    let mut conn = 0;
+    while log.buffered() == Buffered::Nothing {
+        conn += 1;
+        log.write(LogEntry::Core(Log::Reset {
+            conn: ConnId(conn),
+            peer: peer(),
+        }));
+    }
+    let core = Core::new(load(STATIC_LESS).unwrap());
+    let mut driver = Driver::new(core, Vec::new(), Vec::new(), 0, log).unwrap();
+    let mut events = [EpollEvent::EMPTY; 4];
+
+    // Bytes wait, the pipe is full: registered, not ready.
+    driver.sync_log();
+    assert_eq!(
+        driver
+            .epoll
+            .wait(&mut events, Some(Duration::ZERO))
+            .unwrap(),
+        0
+    );
+
+    // The reader catches up: the loop is woken for the log and writes it,
+    // until nothing is left.
+    let mut buf = vec![0u8; 1 << 16];
+    let drain = |buf: &mut [u8]| {
+        while let crate::sys::fd::Io::Done(_) = crate::sys::socket::read(reader.as_fd(), buf) {}
+    };
+    while driver.log.buffered() == Buffered::Bytes {
+        drain(&mut buf);
+        let n = driver
+            .epoll
+            .wait(&mut events, Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(Token::decode(events[0].token()), Some(Token::Log));
+        driver.handle_ready(&events[0]).unwrap();
+        driver.sync_log();
+    }
+    drain(&mut buf);
+
+    // Nothing buffered: the always-writable pipe is not waited for.
     assert_eq!(
         driver
             .epoll

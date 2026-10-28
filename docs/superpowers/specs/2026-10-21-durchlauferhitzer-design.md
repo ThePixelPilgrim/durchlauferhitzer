@@ -1077,7 +1077,21 @@ Failures, persistence, timeouts:
     reason=http.bad_header_value method=GET path="/a\x20b"` (one line).
 - **FR-LOG-06** [stage 4] Logging never blocks: if stderr is backed up,
   entries are dropped and counted, and the count is logged once output
-  catches up.
+  catches up. *(Stage 4 Task 7:)* stderr's file description is set to
+  `O_NONBLOCK`; its original flags are put back when the sink is dropped
+  (best effort; the description may be shared with the parent's
+  terminal). Each entry is written at once as far as stderr takes it;
+  the rest waits in a 64 KiB buffer, written in order whenever the loop
+  sees stderr writable (it waits for that only while bytes wait, so an
+  idle loop never wakes for it). A new entry that does not fit is dropped
+  whole and counted; an entry written in part is always completed, so a
+  line is never cut. As soon as the buffer has room for it, before any
+  newer entry, one `kind=dropped count=N` line reports the count. A hard
+  write error (`EPIPE`, `EIO`) loses what is buffered (counted the same
+  way). If stderr cannot be polled (a regular file or `/dev/null`, whose
+  writes never wait), waiting bytes go out with the next entry. Lines
+  still buffered when the sink is dropped get one last non-blocking
+  write.
 - **FR-LOG-07** [core half done; the driver half: stage 4] `Rejected` for
   a parse error after the request line carries the method and path. The
   driver logs `EMFILE`/`ENFILE` and driver-bug closes distinctly. (Stage 4

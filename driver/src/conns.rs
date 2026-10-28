@@ -27,6 +27,9 @@ pub(crate) enum Token {
     Wake,
     /// The signalfd (Task 9).
     Signal,
+    /// The log sink's descriptor (stderr), registered for writability
+    /// only while the sink holds bytes (FR-LOG-06).
+    Log,
 }
 
 /// Bits of a token that hold its kind.
@@ -39,6 +42,7 @@ const CLIENT: u64 = 1;
 const UPSTREAM: u64 = 2;
 const WAKE: u64 = 3;
 const SIGNAL: u64 = 4;
+const LOG: u64 = 5;
 
 impl Token {
     /// The token as epoll stores it; `None` for an id above [`MAX_ID`]
@@ -50,6 +54,7 @@ impl Token {
             Token::Upstream(UpstreamId(id)) => (UPSTREAM, id),
             Token::Wake => (WAKE, 0),
             Token::Signal => (SIGNAL, 0),
+            Token::Log => (LOG, 0),
         };
         (id <= MAX_ID).then_some((id << TAG_BITS) | tag)
     }
@@ -64,6 +69,7 @@ impl Token {
             UPSTREAM => Some(Token::Upstream(UpstreamId(id))),
             WAKE if id == 0 => Some(Token::Wake),
             SIGNAL if id == 0 => Some(Token::Signal),
+            LOG if id == 0 => Some(Token::Log),
             _ => None,
         }
     }
@@ -368,6 +374,7 @@ mod tests {
             Token::Upstream(UpstreamId(MAX_ID)),
             Token::Wake,
             Token::Signal,
+            Token::Log,
         ];
         for token in tokens {
             let raw = token.encode().unwrap();

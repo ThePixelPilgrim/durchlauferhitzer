@@ -34,7 +34,8 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 src/
   lib.rs            crate root: lint rules, the Linux and 64-bit checks,
                     the modules, re-exports (`Driver`, `Exit`,
-                    `StopHandle`, `LogSink`, `LogEntry`, `DriverLog`)
+                    `StopHandle`, `LogSink`, `Buffered`, `LogEntry`,
+                    `DriverLog`)
   main.rs           the binary (a usage stub until the CLI, Task 8)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
                     `next_deadline`, dispatch, `TimerFired`), `deliver`
@@ -56,12 +57,18 @@ src/
     tests.rs          unit tests of the loop's decisions on a driver that
                       is built but not run
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
-                    Signal` in a `u64`), the per-client and per-upstream
+                    Signal | Log` in a `u64`), the per-client and per-upstream
                     records and the registration each wants
-  log.rs            `LogSink` (a channel sink for tests), `LogEntry`,
+  log.rs            `LogSink` (`stderr()`, `fd(OwnedFd)`, `channel()` for
+                    tests; `write`, `flush`, `buffered` → `Buffered`):
+                    O_NONBLOCK with the original flags put back on drop,
+                    whole lines, never blocking (FR-LOG-06); `LogEntry`,
                     `DriverLog` (FR-LOG-07)
     format.rs         the line format (FR-LOG-05): `format_entry`,
                       `format_driver`, the escaping
+    buffer.rs         `EntryBuffer`: 64 KiB of whole entries, drop and
+                      count when full, the `dropped` line once there is
+                      room, before newer entries
   pool.rs           `Pool` (crate-private): the disk workers (A10):
                     `start`, `submit` (`Job::Open` / `Job::Readahead`),
                     `results` (`JobResult`), `shutdown` (joins)
@@ -99,6 +106,13 @@ tests/
                     reason / failure / file error value, the escaping
                     table, a seeded property (any entry is one line with
                     no raw control byte, and parses back to its strings)
+  log_sink.rs       the sink on a pipe: O_NONBLOCK set and the flags put
+                    back, a stalled reader (writes never block, whole
+                    entries dropped and counted, one `dropped` line), a
+                    reader that went away
+  loop_log.rs       the running loop writes a backed-up log once the
+                    reader catches up (EPOLLOUT), then idles without a
+                    spin; alone in its binary (CPU time is process-wide)
   loop_static_less.rs  the event loop on loopback, no static roots: fixed
                     responses, keep-alive, lingering close, a proxied
                     exchange, an early 413 then a reset (I1), a client
@@ -229,6 +243,14 @@ leaves a choice, this is what the loop does:
   that wanted them has ended); dropping the pool does the same. A worker
   blocked in the kernel (a hung disk) blocks the join; the bounded wait
   at exit is Task 9's.
+- **Logging** (FR-LOG-05/06, DRV-12). Every core `Log` and every
+  `DriverLog` goes to the `LogSink` as one `key=value` line. The sink
+  writes at once as far as the descriptor takes it and keeps the rest
+  (whole entries, 64 KiB); before each wait the loop registers the
+  sink's descriptor for `EPOLLOUT` exactly while bytes wait (token
+  `Log`) and flushes on readiness. The log never ends the loop: a
+  failed registration leaves the bytes for the next entry's write and
+  is retried next turn.
 - **Failures of the loop itself** (`epoll_wait`, or `epoll_ctl` on the
   listeners or the wake eventfd) end `run` with the error; a failure of
   one socket never does.
