@@ -66,7 +66,10 @@ src/
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules
     fd.rs             `Io` (Done / WouldBlock / Closed / Err), the -1/errno
-                      checks and EINTR retries the others share
+                      checks and EINTR retries the others share; for the
+                      log sink: `write_fd` (write(2)), `status_flags` /
+                      `set_status_flags` (`StatusFlags`, `Blocking`:
+                      O_NONBLOCK), `pipe` (pipe2, O_CLOEXEC)
     epoll.rs          `Epoll` (level-triggered), `Readiness` (mirrors the
                       core's `Interest`), `EpollEvent`, `Trouble`
                       (EPOLLERR / EPOLLHUP)

@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use durchlauferhitzer::sys::epoll::{Epoll, EpollEvent, Readiness, Trouble};
 use durchlauferhitzer::sys::eventfd::EventFd;
-use durchlauferhitzer::sys::fd::Io;
+use durchlauferhitzer::sys::fd::{Blocking, Io, pipe, set_status_flags, status_flags, write_fd};
 use durchlauferhitzer::sys::file::{
     Openat2, Stat, file_error, fstat, open_dir_path, openat2_beneath, openat2_supported, readahead,
     sendfile,
@@ -577,4 +577,55 @@ fn raise_nofile_lifts_the_soft_limit_to_the_hard_limit() {
     // Raising the soft limit up to the hard limit needs no privilege.
     raise_nofile(hard).unwrap();
     assert_eq!(nofile().unwrap(), (hard, hard));
+}
+
+// ---- pipes and status flags (the log sink, FR-LOG-06) -----------------
+
+#[test]
+fn a_pipe_carries_bytes_and_starts_blocking() {
+    let (reader, writer) = pipe().unwrap();
+    assert_eq!(
+        status_flags(writer.as_fd()).unwrap().mode(),
+        Blocking::Blocking
+    );
+    assert!(matches!(write_fd(writer.as_fd(), b"abc"), Io::Done(3)));
+    let mut buf = [0u8; 8];
+    assert!(matches!(read(reader.as_fd(), &mut buf), Io::Done(3)));
+    assert_eq!(&buf[..3], b"abc");
+    assert!(matches!(write_fd(writer.as_fd(), &[]), Io::Done(0)));
+}
+
+#[test]
+fn status_flags_switch_non_blocking_and_back() {
+    let (_reader, writer) = pipe().unwrap();
+    let original = status_flags(writer.as_fd()).unwrap();
+    set_status_flags(writer.as_fd(), original.with(Blocking::NonBlocking)).unwrap();
+    assert_eq!(
+        status_flags(writer.as_fd()).unwrap().mode(),
+        Blocking::NonBlocking
+    );
+    // A full pipe: the write would block.
+    let chunk = [b'x'; 4096];
+    let mut outcome = Io::Done(0);
+    for _ in 0..10_000 {
+        outcome = write_fd(writer.as_fd(), &chunk);
+        if !matches!(outcome, Io::Done(_)) {
+            break;
+        }
+    }
+    assert!(matches!(outcome, Io::WouldBlock), "{outcome:?}");
+    set_status_flags(writer.as_fd(), original).unwrap();
+    assert_eq!(status_flags(writer.as_fd()).unwrap(), original);
+    assert_eq!(original.mode(), Blocking::Blocking);
+}
+
+#[test]
+fn writing_to_a_pipe_without_reader_is_broken_pipe() {
+    // The test harness, like any Rust binary, ignores SIGPIPE.
+    let (reader, writer) = pipe().unwrap();
+    drop(reader);
+    match write_fd(writer.as_fd(), b"x") {
+        Io::Err(err) => assert_eq!(err.raw_os_error(), Some(libc::EPIPE)),
+        other @ (Io::Done(_) | Io::WouldBlock | Io::Closed) => panic!("{other:?}"),
+    }
 }
