@@ -83,6 +83,18 @@ enum Broken {
     Upstream(UpstreamId, ConnError),
 }
 
+/// A file request the driver answers `FileFailed { Other }` itself, after
+/// the actions of the current call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileFailure {
+    /// An `OpenFile`: always answered, since the core never closes a file
+    /// whose open is unanswered.
+    Open(FileId),
+    /// A `Readahead`: answered only while the file is still open; after
+    /// `CloseFile` nothing is delivered for it (DRV-09).
+    Read(FileId),
+}
+
 /// The time sources: the monotonic clock as the core's [`Instant`] (DRV-06)
 /// and the wall-clock second for `Date` (DRV-13).
 #[derive(Debug)]
@@ -130,9 +142,11 @@ pub struct Driver {
     pool: Option<Pool>,
     /// Every file id between its `OpenFile` and its `CloseFile`.
     files: Files,
-    /// Opens answered `FileFailed { Other }` after the current call, for
-    /// a root or pool the driver does not have (never, past `new`).
-    file_failures: VecDeque<FileId>,
+    /// File requests answered `FileFailed { Other }` after the current
+    /// call: an open for a root or pool the driver does not have (never,
+    /// past `new`), or a second readahead while one is in flight (never,
+    /// from the core).
+    file_failures: VecDeque<FileFailure>,
     log: LogSink,
     clients: BTreeMap<ConnId, Client>,
     upstreams: BTreeMap<UpstreamId, Upstream>,
@@ -333,14 +347,26 @@ impl Driver {
                 if let Some(failed) = self.broken_event(broken) {
                     self.call(failed)?;
                 }
-            } else if let Some(file) = self.file_failures.pop_front() {
-                self.call(Event::FileFailed {
-                    file,
-                    error: FileError::Other,
-                })?;
+            } else if let Some(failure) = self.file_failures.pop_front() {
+                if let Some(failed) = self.failure_event(failure) {
+                    self.call(failed)?;
+                }
             } else {
                 return Ok(());
             }
+        }
+    }
+
+    /// The answer to a file request the driver failed itself, unless the
+    /// file was closed meanwhile (a `Read` after `CloseFile`, DRV-09).
+    fn failure_event(&self, failure: FileFailure) -> Option<Event> {
+        let failed = |file| Event::FileFailed {
+            file,
+            error: FileError::Other,
+        };
+        match failure {
+            FileFailure::Open(file) => Some(failed(file)),
+            FileFailure::Read(file) => self.files.fd(file).is_some().then(|| failed(file)),
         }
     }
 

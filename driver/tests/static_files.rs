@@ -336,6 +336,7 @@ fn an_empty_file_is_200_with_no_body() {
 /// `sendfile` test at 5 GiB in `tests/sys.rs`).
 #[test]
 fn a_file_over_4_gib_reports_its_size_and_starts_sending() {
+    // Assumes the temp filesystem supports sparse files (ext4, tmpfs).
     let tree = Tree::new();
     let path = tree.file("huge.bin", b"start");
     let size: u64 = 5 * 1024 * 1024 * 1024 + 7;

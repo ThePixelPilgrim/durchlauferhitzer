@@ -9,11 +9,13 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use durchlauferhitzer_core::config::load;
-use durchlauferhitzer_core::{ConnError, ConnId, Core, Event, FileId, Interest, Log, UpstreamId};
+use durchlauferhitzer_core::{
+    ConnError, ConnId, Core, Event, FileError, FileId, Interest, Log, UpstreamId,
+};
 
 use super::accept::Accepting;
 use super::upstreams::{WriteMode, write_mode};
-use super::{Broken, Driver};
+use super::{Broken, Driver, FileFailure};
 use crate::conns::{Answer, Client, Eof, Phase, Token, Upstream, Writes};
 use crate::log::{DriverLog, LogEntry, LogSink};
 use crate::pool::JobResult;
@@ -97,6 +99,9 @@ fn run_shuts_the_pool_down_when_it_ends() {
 /// first is in flight is not dropped in silence (the connection would wait
 /// for an answer that never comes) but answered `FileFailed { Other }`
 /// after the current call, through the queue of failed file requests.
+/// I1 (round 2): a `CloseFile` performed before that answer is delivered
+/// (later in the same call, or in an earlier queued event's call) wins:
+/// after `CloseFile` nothing is delivered for the file.
 #[test]
 fn a_second_readahead_in_flight_is_answered_failed() {
     let (mut driver, _logs) = static_driver();
@@ -109,8 +114,43 @@ fn a_second_readahead_in_flight_is_answered_failed() {
     driver.readahead(file, 5, 5);
     assert_eq!(
         driver.file_failures.iter().copied().collect::<Vec<_>>(),
-        [file]
+        [FileFailure::Read(file)]
     );
+    let failed = Event::FileFailed {
+        file,
+        error: FileError::Other,
+    };
+    assert_eq!(driver.failure_event(FileFailure::Read(file)), Some(failed));
+    driver.close_file(file).unwrap();
+    assert_eq!(driver.failure_event(FileFailure::Read(file)), None);
+    // An open's answer is due whatever happened since: the core never
+    // closes a file whose open is unanswered.
+    let other = FileId(2);
+    assert_eq!(
+        driver.failure_event(FileFailure::Open(other)),
+        Some(Event::FileFailed {
+            file: other,
+            error: FileError::Other
+        })
+    );
+}
+
+/// m1 (round 2): without a pool (unreachable past `new`) a `Readahead`
+/// marks nothing in flight, so a later `CloseFile` closes the file at once
+/// instead of parking it in `Closing` forever.
+#[test]
+fn a_readahead_without_a_pool_leaves_the_file_idle() {
+    let (mut driver, _logs) = driver();
+    let file = FileId(1);
+    driver.files.opening(file);
+    let null = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+    driver.files.opened(file, null);
+    driver.readahead(file, 0, 5);
+    assert_eq!(
+        driver.file_failures.iter().copied().collect::<Vec<_>>(),
+        [FileFailure::Read(file)]
+    );
+    assert_eq!(driver.files.close(file), super::files::Freed::Descriptor);
 }
 
 /// `EMFILE`/`ENFILE` from an open are logged by the driver (the budget

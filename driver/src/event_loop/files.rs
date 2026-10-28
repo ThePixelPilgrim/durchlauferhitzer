@@ -13,7 +13,7 @@ use durchlauferhitzer_core::{
     ConnError, ConnId, Event, FileError, FileId, FileMeta, FileStamp, RootId,
 };
 
-use super::Driver;
+use super::{Driver, FileFailure};
 use crate::log::{DriverLog, LogEntry};
 use crate::pool::{Job, JobResult};
 use crate::sys::fd::Io;
@@ -259,7 +259,7 @@ impl Driver {
                     segments: path,
                 });
             }
-            (None, _) | (_, None) => self.file_failures.push_back(file),
+            (None, _) | (_, None) => self.file_failures.push_back(FileFailure::Open(file)),
         }
     }
 
@@ -268,18 +268,20 @@ impl Driver {
     /// `FileFailed { Other }` after the current call; one for a file that
     /// is not open is ignored (after `CloseFile` nothing may be delivered).
     pub(super) fn readahead(&mut self, file: FileId, offset: u64, len: u64) {
+        // An open file means the pool opened it; without one, nothing is
+        // marked in flight, so the file's state stays consistent.
+        let Some(pool) = &self.pool else {
+            self.file_failures.push_back(FileFailure::Read(file));
+            return;
+        };
         match self.files.start_read(file) {
-            StartRead::Started(fd) => match &self.pool {
-                Some(pool) => pool.submit(Job::Readahead {
-                    file,
-                    fd,
-                    offset,
-                    len,
-                }),
-                // An open file means the pool opened it.
-                None => self.file_failures.push_back(file),
-            },
-            StartRead::Busy => self.file_failures.push_back(file),
+            StartRead::Started(fd) => pool.submit(Job::Readahead {
+                file,
+                fd,
+                offset,
+                len,
+            }),
+            StartRead::Busy => self.file_failures.push_back(FileFailure::Read(file)),
             StartRead::NotOpen => {}
         }
     }

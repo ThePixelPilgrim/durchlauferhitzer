@@ -199,7 +199,8 @@ leaves a choice, this is what the loop does:
   result arrives, which is then dropped (no event). Closing a file
   resumes paused listeners (DRV-16). One readahead per file at a time,
   as the core asks: a second one while one is in flight is answered
-  `FileFailed { Other }` after the current call, a `Readahead` for a file
+  `FileFailed { Other }` after the current call, unless a `CloseFile`
+  came first (then nothing is delivered), a `Readahead` for a file
   that is not open is ignored (after `CloseFile` nothing may be
   delivered for it), and a `CloseFile` before the open's answer (the core never
   sends one) drops that answer and its descriptor.

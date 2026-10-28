@@ -464,6 +464,7 @@ fn sendfile_delivers_the_exact_bytes_then_reports_end_of_file() {
 /// written there, not bytes at the offset modulo 2^32.
 #[test]
 fn readahead_and_sendfile_work_past_4_gib() {
+    // Assumes the temp filesystem supports sparse files (ext4, tmpfs).
     use std::os::unix::fs::FileExt;
     let tmp = TempDir::new();
     let at: u64 = 5 * 1024 * 1024 * 1024;
