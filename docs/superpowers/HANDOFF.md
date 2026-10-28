@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-28, after stage 4 Task 5 landed on `main`.
+Last updated 2026-10-28, after stage 4 Task 6 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -10,7 +10,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 1 Foundations | done (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
 | 3 Reverse proxy | done (`576a77c..b583d96` + this handoff) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
-| 4 epoll driver + binary | **in progress** — plan `docs/superpowers/plans/2026-10-27-stage-4-epoll-driver.md` (owner-approved, amendments A1–A11). Task 1 ✅ (config bounds, memory budget, `disk_threads`, `shutdown_timeout`, `memory_limit`); Task 2 ✅ (core: `Date`, drain/abort API, FR-LOG-07 fields); Task 3 ✅ (sim late-timer mode, `TimerOrder`); Task 4 ✅ (`driver` crate, package `durchlauferhitzer`, safe `sys` wrappers; `libc` only); Task 5 ✅ (epoll event loop for clients and upstreams; `Driver::run -> Exit`, `StopHandle`); **next: Task 6** (disk worker pool and `sendfile`) |
+| 4 epoll driver + binary | **in progress** — plan `docs/superpowers/plans/2026-10-27-stage-4-epoll-driver.md` (owner-approved, amendments A1–A11). Task 1 ✅ (config bounds, memory budget, `disk_threads`, `shutdown_timeout`, `memory_limit`); Task 2 ✅ (core: `Date`, drain/abort API, FR-LOG-07 fields); Task 3 ✅ (sim late-timer mode, `TimerOrder`); Task 4 ✅ (`driver` crate, package `durchlauferhitzer`, safe `sys` wrappers; `libc` only); Task 5 ✅ (epoll event loop for clients and upstreams; `Driver::run -> Exit`, `StopHandle`); Task 6 ✅ (disk worker pool and `sendfile`; `Driver::new(core, listeners, roots, disk_threads, log)` starts the pool exactly when the core has static roots); **next: Task 7** (logging) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -30,7 +30,8 @@ The stage 3 review record lists every owner decision, every ruling taken on the 
 - Deps check (NFR-MAINT-04 done): workspace crates by path, all targets, allow-listed names only from the registry; offline self-test `scripts/test-check-product-deps.sh` runs in CI.
 - Accept pause (owner, 2026-10-28; DRV-16): any non-transient accept failure pauses all listeners until the driver closes any descriptor or 1 s passes; at most one log line per second.
 - Per-socket `epoll_ctl` failure (owner, 2026-10-28; DRV-15): fails only that socket (`Failed`/`UpstreamFailed` + `DriverLog::RegisterFailed`); only `epoll_wait` or the loop's own descriptors end `run`.
-- Carry to Task 6: the pool gets the loop's wake eventfd via `EventFd::try_clone` (std `OwnedFd::try_clone`, no new unsafe; one descriptor in the NFR-RES-05 budget); drop `Driver::new`'s "static roots need a pool" guard once the pool exists; the sim checks only `Read` (not `Write`) with an empty buffer for clients — relevant once `send_file` is driven. Task 8's process exit enum is `ExitStatus` (plan amended, e40c7e3). Carry to Task 8: the A11 probe opens `/` with `O_PATH` when no root is configured; `SignalFd::new` before worker threads spawn; `drop_to` tested in a subprocess.
+- Disk pool (Task 6): workers get the loop's wake eventfd as a duplicate (`EventFd::try_clone`); every job gets one result; a file closed during a readahead keeps its descriptor until the worker returns; a `CloseFile` that comes first wins over any queued `FileFailed`. The sim now also rejects a client `Write` interest with nothing to send. On loopback `sendfile` never returns `EAGAIN` or short counts, so that mapping is pinned by unit tests only.
+- Task 8's process exit enum is `ExitStatus` (plan amended, e40c7e3). Carry to Task 8: pass `limits.disk_threads`; count the pool's one wake duplicate in the NFR-RES-05 descriptor budget; `SignalFd::new` before `Driver::new` (it spawns the workers); the A11 probe opens `/` with `O_PATH` when no root is configured; `drop_to` tested in a subprocess. Carry to Task 9: `Pool::shutdown` joins without a time limit — build the plan's bounded wait (1 s, then detach).
 - Process notes: the `Date` sim tests (Task 2, 66a8f77) and the first late-timer tests (Task 3, ddc859f) were written after the code; their teeth were shown by mutation.
 - Gate (owner, 2026-10-28): the docs build with warnings as errors is part of the pre-commit gate and CI; the deps self-test runs in CI only, and green CI is enough.
 
