@@ -15,13 +15,29 @@ use crate::sys::fd::Io;
 use crate::sys::socket::{ConnectStart, connect_nonblocking, read, set_nodelay, take_error, write};
 
 /// Whether a failed write is reported at once or left to the reads.
-#[derive(Clone, Copy)]
-enum WriteMode {
-    /// Interest `Write`: a failed write is reported at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WriteMode {
+    /// Interest `Write`, or `ReadWrite` after the end of stream: a failed
+    /// write is reported at once.
     Alone,
-    /// Interest `ReadWrite`: the driver stops writing and goes on reading;
-    /// the reads report the error after the readable bytes.
+    /// Interest `ReadWrite` before the end of stream: the driver stops
+    /// writing and goes on reading; the reads report the error after the
+    /// readable bytes.
     WithReads,
+}
+
+/// How an open upstream writes now: `None` when it does not write at all.
+/// Under `ReadWrite` a failed write is left to the reads, unless the end
+/// of stream was already delivered: no read follows then, so the write
+/// reports its error at once.
+pub(super) fn write_mode(interest: Interest, writes: Writes, eof: Eof) -> Option<WriteMode> {
+    match (interest, writes, eof) {
+        (Interest::Write, _, _) | (Interest::ReadWrite, Writes::Open, Eof::Delivered) => {
+            Some(WriteMode::Alone)
+        }
+        (Interest::ReadWrite, Writes::Open, Eof::NotYet) => Some(WriteMode::WithReads),
+        (Interest::ReadWrite, Writes::Failed, _) | (Interest::None | Interest::Read, _, _) => None,
+    }
 }
 
 impl Driver {
@@ -238,15 +254,11 @@ impl Driver {
             let Some(upstream) = self.upstreams.get(&up) else {
                 return Ok(());
             };
-            let Phase::Open { fd, writes, .. } = &upstream.phase else {
+            let Phase::Open { fd, writes, eof } = &upstream.phase else {
                 return Ok(());
             };
-            let mode = match (upstream.interest, writes) {
-                (Interest::Write, _) => WriteMode::Alone,
-                (Interest::ReadWrite, Writes::Open) => WriteMode::WithReads,
-                (Interest::ReadWrite, Writes::Failed) | (Interest::None | Interest::Read, _) => {
-                    return Ok(());
-                }
+            let Some(mode) = write_mode(upstream.interest, *writes, *eof) else {
+                return Ok(());
             };
             let buf = self.core.upstream_send_buffer(up);
             if buf.is_empty() {
