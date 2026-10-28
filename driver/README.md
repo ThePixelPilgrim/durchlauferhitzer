@@ -40,6 +40,9 @@ src/
   process.rs        the command line (FR-PROC-01: serve, `--check`, the
                     usage), the exit codes (`ExitStatus`, FR-PROC-05a),
                     the startup sequence (A11)
+    privileges.rs     A8: `check_ports` (below 1024 needs root without
+                      systemd), `drop_privileges` (root needs `user` and
+                      drops to it; non-root keeps, logged)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
                     `next_deadline`, dispatch, `TimerFired`), `deliver`
                     (one `handle` call, its actions in order, then the
@@ -66,7 +69,7 @@ src/
                     tests; `write`, `flush`, `buffered` → `Buffered`):
                     O_NONBLOCK with the original mode put back on drop,
                     one stderr sink at a time, whole lines, never blocking (FR-LOG-06); `LogEntry`,
-                    `DriverLog` (FR-LOG-07)
+                    `DriverLog` (FR-LOG-07), `KeptReason`
     format.rs         the line format (FR-LOG-05): `format_entry` (a
                       backend by its address in `Core::backends`),
                       `format_driver`, the escaping
@@ -127,6 +130,12 @@ tests/
                     address not configured, a configured address without a
                     socket, a foreign `LISTEN_PID`, a file and a connected
                     socket are exit 2
+  privileges.rs     A8 in the binary: as non-root `user` is kept and
+                    logged, a port below 1024 is exit 2; as root (else
+                    skipped with a printed reason) no `user` and an unknown
+                    user are exit 2, `user nobody` drops every id
+                    (`drop_to` in the server's process) and serves, and a
+                    systemd socket below 1024 serves as nobody
   stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
                     the test binary: non-blocking while it lives, a second
                     one refused (`AlreadyExists`), the mode back after it
@@ -176,7 +185,8 @@ tests/
 `process::run` (FR-PROC-01, FR-PROC-04, A11) parses the arguments,
 loads the config, then: the `openat2` probe beneath the first root (or
 `/`), the roots (`O_PATH | O_DIRECTORY`), the listeners (systemd's,
-`systemd.rs`, or bound in config order, the first failure named), the signal mask and its `signalfd` (before
+`systemd.rs`, or bound in config order, the first failure named), the
+privilege drop (`process/privileges.rs`), the signal mask and its `signalfd` (before
 any thread, so the disk workers inherit it), the stderr log sink, then
 `Driver::new` with `limits.disk_threads` and `Driver::run`. Every
 message (the usage, `--check`'s answer, startup errors) is printed
@@ -330,8 +340,9 @@ Notes on the wrappers:
   raises a thread-directed signal (`pthread_kill` on its own thread) — a
   process-directed one could reach another test thread and kill the run.
   `drop_to` changes the whole process, so it is never called by the tests in
-  this crate's test process; it is tested in a subprocess by the CLI tests
-  (Task 8).
+  this crate's test process; it is tested in the server's own process by
+  `tests/privileges.rs` (root only: skipped with a printed reason
+  elsewhere, as on GitHub's runners).
 
 ## Commands
 

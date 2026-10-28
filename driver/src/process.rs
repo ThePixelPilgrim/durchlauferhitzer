@@ -19,11 +19,13 @@ use durchlauferhitzer_core::Core;
 use durchlauferhitzer_core::config::{Config, load};
 
 use crate::event_loop::{Driver, Exit};
-use crate::log::LogSink;
+use crate::log::{DriverLog, LogEntry, LogSink};
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
 use crate::sys::signal::{Signal, SignalFd};
 use crate::sys::socket::tcp_listen;
 use crate::systemd::{Activation, take_sockets};
+
+mod privileges;
 
 /// The usage text, printed to stderr for bad arguments (exit 1).
 const USAGE: &str =
@@ -139,24 +141,34 @@ struct Ready {
     /// In [`Core::static_roots`] order.
     roots: Vec<OwnedFd>,
     disk_threads: u32,
+    /// Driver log entries of startup, written once the sink exists.
+    notes: Vec<DriverLog>,
 }
 
 /// A11 steps 3 to 7: the `openat2` probe, the static roots, the listeners
-/// (systemd's, A7, or bound here, A6).
+/// (systemd's, A7, or bound here, A6), the privilege drop (A8).
 fn start_up(config: Config) -> Result<Ready, Failure> {
     let listen = config.listen.clone();
+    let user = config.user.clone();
     let disk_threads = config.limits.disk_threads;
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
     let listeners = match take_sockets(&listen).map_err(Failure)? {
         Activation::Sockets(sockets) => sockets,
-        Activation::None => bind(&listen)?,
+        Activation::None => {
+            privileges::check_ports(&listen)?;
+            bind(&listen)?
+        }
     };
+    let notes = privileges::drop_privileges(user.as_deref())?
+        .into_iter()
+        .collect();
     Ok(Ready {
         core,
         listeners,
         roots,
         disk_threads,
+        notes,
     })
 }
 
@@ -220,6 +232,7 @@ fn run_loop(ready: Ready) -> ExitStatus {
         listeners,
         roots,
         disk_threads,
+        notes,
     } = ready;
     // Signal handling is Task 9's; until then the signals stay blocked
     // and pending, and SIGPIPE can never kill the process.
@@ -230,13 +243,16 @@ fn run_loop(ready: Ready) -> ExitStatus {
             return ExitStatus::Startup;
         }
     };
-    let log = match LogSink::stderr() {
+    let mut log = match LogSink::stderr() {
         Ok(log) => log,
         Err(err) => {
             report(format_args!("log sink on stderr: {err}"));
             return ExitStatus::Startup;
         }
     };
+    for note in notes {
+        log.write(LogEntry::Driver(note));
+    }
     // On failure `new` has dropped the sink already.
     let mut driver = match Driver::new(core, listeners, roots, disk_threads, log) {
         Ok(driver) => driver,

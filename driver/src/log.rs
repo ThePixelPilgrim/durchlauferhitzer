@@ -68,6 +68,16 @@ pub enum DriverLog {
     RegisterFailed { errno: i32 },
     /// Entries dropped because the sink's buffer was full (FR-LOG-06).
     Dropped { count: u64 },
+    /// `user` is set but the privileges were kept (FR-PROC-03, A8),
+    /// logged once at startup.
+    PrivilegesKept { reason: KeptReason },
+}
+
+/// Why the privileges were kept although `user` is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeptReason {
+    /// The process does not run as root: there is nothing to drop.
+    NotRoot,
 }
 
 /// One entry handed to a [`LogSink`].

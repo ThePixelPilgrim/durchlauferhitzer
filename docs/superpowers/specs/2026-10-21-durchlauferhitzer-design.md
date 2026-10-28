@@ -1061,7 +1061,9 @@ Failures, persistence, timeouts:
     - `kind=backend_failed conn peer backend failure`
     - Driver kinds (FR-LOG-07): `kind=accept_failed errno`,
       `kind=socket_failed errno`, `kind=open_failed errno`,
-      `kind=register_failed errno`, `kind=dropped count` (FR-LOG-06).
+      `kind=register_failed errno`, `kind=dropped count` (FR-LOG-06),
+      `kind=privileges action reason` (FR-PROC-03: `action=kept
+      reason=not_root`, the only values so far).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
     `192.0.2.7`); `status` the three-digit code; `backend` the backend's
     address, `Core::backends[id]` as it prints (`127.0.0.1:9000`,
@@ -1126,8 +1128,11 @@ Failures, persistence, timeouts:
   FR-LOG-05. A driver-bug close has no driver kind yet: the driver has
   no path that closes a connection for a core bug (the core handles the
   driver bugs it detects itself, contract "Rules for files"); a kind is
-  added with its first producer. The startup and shutdown kinds come
-  with stage 4 Tasks 8 and 9.
+  added with its first producer. *(Stage 4 Task 8:)* the one startup
+  kind is `privileges` (privileges kept although `user` is set,
+  FR-PROC-03); startup errors are not log entries but lines printed
+  before the sink exists (FR-PROC-04). The shutdown kinds come with
+  stage 4 Task 9.
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
@@ -1164,7 +1169,18 @@ Failures, persistence, timeouts:
   claims one of its own.
 - **FR-PROC-03** [stage 4] Otherwise the process binds itself: it starts as
   root only if it needs a port below 1024, binds, then switches to `user`;
-  it refuses to keep running as root if `user` is unset.
+  it refuses to keep running as root if `user` is unset. *(Stage 4
+  amendment A8, Task 8:)* without systemd sockets, a `listen` port below
+  1024 while the effective uid is not 0 is a startup error, before
+  anything is bound (exit 2). After the roots are open and the sockets
+  bound or taken: as root (effective uid 0), `user` is required, with
+  systemd sockets too (never root after binding; exit 2 otherwise); it is
+  looked up with `getpwnam_r` (an unknown user is exit 2), and the process
+  drops to it for good with `setgroups([gid])`, `setgid`, `setuid`, then
+  checks that `setuid(0)` fails (exit 2 on any failure). As non-root
+  nothing is dropped; with `user` set, that is logged once (controller
+  ruling R5): `kind=privileges action=kept reason=not_root`
+  (FR-LOG-05).
 - **FR-PROC-04** [stage 4] At startup the driver opens every static root
   (backends are IP literals and need no resolution, FR-CFG-16), checks
   `openat2` support and the descriptor budget (NFR-RES-05), and fails
@@ -1179,15 +1195,17 @@ Failures, persistence, timeouts:
      (FR-CFG-15; exit 2 naming the root);
   5. the listeners: systemd's (FR-PROC-02), or bound in config order
      (FR-CFG-10; exit 2 naming the address);
-  6. the signal mask: SIGTERM, SIGINT and SIGPIPE are blocked and a
+  6. the privilege drop (FR-PROC-03; exit 2);
+  7. the signal mask: SIGTERM, SIGINT and SIGPIPE are blocked and a
      `signalfd` opened for them, before any other thread exists, so every
      thread inherits the mask and SIGPIPE can never kill the process (A9;
      until stage 4 Task 9 they stay blocked and are not read, so the
      server is stopped with SIGKILL);
-  7. the stderr log sink (FR-LOG-06);
-  8. the disk workers (`limits.disk_threads`, started with the driver,
+  8. the stderr log sink (FR-LOG-06), which then gets the startup's
+     driver log entries (`privileges`);
+  9. the disk workers (`limits.disk_threads`, started with the driver,
      DRV-08);
-  9. the event loop.
+  10. the event loop.
 
   Every startup error is one line on stderr, `durchlauferhitzer:
   <message>`, printed before the log sink exists (exit 2). *Builder

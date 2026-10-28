@@ -30,7 +30,7 @@ use durchlauferhitzer_core::{
     RequestLine, RequestSummary, TimeoutKind,
 };
 
-use super::DriverLog;
+use super::{DriverLog, KeptReason};
 
 /// Appends the line of a core entry to `out`, its `\n` included.
 ///
@@ -113,6 +113,14 @@ pub fn format_driver(entry: &DriverLog, out: &mut Vec<u8>) {
         DriverLog::Dropped { count } => {
             out.extend_from_slice(b"kind=dropped");
             number(out, "count", *count);
+            out.push(b'\n');
+            return;
+        }
+        DriverLog::PrivilegesKept { reason } => {
+            out.extend_from_slice(b"kind=privileges action=kept reason=");
+            out.extend_from_slice(match reason {
+                KeptReason::NotRoot => b"not_root",
+            });
             out.push(b'\n');
             return;
         }

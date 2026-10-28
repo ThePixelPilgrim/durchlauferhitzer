@@ -13,8 +13,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
-use durchlauferhitzer::DriverLog;
 use durchlauferhitzer::log::{format_driver, format_entry};
+use durchlauferhitzer::{DriverLog, KeptReason};
 use durchlauferhitzer_core::http::chunked::ChunkedError;
 use durchlauferhitzer_core::http::request::{HttpError, Method};
 use durchlauferhitzer_core::http::response_head::ResponseError;
@@ -230,6 +230,12 @@ fn driver_kinds() {
             "kind=register_failed errno=1\n",
         ),
         (DriverLog::Dropped { count: 17 }, "kind=dropped count=17\n"),
+        (
+            DriverLog::PrivilegesKept {
+                reason: KeptReason::NotRoot,
+            },
+            "kind=privileges action=kept reason=not_root\n",
+        ),
     ];
     for (entry, expected) in cases {
         assert_eq!(driver_line(&entry), expected, "{entry:?}");
