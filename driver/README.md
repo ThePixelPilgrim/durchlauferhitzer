@@ -81,9 +81,10 @@ src/
                       count when full, the `dropped` line once there is
                       room, before newer entries
   systemd.rs        socket activation (A7, crate-private): `take_sockets`
-                    reads and removes `LISTEN_PID`/`LISTEN_FDS`, claims
-                    fds 3.. and checks them against `listen`
-                    (`Activation`)
+                    reads and removes `LISTEN_PID`/`LISTEN_FDS`
+                    (`parse_env`, pure), claims fds 3.., checks each (TCP,
+                    listening, IPv6-only for IPv6: `dual_stack`, O4) and
+                    all against `listen` (`check_coverage`, pure)
   pool.rs           `Pool` (crate-private): the disk workers (A10):
                     `start`, `submit` (`Job::Open` / `Job::Readahead`),
                     `results` (`JobResult`), `shutdown` (joins)
@@ -105,7 +106,8 @@ src/
                       `accept_nonblocking`, `connect_nonblocking`
                       (`ConnectStart`), `take_error`, `set_nodelay`, `read`,
                       `write` (MSG_NOSIGNAL), `shutdown_write`, `local_addr`,
-                      `is_listening_stream`
+                      `is_listening_stream` (TCP only, `SO_PROTOCOL`),
+                      `ipv6_only` (`V6Only`)
     file.rs           `openat2_beneath` (RESOLVE_BENEATH |
                       RESOLVE_NO_SYMLINKS, `OPEN_FLAGS`), `openat2_supported`,
                       `open_dir_path` (O_PATH roots), `fstat` → `Stat`,
@@ -133,8 +135,12 @@ tests/
   systemd.rs        socket activation of the binary: a listener passed as
                     fd 3 (`sh -c` sets `LISTEN_PID=$$`) is served; an
                     address not configured, a configured address without a
-                    socket, a foreign `LISTEN_PID`, a file and a connected
-                    socket are exit 2
+                    socket, a foreign `LISTEN_PID`, a file, a connected
+                    socket and a dual-stack IPv6 socket are exit 2; an
+                    IPv6-only one is served (IPv6 cases: CI)
+  env_remove.rs     `remove_vars` removes the variables: no libtest
+                    harness (`harness = false`), since it needs a
+                    single-threaded process
   budget.rs         NFR-RES-05 in the binary with RLIMIT_NOFILE lowered
                     in the child: one short is exit 2 with both numbers,
                     exactly the budget starts and serves, a low soft limit

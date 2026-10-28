@@ -19,3 +19,10 @@ workspace = true
 [dependencies]
 durchlauferhitzer-core = { path = "../core" }
 libc = { version = "0.2.191", default-features = false }
+
+# `sys::env::remove_vars` works only while the process has one thread,
+# and libtest always runs tests on threads of their own: this test has
+# its own `main` (no harness).
+[[test]]
+name = "env_remove"
+harness = false

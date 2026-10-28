@@ -139,3 +139,68 @@ fn a_connected_socket_is_not_a_listener() {
     );
     drop(fd);
 }
+
+#[path = "support/ipv6.rs"]
+mod ipv6;
+
+/// O4: an IPv6 socket from systemd that also accepts IPv4 is exit 2. std's
+/// listener leaves `IPV6_V6ONLY` at the host default (`bindv6only`, 0
+/// on most hosts); a host defaulting to 1 cannot build the case and skips.
+#[test]
+fn a_dual_stack_ipv6_socket_is_exit_2() {
+    let Some(listener) = ipv6::or_skip(TcpListener::bind("[::1]:0")) else {
+        return;
+    };
+    let addr = listener.local_addr().unwrap();
+    let fd = OwnedFd::from(listener);
+    match durchlauferhitzer::sys::socket::ipv6_only(std::os::fd::AsFd::as_fd(&fd)).unwrap() {
+        durchlauferhitzer::sys::socket::V6Only::No => {}
+        durchlauferhitzer::sys::socket::V6Only::Yes => {
+            eprintln!("skipped: this host's IPv6 sockets are IPv6-only by default");
+            return;
+        }
+    }
+    let dir = TempDir::new();
+    let path = dir.file("dual.conf", &config(&addr.to_string(), "", PROXY_ROUTE));
+    let output = run(&[path.to_str().unwrap()], activated(fd));
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "durchlauferhitzer: systemd socket fd 3 ({addr}) also accepts IPv4: \
+             set BindIPv6Only=ipv6-only\n"
+        )
+    );
+}
+
+/// O4: an IPv6-only socket from systemd is served.
+#[test]
+fn an_ipv6_only_socket_is_served() {
+    let Some(fd) = ipv6::or_skip(durchlauferhitzer::sys::socket::tcp_listen(
+        "[::1]:0".parse().unwrap(),
+        16,
+    )) else {
+        return;
+    };
+    let addr = durchlauferhitzer::sys::socket::local_addr(std::os::fd::AsFd::as_fd(&fd)).unwrap();
+    let dir = TempDir::new();
+    let www = dir.dir("www");
+    let conf = config(&addr.to_string(), "", &format!("static {};", www.display()));
+    let path = dir.file("v6.conf", &conf);
+    let server = Running::start(&[path.to_str().unwrap()], activated(fd), addr);
+    let response = get(addr, "/missing");
+    assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
+    drop(server);
+}
+
+/// M4: is_listening_stream reads `SO_PROTOCOL`, so a listening TCP socket
+/// still counts (the SCTP case is a unit test of `classify`, since SCTP
+/// may be missing from the kernel).
+#[test]
+fn a_tcp_listener_is_a_listening_stream() {
+    let (fd, _) = listener();
+    assert_eq!(
+        durchlauferhitzer::sys::socket::is_listening_stream(std::os::fd::AsFd::as_fd(&fd)).unwrap(),
+        durchlauferhitzer::sys::socket::Listening::Yes
+    );
+}

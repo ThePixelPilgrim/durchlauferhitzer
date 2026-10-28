@@ -1155,9 +1155,13 @@ Failures, persistence, timeouts:
   root. *(Stage 4 amendment A7, Task 8:)* `LISTEN_PID` must be the
   process's pid and `LISTEN_FDS` at least 1; the descriptors start at 3
   and `LISTEN_FDNAMES` is ignored. Each must be a listening
-  `AF_INET`/`AF_INET6` stream socket (`SO_ACCEPTCONN`) bound to one of the
+  `AF_INET`/`AF_INET6` TCP socket (`SOCK_STREAM`, `SO_PROTOCOL`
+  `IPPROTO_TCP`, so no SCTP; `SO_ACCEPTCONN`) bound to one of the
   `listen` addresses, and every `listen` address must have one; otherwise
-  startup fails (exit 2). The sockets are made non-blocking; the three
+  startup fails (exit 2). An IPv6 socket must accept IPv6 only, like the
+  server's own IPv6 listeners (FR-CFG-10): one with `IPV6_V6ONLY` 0 is
+  exit 2, `systemd socket fd <n> (<address>) also accepts IPv4: set
+  BindIPv6Only=ipv6-only` (owner decision 2026-10-28, O4). The sockets are made non-blocking; the three
   variables are removed from the environment once read. Neither variable
   set means no activation (the process binds itself). *Strict activation
   environment (owner decision 2026-10-28, O2, confirming the builder

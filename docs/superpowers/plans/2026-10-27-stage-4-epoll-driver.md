@@ -70,6 +70,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   - Each one's local address must be one of the configured `listen` addresses, and every configured address must be covered, or startup fails (exit 2).
   - `LISTEN_FDNAMES` is ignored.
   - The variables are cleared after use.
+  - *Owner decision 2026-10-28 (Task 8 review, O4), written into the spec (FR-PROC-02):* an adopted `AF_INET6` socket must have `IPV6_V6ONLY` 1, else exit 2; each socket must also be `IPPROTO_TCP` (review M4).
   - *Owner decision 2026-10-28 (Task 8 review, O2), written into the spec (FR-PROC-02):* the activation environment is read strictly: one variable without the other, a non-number, a foreign `LISTEN_PID`, more sockets than addresses or two sockets on one address are exit 2.
 - **A8, privilege drop (FR-PROC-03).**
   - ~~Without systemd sockets: if any `listen` port is < 1024 and euid ≠ 0, startup fails (exit 2).~~ *Retired by owner decision 2026-10-28 (Task 8 review, O7), written into the spec (FR-PROC-03):* no up-front port check; a bind refused with `EACCES` is the startup error naming the address (A6).

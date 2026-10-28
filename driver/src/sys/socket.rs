@@ -194,8 +194,8 @@ pub fn local_addr(fd: BorrowedFd<'_>) -> io::Result<SocketAddr> {
     from_sockaddr(&storage)
 }
 
-/// Whether `fd` is a listening `AF_INET`/`AF_INET6` stream socket
-/// (`SO_DOMAIN`, `SO_TYPE`, `SO_ACCEPTCONN`). A descriptor that is not a
+/// Whether `fd` is a listening `AF_INET`/`AF_INET6` TCP socket
+/// (`SO_DOMAIN`, `SO_TYPE`, `SO_PROTOCOL`, `SO_ACCEPTCONN`). A descriptor that is not a
 /// socket at all (`ENOTSOCK`) is `No`.
 pub fn is_listening_stream(fd: BorrowedFd<'_>) -> io::Result<Listening> {
     let raw = fd.as_raw_fd();
@@ -205,12 +205,40 @@ pub fn is_listening_stream(fd: BorrowedFd<'_>) -> io::Result<Listening> {
         Err(err) => return Err(err),
     };
     let kind = get_int_option(raw, libc::SOL_SOCKET, libc::SO_TYPE)?;
+    let protocol = get_int_option(raw, libc::SOL_SOCKET, libc::SO_PROTOCOL)?;
     let accepting = get_int_option(raw, libc::SOL_SOCKET, libc::SO_ACCEPTCONN)?;
+    Ok(classify(domain, kind, protocol, accepting))
+}
+
+/// A listening TCP socket: `AF_INET`/`AF_INET6`, `SOCK_STREAM`,
+/// `IPPROTO_TCP` (an SCTP stream socket is not one) and accepting.
+fn classify(
+    domain: libc::c_int,
+    kind: libc::c_int,
+    protocol: libc::c_int,
+    accepting: libc::c_int,
+) -> Listening {
     let inet = domain == libc::AF_INET || domain == libc::AF_INET6;
-    if inet && kind == libc::SOCK_STREAM && accepting != 0 {
-        Ok(Listening::Yes)
+    if inet && kind == libc::SOCK_STREAM && protocol == libc::IPPROTO_TCP && accepting != 0 {
+        Listening::Yes
     } else {
-        Ok(Listening::No)
+        Listening::No
+    }
+}
+
+/// Whether an IPv6 socket accepts IPv6 only (`IPV6_V6ONLY`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6Only {
+    Yes,
+    /// It accepts IPv4 too (as IPv4-mapped addresses).
+    No,
+}
+
+/// Reads `IPV6_V6ONLY` of an `AF_INET6` socket.
+pub fn ipv6_only(fd: BorrowedFd<'_>) -> io::Result<V6Only> {
+    match get_int_option(fd.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_V6ONLY)? {
+        0 => Ok(V6Only::No),
+        _ => Ok(V6Only::Yes),
     }
 }
 
@@ -361,6 +389,34 @@ mod tests {
         assert_eq!(sin6.sin6_flowinfo, 0x0001_2345);
         assert_eq!(sin6.sin6_scope_id, 7);
         assert_eq!(from_sockaddr(&storage).unwrap(), addr);
+    }
+
+    #[test]
+    fn only_listening_tcp_sockets_count() {
+        use super::{Listening, classify};
+        let tcp = libc::IPPROTO_TCP;
+        let yes = [
+            (libc::AF_INET, libc::SOCK_STREAM, tcp, 1),
+            (libc::AF_INET6, libc::SOCK_STREAM, tcp, 1),
+        ];
+        for (domain, kind, protocol, accepting) in yes {
+            assert_eq!(classify(domain, kind, protocol, accepting), Listening::Yes);
+        }
+        let no = [
+            // SCTP's one-to-one style is a stream socket too (M4).
+            (libc::AF_INET, libc::SOCK_STREAM, libc::IPPROTO_SCTP, 1),
+            (libc::AF_INET6, libc::SOCK_STREAM, libc::IPPROTO_SCTP, 1),
+            (libc::AF_INET, libc::SOCK_STREAM, tcp, 0),
+            (libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_UDP, 0),
+            (libc::AF_UNIX, libc::SOCK_STREAM, 0, 1),
+        ];
+        for (domain, kind, protocol, accepting) in no {
+            assert_eq!(
+                classify(domain, kind, protocol, accepting),
+                Listening::No,
+                "{domain} {kind} {protocol} {accepting}"
+            );
+        }
     }
 
     #[test]
