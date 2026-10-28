@@ -58,8 +58,10 @@ src/
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
                     Signal` in a `u64`), the per-client and per-upstream
                     records and the registration each wants
-  log.rs            `LogSink` (a channel sink for tests until Task 7),
-                    `LogEntry`, `DriverLog` (FR-LOG-07)
+  log.rs            `LogSink` (a channel sink for tests), `LogEntry`,
+                    `DriverLog` (FR-LOG-07)
+    format.rs         the line format (FR-LOG-05): `format_entry`,
+                      `format_driver`, the escaping
   pool.rs           `Pool` (crate-private): the disk workers (A10):
                     `start`, `submit` (`Job::Open` / `Job::Readahead`),
                     `results` (`JobResult`), `shutdown` (joins)
@@ -93,6 +95,10 @@ src/
                       (RLIMIT_NOFILE)
 tests/
   sys.rs            the wrappers on the real kernel, unprivileged
+  log.rs            the line format: an exact line per kind, every
+                    reason / failure / file error value, the escaping
+                    table, a seeded property (any entry is one line with
+                    no raw control byte, and parses back to its strings)
   loop_static_less.rs  the event loop on loopback, no static roots: fixed
                     responses, keep-alive, lingering close, a proxied
                     exchange, an early 413 then a reset (I1), a client

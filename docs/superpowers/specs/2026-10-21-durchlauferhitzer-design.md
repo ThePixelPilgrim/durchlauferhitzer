@@ -1024,7 +1024,57 @@ Failures, persistence, timeouts:
 - **FR-LOG-04** [done] Logs carry the raw (validated, ASCII) path; the
   decoded path is never logged or echoed.
 - **FR-LOG-05** [stage 4] The driver writes each entry as one `key=value`
-  line to stderr, escaping untrusted fields.
+  line to stderr, escaping untrusted fields. *(Stage 4 format, Task 7. No
+  timestamp: stage 4 plan decision 4, owner-approved; journald and
+  collectors add their own.)*
+  - Grammar:
+    ```
+    line   = "kind=" kind *( " " key "=" value ) LF
+    value  = plain / quoted
+    plain  = 1*( ALPHA / DIGIT / "." / "_" / ":" / "/" / "@" / "%" / "+" / "-" )
+    quoted = DQUOTE *( "\" DQUOTE / "\\" / "\x" 2HEXLOWER / safe ) DQUOTE
+    safe   = any byte 0x21–0x7E except DQUOTE, "\" and "="
+    ```
+    A value that is a plain token is written as it is; any other value,
+    the empty one included (`""`), is quoted. Inside quotes `"` is `\"`,
+    `\` is `\\`, and every control byte (0x00–0x1F, 0x7F), every byte
+    ≥ 0x80 (each byte of a UTF-8 sequence), `=` and space is `\xHH`
+    (lowercase hex). So a line holds spaces only between fields, and no
+    byte outside 0x20–0x7E but its final LF. Untrusted values (method,
+    host, path) always go through this escaping; the path is the raw one
+    (FR-LOG-04).
+  - Kinds and keys, in this order (`[…]` is left out when absent):
+    - `kind=response conn peer status [method host path]` — `request` is
+      `None`: no `method`/`host`/`path`; a request without `Host`: no
+      `host`.
+    - `kind=rejected conn peer reason [method path]` — `method path` is the
+      `RequestLine` of an HTTP error after a valid request line.
+    - `kind=reset conn peer`
+    - `kind=file_aborted conn peer error`
+    - `kind=proxied_response conn peer backend status method [host] path`
+    - `kind=backend_failed conn peer backend failure`
+    - Driver kinds (FR-LOG-07): `kind=accept_failed errno`,
+      `kind=socket_failed errno`, `kind=open_failed errno`,
+      `kind=register_failed errno`, `kind=dropped count` (FR-LOG-06).
+  - Values: `conn` the connection id; `peer` the IP address (`::1`,
+    `192.0.2.7`); `status` the three-digit code; `backend` the index of
+    the backend in `Core::backends` (config order, distinct); `errno` the
+    decimal errno; `method` `GET`, `HEAD` or the request's own token.
+    Nested enum values are one plain token, snake_case, levels joined by
+    `.`: `reason` is `http.<error>` (`http.bad_target.<target error>`),
+    `route.unknown_host`, `route.no_matching_path`,
+    `timeout.header|send|disk|request_body`,
+    `limit.connections|connections_per_ip`, `shutting_down`,
+    `body.chunked.<chunked error>`, `body.too_large`, `body.closed_early`;
+    `failure` is `refused`, `reset`, `closed_early`,
+    `bad_response.<response error>`, `connect_timeout`,
+    `response_timeout`, `body_timeout`, `bad_chunk.<chunked error>`,
+    `body_too_large`, `transfer_encoding_to_http10`; `error` (a file
+    error) is `not_found`, `symlink`, `permission_denied`, `truncated`,
+    `changed`, `other`. Each enum variant's name is its snake_case
+    spelling (`HttpError::BadHeaderValue` → `bad_header_value`).
+  - Example: `kind=rejected conn=3 peer=192.0.2.7
+    reason=http.bad_header_value method=GET path="/a\x20b"` (one line).
 - **FR-LOG-06** [stage 4] Logging never blocks: if stderr is backed up,
   entries are dropped and counted, and the count is logged once output
   catches up.
@@ -1040,7 +1090,15 @@ Failures, persistence, timeouts:
   target). Driver-bug closes and `EMFILE`/`ENFILE` are driver log kinds,
   not core `Log`s. (Owner decisions 2026-10-28:) accept failures are
   logged at most once a second (DRV-16); a failed `epoll_ctl` for one
-  socket is a driver log too (DRV-15).
+  socket is a driver log too (DRV-15). *(Stage 4 Task 7:)* the driver
+  kinds are `accept_failed` (DRV-16), `socket_failed` and `open_failed`
+  (`EMFILE`/`ENFILE` on a backend `socket()` or a static open),
+  `register_failed` (DRV-15) and `dropped` (FR-LOG-06), formatted per
+  FR-LOG-05. A driver-bug close has no driver kind yet: the driver has
+  no path that closes a connection for a core bug (the core handles the
+  driver bugs it detects itself, contract "Rules for files"); a kind is
+  added with its first producer. The startup and shutdown kinds come
+  with stage 4 Tasks 8 and 9.
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 

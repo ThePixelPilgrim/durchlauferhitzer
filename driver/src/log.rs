@@ -1,13 +1,15 @@
 //! Where the loop's log entries go: the core's [`Log`]s and the driver's
-//! own [`DriverLog`]s (FR-LOG-07).
-//!
-//! Stage 4 Task 5 has only the channel sink the tests read; the
-//! `key=value` formatting and the non-blocking stderr sink are Task 7
-//! (FR-LOG-05/06), which extends both types here.
+//! own [`DriverLog`]s (FR-LOG-07), and how they are written: one
+//! `key=value` line each ([`format_entry`], [`format_driver`],
+//! FR-LOG-05).
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use durchlauferhitzer_core::Log;
+
+mod format;
+
+pub use self::format::{format_driver, format_entry};
 
 /// A log entry of the driver itself, not of the core (FR-LOG-07).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +32,8 @@ pub enum DriverLog {
     /// socket is reported failed (a client accepted but not yet announced
     /// is dropped); the loop goes on.
     RegisterFailed { errno: i32 },
+    /// Entries dropped because the sink's buffer was full (FR-LOG-06).
+    Dropped { count: u64 },
 }
 
 /// One entry handed to a [`LogSink`].
