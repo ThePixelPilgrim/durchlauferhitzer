@@ -634,6 +634,11 @@ impl Rng {
     }
 }
 
+/// The grammar's plain bytes (FR-LOG-05).
+fn is_plain(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"._:/@%+-[]".contains(&byte)
+}
+
 /// Splits a formatted line into its values, undoing the escaping; `None`
 /// if the line breaks the grammar.
 fn parse(line: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
@@ -679,7 +684,7 @@ fn parse(line: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
         } else {
             let end = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
             value.extend_from_slice(&rest[..end]);
-            if value.is_empty() {
+            if value.is_empty() || !value.iter().all(|&b| is_plain(b)) {
                 return None;
             }
             rest = &rest[end..];
@@ -716,6 +721,31 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
         // The line parses back to the untrusted strings, byte for byte.
         let fields = parse(&out)
             .unwrap_or_else(|| panic!("seed {seed}: {:?}", String::from_utf8_lossy(&out)));
+        // The keys of the kind, in the fixed order (FR-LOG-05).
+        let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+        let host_key = |r: &RequestSummary| r.host.as_ref().map(|_| "host");
+        let expected: Vec<&str> = match &entry {
+            Log::Response {
+                request: Some(r), ..
+            } => ["kind", "conn", "peer", "status", "method"]
+                .into_iter()
+                .chain(host_key(r))
+                .chain(["path"])
+                .collect(),
+            Log::ProxiedResponse { request: r, .. } => {
+                ["kind", "conn", "peer", "backend", "status", "method"]
+                    .into_iter()
+                    .chain(host_key(r))
+                    .chain(["path"])
+                    .collect()
+            }
+            Log::Rejected { .. } => vec!["kind", "conn", "peer", "reason", "method", "path"],
+            other @ (Log::Response { request: None, .. }
+            | Log::Reset { .. }
+            | Log::FileAborted { .. }
+            | Log::BackendFailed { .. }) => panic!("not generated: {other:?}"),
+        };
+        assert_eq!(keys, expected, "seed {seed}");
         let get = |key: &str| {
             fields
                 .iter()
