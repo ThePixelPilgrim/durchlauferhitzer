@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use durchlauferhitzer_core::config::load;
 use durchlauferhitzer_core::{
-    ConnError, ConnId, Core, Event, FileError, FileId, Interest, Log, UpstreamId,
+    BackendFailure, BackendId, ConnError, ConnId, Core, Event, FileError, FileId, Interest, Log,
+    UpstreamId,
 };
 
 use super::accept::Accepting;
@@ -551,5 +552,32 @@ fn the_log_descriptor_is_waited_for_only_while_bytes_are_buffered() {
             .wait(&mut events, Some(Duration::ZERO))
             .unwrap(),
         0
+    );
+}
+
+/// FR-LOG-05 (owner decision O1): the driver hands the sink the core's
+/// backends, so a proxy line names the backend by its address.
+#[test]
+fn proxy_lines_name_the_backend_by_its_address() {
+    let (reader, writer) = crate::sys::fd::pipe().unwrap();
+    let log = LogSink::fd(writer).unwrap();
+    let core = Core::new(load(STATIC_LESS).unwrap());
+    let mut driver = Driver::new(core, Vec::new(), Vec::new(), 0, log).unwrap();
+    driver.log.write(LogEntry::Core(Log::BackendFailed {
+        conn: ConnId(1),
+        peer: peer(),
+        backend: BackendId(0),
+        kind: BackendFailure::Refused,
+    }));
+    let mut buf = [0u8; 256];
+    let crate::sys::fd::Io::Done(n) = crate::sys::socket::read(reader.as_fd(), &mut buf) else {
+        panic!("no line");
+    };
+    assert_eq!(
+        std::str::from_utf8(&buf[..n]).unwrap(),
+        format!(
+            "kind=backend_failed conn=1 peer={} backend=127.0.0.1:9 failure=refused\n",
+            peer()
+        )
     );
 }

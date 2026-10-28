@@ -64,7 +64,8 @@ src/
                     O_NONBLOCK with the original flags put back on drop,
                     whole lines, never blocking (FR-LOG-06); `LogEntry`,
                     `DriverLog` (FR-LOG-07)
-    format.rs         the line format (FR-LOG-05): `format_entry`,
+    format.rs         the line format (FR-LOG-05): `format_entry` (a
+                      backend by its address in `Core::backends`),
                       `format_driver`, the escaping
     buffer.rs         `EntryBuffer`: 64 KiB of whole entries, drop and
                       count when full, the `dropped` line once there is

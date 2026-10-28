@@ -16,6 +16,7 @@
 //! before that leaves the description non-blocking.
 
 use std::io::{self, Stderr};
+use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -107,6 +108,9 @@ struct FdSink {
     /// The status flags before the sink set `O_NONBLOCK`, put back on drop.
     original: StatusFlags,
     buffer: EntryBuffer,
+    /// [`Core::backends`](durchlauferhitzer_core::Core::backends), which
+    /// the core's entries name by index (FR-LOG-05); set by the driver.
+    backends: Vec<SocketAddr>,
     /// Each entry is formatted here first.
     line: Vec<u8>,
 }
@@ -142,6 +146,7 @@ impl LogSink {
                 out,
                 original,
                 buffer: EntryBuffer::new(CAPACITY),
+                backends: Vec::new(),
                 line: Vec::new(),
             }),
         })
@@ -159,7 +164,7 @@ impl LogSink {
             SinkKind::Fd(sink) => {
                 sink.line.clear();
                 match &entry {
-                    LogEntry::Core(log) => format_entry(log, &mut sink.line),
+                    LogEntry::Core(log) => format_entry(log, &sink.backends, &mut sink.line),
                     LogEntry::Driver(log) => format_driver(log, &mut sink.line),
                 }
                 sink.buffer.push(&sink.line);
@@ -174,6 +179,17 @@ impl LogSink {
         match &mut self.kind {
             SinkKind::Channel(_) => {}
             SinkKind::Fd(sink) => sink.flush(),
+        }
+    }
+
+    /// The backends the core's entries name by index: the driver passes
+    /// [`Core::backends`](durchlauferhitzer_core::Core::backends), so a
+    /// line carries the address (FR-LOG-05). Until then an id is written
+    /// as its index.
+    pub(crate) fn set_backends(&mut self, backends: &[SocketAddr]) {
+        match &mut self.kind {
+            SinkKind::Fd(sink) => backends.clone_into(&mut sink.backends),
+            SinkKind::Channel(_) => {}
         }
     }
 

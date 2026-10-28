@@ -1031,7 +1031,8 @@ Failures, persistence, timeouts:
     ```
     line   = "kind=" kind *( " " key "=" value ) LF
     value  = plain / quoted
-    plain  = 1*( ALPHA / DIGIT / "." / "_" / ":" / "/" / "@" / "%" / "+" / "-" )
+    plain  = 1*( ALPHA / DIGIT / "." / "_" / ":" / "/" / "@" / "%" / "+" / "-"
+               / "[" / "]" )
     quoted = DQUOTE *( "\" DQUOTE / "\\" / "\x" 2HEXLOWER / safe ) DQUOTE
     safe   = any byte 0x21–0x7E except DQUOTE, "\" and "="
     ```
@@ -1057,8 +1058,11 @@ Failures, persistence, timeouts:
       `kind=socket_failed errno`, `kind=open_failed errno`,
       `kind=register_failed errno`, `kind=dropped count` (FR-LOG-06).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
-    `192.0.2.7`); `status` the three-digit code; `backend` the index of
-    the backend in `Core::backends` (config order, distinct); `errno` the
+    `192.0.2.7`); `status` the three-digit code; `backend` the backend's
+    address, `Core::backends[id]` as it prints (`127.0.0.1:9000`,
+    `[::1]:9000`, a scope id as `[fe80::1%2]:9000`; owner decision
+    2026-10-28, which put `[` and `]` in the plain set; an id outside the
+    list, never from the core, is written as the index); `errno` the
     decimal errno; `method` `GET`, `HEAD` or the request's own token.
     Nested enum values are one plain token, snake_case, levels joined by
     `.`: `reason` is `http.<error>` (`http.bad_target.<target error>`),

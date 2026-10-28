@@ -53,7 +53,7 @@ fn reset(conn: u64) -> Log {
 
 fn line_of(log: &Log) -> String {
     let mut out = Vec::new();
-    format_entry(log, &mut out);
+    format_entry(log, &[], &mut out);
     String::from_utf8(out).unwrap()
 }
 

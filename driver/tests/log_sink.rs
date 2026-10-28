@@ -39,7 +39,7 @@ fn reset(conn: u64) -> LogEntry {
 fn line_of(entry: &LogEntry) -> Vec<u8> {
     let mut out = Vec::new();
     match entry {
-        LogEntry::Core(log) => format_entry(log, &mut out),
+        LogEntry::Core(log) => format_entry(log, &[], &mut out),
         LogEntry::Driver(log) => format_driver(log, &mut out),
     }
     out

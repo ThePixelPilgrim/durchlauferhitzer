@@ -193,7 +193,7 @@ impl Driver {
         listeners: Vec<OwnedFd>,
         roots: Vec<OwnedFd>,
         disk_threads: u32,
-        log: LogSink,
+        mut log: LogSink,
     ) -> io::Result<Driver> {
         if roots.len() != core.static_roots().len() {
             return Err(io::Error::new(
@@ -201,6 +201,7 @@ impl Driver {
                 "one opened root per static root of the core (DRV-07)",
             ));
         }
+        log.set_backends(core.backends());
         let epoll = Epoll::new()?;
         let wake = Arc::new(Wake {
             fd: EventFd::new()?,

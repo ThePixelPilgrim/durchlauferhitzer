@@ -5,7 +5,8 @@
 //! ```text
 //! line   = "kind=" kind *( " " key "=" value ) LF
 //! value  = plain / quoted
-//! plain  = 1*( ALPHA / DIGIT / "." / "_" / ":" / "/" / "@" / "%" / "+" / "-" )
+//! plain  = 1*( ALPHA / DIGIT / "." / "_" / ":" / "/" / "@" / "%" / "+" / "-"
+//!            / "[" / "]" )
 //! quoted = DQUOTE *( "\" DQUOTE / "\\" / "\x" 2HEXLOWER / safe ) DQUOTE
 //! safe   = any byte 0x21-0x7E except DQUOTE, "\" and "="
 //! ```
@@ -17,7 +18,7 @@
 //! fields and no byte outside 0x20–0x7E but its final LF.
 
 use std::io::Write as _;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use durchlauferhitzer_core::http::chunked::ChunkedError;
 use durchlauferhitzer_core::http::request::{HttpError, Method};
@@ -32,7 +33,10 @@ use durchlauferhitzer_core::{
 use super::DriverLog;
 
 /// Appends the line of a core entry to `out`, its `\n` included.
-pub fn format_entry(entry: &Log, out: &mut Vec<u8>) {
+///
+/// `backends` is [`Core::backends`](durchlauferhitzer_core::Core::backends):
+/// a [`BackendId`] is written as the address it indexes there.
+pub fn format_entry(entry: &Log, backends: &[SocketAddr], out: &mut Vec<u8>) {
     match entry {
         Log::Response {
             conn,
@@ -80,7 +84,7 @@ pub fn format_entry(entry: &Log, out: &mut Vec<u8>) {
             request,
         } => {
             head(out, "proxied_response", *conn, *peer);
-            backend_field(out, *backend);
+            backend_field(out, backends, *backend);
             number(out, "status", *status);
             summary(out, request);
         }
@@ -91,7 +95,7 @@ pub fn format_entry(entry: &Log, out: &mut Vec<u8>) {
             kind,
         } => {
             head(out, "backend_failed", *conn, *peer);
-            backend_field(out, *backend);
+            backend_field(out, backends, *backend);
             out.extend_from_slice(b" failure=");
             backend_failure(out, *kind);
         }
@@ -133,8 +137,20 @@ fn number(out: &mut Vec<u8>, key: &str, value: impl std::fmt::Display) {
     let _ = write!(out, " {key}={value}");
 }
 
-fn backend_field(out: &mut Vec<u8>, backend: BackendId) {
-    number(out, "backend", backend.0);
+/// ` backend=<address>`. A `SocketAddr` prints as an IPv4 address or a
+/// bracketed IPv6 one (`%` and the scope id if it has one), `:` and the
+/// port: plain. An id outside `backends` (never from the core) is written
+/// as the index it is.
+fn backend_field(out: &mut Vec<u8>, backends: &[SocketAddr], backend: BackendId) {
+    let address = usize::try_from(backend.0)
+        .ok()
+        .and_then(|index| backends.get(index));
+    match address {
+        Some(address) => {
+            let _ = write!(out, " backend={address}");
+        }
+        None => number(out, "backend", backend.0),
+    }
 }
 
 /// ` method=… [host=…] path=…`; `host` is left out when the request had
@@ -164,7 +180,7 @@ fn text(out: &mut Vec<u8>, key: &str, value: &str) {
 }
 
 fn is_plain(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"._:/@%+-".contains(&byte)
+    byte.is_ascii_alphanumeric() || b"._:/@%+-[]".contains(&byte)
 }
 
 /// Writes `value` as a plain token or quoted (the module's grammar).

@@ -11,7 +11,7 @@
     reason = "test helpers outside #[test] functions; clippy.toml allows these in tests"
 )]
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use durchlauferhitzer::DriverLog;
 use durchlauferhitzer::log::{format_driver, format_entry};
@@ -26,9 +26,18 @@ use durchlauferhitzer_core::{
     RequestLine, RequestSummary, TimeoutKind,
 };
 
+/// The backends the core entries name by index (`Core::backends`).
+fn backends() -> Vec<SocketAddr> {
+    vec![
+        "127.0.0.1:9000".parse().unwrap(),
+        "[::1]:9000".parse().unwrap(),
+        SocketAddr::V6(SocketAddrV6::new("fe80::1".parse().unwrap(), 8080, 0, 2)),
+    ]
+}
+
 fn line(entry: &Log) -> String {
     let mut out = Vec::new();
-    format_entry(entry, &mut out);
+    format_entry(entry, &backends(), &mut out);
     String::from_utf8(out).unwrap()
 }
 
@@ -149,8 +158,8 @@ fn proxied_response() {
     };
     assert_eq!(
         line(&entry),
-        "kind=proxied_response conn=7 peer=192.0.2.7 backend=2 status=299 method=GET \
-         host=api.test:8080 path=/v1/items\n"
+        "kind=proxied_response conn=7 peer=192.0.2.7 backend=[fe80::1%2]:8080 status=299 \
+         method=GET host=api.test:8080 path=/v1/items\n"
     );
 }
 
@@ -164,7 +173,34 @@ fn backend_failed() {
     };
     assert_eq!(
         line(&entry),
-        "kind=backend_failed conn=8 peer=192.0.2.7 backend=0 failure=bad_response.obs_fold\n"
+        "kind=backend_failed conn=8 peer=192.0.2.7 backend=127.0.0.1:9000 \
+         failure=bad_response.obs_fold\n"
+    );
+    let entry = Log::BackendFailed {
+        conn: ConnId(9),
+        peer: PEER,
+        backend: BackendId(1),
+        kind: BackendFailure::Refused,
+    };
+    assert_eq!(
+        line(&entry),
+        "kind=backend_failed conn=9 peer=192.0.2.7 backend=[::1]:9000 failure=refused\n"
+    );
+}
+
+/// A backend id outside `Core::backends` (never from the core) is
+/// written as the index it is, still a plain token.
+#[test]
+fn a_backend_id_outside_the_list_is_its_index() {
+    let entry = Log::BackendFailed {
+        conn: ConnId(1),
+        peer: PEER,
+        backend: BackendId(3),
+        kind: BackendFailure::Reset,
+    };
+    assert_eq!(
+        line(&entry),
+        "kind=backend_failed conn=1 peer=192.0.2.7 backend=3 failure=reset\n"
     );
 }
 
@@ -365,10 +401,10 @@ fn failure(kind: BackendFailure) -> String {
     let full = line(&Log::BackendFailed {
         conn: ConnId(1),
         peer: PEER,
-        backend: BackendId(3),
+        backend: BackendId(0),
         kind,
     });
-    full.strip_prefix("kind=backend_failed conn=1 peer=192.0.2.7 backend=3 failure=")
+    full.strip_prefix("kind=backend_failed conn=1 peer=192.0.2.7 backend=127.0.0.1:9000 failure=")
         .unwrap()
         .strip_suffix('\n')
         .unwrap()
@@ -481,7 +517,7 @@ fn the_escaping_table() {
     let cases = [
         // Plain tokens stay as they are.
         ("/a-b_c.d~", "\"/a-b_c.d~\""),
-        ("/A9._:/@%+-", "/A9._:/@%+-"),
+        ("/A9._:/@%+-[]", "/A9._:/@%+-[]"),
         // Anything else is quoted.
         ("", "\"\""),
         ("/a?b", "\"/a?b\""),
@@ -578,7 +614,8 @@ impl Rng {
             1 => Log::ProxiedResponse {
                 conn,
                 peer,
-                backend: BackendId(self.next() as u32),
+                // One past the list too: the index fallback.
+                backend: BackendId(self.below(4) as u32),
                 status: self.below(600) as u16,
                 request,
             },
@@ -662,7 +699,7 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
         let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let entry = rng.entry();
         let mut out = Vec::new();
-        format_entry(&entry, &mut out);
+        format_entry(&entry, &backends(), &mut out);
         assert_eq!(
             out.iter().filter(|&&b| b == b'\n').count(),
             1,
