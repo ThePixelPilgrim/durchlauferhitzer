@@ -445,7 +445,8 @@
 //!   pipelined behind a head queued keep-alive before the drain included;
 //!   exchanges in flight finish (a head already queued keeps what it said,
 //!   any head rendered from now on says `Connection: close`, and a request
-//!   pipelined behind such a head is not answered), then take the normal
+//!   pipelined behind such a head is not answered: owner decision
+//!   2026-10-29, FR-PROC-05b), then take the normal
 //!   close path (lingering close). An `Accepted` after it is answered 503 and
 //!   closed like a refused connection (`Rejected` with `ShuttingDown`).
 //!   *Buffered* (controller clarification 2026-10-28 of the owner
