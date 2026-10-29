@@ -647,7 +647,16 @@ mod pre_exec {
         ];
         let hook = move || {
             // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS)` takes no pointers.
-            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
+            if unsafe {
+                libc::prctl(
+                    libc::PR_SET_NO_NEW_PRIVS,
+                    1 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                    0 as libc::c_ulong,
+                )
+            } == -1
+            {
                 return Err(io::Error::last_os_error());
             }
             let fprog = libc::sock_fprog {
@@ -660,7 +669,7 @@ mod pre_exec {
             let ret = unsafe {
                 libc::prctl(
                     libc::PR_SET_SECCOMP,
-                    libc::SECCOMP_MODE_FILTER,
+                    libc::c_ulong::from(libc::SECCOMP_MODE_FILTER),
                     &raw const fprog,
                 )
             };

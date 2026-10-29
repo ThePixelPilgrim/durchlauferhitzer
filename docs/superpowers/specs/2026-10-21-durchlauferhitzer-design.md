@@ -1594,8 +1594,8 @@ Failures, persistence, timeouts:
   in the core; the driver confines it to a small, documented `libc`
   wrapper module. The workspace lint denies `unsafe_code`, and
   `driver/tests/unsafe_confined.rs` checks that the product's sources
-  allow it only on the `sys` module in `driver/src/lib.rs` (test files
-  excluded).
+  allow it only on the `sys` module in `driver/src/lib.rs` (every source
+  file scanned, unit tests included).
 - **NFR-MAINT-06** [done] Exhaustive enum handling: no `_ =>` arm on an
   enum anywhere (tests' helpers included);
   `clippy::wildcard_enum_match_arm` is denied.

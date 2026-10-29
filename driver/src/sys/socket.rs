@@ -140,7 +140,8 @@ pub fn set_nodelay(fd: BorrowedFd<'_>) -> io::Result<()> {
 
 /// A socket's buffer sizes as the kernel reports them (`SO_SNDBUF`,
 /// `SO_RCVBUF`). The driver never sets them (NFR-PERF-04); the tests read
-/// them to check that.
+/// them to check that (test-only: nothing in the product reads them).
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferSizes {
     pub send: libc::c_int,
@@ -148,6 +149,7 @@ pub struct BufferSizes {
 }
 
 /// Reads `SO_SNDBUF` and `SO_RCVBUF`.
+#[cfg(test)]
 pub fn buffer_sizes(fd: BorrowedFd<'_>) -> io::Result<BufferSizes> {
     let raw = fd.as_raw_fd();
     Ok(BufferSizes {

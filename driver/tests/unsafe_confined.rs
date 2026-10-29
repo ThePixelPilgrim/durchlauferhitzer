@@ -2,8 +2,8 @@
 //! `unsafe_code` in one place only, the `sys` module's declaration in
 //! `driver/src/lib.rs`. The workspace lint denies it everywhere else, and
 //! this test makes sure no second `allow` (or `expect`) of it appears.
-//! Test code is excluded: the `tests.rs` files of the product sources
-//! (the test crate's own `pre_exec` module is outside these trees).
+//! Every `.rs` file under those trees is scanned, unit tests included (the
+//! test crate's own `pre_exec` module is outside these trees).
 
 #![allow(
     clippy::unwrap_used,
@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Every `.rs` file under `dir`, test files excluded, in a stable order.
+/// Every `.rs` file under `dir`, in a stable order.
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .unwrap()
@@ -26,9 +26,7 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for path in entries {
         if path.is_dir() {
             sources(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs")
-            && path.file_name().is_some_and(|n| n != "tests.rs")
-        {
+        } else if path.extension().is_some_and(|e| e == "rs") {
             out.push(path);
         }
     }
@@ -60,7 +58,7 @@ fn unsafe_allows(text: &str) -> Vec<usize> {
                 .split(|c: char| !(c.is_alphanumeric() || c == '_'))
                 .any(|word| word == "unsafe_code");
             if names_it {
-                found.push(text[..from + at].lines().count().max(1));
+                found.push(text[..from + at].matches('\n').count() + 1);
             }
             from = start;
         }

@@ -233,8 +233,8 @@ tests/
   static_fd_leak.rs a client reset mid-`sendfile` closes the file and leaks
                     no descriptor; alone in its binary
   unsafe_confined.rs  NFR-MAINT-05: `allow(unsafe_code)` (or `expect`) appears
-                    in `core/src` and `driver/src` (`tests.rs` files
-                    excluded) only on `pub mod sys;` in `src/lib.rs`
+                    in `core/src` and `driver/src` (every file, unit
+                    tests included) only on `pub mod sys;` in `src/lib.rs`
   support/child.rs  running the binary: temp configs, a free port (bound,
                     read and released, so another process could take it
                     before the server binds: a known, rare race, left as
