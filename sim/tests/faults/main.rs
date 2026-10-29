@@ -12,7 +12,7 @@
     reason = "a failing seed is reported by re-panicking with SIM_SEED=<seed>"
 )]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
@@ -156,6 +156,7 @@ fn deliver(config: &str, parts: &[&[u8]]) -> (Outcome, String) {
     (outcome, sim.trace().to_owned())
 }
 
+mod client;
 #[allow(dead_code, reason = "shared by all test binaries; each uses part")]
 #[path = "../support/model_http.rs"]
 mod fixed;
@@ -170,10 +171,13 @@ mod proxy;
 mod run;
 mod shutdown;
 mod split;
+mod unanswered;
 
+use client::*;
 use fixed::*;
 use generator::*;
 use model::*;
 use oracle::*;
 use run::{assert_clock_done, replay_seed, run_reporting};
 use shutdown::*;
+use unanswered::*;

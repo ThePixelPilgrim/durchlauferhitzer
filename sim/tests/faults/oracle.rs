@@ -3,27 +3,6 @@
 
 use super::*;
 
-/// The test's view of one simulated client.
-pub(crate) struct Client {
-    pub(crate) id: ConnId,
-    /// Templates still to send; the front one may be partly sent.
-    pub(crate) queue: VecDeque<Vec<u8>>,
-    /// Whether the front template's first byte has been sent.
-    pub(crate) front_started: bool,
-    /// Templates whose first byte was sent, and how many were `HEAD`.
-    pub(crate) started: usize,
-    pub(crate) started_head: usize,
-    /// Every template whose first byte was sent, in order.
-    pub(crate) templates: Vec<Vec<u8>>,
-    /// Sends that carried the end of one template and the start of the next.
-    pub(crate) pipelined_sends: usize,
-    pub(crate) eof: bool,
-    /// Everything received so far.
-    pub(crate) received: Vec<u8>,
-    /// The sim reported the connection as no longer `Open`.
-    pub(crate) ended: bool,
-}
-
 /// What the generator reached, summed over all seeds.
 #[derive(Default)]
 pub(crate) struct Coverage {
@@ -189,14 +168,25 @@ pub(crate) fn redirect_renderings(path: &str, body: BodyMode) -> (Vec<Rendering>
 
 pub(crate) const BOTH: [Persistence; 2] = [Persistence::KeepAlive, Persistence::Close];
 
+/// Whether a request logged during the drain may be its `503`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refusable {
+    Yes,
+    /// Its file was being opened when the drain began, so it was parsed
+    /// before: it gets the tree's status (with close), not the 503.
+    No,
+}
+
 /// The response `log` (written in `phase`) announces, if it announces
 /// one, with the exact bytes it may be sent as. A logged request status
 /// that does not follow from the tree is an error; during the drain a
-/// request may be answered `503` with close instead (FR-PROC-05).
+/// request may be answered `503` with close instead (FR-PROC-05), unless
+/// it was parsed before the drain (`refusable`).
 pub(crate) fn announced<'t>(
     log: &Log,
     tree: &'t Tree,
     phase: Phase,
+    refusable: Refusable,
 ) -> Result<Option<Announced<'t>>, String> {
     let (status, request) = match log {
         Log::Response {
@@ -243,7 +233,10 @@ pub(crate) fn announced<'t>(
         Some(Method::Head) => BodyMode::HeadOnly,
         Some(Method::Get | Method::Other(_)) | None => BodyMode::Full,
     };
-    if phase == Phase::Draining && status == Status::ServiceUnavailable {
+    if phase == Phase::Draining
+        && status == Status::ServiceUnavailable
+        && refusable == Refusable::Yes
+    {
         if request.is_none() {
             return Err(format!("{log:?}: a drain's 503 without its request"));
         }
@@ -475,6 +468,18 @@ pub(crate) fn check_client(
         .filter(|(_, l)| log_conn(l) == client.id)
         .map(|(i, l)| (l, marks.phase(i)))
         .collect();
+    // The connection's first log written during the drain answers the
+    // request whose file was being opened then, if one was (M-a).
+    let opened_at_drain = marks
+        .at_drain
+        .get(&client.id)
+        .is_some_and(|a| a.opening == Opening::File);
+    let first_draining = sim
+        .logs()
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| log_conn(l) == client.id)
+        .position(|(i, _)| marks.drain.is_some_and(|d| i >= d));
     let logs: Vec<&Log> = phased.iter().map(|(l, _)| *l).collect();
     // A connection refused (over a limit, or while shutting down) has no
     // request: its 503 answers none.
@@ -501,11 +506,20 @@ pub(crate) fn check_client(
     // Every announced response but a connection refusal answers the next
     // request template: its persistence follows from that request.
     let mut templates = client.templates.iter();
-    for &(log, phase) in &phased {
+    let mut consumed = 0;
+    for (n, &(log, phase)) in phased.iter().enumerate() {
         if phase == Phase::AbortCut {
             coverage.shutdown.abort_cut += 1;
         }
-        match announced(log, tree, phase) {
+        let refusable = if opened_at_drain && first_draining == Some(n) {
+            if matches!(log, Log::Response { .. }) {
+                coverage.shutdown.opened_before_drain += 1;
+            }
+            Refusable::No
+        } else {
+            Refusable::Yes
+        };
+        match announced(log, tree, phase, refusable) {
             Ok(Some(mut a)) => {
                 if refusal(log, phase) {
                     if matches!(
@@ -521,6 +535,7 @@ pub(crate) fn check_client(
                     let Some(template) = templates.next() else {
                         fail(format!("{log:?} answers no request sent"));
                     };
+                    consumed += 1;
                     if let Log::Rejected {
                         reason: RejectReason::Http { error, request },
                         ..
@@ -790,6 +805,42 @@ pub(crate) fn check_client(
                 "the connection was shut down after {seen:?}, whose last response does not close"
             ));
         }
+    }
+    // No request the spec says must be answered vanished.
+    let last = match expected.iter().enumerate().next_back() {
+        None => LastAnswer::None,
+        Some((i, a)) => {
+            let renderings = &a.renderings;
+            let closes = renderings
+                .iter()
+                .all(|r| r.persistence == Persistence::Close);
+            match seen.get(i).map(|s| s.persistence) {
+                Some(Persistence::Close) => LastAnswer::Closes,
+                Some(Persistence::KeepAlive) => LastAnswer::KeepsOpen,
+                None if closes => LastAnswer::Closes,
+                // Either is allowed, and it was not received whole.
+                None if renderings.len() > 1 => LastAnswer::Closes,
+                None => LastAnswer::KeepsOpen,
+            }
+        }
+    };
+    let answers = Answers {
+        consumed,
+        last,
+        refused: if refused { Refused::Yes } else { Refused::No },
+        cut: phased
+            .last()
+            .map_or(CutOff::No, |&(log, phase)| cuts(log, phase)),
+    };
+    if let Err(e) = check_unanswered(sim, client, marks, &answers) {
+        fail(e);
+    }
+    if marks.drain.is_some()
+        && consumed < client.templates.len()
+        && answers.last == LastAnswer::KeepsOpen
+        && answers.cut == CutOff::No
+    {
+        coverage.shutdown.dropped_unread += 1;
     }
     for (slot, status) in coverage.statuses.iter_mut().zip(STATUSES) {
         *slot += statuses.iter().filter(|s| **s == status).count();

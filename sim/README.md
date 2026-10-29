@@ -85,7 +85,9 @@ tests/
     split.rs            deterministic split, byte-by-byte and pipelined runs
     generator.rs        random requests and schedule steps
     model.rs            the model of the random file tree
+    client.rs           a random or witness client, as the test sees it
     oracle.rs           what each client must receive; coverage
+    unanswered.rs       no request the spec says must be answered vanishes
     run.rs              one random schedule; the test over all seeds;
                         seed replay for every net of the binary
     shutdown.rs         the shutdown plans of both nets (drain, drain
@@ -144,13 +146,27 @@ a seeded step (then every client reads all it is sent), a third call
 `abort_all` some steps after the drain, a sixth call `abort_all` without
 a drain. The plan follows from the seed alone, by an RNG of its own (the
 other seeds keep their schedules), and a failure prints it too. In the
-static net two witness clients join at the drain: one with a keep-alive
-`404` queued (alone, or with a request pipelined behind it), one idle.
-In the proxy net it falls among the steps of a round without a timed
-scenario (or after the last round), the round runs on, and the seed
-ends with it; an exchange whose head is rendered during the drain must
-match the model's outcome for a client that closes, or the drain's
-`503`; a story may end silently where the drain closed it.
+static net two witness clients join at the drain, kept apart from the
+random steps, and their bytes are checked exactly: one with a keep-alive
+`404` queued (alone: the `404`, then the shutdown; with a request
+pipelined behind it: the `404`, then the `503` with close), one idle (its
+`404`, then the close at once). In the proxy net it falls among the
+steps of a round without a timed scenario (or after the last round), the
+round runs on, and the seed ends with it; an exchange whose head is
+rendered during the drain must match the model's outcome for a client
+that closes, or the drain's `503`; a head the parser rejects keeps its
+own error (owner decision 2026-10-29, FR-PROC-05b).
+No request may vanish (`faults/unanswered.rs`, and `silent_stop` in
+`faults/proxy/drain.rs`): the drain records what the core had read of
+each connection (`Sim::delivered_to_server`, FR-PROC-05b's "buffered"
+input) and which file opens were pending (`Sim::opening_file`), the
+abort which connections it found open. A request may go unanswered only
+for a reason from the spec: none of it was read when the drain began,
+the answer before it closes (every head rendered during the drain
+does), the abort or the client cut the connection, or it never
+completed. A request whose file was being opened when the drain began
+gets its own status with close, never the `503`. The static net applies
+the same check to every seed, before any shutdown too.
 The oracles check what the spec says of the drain: a head logged before
 it keeps what it said, one logged after it says `Connection: close` or is
 the `503` with close for a request completed during it; a connection

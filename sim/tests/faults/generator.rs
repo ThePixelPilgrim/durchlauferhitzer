@@ -249,6 +249,7 @@ pub(crate) fn send_piece(
             finished_one = true;
         }
     }
+    client.sent += piece.len();
     sim.send(client.id, &piece);
 }
 
