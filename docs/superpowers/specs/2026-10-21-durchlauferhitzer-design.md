@@ -1546,10 +1546,12 @@ Failures, persistence, timeouts:
 
 ### NFR-PORT — Platform
 
-- **NFR-PORT-01** [stage 4] Linux ≥ 5.14, x86_64 and aarch64. *(Status
-  after stage 4 Task 10:)* the driver crate refuses to build on anything
-  but 64-bit Linux, and CI builds and tests it on x86_64 only; aarch64 is
-  not built or tested anywhere yet, so this stays open.
+- **NFR-PORT-01** [done] Linux ≥ 5.14, x86_64 and aarch64. The driver
+  crate refuses to build on anything but 64-bit Linux. *(Owner decision
+  2026-10-29, O2:)* CI runs the same gate (format, clippy, the tests with
+  IPv6 required and the root step, the dependency check and its
+  self-test, the docs) on x86_64 (`ubuntu-latest`) and on aarch64
+  (`ubuntu-24.04-arm`).
 - **NFR-PORT-02** [done] Links against the system glibc; no other C.
 - **NFR-PORT-03** [done] `openat2` is required (startup error without
   it; the probe is FR-PROC-04 step 3). Every file open uses `openat2` and
