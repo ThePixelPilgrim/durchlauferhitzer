@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-29, after stage 5 Task 1 landed on `main`.
+Last updated 2026-10-29, after stage 5 Task 2 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -11,7 +11,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 2 Static files | done (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
 | 3 Reverse proxy | done (`576a77c..b583d96`) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
-| 5 Containment | **in progress** — plan `docs/superpowers/plans/2026-10-29-stage-5-containment.md` (owner-approved `bc2f7d3`; decisions of 2026-10-29 in the spec: FR-CFG-25, FR-CONN-13, FR-PROC-06/07, NFR-SEC-13, NFR-PORT-04/07, NFR-TEST-08). Task 1 ✅ (`containment` block, `ipv6_prefix`; `NoEffect` config error); **next: Task 2** (FR-CONN-13: IPv6 prefix grouping, fair refused pool) |
+| 5 Containment | **in progress** — plan `docs/superpowers/plans/2026-10-29-stage-5-containment.md` (owner-approved `bc2f7d3`; decisions of 2026-10-29 in the spec: FR-CFG-25, FR-CONN-13, FR-PROC-06/07, NFR-SEC-13, NFR-PORT-04/07, NFR-TEST-08). Task 1 ✅ (`containment` block, `ipv6_prefix`; `NoEffect` config error); Task 2 ✅ (FR-CONN-13: IPv6 peers grouped by prefix, refused connections capped per group; the static net checks admission against a spec-written model); **next: Task 3** (seccomp allow-list generator and install) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
