@@ -65,6 +65,10 @@ impl Coverage {
                 "a refusal dropped for its group's refused cap",
                 self.admission.group_dropped,
             ),
+            (
+                "two /64s in one group (ipv6_prefix 48)",
+                self.admission.joined_prefixes,
+            ),
             ("pipelined pairs", self.pipelined),
             ("FileAborted(Truncated)", self.aborted_truncated),
             ("FileAborted(Changed)", self.aborted_changed),

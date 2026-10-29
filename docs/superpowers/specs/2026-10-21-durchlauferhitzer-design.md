@@ -1008,7 +1008,8 @@ Failures, persistence, timeouts:
   connections, or `max_connections_per_ip` from the same peer, are counted
   is answered 503 and closed (lingering), and logged. Refused connections
   count toward neither limit. Peers are counted by canonical address (an
-  IPv4-mapped IPv6 peer shares its IPv4 slot). Counts drop when a
+  IPv4-mapped IPv6 peer shares its IPv4 slot; IPv6 grouped by prefix,
+  FR-CONN-13). Counts drop when a
   connection closes.
 - **FR-CONN-10** [done] At most `max_connections` refused connections are
   kept at once; beyond that a new connection is logged as rejected and

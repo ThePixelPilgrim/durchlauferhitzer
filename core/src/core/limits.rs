@@ -326,27 +326,33 @@ mod tests {
 
     #[test]
     fn refused_cap_is_released_on_every_close_path() {
-        released_on_every_close_path(capped(), PEER, refused);
+        released_on_every_close_path(capped(), [PEER; 3], |conn, _| refused(conn));
     }
 
-    /// Each closing path, applied to a refused connection from `peer`,
-    /// frees the single refused slot `core` allows it for the next round;
-    /// `rejected` is the log of a refusal.
-    fn released_on_every_close_path(mut core: Core, peer: IpAddr, rejected: fn(ConnId) -> Action) {
+    /// Each closing path, applied to a refused connection, frees the
+    /// single refused slot `core` allows for the next round. `peers`: the
+    /// counted connection's, the refused one's, and the one beyond the
+    /// cap's; `rejected` is the log of a refusal.
+    fn released_on_every_close_path(
+        mut core: Core,
+        peers: [IpAddr; 3],
+        rejected: fn(ConnId, IpAddr) -> Action,
+    ) {
+        let [counted, refused_peer, over_peer] = peers;
         let mut actions = Vec::new();
-        accept(&mut core, secs(0), 1, peer);
+        accept(&mut core, secs(0), 1, counted);
         let mut id = 2;
         for path in 0..4 {
             let t = secs(100 * path);
             let conn = ConnId(id);
             id += 1;
-            let accepted = accept(&mut core, t, conn.0, peer);
+            let accepted = accept(&mut core, t, conn.0, refused_peer);
             assert!(!accepted.contains(&Action::Close { conn }), "path {path}");
             let over = ConnId(id);
             id += 1;
             assert_eq!(
-                accept(&mut core, t, over.0, peer),
-                [rejected(over), Action::Close { conn: over }],
+                accept(&mut core, t, over.0, over_peer),
+                [rejected(over, over_peer), Action::Close { conn: over }],
                 "path {path}"
             );
             actions.clear();
@@ -399,6 +405,17 @@ mod tests {
         assert_eq!(peer_group(v4, 64), v4);
         assert_eq!(peer_group(mapped, 32), v4);
         assert_eq!(peer_group(mapped, 128), v4);
+        // IPv4-compatible and NAT64 addresses are plain IPv6.
+        let compatible = IpAddr::V6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_compatible());
+        assert_eq!(
+            peer_group(compatible, 64),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        );
+        let nat64 = IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0xc000, 0x0201));
+        assert_eq!(
+            peer_group(nat64, 64),
+            IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0))
+        );
     }
 
     /// Two counted connections per group, at most four in all.
@@ -552,17 +569,14 @@ mod tests {
     }
 
     /// One counted connection per group: a group's second connection is
-    /// refused, its third closed at once, on every close path alike.
+    /// refused, its third closed at once, on every close path alike; three
+    /// addresses of one /64.
     #[test]
     fn group_refused_cap_is_released_on_every_close_path() {
         let config = GROUPED.replace("max_connections_per_ip 2;", "max_connections_per_ip 1;");
         let core = Core::new(crate::config::load(&config).unwrap());
-        released_on_every_close_path(core, PEER, |conn| {
-            Action::Log(Log::Rejected {
-                conn,
-                peer: PEER,
-                reason: RejectReason::Limit(LimitKind::ConnectionsPerIp),
-            })
+        released_on_every_close_path(core, [V6_A3, V6_A1, V6_A2], |conn, peer| {
+            rejected(conn, peer, LimitKind::ConnectionsPerIp)
         });
     }
 

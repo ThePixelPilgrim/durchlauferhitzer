@@ -476,17 +476,19 @@
 //! A connection accepted while `max_connections` connections, or
 //! `max_connections_per_ip` from the same peer, are open is answered 503 and
 //! closed (with a lingering close). Refused connections do not count toward
-//! either limit. Peers are counted by their canonical address, so an
-//! IPv4-mapped IPv6 peer shares the slot of its IPv4 address.
+//! either limit. Peers are counted per group (FR-CONN-13): an IPv4 peer,
+//! and an IPv4-mapped IPv6 peer, by its IPv4 address; an IPv6 peer by its
+//! first `ipv6_prefix` bits.
 //!
 //! Resource policy: memory stays bounded by the limits even under a flood of
 //! refused connections.
 //!
 //! - A refused connection gets no receive buffer, only the send buffer that
 //!   holds its 503.
-//! - At most `max_connections` refused connections are kept at once; beyond
-//!   that a new one is logged as rejected and closed at once, with nothing
-//!   written.
+//! - At most `max_connections` refused connections are kept at once, and at
+//!   most `max_connections_per_ip` per peer group (FR-CONN-13); beyond
+//!   either a new one is logged as rejected and closed at once, with
+//!   nothing written.
 //! - A connection entering the lingering close drops its own receive buffer;
 //!   all lingering connections discard their input into one shared scratch
 //!   buffer of [`LINGER_SCRATCH`] bytes, whose contents are never inspected.

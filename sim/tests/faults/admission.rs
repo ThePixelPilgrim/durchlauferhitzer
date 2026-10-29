@@ -60,10 +60,11 @@ impl Prefix {
     pub(crate) fn apply(self, config: &str) -> String {
         match self {
             Prefix::Default => config.to_owned(),
-            Prefix::Set(bits) => config.replace(
-                "max_connections_per_ip 3;",
-                &format!("max_connections_per_ip 3;\n  ipv6_prefix {bits};"),
-            ),
+            Prefix::Set(bits) => {
+                let anchor = "max_connections_per_ip 3;";
+                assert!(config.contains(anchor), "no {anchor:?} in {config}");
+                config.replace(anchor, &format!("{anchor}\n  ipv6_prefix {bits};"))
+            }
         }
     }
 }
@@ -118,12 +119,16 @@ pub(crate) struct AdmissionCoverage {
     /// `max_connections_per_ip` refused connections while the global
     /// refused pool still had room (FR-CONN-13).
     pub(crate) group_dropped: usize,
+    /// Of `shared_group`: the two addresses in different /64s, one group
+    /// by a shorter `ipv6_prefix` (48).
+    pub(crate) joined_prefixes: usize,
 }
 
 impl AdmissionCoverage {
     pub(crate) fn add(&mut self, other: AdmissionCoverage) {
         self.shared_group += other.shared_group;
         self.group_dropped += other.group_dropped;
+        self.joined_prefixes += other.joined_prefixes;
     }
 }
 
@@ -144,6 +149,8 @@ impl Admission {
         let mut counted = 0;
         let mut counted_group = 0;
         let mut other_address = false;
+        // A counted connection of another /64 in the same group.
+        let mut joined = false;
         let mut refused = 0;
         let mut refused_group = 0;
         for &(id, p, verdict) in &self.conns {
@@ -156,6 +163,7 @@ impl Admission {
                     if same {
                         counted_group += 1;
                         other_address |= p != peer;
+                        joined |= group_of(p, 64) != group_of(peer, 64);
                     }
                 }
                 Verdict::Refused if open => {
@@ -179,6 +187,7 @@ impl Admission {
             Some(_) => false,
         };
         self.coverage.shared_group += usize::from(shares);
+        self.coverage.joined_prefixes += usize::from(shares && joined);
         let logged = sim.logs().len();
         let conn = sim.connect(peer);
         let logs = sim.logs().get(logged..).unwrap_or_default().to_vec();
