@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-28, after stage 4 Task 10 landed on `main`.
+Last updated 2026-10-29, after stage 4 closed on `main` (final review and fix wave landed).
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -9,47 +9,36 @@ A new session should start from the latest `main`, read this file first, then `C
 |---|---|
 | 1 Foundations | done (`ff5480a`) — record: `docs/superpowers/reviews/2026-10-25-stage-1-review.md` |
 | 2 Static files | done (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
-| 3 Reverse proxy | done (`576a77c..b583d96` + this handoff) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
-| 4 epoll driver + binary | **in progress** — plan `docs/superpowers/plans/2026-10-27-stage-4-epoll-driver.md` (owner-approved, amendments A1–A11). Task 1 ✅ (config bounds, memory budget, `disk_threads`, `shutdown_timeout`, `memory_limit`); Task 2 ✅ (core: `Date`, drain/abort API, FR-LOG-07 fields); Task 3 ✅ (sim late-timer mode, `TimerOrder`); Task 4 ✅ (`driver` crate, package `durchlauferhitzer`, safe `sys` wrappers; `libc` only); Task 5 ✅ (epoll event loop for clients and upstreams; `Driver::run -> Exit`, `StopHandle`); Task 6 ✅ (disk worker pool and `sendfile`; `Driver::new(core, listeners, roots, disk_threads, log)` starts the pool exactly when the core has static roots); Task 7 ✅ (`key=value` logging, escaping, non-blocking stderr sink); Task 8 ✅ (CLI and `--check`, startup sequence A11, systemd sockets, privilege drop, descriptor budget); Task 9 ✅ (SIGTERM drain, fast shutdown on a second SIGTERM / SIGINT / `shutdown_timeout`, bounded teardown); Task 10 ✅ (end-to-end smoke suite, README build/run docs, spec status: every stage 4 requirement `[done]`); **next: the stage 4 whole-branch review** over `7e1b18e..main`, then its review record |
+| 3 Reverse proxy | done (`576a77c..b583d96`) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
+| 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
+| 5 Containment | **next:** brainstorm and write the stage 5 plan from the spec's Timeline and the carry-forwards below; the owner approves it before any task starts |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
-Key documents: spec `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md` (binding), the driver contract in `core/src/core/contract.rs` (module docs; the stage 4 driver follows it exactly), crate READMEs `core/README.md`, `sim/README.md`, example config `examples/durchlauferhitzer.conf` (a test keeps it loadable and checks every key is documented).
+Key documents: spec `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md` (binding), the driver contract in `core/src/core/contract.rs` (module docs), `README.md` (build, `--check`, running, systemd, signals), crate READMEs `core/README.md`, `sim/README.md`, `driver/README.md`, example config `examples/durchlauferhitzer.conf` (runs on 127.0.0.1:8080 without root; a test keeps it loadable and checks every key is documented).
 
-The stage 3 review record lists every owner decision, every ruling taken on the owner's behalf, the final review and its fix wave.
+The stage 4 review record lists every owner decision and ruling of stage 4, the final review, its fix wave and the accepted gaps.
 
-## Before or during the stage 4 plan
+## Where things stand after stage 4 (details in the spec and the stage 4 record)
 
-- FR-CFG-21 is decided (owner, 2026-10-27): per-key caps plus a `memory_limit` budget over each connection's own buffers; an unset `max_connections_per_ip` defaults to min(64, `max_connections`).
-- The driver must implement the contract in `core/src/core/contract.rs` exactly: client and upstream readiness, `Interest::ReadWrite` (upstreams only), reading an upstream's readable bytes before reporting its socket error, deferring errors while the interest is `None`, connect answers always as a later event, the file contract, and the descriptor budget (NFR-RES-05: startup check of `RLIMIT_NOFILE`).
-- Backend addresses are IP literals only (no DNS); unspecified, broadcast and multicast are rejected at config load.
-- Drain and abort (owner, 2026-10-27; spec FR-PROC-05b–05d): during a drain a complete pipelined request behind a response whose head was queued keep-alive before the drain gets 503 + close; `abort_all` logs `Rejected { ShuttingDown }` per connection with an exchange in flight. Controller ruling (awaiting owner confirmation, then relabel in FR-PROC-05b): a request pipelined behind a head rendered during the drain (file opening, backend connecting/awaited) is not answered, since that head says close (A4).
-- Late wakes (owner, 2026-10-27; DRV-06): delivery order decides — an event handled before `TimerFired` counts even past its deadline; every deadline may be overrun by as long as the loop was late. The sim's `TimerOrder::Late` pins both orders (`sim/tests/late_timers.rs`); the randomized nets run seeds with `seed % 4 == 0` late.
-- IPv6 listeners always set `IPV6_V6ONLY` (owner, 2026-10-27; FR-CFG-10 note, A6). This container boots with IPv6 disabled: the IPv6 tests skip here and are required in CI (`DURCHLAUFERHITZER_REQUIRE_IPV6=1`).
-- Lints: one workspace table (`unsafe_code = "deny"`, `undocumented_unsafe_blocks`, `multiple_unsafe_ops_per_block`); core, sim and the driver's `main.rs` forbid unsafe at their roots; `unsafe` only in `driver/src/sys/`.
-- Deps check (NFR-MAINT-04 done): workspace crates by path, all targets, allow-listed names only from the registry; offline self-test `scripts/test-check-product-deps.sh` runs in CI.
-- Accept pause (owner, 2026-10-28; DRV-16): any non-transient accept failure pauses all listeners until the driver closes any descriptor or 1 s passes; at most one log line per second.
-- Per-socket `epoll_ctl` failure (owner, 2026-10-28; DRV-15): fails only that socket (`Failed`/`UpstreamFailed` + `DriverLog::RegisterFailed`); only `epoll_wait` or the loop's own descriptors end `run`.
-- Disk pool (Task 6): workers get the loop's wake eventfd as a duplicate (`EventFd::try_clone`); every job gets one result; a file closed during a readahead keeps its descriptor until the worker returns; a `CloseFile` that comes first wins over any queued `FileFailed`. The sim now also rejects a client `Write` interest with nothing to send. On loopback `sendfile` never returns `EAGAIN` or short counts, so that mapping is pinned by unit tests only.
-- Logging (Task 7; FR-LOG-05/06): one `key=value` line per entry, untrusted fields escaped (grammar in FR-LOG-05); proxy lines carry the backend address (owner, 2026-10-28), `[`/`]` are plain so IPv6 stays unquoted; a 64 KiB buffer of whole entries, drops counted and reported before newer entries; fd 2 is made non-blocking and only its blocking mode is restored; one stderr sink per process.
-- Startup (Task 8; owner decisions 2026-10-28, all in the spec): closed fds 0–2 are left to std (reopened on /dev/null before `main`); inconsistent systemd variables, a dual-stack IPv6 or non-TCP systemd socket, and root (any of real/effective/saved uid 0) without `user` all exit 2; no up-front <1024 check (a refused bind is the error); the descriptor budget counts the descriptors actually open at the check (NFR-RES-05). Root-only tests run when the tests run as root and skip with a reason otherwise.
-- Shutdown (Task 9; A9, FR-PROC-05 driver half): first SIGTERM closes the listeners, logs `kind=shutdown phase=draining` and drains with a `shutdown_timeout` deadline; a second SIGTERM, SIGINT or the deadline aborts (`phase=aborting`); SIGPIPE and SIGHUP are read and ignored; the pool gets 1 s, then stuck workers are detached (`phase=done detached=N`); the final log flush gets 1 s; every ending exits 0. "Buffered" in FR-PROC-05b means what the core has read when the in-flight response ends (controller clarification 2026-10-28): a request written wholly after the SIGTERM behind a response still being sent is closed unanswered (RFC 9112 §9.6).
-- CI (Task 10; owner decisions 2026-10-29): a matrix of x86_64 (`ubuntu-latest`) and arm64 (`ubuntu-24.04-arm`) runs the same gate; a "Root tests" step builds the 7 server-starting test binaries as the runner user and runs them with `sudo env DURCHLAUFERHITZER_REQUIRE_ROOT=1 …`, so the privilege-drop tests run and a root skip fails. NFR-PERF-04 (kernel-default buffer sizes pinned), NFR-PORT-01 (arm64 CI) and NFR-PORT-03 (seccomp test for a missing `openat2`) are done; `unsafe_confined.rs` pins that `allow(unsafe_code)` appears only on `sys`.
-- README.md now documents build, `--check`, a loopback run, privileges, systemd socket activation and signals; `examples/durchlauferhitzer.conf` runs on 127.0.0.1:8080 without root.
-- Process notes: the `Date` sim tests (Task 2, 66a8f77) and the first late-timer tests (Task 3, ddc859f) were written after the code; their teeth were shown by mutation.
-- Gate (owner, 2026-10-28): the docs build with warnings as errors is part of the pre-commit gate and CI; the deps self-test runs in CI only, and green CI is enough.
+- The binary `durchlauferhitzer` (crate `driver`, `libc` its only dependency; `unsafe` only in `driver/src/sys/`, pinned by `driver/tests/unsafe_confined.rs`) serves static files and proxies over epoll, follows the contract (DRV-01…16), logs one `key=value` line per entry on a non-blocking stderr (FR-LOG-05/06), starts up in the A11 order with systemd sockets or its own binds, drops to `user` and clears every capability (FR-PROC-03), checks the descriptor budget (NFR-RES-05), and drains on SIGTERM / aborts on a second SIGTERM, SIGINT or `shutdown_timeout` (FR-PROC-05).
+- CI: x86_64 and arm64 run the same gate (fmt, clippy, tests with IPv6 required, deps check and self-test, docs with `-D warnings`); a root step runs the 7 server-starting test binaries under `sudo` with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`; a list check keeps that step complete; the workflow token is read-only and `actions/checkout` is pinned by commit.
+- Tests: an end-to-end smoke suite on the real binary; randomized sim nets that also drain and abort (`seed % 5 == 0`) and run late timers (`seed % 4 == 0`); the unanswered-request check runs on every static seed.
+- This container boots with IPv6 disabled: IPv6 tests skip here and are required in CI. It runs as root, so root tests run here.
 
 ## Carry-forwards to later stages
 
-- Stage 4/5: draw "bytes, then reset" backends in the randomized proxy net (`backend_reset_after` is used by directed tests only).
-- Stage 5: IPv6 per-IP grouping by prefix; refused-slot pool fairness; long randomized runs.
-- Stage 7: double buffering vs fill-drain-refill measured with `tc netem`; per-request buffer allocation; `next_deadline` O(n); parse/route allocation nits.
+- Stage 5: "bytes, then reset" backends in the randomized proxy net (`backend_reset_after` is used by directed tests only); IPv6 per-IP grouping by prefix; refused-slot pool fairness; long randomized runs; Landlock and seccomp (NFR-SEC-12); a parser model for the static net's drain oracle (today it accepts a 503 for a head the parser would reject).
+- Stage 6: the restart target of FR-PROC-05; SIGHUP restart (FR-PROC-07).
+- Stage 7: double buffering vs fill-drain-refill measured with `tc netem`; per-request buffer allocation; `next_deadline` O(n); parse/route allocation nits; `sendfile` blocking on evicted pages (DRV-09).
+- Open: the driver-bug-close log kind is added with its first producer (FR-LOG-07); an NSS descriptor opened by the user lookup after the budget check is not counted (NFR-RES-05).
+- Known test race: `free_port()` (bind, read, release) can collide with a parallel test; documented in `driver/tests/support/child.rs`.
 
 ## Branches
 
-- `main` holds all verified work. Each plan task is fast-forwarded to `main` once it passes its review and the gate (CLAUDE.md, "Branches and main").
-- Fully contained in `main`, safe to delete when the owner says so: `claude/magical-dijkstra-2eoh4y`, `unify`, `stage3-task4` … `stage3-task9`, `stage3-final`.
-- `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A session that missed `claude/magical-dijkstra-2eoh4y` redid stage 3 Tasks 1–4 there from the pre-consolidation spec. Everything worth keeping was ported (see the stage 3 review record, "Unification"); it has 12 commits not on `main` by design. The owner decides on deletion.
+- `main` holds all verified work.
+- Fully contained in `main`, safe to delete when the owner says so: `claude/magical-dijkstra-2eoh4y`, `unify`, `stage3-task4` … `stage3-task9`, `stage3-final`, `stage4-plan`, `stage4-task1` … `stage4-task10`, `gate-docs`, `stage4-final`, `stage4-final-a`, `stage4-final-b`, `stage4-final-r2a`, `stage4-final-r2b` (the last four were rebased into `stage4-final`; their own commits are superseded, not lost).
+- `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A session that missed `claude/magical-dijkstra-2eoh4y` redid stage 3 Tasks 1–4 there; everything worth keeping was ported (stage 3 record, "Unification"); it has 12 commits not on `main` by design. The owner decides on deletion.
 
 ## Owner's way of working (mandatory, see CLAUDE.md)
 
