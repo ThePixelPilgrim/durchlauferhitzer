@@ -8,7 +8,9 @@
 //! usual; one whose head is rendered during the drain is the model's for
 //! a client that closes (`Connection: close` in the head), or, for a
 //! request completed during the drain, the `503` with close, with no
-//! upstream; a story may end silently where the drain closed it.
+//! upstream; a head the parser rejects keeps its own error (owner
+//! decision 2026-10-29, FR-PROC-05b). A story may end silently only where
+//! the drain may close it (`check.rs`).
 
 use super::*;
 
@@ -113,14 +115,17 @@ pub(crate) fn drain_alts(
         Some(Phase::Serving) => return ex.alts.clone(),
         Some(Phase::Draining | Phase::AbortCut) | None => {}
     }
-    let mut out = match &ex.req.verdict {
+    match &ex.req.verdict {
         // Answered with its head: during the drain that head gets the 503.
-        Verdict::Answer(..) => Vec::new(),
-        // A head the parser rejects is not a request: its 400 (which
-        // closes) or the 503 (the spec does not say which).
+        Verdict::Answer(..) => vec![refused_alt(ex, who)],
+        // A head the parser rejects is no request: it keeps its own error,
+        // which closes (owner decision 2026-10-29, FR-PROC-05b), never
+        // the 503.
         Verdict::Parse(_) => ex.alts.clone(),
-        Verdict::Forward(_) | Verdict::BadBody { .. } => closing_alts(ex, who, net),
-    };
-    out.push(refused_alt(ex, who));
-    out
+        Verdict::Forward(_) | Verdict::BadBody { .. } => {
+            let mut out = closing_alts(ex, who, net);
+            out.push(refused_alt(ex, who));
+            out
+        }
+    }
 }

@@ -7,7 +7,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use durchlauferhitzer_core::http::request::{Method, Persistence};
+use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::{Log, RejectReason, RequestSummary, TimeoutKind};
@@ -455,6 +455,48 @@ fn a_request_pipelined_behind_the_drain_gets_503() {
     assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
     finish_client(&mut sim, c);
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+    assert!(sim.is_drained(), "{}", sim.trace());
+}
+
+/// A head the parser rejects, pipelined behind a response queued
+/// keep-alive before the drain: it is no request, so it keeps its own
+/// error (here the 400 of a bare LF) with `Connection: close`, not the
+/// drain's 503 (owner decision 2026-10-29, FR-PROC-05b).
+#[test]
+fn a_malformed_request_pipelined_during_the_drain_keeps_its_400() {
+    let mut sim = sim();
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Budget(10));
+    sim.send(c, &[MISSING, b"GET / HTTP/1.1\nHost: a\n\n"].concat());
+    sim.run_until_idle();
+    sim.begin_drain();
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    let logs = sim.logs().len();
+    sim.set_client_window(c, Window::Unlimited);
+    sim.run_until_idle();
+    let mut expected = not_found_keep_alive();
+    expected.extend(model_fixed(
+        Status::BadRequest,
+        Persistence::Close,
+        BodyMode::Full,
+        None,
+    ));
+    assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
+    assert_eq!(
+        &sim.logs()[logs..],
+        &[Log::Rejected {
+            conn: c,
+            peer: peer(),
+            reason: RejectReason::Http {
+                error: HttpError::BareLf,
+                request: None,
+            },
+        }],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    finish_client(&mut sim, c);
     assert!(sim.is_drained(), "{}", sim.trace());
 }
 

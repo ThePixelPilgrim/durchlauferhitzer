@@ -22,7 +22,9 @@ impl Core {
     /// - a request head that is partly received completes as usual (within
     ///   its header deadline) and is then answered `503 Service
     ///   Unavailable` with `Connection: close` (logged as its
-    ///   [`Log::Response`]), as is every request completed later;
+    ///   [`Log::Response`]), as is every request completed later; a head
+    ///   the parser rejects is no request and keeps its own error, with
+    ///   `Connection: close` (owner decision 2026-10-29, FR-PROC-05b);
     /// - every exchange in flight (a fixed response, a static file, a
     ///   proxied request) finishes. A head already queued keeps what it
     ///   said; a head rendered from now on says `Connection: close`. Then
