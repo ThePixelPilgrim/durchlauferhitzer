@@ -67,7 +67,8 @@ src/
                       writes by interest, error deferral, upstream actions
     files.rs          the file contract (DRV-07…09): `Files` (each file id
                       from `OpenFile` to `CloseFile`; `Closing` while a
-                      readahead is in flight), file actions to the pool,
+                      worker runs its readahead, a queued one is
+                      cancelled), file actions to the pool,
                       pool results to events, `sendfile` of the segment
     shutdown.rs       the shutdown state machine (FR-PROC-05, DRV-14):
                       `ShutdownGate` (`Running | Draining { deadline } |
@@ -97,7 +98,8 @@ src/
                     all against `listen` (`check_coverage`, pure)
   pool.rs           `Pool` (crate-private): the disk workers (A10):
                     `start`, `submit` (`Job::Open` / `Job::Readahead`),
-                    `results` (`JobResult`), `shutdown` (joins within
+                    `cancel_readahead` (`Cancel`: a queued readahead
+                    of a closed file, OA1), `results` (`JobResult`), `shutdown` (joins within
                     1 s, detaches the rest, returns how many)
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules
@@ -354,9 +356,12 @@ leaves a choice, this is what the loop does:
   stamp, `FileFailed` by the errno table, `ChunkReady` with the stamp at
   read time), in arrival order. An open failing with `EMFILE`/`ENFILE`
   is logged (`DriverLog::OpenFailed`) and is still `FileFailed { Other }`.
-  `CloseFile` closes the descriptor at once, or, while a readahead is in
-  flight, marks the file `Closing`: the descriptor stays open until that
-  result arrives, which is then dropped (no event). Closing a file
+  `CloseFile` closes the descriptor at once; while a readahead is in
+  flight it first cancels that job if no worker has taken it yet
+  (`Pool::cancel_readahead`, OA1), and closes at once then too;
+  otherwise it marks the file `Closing`: the descriptor stays open until
+  that result arrives, which is then dropped (no event). So at most
+  `disk_threads` files are `Closing` (NFR-RES-05 counts them). Closing a file
   resumes paused listeners (DRV-16). One readahead per file at a time,
   as the core asks: a second one while one is in flight is answered
   `FileFailed { Other }` after the current call, unless a `CloseFile`
@@ -372,10 +377,12 @@ leaves a choice, this is what the loop does:
   error is `FileFailed { Other }`. A segment of a file the driver does not
   hold open (never, from the core) is `FileFailed { Other }` rather than
   a wait for a writability the loop would never use.
-- **Pool rules** (`pool.rs`). Every job gets exactly one result; a failure
+- **Pool rules** (`pool.rs`). Every job gets exactly one result, but a
+  readahead cancelled while queued (OA1) gets none; a failure
   is a result, never a panic (R6). The queue is unbounded in the type but
   bounded by the core (one job per connection at a time, orphaned opens
-  included: at most `max_connections`). `shutdown` stops the workers and
+  included: at most `max_connections`), plus at most `disk_threads`
+  running readaheads of closed files. `shutdown` stops the workers and
   joins them: a running job finishes, queued jobs are dropped (the loop
   that wanted them has ended); dropping the pool does the same. It waits
   at most 1 s (polling each thread's `is_finished` every millisecond:

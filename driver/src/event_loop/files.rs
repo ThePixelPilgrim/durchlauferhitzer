@@ -15,7 +15,7 @@ use durchlauferhitzer_core::{
 
 use super::{Driver, FileFailure};
 use crate::log::{DriverLog, LogEntry};
-use crate::pool::{Job, JobResult};
+use crate::pool::{Cancel, Job, JobResult};
 use crate::sys::fd::Io;
 use crate::sys::file::{Stat, file_error, sendfile};
 
@@ -36,9 +36,11 @@ enum FileState {
     Abandoned,
     /// `FileOpened` was delivered; `sendfile` reads from `fd`.
     Open { fd: Arc<OwnedFd>, reading: Reading },
-    /// `CloseFile` came while a readahead was in flight: the descriptor
-    /// stays open until that worker's result arrives, which is then
-    /// dropped (DRV-09), so a reused descriptor number never receives it.
+    /// `CloseFile` came while a worker ran the file's readahead: the
+    /// descriptor stays open until that worker's result arrives, which is
+    /// then dropped (DRV-09), so a reused descriptor number never receives
+    /// it. A readahead still queued is cancelled instead (OA1), so at most
+    /// `disk_threads` files are `Closing`.
     Closing { _fd: Arc<OwnedFd> },
 }
 
@@ -164,15 +166,22 @@ impl Files {
     }
 
     /// `CloseFile`: the descriptor closes now, or once the readahead in
-    /// flight returns.
-    pub(super) fn close(&mut self, file: FileId) -> Freed {
+    /// flight returns. A readahead still queued is cancelled first
+    /// (`cancel`, the pool's `Pool::cancel_readahead`; OA1), so the
+    /// descriptor closes at once: only readaheads a worker runs leave a
+    /// file `Closing`, at most `disk_threads` of them (NFR-RES-05).
+    pub(super) fn close(&mut self, file: FileId, cancel: impl FnOnce(FileId) -> Cancel) -> Freed {
         match self.map.remove(&file) {
             Some(FileState::Open { fd, reading }) => match reading {
                 Reading::Idle => Freed::Descriptor,
-                Reading::InFlight => {
-                    self.map.insert(file, FileState::Closing { _fd: fd });
-                    Freed::Nothing
-                }
+                Reading::InFlight => match cancel(file) {
+                    // The job's reference went with it: `fd` is the last.
+                    Cancel::Cancelled => Freed::Descriptor,
+                    Cancel::NotQueued => {
+                        self.map.insert(file, FileState::Closing { _fd: fd });
+                        Freed::Nothing
+                    }
+                },
             },
             Some(FileState::Opening) => {
                 self.map.insert(file, FileState::Abandoned);
@@ -289,7 +298,11 @@ impl Driver {
     /// `CloseFile` (DRV-09): closes the descriptor, or marks the file
     /// closing while its readahead is in flight.
     pub(super) fn close_file(&mut self, file: FileId) -> io::Result<()> {
-        let freed = self.files.close(file);
+        let pool = self.pool.as_ref();
+        let freed = self.files.close(file, |file| match pool {
+            Some(pool) => pool.cancel_readahead(file),
+            None => Cancel::NotQueued,
+        });
         self.freed(freed)
     }
 
@@ -387,7 +400,13 @@ mod tests {
     use durchlauferhitzer_core::{ConnError, ConnId, Event, FileError, FileId};
 
     use super::{Answer, Files, Freed, StartRead, sendfile_event};
+    use crate::pool::Cancel;
     use crate::sys::fd::Io;
+
+    /// A pool that has no readahead of the file queued.
+    fn running(_: FileId) -> Cancel {
+        Cancel::NotQueued
+    }
 
     fn fd() -> OwnedFd {
         OwnedFd::from(std::fs::File::open("/dev/null").unwrap())
@@ -407,9 +426,9 @@ mod tests {
     fn a_file_without_a_readahead_closes_at_once() {
         let mut files = Files::new();
         let weak = open_file(&mut files);
-        assert_eq!(files.close(F), Freed::Descriptor);
+        assert_eq!(files.close(F, running), Freed::Descriptor);
         assert!(weak.upgrade().is_none());
-        assert_eq!(files.close(F), Freed::Nothing);
+        assert_eq!(files.close(F, running), Freed::Nothing);
     }
 
     /// DRV-09: `CloseFile` while a readahead is in flight keeps the
@@ -424,12 +443,45 @@ mod tests {
         };
         // The worker returns its reference before it sends the result.
         drop(job_fd);
-        assert_eq!(files.close(F), Freed::Nothing);
+        assert_eq!(files.close(F, running), Freed::Nothing);
         assert!(weak.upgrade().is_some(), "closed while the readahead runs");
         assert!(files.fd(F).is_none(), "no sendfile after CloseFile");
         assert_eq!(files.read_done(F), Answer::Drop(Freed::Descriptor));
         assert!(weak.upgrade().is_none());
         assert_eq!(files.read_done(F), Answer::Drop(Freed::Nothing));
+    }
+
+    /// OA1: `CloseFile` while the readahead is still queued cancels it, so
+    /// the descriptor closes at once (and paused listeners resume); a late
+    /// result for the file (none comes) would be dropped.
+    #[test]
+    fn close_with_a_queued_readahead_cancels_it_and_closes_at_once() {
+        let mut files = Files::new();
+        let weak = open_file(&mut files);
+        let StartRead::Started(job_fd) = files.start_read(F) else {
+            panic!("no readahead started");
+        };
+        let mut asked = None;
+        let freed = files.close(F, |file| {
+            asked = Some(file);
+            // The pool drops the job, and its reference, when it cancels.
+            drop(job_fd);
+            Cancel::Cancelled
+        });
+        assert_eq!(asked, Some(F));
+        assert_eq!(freed, Freed::Descriptor);
+        assert!(weak.upgrade().is_none(), "the descriptor is still open");
+        assert!(files.fd(F).is_none());
+        assert_eq!(files.read_done(F), Answer::Drop(Freed::Nothing));
+    }
+
+    /// OA1: an idle file is closed without asking the pool.
+    #[test]
+    fn close_of_an_idle_file_does_not_ask_the_pool() {
+        let mut files = Files::new();
+        let _weak = open_file(&mut files);
+        let freed = files.close(F, |_| panic!("asked the pool"));
+        assert_eq!(freed, Freed::Descriptor);
     }
 
     #[test]
@@ -470,10 +522,10 @@ mod tests {
     fn close_before_the_open_answer_drops_the_answer() {
         let mut files = Files::new();
         files.opening(F);
-        assert_eq!(files.close(F), Freed::Nothing);
+        assert_eq!(files.close(F, running), Freed::Nothing);
         assert_eq!(files.opened(F, fd()), Answer::Drop(Freed::Descriptor));
         files.opening(FileId(2));
-        assert_eq!(files.close(FileId(2)), Freed::Nothing);
+        assert_eq!(files.close(FileId(2), running), Freed::Nothing);
         assert_eq!(files.open_failed(FileId(2)), Answer::Drop(Freed::Nothing));
     }
 

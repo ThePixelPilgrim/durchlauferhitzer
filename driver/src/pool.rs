@@ -11,16 +11,22 @@
 //!
 //! Rules:
 //!
-//! - Every job gets exactly one [`JobResult`]: a failure is a result like
-//!   any other, and no worker panics on an I/O error (R6).
+//! - Every job gets exactly one [`JobResult`] (but a readahead cancelled
+//!   while queued, [`Pool::cancel_readahead`], gets none): a failure is a
+//!   result like any other, and no worker panics on an I/O error (R6).
 //! - A job holds its descriptor (`Arc<OwnedFd>`) only while it runs: the
 //!   worker drops the job before it sends the result, so once the loop
 //!   holds the result it holds the last reference the job had (DRV-09:
 //!   after `CloseFile` the loop closes the descriptor only when the
 //!   in-flight readahead's result arrives).
-//! - The queue is not bounded here: the core asks for at most one open or
-//!   readahead per connection at a time, orphaned opens included, so at
-//!   most `max_connections` jobs are queued or running (NFR-RES-05).
+//! - The queue is not bounded here. The core asks for at most one open or
+//!   readahead per connection at a time, orphaned opens included, so the
+//!   live files have at most `max_connections` jobs queued or running. A
+//!   file closed while its readahead is queued has that job cancelled
+//!   ([`Pool::cancel_readahead`], OA1); one closed while a worker runs it
+//!   keeps that job until it ends, at most `disk_threads` of them. So at
+//!   most `max_connections + disk_threads` jobs are queued or running,
+//!   and as many file descriptors held (NFR-RES-05).
 //! - [`Pool::shutdown`] (also on drop) stops the workers and joins them,
 //!   waiting at most 1 s: a worker still running then (stuck in the
 //!   kernel) is detached and counted. A worker in uninterruptible sleep
@@ -91,6 +97,17 @@ impl JobResult {
             | JobResult::ReadFailed { file, .. } => *file,
         }
     }
+}
+
+/// What [`Pool::cancel_readahead`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cancel {
+    /// The readahead was still queued: it is gone, with its reference to
+    /// the descriptor, and no result will come for it.
+    Cancelled,
+    /// No readahead of the file is queued: a worker runs it (or ran it),
+    /// and its result comes as usual.
+    NotQueued,
 }
 
 /// Whether the workers keep taking jobs.
@@ -204,6 +221,27 @@ impl Pool {
                 self.shared.ready.notify_one();
             }
             Run::Stopping => {}
+        }
+    }
+
+    /// Takes a queued `Job::Readahead` of `file` out of the queue, before
+    /// any worker took it (OA1, owner decision 2026-10-29): the job and
+    /// its reference to the descriptor are dropped here, and no result
+    /// comes for it. A readahead a worker has taken, and any `Job::Open`,
+    /// are left alone.
+    pub fn cancel_readahead(&self, file: FileId) -> Cancel {
+        let mut queue = self.shared.lock();
+        let queued = queue.jobs.iter().position(|job| match job {
+            Job::Readahead { file: queued, .. } => *queued == file,
+            Job::Open { .. } => false,
+        });
+        match queued.and_then(|at| queue.jobs.remove(at)) {
+            Some(job) => {
+                drop(queue);
+                drop(job);
+                Cancel::Cancelled
+            }
+            None => Cancel::NotQueued,
         }
     }
 
@@ -334,7 +372,7 @@ mod tests {
 
     use durchlauferhitzer_core::{FileId, FileKind};
 
-    use super::{GRACE, Job, JobResult, Pool, Stopped};
+    use super::{Cancel, GRACE, Job, JobResult, Pool, Stopped};
     use crate::sys::eventfd::EventFd;
     use crate::sys::file::open_dir_path;
 
@@ -376,6 +414,74 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         out
+    }
+
+    /// A pool without workers: every job stays queued.
+    fn idle() -> Pool {
+        let (_sender, results) = std::sync::mpsc::channel();
+        Pool {
+            shared: Arc::new(super::Shared {
+                queue: std::sync::Mutex::new(super::Queue {
+                    jobs: std::collections::VecDeque::new(),
+                    run: super::Run::Running,
+                }),
+                ready: std::sync::Condvar::new(),
+            }),
+            results,
+            threads: Vec::new(),
+        }
+    }
+
+    fn readahead(file: u64, fd: &Arc<OwnedFd>) -> Job {
+        Job::Readahead {
+            file: FileId(file),
+            fd: Arc::clone(fd),
+            offset: 0,
+            len: 5,
+        }
+    }
+
+    /// OA1: a readahead no worker has taken yet is cancelled: it leaves
+    /// the queue with its reference to the descriptor, so the loop's is
+    /// the last one; other jobs stay queued.
+    #[test]
+    fn a_queued_readahead_is_cancelled_and_drops_its_descriptor() {
+        let (_root, root_fd) = Root::new("cancel");
+        let pool = idle();
+        let fd = Arc::new(root_fd.as_fd().try_clone_to_owned().unwrap());
+        pool.submit(open(1, &root_fd, &[b"a.txt"]));
+        pool.submit(readahead(2, &fd));
+        pool.submit(readahead(3, &root_fd));
+        assert_eq!(Arc::strong_count(&fd), 2);
+        assert_eq!(pool.cancel_readahead(FileId(2)), Cancel::Cancelled);
+        assert_eq!(Arc::strong_count(&fd), 1, "the job still holds the fd");
+        assert_eq!(pool.cancel_readahead(FileId(2)), Cancel::NotQueued);
+        // An open is never cancelled (DRV-09: its answer is due).
+        assert_eq!(pool.cancel_readahead(FileId(1)), Cancel::NotQueued);
+        let files: Vec<FileId> = pool
+            .shared
+            .lock()
+            .jobs
+            .iter()
+            .map(|job| match job {
+                Job::Open { file, .. } | Job::Readahead { file, .. } => *file,
+            })
+            .collect();
+        assert_eq!(files, [FileId(1), FileId(3)]);
+    }
+
+    /// OA1: a readahead a worker has taken is not cancelled; its result
+    /// comes as usual.
+    #[test]
+    fn a_running_readahead_is_not_cancelled() {
+        let (_root, root_fd) = Root::new("running");
+        let wake = EventFd::new().unwrap();
+        let pool = Pool::start(1, wake.try_clone().unwrap()).unwrap();
+        pool.submit(readahead(1, &root_fd));
+        let results = collect(&pool, &wake, 1);
+        assert_eq!(pool.cancel_readahead(FileId(1)), Cancel::NotQueued);
+        assert_eq!(results.len(), 1, "{results:?}");
+        pool.shutdown();
     }
 
     #[test]

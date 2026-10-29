@@ -11,8 +11,9 @@
 //! + 2 × 16 (client sockets) = 39, then
 //! - a proxy route: + 16 (upstream sockets) = 55;
 //! - a static route: + 1 (the root, open) + 1 (the pool's wake
-//!   duplicate) + 16 (files) = 57;
-//! - both: 73;
+//!   duplicate) + 16 (files) + 4 (`disk_threads`: closed files whose
+//!   readahead a worker still runs, OA1) = 61;
+//! - both: 77;
 //!
 //! plus every descriptor this test process passes on to its children
 //! (`child::inheritable_fds`: two on GitHub's runners).
@@ -47,7 +48,7 @@ fn configs(dir: &TempDir, addr: SocketAddr) -> Vec<(String, u64)> {
     );
     // Whatever this process passes on is open in the server too.
     let inherited = child::inheritable_fds(&[]);
-    [(proxy, 55), (stat, 57), (both, 73)]
+    [(proxy, 55), (stat, 61), (both, 77)]
         .into_iter()
         .enumerate()
         .map(|(i, (conf, needed))| {

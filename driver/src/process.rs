@@ -166,6 +166,7 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
     budget::ensure(budget::needed(budget::Descriptors {
         open: budget::open_now()?,
         max_connections,
+        disk_threads,
         roots: roots.len(),
         backends: core.backends().len(),
     }))?;

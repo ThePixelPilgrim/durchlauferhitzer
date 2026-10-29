@@ -151,7 +151,10 @@ fn a_readahead_without_a_pool_leaves_the_file_idle() {
         driver.file_failures.iter().copied().collect::<Vec<_>>(),
         [FileFailure::Read(file)]
     );
-    assert_eq!(driver.files.close(file), super::files::Freed::Descriptor);
+    assert_eq!(
+        driver.files.close(file, |_| crate::pool::Cancel::NotQueued),
+        super::files::Freed::Descriptor
+    );
 }
 
 /// `EMFILE`/`ENFILE` from an open are logged by the driver (the budget

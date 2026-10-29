@@ -1488,7 +1488,9 @@ Failures, persistence, timeouts:
   in the buffer.
 - **NFR-RES-05** [done] File-descriptor
   budget: at most `max_connections` files are open or being opened
-  (orphans included, FR-CONN-11); at most 2 × `max_connections` client
+  (orphans included, FR-CONN-11), plus at most `disk_threads` closed
+  files whose readahead a worker still runs (DRV-09; owner decision
+  2026-10-29, OA1); at most 2 × `max_connections` client
   sockets (refused ones included); from stage 3 at most one upstream socket
   per counted connection; plus the static roots, listeners and the eventfd.
   The driver checks `RLIMIT_NOFILE` against this at startup. *(Stage 4
@@ -1496,7 +1498,9 @@ Failures, persistence, timeouts:
   fds 0–2 by the real count:)* the soft limit must be at least
   `needed = open + 3 (epoll, wake eventfd, signalfd) + 2 × max_connections
   (client sockets) + [roots > 0: 1 (the disk pool's duplicate of the wake
-  eventfd) + max_connections (files)] + [some proxy route:
+  eventfd) + max_connections (files) + disk_threads (closed files whose
+  readahead a worker still runs, DRV-09; owner decision 2026-10-29, OA1)]
+  + [some proxy route:
   max_connections (upstream sockets)]`, where `open` is the number of
   descriptors open at the check (after the roots are opened and the
   sockets bound or taken), counted in `/proc/self/fd`: fds 0–2, the
@@ -1731,7 +1735,11 @@ stage 4 (its tests are in `driver/`).
   with the real outcome — the driver never fabricates one (a blocked
   `openat2` cannot be cancelled; the core waits, FR-CONN-11). `CloseFile`
   supersedes a readahead in flight; the descriptor stays open until that
-  worker returns. Errors map to `FileError` by the errno table; stamps are
+  worker returns. *(Owner decision 2026-10-29, OA1, stage 4 final
+  review:)* a readahead no worker has taken yet is cancelled by
+  `CloseFile` (taken out of the pool's queue) and the descriptor closed
+  at once, so at most `disk_threads` closed files are held open
+  (NFR-RES-05). Errors map to `FileError` by the errno table; stamps are
   `st_size` and mtime in nanoseconds (pre-1970 clamps to 0); a `sendfile`
   returning 0 mid-segment is `Truncated`; `EPIPE`/`ECONNRESET` are the
   socket's (`Failed`); other file-side errors are `FileFailed { Other }`.
