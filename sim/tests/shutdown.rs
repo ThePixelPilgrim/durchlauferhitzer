@@ -187,6 +187,65 @@ fn a_proxied_exchange_completes_then_closes() {
     assert!(sim.is_drained(), "{}", sim.trace());
 }
 
+/// A backend still being connected to when the drain begins: the 504 of
+/// its connect timeout is rendered afterwards, so it says
+/// `Connection: close` (FR-PROC-05 "Core half").
+#[test]
+fn a_connect_timing_out_during_the_drain_gets_504_with_close() {
+    let mut sim = sim();
+    sim.set_connect("127.0.0.1:3000", ConnectBehaviour::Hang);
+    let c = sim.connect(peer());
+    sim.send(c, b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n");
+    sim.run_until_idle();
+    assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
+    sim.begin_drain();
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    // `backend_connect_timeout` defaults to 5s.
+    sim.advance(Duration::from_secs(6));
+    assert_eq!(
+        sim.take_received(c),
+        model_fixed(
+            Status::GatewayTimeout,
+            Persistence::Close,
+            BodyMode::Full,
+            None
+        ),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    finish_client(&mut sim, c);
+    assert!(sim.is_drained(), "{}", sim.trace());
+}
+
+/// The same connect answered after the drain began (a slow accept): the
+/// relayed head says `connection: close`.
+#[test]
+fn a_connect_completed_during_the_drain_relays_with_close() {
+    let mut sim = sim();
+    sim.set_connect("127.0.0.1:3000", ConnectBehaviour::Hang);
+    let c = sim.connect(peer());
+    sim.send(c, b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n");
+    sim.run_until_idle();
+    let up = *sim.upstreams().first().unwrap();
+    sim.begin_drain();
+    sim.accept_upstream(up);
+    sim.run_until_idle();
+    sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    finish_client(&mut sim, c);
+    assert!(sim.is_drained(), "{}", sim.trace());
+}
+
 /// `is_drained` turns true exactly when the last resource goes: here an
 /// orphaned open, answered by the disk after its connection reset.
 #[test]
