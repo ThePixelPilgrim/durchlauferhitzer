@@ -167,9 +167,11 @@ tests/
                     chunked both ways, an early 413, a refused 502, a
                     hanging 504), each response byte-exact (the sim's
                     model for the core's own), every backend request
-                    byte-exact, one log line per entry (exact but for
-                    `conn=`), the fd count back to its baseline, then
-                    SIGTERM: `draining`, `done detached=0`, exit 0
+                    byte-exact, every core `Date` the wall-clock second
+                    of its exchange (DRV-13), one log line per entry
+                    (exact but for `conn=`), the fd count back to its
+                    baseline, then SIGTERM: `draining`, `done
+                    detached=0`, exit 0
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process
@@ -212,6 +214,10 @@ tests/
   loop_accept_pause.rs  out of descriptors: accepting pauses without a
                     spin and the 1 s retry resumes it; alone in its binary
                     (it lowers RLIMIT_NOFILE)
+  loop_socket_failed.rs  out of descriptors for a backend `socket()`:
+                    logged `socket_failed`, answered 502 on the
+                    keep-alive connection; alone in its binary (it lowers
+                    RLIMIT_NOFILE)
   static_files.rs   the file contract on loopback: a 10 MiB file to a slow
                     reader, directory 301 and index, 404 for a symlink, a
                     dotfile, a FIFO and a missing file, a FIFO that must not

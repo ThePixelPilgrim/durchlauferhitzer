@@ -581,3 +581,38 @@ fn proxy_lines_name_the_backend_by_its_address() {
         )
     );
 }
+
+/// NFR-PERF-04, DRV-11: every client socket the loop accepts and every
+/// upstream socket it connects gets `TCP_NODELAY` (off by default).
+#[test]
+fn clients_and_upstreams_get_tcp_nodelay() {
+    use std::net::{TcpListener, TcpStream};
+
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = format!(
+        "listen 127.0.0.1:8080; host a.test {{ path / {{ proxy {}; \
+         max_request_body 1MiB; max_response_body 1MiB; }} }}",
+        backend.local_addr().unwrap()
+    );
+    let core = Core::new(load(&config).unwrap());
+    let (log, _logs) = LogSink::channel();
+    let mut driver = Driver::new(core, Vec::new(), Vec::new(), 1, log).unwrap();
+    let nodelay = |fd: &OwnedFd| TcpStream::from(fd.try_clone().unwrap()).nodelay().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let _peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+    assert!(!accepted.nodelay().unwrap(), "the kernel's default");
+    driver.accepted(OwnedFd::from(accepted), peer()).unwrap();
+    assert!(nodelay(&driver.clients[&ConnId(1)].fd));
+
+    let up = UpstreamId(1);
+    driver.connect(up, BackendId(0)).unwrap();
+    let fd = match &driver.upstreams[&up].phase {
+        Phase::Connecting(fd) | Phase::Answering(Answer::Connected(fd)) => fd,
+        Phase::Answering(Answer::Failed) | Phase::Open { .. } | Phase::Failed => {
+            panic!("the connect to a listening backend did not start")
+        }
+    };
+    assert!(nodelay(fd));
+}

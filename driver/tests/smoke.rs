@@ -17,6 +17,9 @@
 //!   with the `Date` the response carried, always 29 bytes), relayed
 //!   ones with the bytes FR-PROXY-04…12 and FR-HTTP-22a give; every
 //!   request the backend gets is compared byte for byte too;
+//! - every `Date` the core renders is the wall-clock second of its
+//!   exchange, between sending the request and reading the head (DRV-13;
+//!   the IMF-fixdate written here from the calendar rules);
 //! - after the last response of every connection the client half-closes
 //!   and must read the end of stream with no byte more;
 //! - the server's stderr must hold exactly one line per expected entry
@@ -54,7 +57,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use child::{PATIENCE, Running, Setup, TempDir, free_port, text};
 use durchlauferhitzer_core::http::request::Persistence;
@@ -435,11 +438,82 @@ fn date_of(head: &[u8]) -> Option<String> {
     Some(date)
 }
 
+/// The wall-clock second now.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// The IMF-fixdate of `secs` after the epoch (RFC 9110 section 5.6.7),
+/// written here from the calendar rules (days to civil date), not taken
+/// from the core.
+fn imf_fixdate(secs: u64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = secs / 86_400;
+    let time = secs % 86_400;
+    // Proleptic Gregorian calendar in 400-year eras from 0000-03-01.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    format!(
+        "{}, {day:02} {} {year} {:02}:{:02}:{:02} GMT",
+        WEEKDAYS[usize::try_from(days % 7).unwrap()],
+        MONTHS[usize::try_from(month - 1).unwrap()],
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    )
+}
+
+#[test]
+fn imf_fixdate_matches_known_dates() {
+    assert_eq!(imf_fixdate(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+    assert_eq!(imf_fixdate(784_111_777), "Sun, 06 Nov 1994 08:49:37 GMT");
+    assert_eq!(imf_fixdate(951_782_400), "Tue, 29 Feb 2000 00:00:00 GMT");
+    assert_eq!(imf_fixdate(1_798_761_599), "Thu, 31 Dec 2026 23:59:59 GMT");
+}
+
 /// Sends the request of `kind` and checks the response byte for byte.
 fn exchange(stream: &mut TcpStream, kind: Kind, conn: usize, index: usize) {
+    let sent = unix_now();
     stream.write_all(&client_request(kind)).unwrap();
     let head = read_head(stream).unwrap_or_else(|e| panic!("conn {conn} #{index} {kind:?}: {e}"));
-    let expected = client_response(kind, date_of(&head).as_deref());
+    let date = date_of(&head);
+    match kind {
+        // The backend's `Date`, checked with the bytes.
+        Kind::ProxyPost | Kind::Chunked => {}
+        // DRV-13: the core's `Date` is the wall-clock second it was
+        // rendered in, between sending the request and reading the head.
+        Kind::File
+        | Kind::Index
+        | Kind::NotFound
+        | Kind::Redirect
+        | Kind::ProxyGet
+        | Kind::TooLarge
+        | Kind::Refused
+        | Kind::Hang => {
+            let received = unix_now();
+            let date = date.as_deref().unwrap_or_default();
+            assert!(
+                (sent..=received).any(|secs| imf_fixdate(secs) == date),
+                "conn {conn} #{index} {kind:?}: Date {date:?} outside {} .. {}",
+                imf_fixdate(sent),
+                imf_fixdate(received)
+            );
+        }
+    }
+    let expected = client_response(kind, date.as_deref());
     assert!(
         head.len() <= expected.len() && head == expected[..head.len()],
         "conn {conn} #{index} {kind:?}: head\n{}\nexpected\n{}",
