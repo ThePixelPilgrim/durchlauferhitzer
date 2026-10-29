@@ -25,7 +25,7 @@ pub(crate) enum Token {
     /// The eventfd that wakes the loop (the stop handle and the disk
     /// workers).
     Wake,
-    /// The signalfd (Task 9).
+    /// The signalfd (SIGTERM, SIGINT, SIGPIPE, SIGHUP; DRV-14).
     Signal,
     /// The log sink's descriptor (stderr), registered for writability
     /// only while the sink holds bytes (FR-LOG-06).

@@ -1,11 +1,12 @@
 //! The epoll event loop: it runs the core over real sockets and files,
 //! following the driver contract (`core/src/core/contract.rs`, DRV-01…10,
-//! DRV-13, DRV-15, DRV-16) to the letter.
+//! DRV-13…16) to the letter.
 //!
 //! One thread owns everything. Each turn waits on the epoll set with a
-//! timeout derived from [`Core::next_deadline`], handles every ready
-//! descriptor (listeners, clients, upstreams, the wake eventfd), then
-//! delivers `TimerFired` if the deadline has passed. Every event goes
+//! timeout derived from [`Core::next_deadline`] (and the drain's deadline,
+//! DRV-14), handles every ready descriptor (listeners, clients, upstreams,
+//! the wake eventfd, the signalfd, the log sink's descriptor while bytes
+//! wait), then delivers `TimerFired` if the deadline has passed. Every event goes
 //! through `Driver::deliver`: one `handle` call whose actions are all
 //! performed, in order, before anything else happens (DRV-02), followed by
 //! the connect answers those actions queued (DRV-10: never inside the call
