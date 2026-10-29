@@ -102,6 +102,10 @@ fn set_mode(path: &Path, mode: u32) {
 }
 
 /// A loopback port that was free a moment ago (bound, read, released).
+///
+/// Another process may take it before the server binds it: a known, rare
+/// race, left as it is (a retry would have to rewrite the test's config).
+/// [`Running::start`] names it when the server's bind fails that way.
 pub fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -197,6 +201,9 @@ pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if setup.as_nobody || setup.effective_uid.is_some() {
+        assert_reachable_by_others(Path::new(exe()));
+    }
     if setup.as_nobody {
         cmd.uid(NOBODY).gid(NOBODY);
     }
@@ -231,6 +238,32 @@ pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
         Filter::Openat2Enosys => pre_exec::openat2_enosys(&mut cmd),
     }
     (cmd, keep)
+}
+
+/// Fails the test with an explanation unless a user other than the owner
+/// (`nobody`) can execute `exe`: every directory above it must be
+/// searchable by others (`o+x`), and the file executable by them. A
+/// target dir under a private home directory is not; build into one
+/// others can reach (`CARGO_TARGET_DIR`, e.g. under `/tmp`), or make the
+/// directories searchable (CI runs `chmod a+x "$HOME"`).
+fn assert_reachable_by_others(exe: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    const OTHERS_X: u32 = 0o001;
+    for path in exe.ancestors() {
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+        let mode = fs::metadata(path).unwrap().permissions().mode();
+        assert!(
+            mode & OTHERS_X != 0,
+            "the server is started as nobody here, but it cannot reach {}: {} has mode {:o}, \
+             without o+x. Build into a target dir others can reach (CARGO_TARGET_DIR, \
+             e.g. under /tmp) or make the directories above it searchable (chmod o+x)",
+            exe.display(),
+            path.display(),
+            mode & 0o7777
+        );
+    }
 }
 
 /// Runs the binary to completion with `args` and `setup`.
@@ -309,7 +342,14 @@ impl Running {
                 if let Some(mut err) = self.child.stderr.take() {
                     let _ = err.read_to_string(&mut stderr);
                 }
-                panic!("the server exited early ({status}): {stderr}");
+                // The race of `free_port`: another process took the port.
+                let race = if stderr.contains("Address already in use") {
+                    " (the port from `free_port` was taken before the server \
+                     bound it, a known rare race: rerun the test)"
+                } else {
+                    ""
+                };
+                panic!("the server exited early ({status}){race}: {stderr}");
             }
             if TcpStream::connect(addr).is_ok() {
                 return self;

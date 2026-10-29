@@ -193,7 +193,8 @@ tests/
                     DURCHLAUFERHITZER_REQUIRE_ROOT=1) no `user` and an unknown
                     user are exit 2, `user nobody` drops every id
                     (`drop_to` in the server's process) and serves, and a
-                    systemd socket below 1024 serves as nobody; a real
+                    systemd socket below 1024 serves as nobody, root with
+                    a systemd socket and no `user` is exit 2; a real
                     uid of 0 under an effective nobody counts as root
                     (exit 2 without `user`, every uid dropped with one)
   stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
@@ -238,7 +239,9 @@ tests/
   support/child.rs  running the binary: temp configs, a free port (bound,
                     read and released, so another process could take it
                     before the server binds: a known, rare race, left as
-                    it is), the
+                    it is; a server exiting early with "Address already
+                    in use" names it), the binary checked to be reachable
+                    for `nobody` before it is started as nobody, the
                     child's setup before exec (`pre_exec`: closed fds,
                     fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`); the
                     test crate's only `unsafe`),
@@ -447,6 +450,12 @@ Notes on the wrappers:
   instead). CI builds the test binaries that run the server as the
   runner user and runs them once more with `sudo` and that variable, so
   the root cases run in CI too.
+- Tests as root start the server as `nobody` in many cases, so `nobody`
+  must reach the built binary: every directory above the target dir
+  needs `o+x`. A target dir under a private home directory fails such a
+  test at once with that explanation; set `CARGO_TARGET_DIR` to a
+  directory others can reach (e.g. under `/tmp`), or make the
+  directories searchable (CI runs `chmod a+x "$HOME"`).
 
 ## Commands
 
