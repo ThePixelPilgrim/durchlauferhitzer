@@ -86,6 +86,8 @@ tests/
     generator.rs        random requests and schedule steps
     model.rs            the model of the random file tree
     client.rs           a random or witness client, as the test sees it
+    admission.rs        the peers of each seed and the spec's model of
+                        what the connection limits admit
     oracle.rs           what each client must receive; coverage
     unanswered.rs       no request the spec says must be answered vanishes
     run.rs              one random schedule; the test over all seeds;
@@ -135,6 +137,14 @@ SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_proxy_schedules
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_fault_schedules
 ```
+
+In the static net every connection is checked as it is accepted against
+a model of the connection limits written from the spec
+(`faults/admission.rs`): counted, refused with `503`, or closed at once
+when the refused pool is full in all or for the peer's group
+(FR-CONN-09 to -13). One seed in three draws IPv4 peers, one IPv6 peers
+(two in one /64, one in another; `ipv6_prefix` default, 48 or 128), one
+an IPv4 peer and its IPv4-mapped form.
 
 One seed in four of either net (`seed % 4 == 0`) runs with late timers
 (`TimerOrder::Late`); the order follows from the seed alone, and a failure

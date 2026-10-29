@@ -40,6 +40,8 @@ pub(crate) struct Coverage {
     pub(crate) respelled_route: usize,
     /// The drains and aborts (`shutdown.rs`).
     pub(crate) shutdown: ShutdownCoverage,
+    /// Peer groups (`admission.rs`).
+    pub(crate) admission: AdmissionCoverage,
 }
 
 /// `grown` must be well clear of zero, so a refactor cannot silently lose
@@ -55,6 +57,14 @@ impl Coverage {
             ("Rejected(Timeout(Disk))", self.disk_timeout),
             ("Rejected(Limit(Connections))", self.limit_connections),
             ("Rejected(Limit(ConnectionsPerIp))", self.limit_per_ip),
+            (
+                "a group shared by two addresses",
+                self.admission.shared_group,
+            ),
+            (
+                "a refusal dropped for its group's refused cap",
+                self.admission.group_dropped,
+            ),
             ("pipelined pairs", self.pipelined),
             ("FileAborted(Truncated)", self.aborted_truncated),
             ("FileAborted(Changed)", self.aborted_changed),

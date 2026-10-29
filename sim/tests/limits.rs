@@ -1,6 +1,6 @@
 //! Timeouts, connection caps and lingering close through the simulation.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use durchlauferhitzer_core::http::request::{Method, Persistence};
@@ -441,6 +441,77 @@ fn ipv4_mapped_peer_shares_the_ipv4_slot() {
     assert_served(&mut sim, b);
     let c = sim.connect(mapped);
     assert_refused(&mut sim, c, mapped, LimitKind::ConnectionsPerIp);
+}
+
+/// Two connections per peer group, ten in all: only the per-IP limit
+/// binds.
+const GROUPED: &str = "listen 127.0.0.1:8080;
+limits {
+  header_timeout 10s;
+  keepalive_timeout 60s;
+  send_idle_timeout 30s;
+  max_connections 10;
+  max_connections_per_ip 2;
+}
+host example.test { path / { static /srv/www; } }";
+
+/// Address `host` in the /64 `2001:db8:0:<net>::/64`.
+fn v6(net: u16, host: u16) -> IpAddr {
+    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, net, 0, 0, 0, host))
+}
+
+/// FR-CONN-13: IPv6 peers in one /64 (the default `ipv6_prefix`) share
+/// `max_connections_per_ip`, and hold at most that many refused
+/// connections at once; another /64 is counted apart.
+#[test]
+fn ipv6_peers_are_counted_by_prefix() {
+    let mut sim = Sim::new(GROUPED);
+    let a1 = sim.connect(v6(1, 1));
+    let a2 = sim.connect(v6(1, 0xffff));
+    // Two refusals of group A get their 503s.
+    for host in [3, 4] {
+        let c = sim.connect(v6(1, host));
+        assert_refused(&mut sim, c, v6(1, host), LimitKind::ConnectionsPerIp);
+    }
+    // The third is closed at once, unanswered, logged as rejected.
+    let over = sim.connect(v6(1, 5));
+    assert_eq!(sim.state(over), SimConnState::Closed, "{}", sim.trace());
+    sim.run_until_idle();
+    assert!(sim.take_received(over).is_empty(), "{}", sim.trace());
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Rejected {
+            conn: over,
+            peer: v6(1, 5),
+            reason: RejectReason::Limit(LimitKind::ConnectionsPerIp),
+        }),
+        "{}",
+        sim.trace()
+    );
+    // Group B: its own two slots, then its own 503.
+    let b1 = sim.connect(v6(2, 1));
+    let b2 = sim.connect(v6(2, 1));
+    let b3 = sim.connect(v6(2, 2));
+    assert_refused(&mut sim, b3, v6(2, 2), LimitKind::ConnectionsPerIp);
+    for c in [a1, a2, b1, b2] {
+        assert_served(&mut sim, c);
+    }
+    let served: Vec<Log> = [
+        (a1, v6(1, 1)),
+        (a2, v6(1, 0xffff)),
+        (b1, v6(2, 1)),
+        (b2, v6(2, 1)),
+    ]
+    .into_iter()
+    .map(|(c, p)| not_found_response(c, p))
+    .collect();
+    assert!(sim.logs().ends_with(&served), "{}", sim.trace());
+    // Closing a1 frees a slot for any address of group A.
+    sim.send_eof(a1);
+    sim.run_until_idle();
+    assert_eq!(sim.state(a1), SimConnState::Closed, "{}", sim.trace());
+    let a6 = sim.connect(v6(1, 6));
+    assert_served(&mut sim, a6);
 }
 
 /// A head of nearly `max_head` bytes arriving one header line per read is

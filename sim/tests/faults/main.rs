@@ -156,6 +156,7 @@ fn deliver(config: &str, parts: &[&[u8]]) -> (Outcome, String) {
     (outcome, sim.trace().to_owned())
 }
 
+mod admission;
 mod client;
 #[allow(dead_code, reason = "shared by all test binaries; each uses part")]
 #[path = "../support/model_http.rs"]
@@ -173,6 +174,7 @@ mod shutdown;
 mod split;
 mod unanswered;
 
+use admission::*;
 use client::*;
 use fixed::*;
 use generator::*;

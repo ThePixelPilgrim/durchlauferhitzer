@@ -45,7 +45,8 @@ src/
                         and body to the backend, read the body from the
                         client, body errors (400, cut), a client end of
                         stream mid-body, the 408 for a stalled body
-    limits.rs           connection counting, refusals (503), orphaned opens
+    limits.rs           connection counting per peer group (IPv6 by
+                        prefix), refusals (503), orphaned opens
     shutdown.rs         begin_drain, abort_all, is_drained; the 503 for
                         requests completed during the drain
     timers.rs           deadlines and TimerFired; closing on a timeout

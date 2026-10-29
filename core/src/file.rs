@@ -107,8 +107,8 @@ pub(crate) fn check_stamp(
 pub(crate) enum OrphanSlots {
     /// Its connection counted toward the limits: the orphan keeps both the
     /// `max_connections` slot and the `max_connections_per_ip` slot of
-    /// `peer` (canonical address).
-    Held { peer: IpAddr },
+    /// its peer `group` (FR-CONN-13).
+    Held { group: IpAddr },
     /// Its connection did not count; nothing to release. Cannot happen:
     /// refused connections open no files (`Core::release_orphan` checks
     /// this in debug builds).

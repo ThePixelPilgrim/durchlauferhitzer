@@ -7,11 +7,13 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     let mut rng = fastrand::Rng::with_seed(seed);
     // One seed in three allows long request lines (and long paths).
     let long = rng.u8(0..3) == 0;
-    let mut sim = dated_sim(if long {
+    let (peers, prefix) = peer_pool(seed);
+    let mut sim = dated_sim(&prefix.apply(if long {
         LONG_RANDOM_CONFIG
     } else {
         RANDOM_CONFIG
-    });
+    }));
+    let mut admission = Admission::new(prefix);
     // Here the backend refuses, so every forwarded request is a 502;
     // proxying itself has a randomized net of its own (`proxy/`).
     sim.set_timer_order(timer_order(seed));
@@ -28,14 +30,17 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     let mut marks = Marks::default();
     for step in 0..steps {
         if plan.drain_due(step, &marks) {
-            witnesses.extend(drain_witnesses(&mut sim, step));
+            witnesses.extend(drain_witnesses(&mut sim, &mut admission, &marks, step));
         }
         let ids: Vec<ConnId> = clients.iter().chain(&witnesses).map(|c| c.id).collect();
         shutdown_at(&mut sim, plan, step, &mut marks, &ids);
         let op = rng.u8(0..100);
         if op < 25 || step < 3 || clients.is_empty() {
-            let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, rng.u8(1..4)));
-            let id = sim.connect(ip);
+            let ip = peers
+                .get(usize::from(rng.u8(0..3)))
+                .copied()
+                .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            let id = admission.connect(&mut sim, &marks, ip);
             if rng.bool() {
                 sim.set_read_chunk(id, rng.usize(1..40));
             }
@@ -77,7 +82,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     }
     // A shutdown the steps did not reach comes now.
     if plan.drain_due(END, &marks) {
-        witnesses.extend(drain_witnesses(&mut sim, steps));
+        witnesses.extend(drain_witnesses(&mut sim, &mut admission, &marks, steps));
     }
     // The witnesses are checked like every client, and exactly.
     clients.append(&mut witnesses);
@@ -184,6 +189,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
         .map(|i| IpAddr::V4(Ipv4Addr::new(198, 51, 100, i)))
         .collect();
     check_full_house(&mut sim, &marks, &peers);
+    coverage.admission.add(admission.coverage);
 }
 
 /// The static net's shutdown steps: below its longest schedule (80 steps).
@@ -196,20 +202,26 @@ pub(crate) const STATIC_SPAN: usize = 80;
 /// drain's `503` (FR-PROC-05b); alone, the connection must close after
 /// the `404`. The other is idle keep-alive, its `404` read: the drain
 /// must close it at once.
-fn drain_witnesses(sim: &mut Sim, step: usize) -> [Client; 2] {
-    let witness = |sim: &mut Sim, host: u8, window: Window, role: Role, templates: Vec<Vec<u8>>| {
-        let id = sim.connect(IpAddr::V4(Ipv4Addr::new(203, 0, 113, host)));
-        sim.set_client_window(id, window);
-        let bytes = templates.concat();
-        sim.send(id, &bytes);
-        sim.run_until_idle();
-        let mut client = Client::new(id, role);
-        client.started = templates.len();
-        client.pipelined_sends = usize::from(templates.len() > 1);
-        client.sent = bytes.len();
-        client.templates = templates;
-        client
-    };
+fn drain_witnesses(
+    sim: &mut Sim,
+    admission: &mut Admission,
+    marks: &Marks,
+    step: usize,
+) -> [Client; 2] {
+    let mut witness =
+        |sim: &mut Sim, host: u8, window: Window, role: Role, templates: Vec<Vec<u8>>| {
+            let id = admission.connect(sim, marks, IpAddr::V4(Ipv4Addr::new(203, 0, 113, host)));
+            sim.set_client_window(id, window);
+            let bytes = templates.concat();
+            sim.send(id, &bytes);
+            sim.run_until_idle();
+            let mut client = Client::new(id, role);
+            client.started = templates.len();
+            client.pipelined_sends = usize::from(templates.len() > 1);
+            client.sent = bytes.len();
+            client.templates = templates;
+            client
+        };
     let in_flight = if step % 2 == 1 {
         witness(
             sim,
@@ -337,6 +349,7 @@ fn random_fault_schedules() {
                 coverage.respelled_route
             );
             eprintln!("SHUTDOWN COVERAGE {:?}", coverage.shutdown);
+            eprintln!("ADMISSION COVERAGE {:?}", coverage.admission);
             coverage.check();
         }
     }

@@ -49,11 +49,14 @@ pub struct Core {
     conns: BTreeMap<ConnId, Conn>,
     /// Open connections that count toward the limits.
     counted: u32,
-    /// Counted connections per canonical peer address; entries are removed
-    /// at zero.
+    /// Counted connections per peer group (`limits::peer_group`,
+    /// FR-CONN-13); entries are removed at zero.
     counted_per_ip: BTreeMap<IpAddr, u32>,
     /// Refused connections not yet closed; at most `max_connections`.
     refused: u32,
+    /// Refused connections not yet closed per peer group; at most
+    /// `max_connections_per_ip` each, entries removed at zero.
+    refused_per_group: BTreeMap<IpAddr, u32>,
     /// Where every lingering connection discards its input.
     scratch: Box<[u8]>,
     /// Distinct static roots in config order; a `RootId` indexes it.
@@ -125,6 +128,7 @@ impl Core {
             counted: 0,
             counted_per_ip: BTreeMap::new(),
             refused: 0,
+            refused_per_group: BTreeMap::new(),
             scratch: vec![0; LINGER_SCRATCH].into_boxed_slice(),
             static_roots,
             files: FileTable::new(),
