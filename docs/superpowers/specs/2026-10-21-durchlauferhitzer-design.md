@@ -1212,10 +1212,11 @@ Failures, persistence, timeouts:
   looked up with `getpwnam_r` (an unknown user is exit 2; *owner
   decision 2026-10-29, OA3:* so is a user whose primary group is 0,
   `user <name>: its primary group is 0 (root); the server never keeps
-  group root after binding`), and the process drops to it for good: the effective uid back to 0 first if it is not,
-  then `setgroups([gid])`, `setgid`, `setuid`, then it checks that
-  `setuid(0)` fails and that the real, effective and saved uids, and the three gids, are all
-  the user's (exit 2 on any failure). As non-root
+  group root after binding`), and the process drops to it for good:
+  the effective uid back to 0 first if it is not, then
+  `setgroups([gid])`, `setgid`, `setuid`, then it checks that
+  `setuid(0)` fails and that the real, effective and saved uids, and the
+  three gids, are all the user's (exit 2 on any failure). As non-root
   nothing is dropped; with `user` set, that is logged once (controller
   ruling R5): `kind=privileges action=kept reason=not_root`
   (FR-LOG-05). *(Owner decision 2026-10-29, OA2, stage 4 final review:)*
@@ -1226,9 +1227,10 @@ Failures, persistence, timeouts:
   empty); any failure is exit 2 naming the step. This runs while the
   process has one thread (capabilities are per thread), so every later
   thread starts with none. `action=kept` is about the ids: they are kept,
-  the capabilities are cleared all the same. *(Status, owner decision 2026-10-29, O4:)* CI guards the
-  root-only cases: it builds the test binaries that run the server as
-  the runner user and runs them with `sudo` and
+  the capabilities are cleared all the same. *(Status, owner decision
+  2026-10-29, O4:)* CI guards the root-only cases: it builds the test
+  binaries that run the server as the runner user and runs them with
+  `sudo` and
   `DURCHLAUFERHITZER_REQUIRE_ROOT=1`, so a root skip there is a failure;
   the step fails unless its list names every test file that runs the
   server (stage 4 final review), so a new one cannot miss it.

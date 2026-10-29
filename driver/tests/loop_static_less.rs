@@ -1,7 +1,8 @@
 //! The epoll event loop on loopback with a config that has no static
 //! roots (stage 4 Task 5): fixed responses, keep-alive, a burst of
-//! connects larger than one accept batch (A3), the lingering close, a proxied exchange to a std backend, a backend's early answer
-//! followed by a reset (the stage 3 I1 rule, DRV-10) and the header
+//! connects larger than one accept batch (A3), the lingering close, a
+//! proxied exchange to a std backend, a backend's early answer followed
+//! by a reset (the stage 3 I1 rule, DRV-10) and the header
 //! timeout (DRV-06). The fd-count check after a client reset is in
 //! `tests/loop_fd_leak.rs`, alone in its binary (R4).
 
