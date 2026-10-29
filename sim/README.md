@@ -88,7 +88,7 @@ tests/
     oracle.rs           what each client must receive; coverage
     run.rs              one random schedule; the test over all seeds;
                         seed replay for every net of the binary
-    shutdown.rs         the shutdown plans (drain, drain
+    shutdown.rs         the shutdown plans of both nets (drain, drain
                         then abort, abort), where they fell in the log,
                         and the checks they add
     proxy/              the randomized proxy net (see below)
@@ -102,6 +102,8 @@ tests/
       draw.rs             drawing an exchange: plain ones, timed scenarios
       drive.rs            stories, rounds, backends, timed scenarios
       check.rs            the oracle: each story against the model
+      drain.rs            the shutdown in this net: when it falls, and
+                          the outcomes a drain allows an exchange
 ```
 
 ## Randomized runs
@@ -136,11 +138,19 @@ One seed in four of either net (`seed % 4 == 0`) runs with late timers
 (`TimerOrder::Late`); the order follows from the seed alone, and a failure
 prints it beside `SIM_SEED`.
 
-One seed in five of the static net (`seed % 5 == 0`) also shuts the server down
-(FR-PROC-05, `faults/shutdown.rs`): it calls `begin_drain` at a seeded
-step, half of those call `abort_all` later, and some call `abort_all`
-without a drain. The plan follows from the seed alone, by an RNG of its
-own (the other seeds keep their schedules), and a failure prints it too.
+One seed in five of either net (`seed % 5 == 0`) also shuts the server down
+(FR-PROC-05, `faults/shutdown.rs`): half of those call `begin_drain` at
+a seeded step (then every client reads all it is sent), a third call
+`abort_all` some steps after the drain, a sixth call `abort_all` without
+a drain. The plan follows from the seed alone, by an RNG of its own (the
+other seeds keep their schedules), and a failure prints it too. In the
+static net two witness clients join at the drain: one with a keep-alive
+`404` queued (alone, or with a request pipelined behind it), one idle.
+In the proxy net it falls among the steps of a round without a timed
+scenario (or after the last round), the round runs on, and the seed
+ends with it; an exchange whose head is rendered during the drain must
+match the model's outcome for a client that closes, or the drain's
+`503`; a story may end silently where the drain closed it.
 The oracles check what the spec says of the drain: a head logged before
 it keeps what it said, one logged after it says `Connection: close` or is
 the `503` with close for a request completed during it; a connection

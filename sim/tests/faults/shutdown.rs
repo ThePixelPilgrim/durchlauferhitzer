@@ -156,7 +156,7 @@ pub(crate) fn shutdown_at(
     }
 }
 
-/// A plain drain finishes (FR-PROC-05: in-flight requests finish, then
+/// A plain drain that began finishes (FR-PROC-05: in-flight requests finish, then
 /// every connection closes): after `within`, which the net chooses as the
 /// longest chain of deadlines an exchange may still wait on and shorter
 /// than `keepalive_timeout`, no connection is `Open` any more (each is
@@ -166,14 +166,16 @@ pub(crate) fn shutdown_at(
 pub(crate) fn check_drain_finishes(
     sim: &mut Sim,
     plan: ShutdownPlan,
+    marks: &Marks,
     clients: &[ConnId],
     within: Duration,
 ) {
     match plan {
-        ShutdownPlan::Drain { .. } => {}
-        ShutdownPlan::None | ShutdownPlan::DrainThenAbort { .. } | ShutdownPlan::Abort { .. } => {
-            return;
-        }
+        ShutdownPlan::Drain { .. } if marks.drain.is_some() => {}
+        ShutdownPlan::None
+        | ShutdownPlan::Drain { .. }
+        | ShutdownPlan::DrainThenAbort { .. }
+        | ShutdownPlan::Abort { .. } => return,
     }
     for _ in 0..within.as_secs() {
         sim.advance(Duration::from_secs(1));

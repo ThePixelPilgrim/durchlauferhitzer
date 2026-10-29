@@ -295,17 +295,32 @@ fn window(rng: &mut fastrand::Rng, large: bool) -> Window {
     }
 }
 
-/// Run one round: its stories interleaved until none can move.
+/// Whether a round runs a timed scenario: then the clock must run out only
+/// deadlines the model knows, so no shutdown falls among its steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoundKind {
+    Plain,
+    Timed,
+}
+
+/// Run one round: its stories interleaved until none can move; in a plain
+/// round the seed's shutdown may fall among the steps.
 pub(crate) fn run_round(
     sim: &mut Sim,
     rng: &mut fastrand::Rng,
     net: &NetConfig,
     stories: &mut [Story],
     assigned: &mut usize,
+    kind: RoundKind,
+    shutdown: &mut Shutdown,
 ) {
     let mut steps = 0;
     loop {
         sync(sim, stories, assigned);
+        match kind {
+            RoundKind::Plain => shutdown.tick(sim, stories),
+            RoundKind::Timed => {}
+        }
         let mut options = Vec::new();
         for (s, story) in stories.iter_mut().enumerate() {
             if let Some(step) = story.next_send(sim) {
@@ -642,8 +657,15 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
     let mut assigned = 0;
     let mut n = 1u8;
     let mut used_peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-    for _ in 0..rng.usize(2..6) {
+    let mut shutdown = Shutdown::new(seed);
+    let rounds = rng.usize(2..6);
+    for round in 0..rounds {
         let solo = rng.u8(0..3) == 0;
+        let kind = if solo {
+            RoundKind::Timed
+        } else {
+            RoundKind::Plain
+        };
         // Per backend: accept, refuse, or accept slowly (the model treats
         // a slow accept as an accept).
         let mut connect = [ConnectBehaviour::Accept; 2];
@@ -691,16 +713,49 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
             sim.set_default_backend_window(Window::Unlimited);
         }
         used_peer = stories.first().map_or(used_peer, |s| s.peer);
-        run_round(&mut sim, &mut rng, &net, &mut stories, &mut assigned);
+        run_round(
+            &mut sim,
+            &mut rng,
+            &net,
+            &mut stories,
+            &mut assigned,
+            kind,
+            &mut shutdown,
+        );
         if let Some(first) = stories.first_mut().filter(|s| s.paused) {
             first.paused = false;
-            run_round(&mut sim, &mut rng, &net, &mut stories, &mut assigned);
+            run_round(
+                &mut sim,
+                &mut rng,
+                &net,
+                &mut stories,
+                &mut assigned,
+                kind,
+                &mut shutdown,
+            );
         }
+        if round + 1 == rounds {
+            shutdown.finish(&mut sim, &stories);
+        }
+        // The longest wait left once the backends are done: a head's
+        // deadline (20 s); `keepalive_timeout` is 120 s.
+        let conns: Vec<ConnId> = stories.iter().map(|s| s.conn).collect();
+        check_drain_finishes(
+            &mut sim,
+            shutdown.plan,
+            &shutdown.marks,
+            &conns,
+            Duration::from_secs(30),
+        );
         wind_down(&mut sim, &mut stories, &mut assigned);
         for story in &stories {
-            check_story(&sim, story, coverage);
+            check_story(&sim, story, &net, &shutdown.marks, coverage);
         }
         assert_closed(&sim, &stories);
+        // A server that shut down takes no new round.
+        if shutdown.marks.shut_down() {
+            break;
+        }
     }
     // Nothing is held once every round closed its connections, before
     // and after every timer has run out.
@@ -734,19 +789,18 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         "files left open\ntrace:\n{}",
         sim.trace()
     );
-    // Every slot is free again: a full house of new clients is accepted,
-    // the per-IP share of it from a peer the run already used.
-    let logged = sim.logs().len();
-    for _ in 0..net.max_connections_per_ip {
-        sim.connect(used_peer);
-    }
-    for i in net.max_connections_per_ip..net.max_connections {
-        sim.connect(IpAddr::V4(Ipv4Addr::new(198, 51, 100, i)));
-    }
-    assert_eq!(
-        sim.logs().get(logged..).unwrap_or_default(),
-        [],
-        "connection slots still taken after the run\ntrace:\n{}",
-        sim.trace()
-    );
+    check_wound_down(&sim, &shutdown.marks);
+    // Every slot is free again: a full house of new clients is accepted
+    // (refused, once shut down), the per-IP share of it from a peer the
+    // run already used.
+    let peers: Vec<IpAddr> = (0..net.max_connections)
+        .map(|i| {
+            if i < net.max_connections_per_ip {
+                used_peer
+            } else {
+                IpAddr::V4(Ipv4Addr::new(198, 51, 100, i))
+            }
+        })
+        .collect();
+    check_full_house(&mut sim, &shutdown.marks, &peers);
 }

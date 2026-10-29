@@ -16,7 +16,7 @@ pub(crate) enum Ending {
 }
 
 /// What a backend sends.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Script {
     pub(crate) wire: Vec<u8>,
     /// Where the final head ends (after any interim heads).

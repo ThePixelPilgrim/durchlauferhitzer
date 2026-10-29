@@ -145,14 +145,23 @@ fn describe(ex: &Exchange) -> String {
     )
 }
 
-/// Judge one story once its round is over.
-pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage) {
-    let mut logs: Vec<Log> = sim
+/// Judge one story once its round is over; `marks` say where a drain or
+/// abort fell (`drain.rs`).
+pub(crate) fn check_story(
+    sim: &Sim,
+    story: &Story,
+    net: &NetConfig,
+    marks: &Marks,
+    coverage: &mut ProxyCoverage,
+) {
+    // The story's logs, and the phase each was written in.
+    let (mut logs, mut phases): (Vec<Log>, Vec<Phase>) = sim
         .logs()
         .iter()
-        .filter(|l| conn_of(l) == story.conn)
-        .cloned()
-        .collect();
+        .enumerate()
+        .filter(|(_, l)| conn_of(l) == story.conn)
+        .map(|(i, l)| (l.clone(), marks.phase(i)))
+        .unzip();
     let fail = |what: String| -> ! {
         panic!(
             "conn={} {what}\nexchanges:\n{}\nreceived: {:?}\ntrace:\n{}",
@@ -167,7 +176,23 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
             sim.trace()
         )
     };
-    let truncated = story.reset.is_some() || story.eof_anywhere;
+    // The abort cut the story: its last log says so (FR-PROC-05c), and
+    // what came before it may stop anywhere.
+    let aborted = phases.last() == Some(&Phase::AbortCut);
+    if aborted {
+        let cut = Log::Rejected {
+            conn: story.conn,
+            peer: story.peer,
+            reason: RejectReason::ShuttingDown,
+        };
+        if logs.last() != Some(&cut) {
+            fail(format!("the abort logged {:?}", logs.last()));
+        }
+        logs.pop();
+        phases.pop();
+        coverage.add("abort: exchange cut");
+    }
+    let truncated = story.reset.is_some() || story.eof_anywhere || aborted;
     if story.reset == Some(SimConnState::Open) {
         let reset = Log::Reset {
             conn: story.conn,
@@ -180,6 +205,7 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
             ));
         }
         logs.pop();
+        phases.pop();
         coverage.add("client reset");
     }
     if story.eof_anywhere {
@@ -203,6 +229,7 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
                 fail("logged an end of stream mid-body, but no request has a body".to_owned());
             }
             logs.pop();
+            phases.pop();
             coverage.add("client end of stream mid-body");
         }
     }
@@ -213,6 +240,10 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
         lpos: 0,
     };
     let mut ended = false;
+    let who = Who {
+        conn: story.conn,
+        peer: story.peer,
+    };
     for (i, ex) in story.exchanges.iter().enumerate() {
         let run = &story.runs[i];
         if ended {
@@ -223,8 +254,16 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
             }
             continue;
         }
-        let full = ex
-            .alts
+        // Once the server shut down, what the exchange may show depends on
+        // when its first log was written.
+        let drained;
+        let candidates: &[Alt] = if marks.shut_down() {
+            drained = drain_alts(ex, &who, net, phases.get(c.lpos).copied());
+            &drained
+        } else {
+            &ex.alts
+        };
+        let full = candidates
             .iter()
             .find_map(|alt| matches(&c, alt, run, false).ok().map(|taken| (alt, taken)));
         if let Some((alt, (n, k))) = full {
@@ -239,18 +278,30 @@ pub(crate) fn check_story(sim: &Sim, story: &Story, coverage: &mut ProxyCoverage
             continue;
         }
         if truncated
-            && ex
-                .alts
+            && candidates
                 .iter()
                 .any(|alt| matches(&c, alt, run, true).is_ok())
         {
             c.pos = c.received.len();
             c.lpos = c.logs.len();
             ended = true;
+            if aborted {
+                coverage.add("abort: response cut short");
+            }
             continue;
         }
-        let why: Vec<String> = ex
-            .alts
+        // The drain closed the connection before this request was read:
+        // nothing more arrived, and no upstream was opened for it.
+        if marks.shut_down()
+            && c.pos == c.received.len()
+            && c.lpos == c.logs.len()
+            && run.up.is_none()
+        {
+            ended = true;
+            coverage.add("drain: closed before a request");
+            continue;
+        }
+        let why: Vec<String> = candidates
             .iter()
             .map(|alt| matches(&c, alt, run, false).err().unwrap_or_default())
             .collect();
