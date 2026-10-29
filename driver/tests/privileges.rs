@@ -5,7 +5,8 @@
 //!   runs and logs `kind=privileges action=kept reason=not_root`;
 //! - as non-root, a refused bind to a port below 1024 is exit 2 naming it;
 //! - as root (these tests skip with a printed reason unless the tests run
-//!   as root; GitHub's runners do not): `user` unset is exit 2, an unknown
+//!   as root, and fail instead with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`,
+//!   which CI's root step sets): `user` unset is exit 2, an unknown
 //!   user is exit 2, and with `user nobody` the server drops to nobody
 //!   (`drop_to`, in this subprocess only) and serves; root is any uid 0
 //!   (O6), so a real uid of 0 under an effective nobody counts as root.
@@ -33,10 +34,21 @@ fn loopback(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
-/// Whether a root-only test runs; prints why it skips otherwise.
+/// The environment variable that turns a root skip into a failure (CI's
+/// root step sets it, so that step can never pass by skipping).
+const REQUIRE_ROOT: &str = "DURCHLAUFERHITZER_REQUIRE_ROOT";
+
+/// Whether a root-only test runs; prints why it skips otherwise, or fails
+/// when [`REQUIRE_ROOT`] is `1`.
 fn root_or_skip() -> bool {
     if is_root() {
         return true;
+    }
+    if std::env::var_os(REQUIRE_ROOT).is_some_and(|v| v == "1") {
+        panic!(
+            "not root (euid {}), but {REQUIRE_ROOT}=1 requires it",
+            durchlauferhitzer::sys::user::euid()
+        );
     }
     eprintln!(
         "skipped: needs root (euid {}); the root-only privilege tests run only as root",

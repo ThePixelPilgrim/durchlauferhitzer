@@ -20,6 +20,28 @@ jobs:
         env:
           # The IPv6 tests fail instead of skipping (driver/README.md).
           DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
+      - name: Root tests (as root; a root skip is a failure)
+        # The test binaries that run the server are built as the runner
+        # user (cargo never runs as root) and run with sudo: the privilege
+        # drop's root-only cases run, and the others run the server as
+        # `nobody`. The temp dirs are under /tmp and the binary must be
+        # reachable for `nobody`.
+        run: |
+          set -euo pipefail
+          tests=(budget cli privileges shutdown smoke startup systemd)
+          args=()
+          for t in "${tests[@]}"; do args+=(--test "$t"); done
+          bins=$(cargo test --locked -p durchlauferhitzer "${args[@]}" --no-run \
+              --message-format=json \
+            | grep -o '"executable":"[^"]*/deps/[^"]*"' | cut -d '"' -f 4)
+          test "$(wc -l <<< "$bins")" -eq "${#tests[@]}"
+          chmod a+x "$HOME"
+          cd driver
+          for bin in $bins; do
+            echo "== $bin"
+            sudo -E env DURCHLAUFERHITZER_REQUIRE_ROOT=1 \
+              DURCHLAUFERHITZER_REQUIRE_IPV6=1 TMPDIR=/tmp "$bin"
+          done
       - name: Product dependency check
         run: scripts/check-product-deps.sh
       - name: Product dependency check self-test

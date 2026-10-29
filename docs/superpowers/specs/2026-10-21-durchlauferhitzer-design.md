@@ -1207,7 +1207,10 @@ Failures, persistence, timeouts:
   the user's (exit 2 on any failure). As non-root
   nothing is dropped; with `user` set, that is logged once (controller
   ruling R5): `kind=privileges action=kept reason=not_root`
-  (FR-LOG-05).
+  (FR-LOG-05). *(Status, owner decision 2026-10-29, O4:)* CI guards the
+  root-only cases: it builds the test binaries that run the server as
+  the runner user and runs them with `sudo` and
+  `DURCHLAUFERHITZER_REQUIRE_ROOT=1`, so a root skip there is a failure.
 - **FR-PROC-04** [done] At startup the driver opens every static root
   (backends are IP literals and need no resolution, FR-CFG-16), checks
   `openat2` support and the descriptor budget (NFR-RES-05), and fails

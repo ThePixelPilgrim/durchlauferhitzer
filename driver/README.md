@@ -189,7 +189,8 @@ tests/
                     (`child::inheritable_fds`, e.g. a CI runner's fds)
   privileges.rs     A8 in the binary: as non-root `user` is kept and
                     logged, a refused bind below 1024 is exit 2 naming it; as root (else
-                    skipped with a printed reason) no `user` and an unknown
+                    skipped with a printed reason, or a failure with
+                    DURCHLAUFERHITZER_REQUIRE_ROOT=1) no `user` and an unknown
                     user are exit 2, `user nobody` drops every id
                     (`drop_to` in the server's process) and serves, and a
                     systemd socket below 1024 serves as nobody; a real
@@ -439,7 +440,10 @@ Notes on the wrappers:
   `drop_to` changes the whole process, so it is never called by the tests in
   this crate's test process; it is tested in the server's own process by
   `tests/privileges.rs` (root only: skipped with a printed reason
-  elsewhere, as on GitHub's runners).
+  elsewhere; with `DURCHLAUFERHITZER_REQUIRE_ROOT=1` a skip is a failure
+  instead). CI builds the test binaries that run the server as the
+  runner user and runs them once more with `sudo` and that variable, so
+  the root cases run in CI too.
 
 ## Commands
 
