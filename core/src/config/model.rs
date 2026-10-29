@@ -17,7 +17,48 @@ pub struct Config {
     pub listen: Vec<SocketAddr>,
     pub user: Option<String>,
     pub limits: Limits,
+    /// How strictly the containment layers apply (FR-CFG-25). The core
+    /// only holds it; the driver enforces it.
+    pub containment: Containment,
     pub hosts: Vec<VirtualHost>,
+}
+
+/// How strictly one containment layer applies (FR-CFG-25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layer {
+    /// Skip the layer.
+    Off,
+    /// Use it where the kernel supports it; otherwise log and serve.
+    BestEffort,
+    /// A missing or partly supported layer is a startup error.
+    Required,
+}
+
+/// What a system call the seccomp filter does not allow gets (FR-CFG-25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeccompAction {
+    /// It returns an error and the server keeps running.
+    Fail,
+    /// The process ends at once.
+    Kill,
+}
+
+/// The `containment` block (FR-CFG-25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Containment {
+    pub landlock: Layer,
+    pub seccomp: Layer,
+    pub seccomp_action: SeccompAction,
+}
+
+impl Default for Containment {
+    fn default() -> Self {
+        Self {
+            landlock: Layer::BestEffort,
+            seccomp: Layer::BestEffort,
+            seccomp_action: SeccompAction::Fail,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +90,9 @@ pub struct Limits {
     /// send buffers of refused connections, the 4 KiB lingering scratch
     /// buffer, and driver-side buffers (disk readahead, the log buffer).
     pub memory_limit: u64,
+    /// Prefix length in bits that groups IPv6 peers for the per-IP limit
+    /// (FR-CONN-13), 32 to 128.
+    pub ipv6_prefix: u8,
 }
 
 /// The most buffer memory one counted connection can hold, from the
@@ -92,6 +136,7 @@ impl Default for Limits {
             disk_threads: 4,
             shutdown_timeout: Duration::from_secs(30),
             memory_limit: 1 << 30,
+            ipv6_prefix: 64,
         }
     }
 }

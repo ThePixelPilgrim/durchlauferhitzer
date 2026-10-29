@@ -1,8 +1,8 @@
 //! Tests for configuration validation: top level, listen, user.
 
 use super::super::model::{
-    BodyLimit, Limits, OnFileChange, ProxyRoute, Route, RouteAction, StripPrefix, VirtualHost,
-    worst_case_per_connection,
+    BodyLimit, Containment, Limits, OnFileChange, ProxyRoute, Route, RouteAction, StripPrefix,
+    VirtualHost, worst_case_per_connection,
 };
 use super::super::syntax::SyntaxErrorKind;
 use super::*;
@@ -10,6 +10,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod containment;
 mod limits;
 mod routes;
 
@@ -112,6 +113,7 @@ fn loads_spec_example() {
                 },
             ],
         }],
+        containment: Containment::default(),
     };
     assert_eq!(ok(SPEC_EXAMPLE), expected);
 }
@@ -313,5 +315,15 @@ fn example_config_loads() {
         let setting = format!("\n  {key} ");
         assert!(text.contains(&setting), "`{key}` is not documented");
     }
-    assert_eq!(config.map(|c| c.limits), Ok(Limits::default()));
+    // Likewise every `containment` key.
+    for (key, _) in ContainmentKey::ALL {
+        let setting = format!("\n  {key} ");
+        assert!(text.contains(&setting), "`{key}` is not documented");
+    }
+    let config = config.map_err(|_| ());
+    assert_eq!(
+        config.as_ref().map(|c| c.limits.clone()),
+        Ok(Limits::default())
+    );
+    assert_eq!(config.map(|c| c.containment), Ok(Containment::default()));
 }

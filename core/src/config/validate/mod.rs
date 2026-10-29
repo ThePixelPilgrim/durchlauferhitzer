@@ -10,8 +10,9 @@ use crate::routing::same_segments;
 
 use super::lexer::Pos;
 use super::model::{
-    BodyLimit, Config, ConfigError, ConfigErrorKind, Limits, OnFileChange, ProxyRoute, Route,
-    RouteAction, StripPrefix, VirtualHost, worst_case_per_connection,
+    BodyLimit, Config, ConfigError, ConfigErrorKind, Containment, Layer, Limits, OnFileChange,
+    ProxyRoute, Route, RouteAction, SeccompAction, StripPrefix, VirtualHost,
+    worst_case_per_connection,
 };
 use super::syntax::{Block, Item, Setting, parse};
 use super::units::{parse_duration, parse_size};
@@ -26,6 +27,9 @@ const MIN_DURATION: Duration = Duration::from_millis(1);
 const MAX_DURATION: Duration = Duration::from_secs(24 * 3600);
 const MIN_MEMORY_LIMIT: u64 = 1 << 20;
 const MAX_MEMORY_LIMIT: u64 = 1 << 40;
+/// FR-CFG-21: `ipv6_prefix` in bits.
+const MIN_IPV6_PREFIX: u8 = 32;
+const MAX_IPV6_PREFIX: u8 = 128;
 
 fn fail<T>(kind: ConfigErrorKind, pos: Pos) -> Result<T, ConfigError> {
     Err(ConfigError { kind, pos })
@@ -194,12 +198,13 @@ enum LimitKey {
     DiskThreads,
     ShutdownTimeout,
     MemoryLimit,
+    Ipv6Prefix,
 }
 
 impl LimitKey {
     /// Every `limits` key with its name: the one list the parser and the
     /// example config's test read.
-    const ALL: [(&'static str, LimitKey); 14] = [
+    const ALL: [(&'static str, LimitKey); 15] = [
         ("max_connections", Self::MaxConnections),
         ("max_connections_per_ip", Self::MaxConnectionsPerIp),
         ("max_request_line", Self::MaxRequestLine),
@@ -214,6 +219,7 @@ impl LimitKey {
         ("disk_threads", Self::DiskThreads),
         ("shutdown_timeout", Self::ShutdownTimeout),
         ("memory_limit", Self::MemoryLimit),
+        ("ipv6_prefix", Self::Ipv6Prefix),
     ];
 
     fn from_name(name: &str) -> Option<Self> {
@@ -335,6 +341,11 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
                     .filter(|n| (MIN_MEMORY_LIMIT..=MAX_MEMORY_LIMIT).contains(n))
                     .ok_or_else(bad)?;
             }
+            LimitKey::Ipv6Prefix => {
+                limits.ipv6_prefix = parse_count(value)
+                    .filter(|n| (MIN_IPV6_PREFIX..=MAX_IPV6_PREFIX).contains(n))
+                    .ok_or_else(bad)?;
+            }
         }
     }
     if limits.max_request_line > limits.max_head {
@@ -359,6 +370,92 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
         }
     }
     Ok(limits)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContainmentKey {
+    Landlock,
+    Seccomp,
+    SeccompAction,
+}
+
+impl ContainmentKey {
+    /// Every `containment` key with its name: the one list the parser and
+    /// the example config's test read.
+    const ALL: [(&'static str, ContainmentKey); 3] = [
+        ("landlock", Self::Landlock),
+        ("seccomp", Self::Seccomp),
+        ("seccomp_action", Self::SeccompAction),
+    ];
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, key)| *key)
+    }
+}
+
+fn parse_layer(value: &str) -> Option<Layer> {
+    match value {
+        "off" => Some(Layer::Off),
+        "best_effort" => Some(Layer::BestEffort),
+        "required" => Some(Layer::Required),
+        _ => None,
+    }
+}
+
+fn parse_seccomp_action(value: &str) -> Option<SeccompAction> {
+    match value {
+        "fail" => Some(SeccompAction::Fail),
+        "kill" => Some(SeccompAction::Kill),
+        _ => None,
+    }
+}
+
+/// FR-CFG-25. `seccomp_action` with `seccomp off` does nothing, so it is an
+/// error at the `seccomp_action` setting (builder call), in either order.
+fn parse_containment(block: &Block) -> Result<Containment, ConfigError> {
+    if !block.args.is_empty() {
+        return fail(
+            ConfigErrorKind::WrongValueCount("containment".to_string()),
+            block.pos,
+        );
+    }
+    let mut containment = Containment::default();
+    let mut seen: Vec<&str> = Vec::new();
+    let mut action: Option<&Setting> = None;
+    for item in &block.items {
+        let setting = match item {
+            Item::Setting(setting) => setting,
+            Item::Block(inner) => return unknown_key(&inner.name, inner.pos),
+        };
+        let name = setting.key.as_str();
+        let Some(key) = ContainmentKey::from_name(name) else {
+            return unknown_key(name, setting.pos);
+        };
+        if seen.contains(&name) {
+            return duplicate_key(name, setting.pos);
+        }
+        seen.push(name);
+        let value = one_value(setting)?;
+        let bad = || invalid_value(name, value, setting.pos);
+        match key {
+            ContainmentKey::Landlock => {
+                containment.landlock = parse_layer(value).ok_or_else(bad)?
+            }
+            ContainmentKey::Seccomp => containment.seccomp = parse_layer(value).ok_or_else(bad)?,
+            ContainmentKey::SeccompAction => {
+                containment.seccomp_action = parse_seccomp_action(value).ok_or_else(bad)?;
+                action = Some(setting);
+            }
+        }
+    }
+    if let (Some(setting), Layer::Off) = (action, containment.seccomp) {
+        let value = setting.values.first().map_or("", String::as_str);
+        return Err(invalid_value(&setting.key, value, setting.pos));
+    }
+    Ok(containment)
 }
 
 /// FR-CFG-21 (owner decision 2026-10-27): `max_connections` times the worst
@@ -574,6 +671,7 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
     let mut user: Option<String> = None;
     let mut limits: Option<Limits> = None;
     let mut limits_pos: Option<Pos> = None;
+    let mut containment: Option<Containment> = None;
     let mut first_host_pos: Option<Pos> = None;
     let mut hosts: Vec<VirtualHost> = Vec::new();
     let mut seen_hosts: Vec<String> = Vec::new();
@@ -606,6 +704,12 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
                     limits = Some(parse_limits(block)?);
                     limits_pos = Some(block.pos);
                 }
+                "containment" => {
+                    if containment.is_some() {
+                        return duplicate_key("containment", block.pos);
+                    }
+                    containment = Some(parse_containment(block)?);
+                }
                 "host" => {
                     first_host_pos.get_or_insert(block.pos);
                     hosts.push(parse_host(block, &mut seen_hosts)?);
@@ -625,6 +729,7 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
         listen,
         user,
         limits: limits.unwrap_or_default(),
+        containment: containment.unwrap_or_default(),
         hosts,
     };
     check_memory_budget(&config, limits_pos.or(first_host_pos).unwrap_or(start))?;

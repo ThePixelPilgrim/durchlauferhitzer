@@ -20,6 +20,7 @@ limits {
   disk_threads 8;
   shutdown_timeout 5s;
   memory_limit 64MiB;
+  ipv6_prefix 48;
 }
 host a { path / { static /s; } }
 "));
@@ -40,6 +41,7 @@ host a { path / { static /s; } }
             disk_threads: 8,
             shutdown_timeout: Duration::from_secs(5),
             memory_limit: 64 << 20,
+            ipv6_prefix: 48,
         }
     );
 }
@@ -64,6 +66,7 @@ fn default_limits_are_the_spec_table() {
             disk_threads: 4,
             shutdown_timeout: Duration::from_secs(30),
             memory_limit: 1 << 30,
+            ipv6_prefix: 64,
         }
     );
 }
@@ -188,6 +191,7 @@ fn limit_key_list_is_complete() {
             LimitKey::DiskThreads => 11,
             LimitKey::ShutdownTimeout => 12,
             LimitKey::MemoryLimit => 13,
+            LimitKey::Ipv6Prefix => 14,
         }
     }
     let mut seen = [false; LimitKey::ALL.len()];
@@ -218,7 +222,7 @@ fn extra_for(key: &str) -> &'static str {
 fn per_key_caps() {
     // (key, accepted values, rejected values); extra lines make the
     // accepted file consistent with the other rules.
-    let cases: [(&str, &[&str], &[&str]); 7] = [
+    let cases: [(&str, &[&str], &[&str]); 8] = [
         ("max_connections", &["64", "65536"], &["0", "65537"]),
         ("max_headers", &["1", "1000"], &["0", "1001"]),
         (
@@ -234,6 +238,11 @@ fn per_key_caps() {
             &["1048575", "1025GiB"],
         ),
         ("body_idle_timeout", &["1ms", "1440m"], &["0ms", "1441m"]),
+        (
+            "ipv6_prefix",
+            &["32", "64", "128"],
+            &["0", "31", "129", "64x", "-64", "6.4"],
+        ),
     ];
     for (key, good, bad) in cases {
         for value in good {

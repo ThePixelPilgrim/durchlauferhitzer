@@ -67,7 +67,7 @@ src/
     lexer.rs            tokens
     syntax.rs           nested blocks and settings
     validate/           semantic rules, defaults, line:column errors
-    model.rs            the validated Config
+    model.rs            the validated Config (limits, containment)
     units.rs            durations and sizes
   http/               HTTP building blocks (pure functions, no state)
     request.rs          strict, resumable request-head parser
