@@ -6,7 +6,9 @@
 //! - Root is any uid 0, real, effective or saved (owner decision
 //!   2026-10-28, O6): such a process could become root again.
 //! - After binding: as root, `user` is required (never root after
-//!   binding) and the process drops to it for good (`drop_to`); as
+//!   binding), its primary group must not be 0 (owner decision
+//!   2026-10-29, OA3: never group root either), and the process drops to
+//!   it for good (`drop_to`); as
 //!   non-root the ids are kept, and a set `user` is logged as kept.
 //! - Then, root or not, every capability is cleared (owner decision
 //!   2026-10-29, OA2): the ambient set, then the permitted, effective and
@@ -67,6 +69,12 @@ fn drop_ids(user: Option<&str>) -> Result<Option<DriverLog>, Failure> {
                 Ok(None) => return Err(Failure(format!("user {name}: no such user"))),
                 Err(err) => return Err(Failure(format!("user {name}: {err}"))),
             };
+            if gid == 0 {
+                return Err(Failure(format!(
+                    "user {name}: its primary group is 0 (root); \
+                     the server never keeps group root after binding"
+                )));
+            }
             drop_to(uid, gid).map_err(|err| {
                 Failure(format!(
                     "cannot drop privileges to {name} (uid {uid}, gid {gid}): {err}"

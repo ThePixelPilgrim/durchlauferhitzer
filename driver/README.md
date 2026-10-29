@@ -48,7 +48,7 @@ src/
                       `ensure` (raise the soft limit, or fail naming both
                       numbers)
     privileges.rs     A8: `drop_privileges` (root, any uid 0 (O6), needs
-                      `user` and drops to it; non-root keeps, logged); no
+                      `user`, not of primary gid 0 (OA3), and drops to it; non-root keeps, logged); no
                       port check (O7); then, root or not, every
                       capability cleared and checked (OA2)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
@@ -197,8 +197,9 @@ tests/
   privileges.rs     A8 in the binary: as non-root `user` is kept and
                     logged, a refused bind below 1024 is exit 2 naming it; as root (else
                     skipped with a printed reason, or a failure with
-                    DURCHLAUFERHITZER_REQUIRE_ROOT=1) no `user` and an unknown
-                    user are exit 2, `user nobody` drops every id
+                    DURCHLAUFERHITZER_REQUIRE_ROOT=1) no `user`, an unknown
+                    user and a user whose primary gid is 0 (OA3) are
+                    exit 2, `user nobody` drops every id
                     (`drop_to` in the server's process) and serves, and a
                     systemd socket below 1024 serves as nobody; a real
                     uid of 0 under an effective nobody counts as root

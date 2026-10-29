@@ -7,7 +7,7 @@
 //! - as root (these tests skip with a printed reason unless the tests run
 //!   as root, and fail instead with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`,
 //!   which CI's root step sets): `user` unset is exit 2, an unknown
-//!   user is exit 2, and with `user nobody` the server drops to nobody
+//!   user and one whose primary group is 0 (OA3) are exit 2, and with `user nobody` the server drops to nobody
 //!   (`drop_to`, in this subprocess only) and serves; root is any uid 0
 //!   (O6), so a real uid of 0 under an effective nobody counts as root;
 //! - root or not, every capability set of every server thread ends up
@@ -149,6 +149,25 @@ fn as_root_an_unknown_user_is_exit_2() {
     assert_eq!(
         text(&output.stderr),
         "durchlauferhitzer: user no_such_user_dlh: no such user\n"
+    );
+}
+
+/// OA3 (owner decision 2026-10-29): a `user` whose primary group is 0
+/// would keep group root after the drop: refused, exit 2. `root` is
+/// such a user everywhere (uid 0 as well; the gid is checked first).
+#[test]
+fn as_root_a_user_with_primary_gid_0_is_exit_2() {
+    if !root_or_skip() {
+        return;
+    }
+    let dir = TempDir::new();
+    let path = static_config(&dir, loopback(free_port()), "user root;");
+    let output = run(&[&path], Setup::default());
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: user root: its primary group is 0 (root); \
+         the server never keeps group root after binding\n"
     );
 }
 

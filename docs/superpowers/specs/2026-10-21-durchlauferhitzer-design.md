@@ -1201,8 +1201,10 @@ Failures, persistence, timeouts:
   bound or taken: as root, `user` is required, with
   systemd sockets too (owner decision 2026-10-28, O3: never root after
   binding; exit 2 otherwise); it is
-  looked up with `getpwnam_r` (an unknown user is exit 2), and the process
-  drops to it for good: the effective uid back to 0 first if it is not,
+  looked up with `getpwnam_r` (an unknown user is exit 2; *owner
+  decision 2026-10-29, OA3:* so is a user whose primary group is 0,
+  `user <name>: its primary group is 0 (root); the server never keeps
+  group root after binding`), and the process drops to it for good: the effective uid back to 0 first if it is not,
   then `setgroups([gid])`, `setgid`, `setuid`, then it checks that
   `setuid(0)` fails and that the real, effective and saved uids, and the three gids, are all
   the user's (exit 2 on any failure). As non-root
