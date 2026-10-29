@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# The jobs only read the repository.
+permissions:
+  contents: read
+
 jobs:
   check:
     # The same gate on both supported architectures (NFR-PORT-01).
@@ -18,7 +22,8 @@ jobs:
     name: check (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      # Pinned by commit: the v4 tag (= v4.4.0) as of 2026-10-29.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show
       - name: Architecture
@@ -37,10 +42,22 @@ jobs:
         # user (cargo never runs as root) and run with sudo: the privilege
         # drop's root-only cases run, and the others run the server as
         # `nobody`. The temp dirs are under /tmp and the binary must be
-        # reachable for `nobody`.
+        # reachable for `nobody`. The list must name every test file
+        # that runs the server (those that include the child helper,
+        # `support/child.rs`), but the ones excluded with a reason (none
+        # yet), so a new server test cannot miss this step.
         run: |
           set -euo pipefail
           tests=(budget cli privileges shutdown smoke startup systemd)
+          excluded=()
+          found=$(grep -l '"support/child.rs"' driver/tests/*.rs \
+            | xargs -n1 basename | sed 's/\.rs$//' | sort)
+          listed=$(printf '%s\n' "${tests[@]}" "${excluded[@]}" | sed '/^$/d' | sort)
+          if [ "$found" != "$listed" ]; then
+            echo "test files that run the server:" $found
+            echo "listed here (run or excluded):" $listed
+            exit 1
+          fi
           args=()
           for t in "${tests[@]}"; do args+=(--test "$t"); done
           bins=$(cargo test --locked -p durchlauferhitzer "${args[@]}" --no-run \

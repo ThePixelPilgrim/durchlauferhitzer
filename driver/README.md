@@ -449,7 +449,9 @@ Notes on the wrappers:
   elsewhere; with `DURCHLAUFERHITZER_REQUIRE_ROOT=1` a skip is a failure
   instead). CI builds the test binaries that run the server as the
   runner user and runs them once more with `sudo` and that variable, so
-  the root cases run in CI too.
+  the root cases run in CI too. That step fails unless its list names
+  every test file that includes `support/child.rs` (but those it
+  excludes with a reason), so a new server test cannot miss it.
 - Tests as root start the server as `nobody` in many cases, so `nobody`
   must reach the built binary: every directory above the target dir
   needs `o+x`. A target dir under a private home directory fails such a
