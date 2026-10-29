@@ -1510,8 +1510,8 @@ Failures, persistence, timeouts:
 - **NFR-RES-05** [done] File-descriptor
   budget: at most `max_connections` files are open or being opened
   (orphans included, FR-CONN-11), plus at most `disk_threads` closed
-  files whose readahead a worker still runs (DRV-09; owner decision
-  2026-10-29, OA1); at most 2 × `max_connections` client
+  files whose readahead a worker still runs, held only by that job until
+  the worker drops it (DRV-09; owner decision 2026-10-29, OA1); at most 2 × `max_connections` client
   sockets (refused ones included); from stage 3 at most one upstream socket
   per counted connection; plus the static roots, listeners and the eventfd.
   The driver checks `RLIMIT_NOFILE` against this at startup. *(Stage 4
@@ -1763,7 +1763,10 @@ stage 4 (its tests are in `driver/`).
   review:)* a readahead no worker has taken yet is cancelled by
   `CloseFile` (taken out of the pool's queue) and the descriptor closed
   at once, so at most `disk_threads` closed files are held open
-  (NFR-RES-05). Errors map to `FileError` by the errno table; stamps are
+  (NFR-RES-05). *(Stage 4 final review, round 2, I-1:)* after
+  `CloseFile` the loop holds no reference to the descriptor; only the
+  running job does, and the descriptor closes when the worker drops the
+  job, before it sends the result (which is then dropped). Errors map to `FileError` by the errno table; stamps are
   `st_size` and mtime in nanoseconds (pre-1970 clamps to 0); a `sendfile`
   returning 0 mid-segment is `Truncated`; `EPIPE`/`ECONNRESET` are the
   socket's (`Failed`); other file-side errors are `FileFailed { Other }`.

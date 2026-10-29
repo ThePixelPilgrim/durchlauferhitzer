@@ -15,18 +15,19 @@
 //!   while queued, [`Pool::cancel_readahead`], gets none): a failure is a
 //!   result like any other, and no worker panics on an I/O error (R6).
 //! - A job holds its descriptor (`Arc<OwnedFd>`) only while it runs: the
-//!   worker drops the job before it sends the result, so once the loop
-//!   holds the result it holds the last reference the job had (DRV-09:
-//!   after `CloseFile` the loop closes the descriptor only when the
-//!   in-flight readahead's result arrives).
+//!   worker drops the job before it sends the result. After `CloseFile`
+//!   the loop holds no reference (I-1), so the running readahead's job
+//!   holds the last one and the descriptor closes when the worker drops
+//!   it, before the result (then dropped) arrives (DRV-09).
 //! - The queue is not bounded here. The core asks for at most one open or
 //!   readahead per connection at a time, orphaned opens included, so the
 //!   live files have at most `max_connections` jobs queued or running. A
 //!   file closed while its readahead is queued has that job cancelled
 //!   ([`Pool::cancel_readahead`], OA1); one closed while a worker runs it
-//!   keeps that job until it ends, at most `disk_threads` of them. So at
-//!   most `max_connections + disk_threads` jobs are queued or running,
-//!   and as many file descriptors held (NFR-RES-05).
+//!   keeps its descriptor open only in that job, until the worker drops
+//!   it: at most `disk_threads` of them. So at most
+//!   `max_connections + disk_threads` jobs are queued or running, and as
+//!   many file descriptors held (NFR-RES-05).
 //! - [`Pool::shutdown`] (also on drop) stops the workers and joins them,
 //!   waiting at most 1 s: a worker still running then (stuck in the
 //!   kernel) is detached and counted. A worker in uninterruptible sleep

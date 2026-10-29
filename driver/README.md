@@ -388,10 +388,13 @@ leaves a choice, this is what the loop does:
   `CloseFile` closes the descriptor at once; while a readahead is in
   flight it first cancels that job if no worker has taken it yet
   (`Pool::cancel_readahead`, OA1), and closes at once then too;
-  otherwise it marks the file `Closing`: the descriptor stays open until
-  that result arrives, which is then dropped (no event). So at most
-  `disk_threads` files are `Closing` (NFR-RES-05 counts them). Closing a file
-  resumes paused listeners (DRV-16). One readahead per file at a time,
+  otherwise it drops the loop's reference and marks the file `Closing`
+  (a tombstone that holds no descriptor, I-1): the descriptor stays open
+  until the worker drops the job, before it sends the result, which is
+  then dropped (no event). So closed files hold at most `disk_threads`
+  descriptors, each in a running job (NFR-RES-05 counts them). Closing a
+  file resumes paused listeners (DRV-16); for a `Closing` file that is
+  when its result arrives. One readahead per file at a time,
   as the core asks: a second one while one is in flight is answered
   `FileFailed { Other }` after the current call, unless a `CloseFile`
   came first (then nothing is delivered), a `Readahead` for a file

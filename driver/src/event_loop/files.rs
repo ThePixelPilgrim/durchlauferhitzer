@@ -1,8 +1,8 @@
 //! The file contract on the loop's side (DRV-07…09): `OpenFile` and
 //! `Readahead` go to the disk pool, its results come back as `FileOpened`,
-//! `FileFailed` and `ChunkReady`, `CloseFile` closes the descriptor (or
-//! defers that while a readahead is in flight), and `sendfile` of the
-//! core's segment runs on the loop.
+//! `FileFailed` and `ChunkReady`, `CloseFile` drops the loop's descriptor
+//! (a worker running the file's readahead keeps it open until it drops
+//! the job), and `sendfile` of the core's segment runs on the loop.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -36,12 +36,13 @@ enum FileState {
     Abandoned,
     /// `FileOpened` was delivered; `sendfile` reads from `fd`.
     Open { fd: Arc<OwnedFd>, reading: Reading },
-    /// `CloseFile` came while a worker ran the file's readahead: the
-    /// descriptor stays open until that worker's result arrives, which is
-    /// then dropped (DRV-09), so a reused descriptor number never receives
-    /// it. A readahead still queued is cancelled instead (OA1), so at most
-    /// `disk_threads` files are `Closing`.
-    Closing { _fd: Arc<OwnedFd> },
+    /// `CloseFile` came while a worker ran the file's readahead: a
+    /// tombstone, holding no descriptor (I-1). The worker's job holds the
+    /// last reference and closes the descriptor when the worker drops it,
+    /// before it sends the result; that result is then dropped (DRV-09).
+    /// A readahead still queued is cancelled instead (OA1), so at most
+    /// `disk_threads` closed files hold a descriptor, each in a running job.
+    Closing,
 }
 
 /// What to do with a pool result.
@@ -101,7 +102,7 @@ impl Files {
                 );
                 Answer::Deliver
             }
-            Some(state @ (FileState::Open { .. } | FileState::Closing { .. })) => {
+            Some(state @ (FileState::Open { .. } | FileState::Closing)) => {
                 // Not an answer to anything in flight: keep the state.
                 self.map.insert(file, state);
                 Answer::Drop(Freed::Descriptor)
@@ -114,7 +115,7 @@ impl Files {
     pub(super) fn open_failed(&mut self, file: FileId) -> Answer {
         match self.map.remove(&file) {
             Some(FileState::Opening) => Answer::Deliver,
-            Some(state @ (FileState::Open { .. } | FileState::Closing { .. })) => {
+            Some(state @ (FileState::Open { .. } | FileState::Closing)) => {
                 self.map.insert(file, state);
                 Answer::Drop(Freed::Nothing)
             }
@@ -132,7 +133,7 @@ impl Files {
                 }
                 Reading::InFlight => StartRead::Busy,
             },
-            Some(FileState::Opening | FileState::Abandoned | FileState::Closing { .. }) | None => {
+            Some(FileState::Opening | FileState::Abandoned | FileState::Closing) | None => {
                 StartRead::NotOpen
             }
         }
@@ -148,9 +149,11 @@ impl Files {
                 }
                 Reading::Idle => Answer::Drop(Freed::Nothing),
             },
-            Some(FileState::Closing { .. }) => {
-                // The worker dropped its reference before sending: this is
-                // the last one, so the descriptor closes here.
+            Some(FileState::Closing) => {
+                // The worker dropped the job, and with it the last
+                // reference, before sending: the descriptor is closed by
+                // now, and the loop learns of it here (paused listeners
+                // resume, DRV-16).
                 self.map.remove(&file);
                 Answer::Drop(Freed::Descriptor)
             }
@@ -158,11 +161,12 @@ impl Files {
         }
     }
 
-    /// `CloseFile`: the descriptor closes now, or once the readahead in
-    /// flight returns. A readahead still queued is cancelled first
-    /// (`cancel`, the pool's `Pool::cancel_readahead`; OA1), so the
-    /// descriptor closes at once: only readaheads a worker runs leave a
-    /// file `Closing`, at most `disk_threads` of them (NFR-RES-05).
+    /// `CloseFile`: the loop drops its descriptor. A readahead still
+    /// queued is cancelled first (`cancel`, the pool's
+    /// `Pool::cancel_readahead`; OA1), so the descriptor closes at once;
+    /// one a worker runs keeps it open until the worker drops the job, and
+    /// the file stays `Closing` (holding nothing) until that result
+    /// arrives: at most `disk_threads` of them (NFR-RES-05).
     pub(super) fn close(&mut self, file: FileId, cancel: impl FnOnce(FileId) -> Cancel) -> Freed {
         match self.map.remove(&file) {
             Some(FileState::Open { fd, reading }) => match reading {
@@ -171,7 +175,9 @@ impl Files {
                     // The job's reference went with it: `fd` is the last.
                     Cancel::Cancelled => Freed::Descriptor,
                     Cancel::NotQueued => {
-                        self.map.insert(file, FileState::Closing { _fd: fd });
+                        // The running job holds the last reference now.
+                        drop(fd);
+                        self.map.insert(file, FileState::Closing);
                         Freed::Nothing
                     }
                 },
@@ -180,7 +186,7 @@ impl Files {
                 self.map.insert(file, FileState::Abandoned);
                 Freed::Nothing
             }
-            Some(state @ (FileState::Abandoned | FileState::Closing { .. })) => {
+            Some(state @ (FileState::Abandoned | FileState::Closing)) => {
                 self.map.insert(file, state);
                 Freed::Nothing
             }
@@ -192,9 +198,7 @@ impl Files {
     pub(super) fn fd(&self, file: FileId) -> Option<&Arc<OwnedFd>> {
         match self.map.get(&file) {
             Some(FileState::Open { fd, .. }) => Some(fd),
-            Some(FileState::Opening | FileState::Abandoned | FileState::Closing { .. }) | None => {
-                None
-            }
+            Some(FileState::Opening | FileState::Abandoned | FileState::Closing) | None => None,
         }
     }
 }
@@ -288,8 +292,8 @@ impl Driver {
         }
     }
 
-    /// `CloseFile` (DRV-09): closes the descriptor, or marks the file
-    /// closing while its readahead is in flight.
+    /// `CloseFile` (DRV-09): drops the loop's descriptor, and marks the
+    /// file closing while a worker runs its readahead.
     pub(super) fn close_file(&mut self, file: FileId) -> io::Result<()> {
         let pool = self.pool.as_ref();
         let freed = self.files.close(file, |file| match pool {
@@ -417,23 +421,28 @@ mod tests {
         assert_eq!(files.close(F, running), Freed::Nothing);
     }
 
-    /// DRV-09: `CloseFile` while a readahead is in flight keeps the
-    /// descriptor open until the worker's result arrives; the result is
-    /// then dropped (no event) and only then is the descriptor closed.
+    /// DRV-09: `CloseFile` while a worker runs the readahead leaves the
+    /// descriptor open only as long as the worker's job holds it (I-1,
+    /// round 2): the loop keeps no reference, so the descriptor closes when
+    /// the worker drops the job, before its result arrives; that result is
+    /// then dropped (no event) and frees the descriptor's slot.
     #[test]
-    fn close_during_a_readahead_waits_for_its_result_and_drops_it() {
+    fn close_during_a_readahead_closes_when_the_job_is_dropped() {
         let mut files = Files::new();
         let weak = open_file(&mut files);
         let StartRead::Started(job_fd) = files.start_read(F) else {
             panic!("no readahead started");
         };
-        // The worker returns its reference before it sends the result.
-        drop(job_fd);
         assert_eq!(files.close(F, running), Freed::Nothing);
         assert!(weak.upgrade().is_some(), "closed while the readahead runs");
         assert!(files.fd(F).is_none(), "no sendfile after CloseFile");
+        // The worker drops the job before it sends the result.
+        drop(job_fd);
+        assert!(
+            weak.upgrade().is_none(),
+            "the loop still holds the closed file's descriptor"
+        );
         assert_eq!(files.read_done(F), Answer::Drop(Freed::Descriptor));
-        assert!(weak.upgrade().is_none());
         assert_eq!(files.read_done(F), Answer::Drop(Freed::Nothing));
     }
 
