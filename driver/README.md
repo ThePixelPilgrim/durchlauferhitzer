@@ -160,6 +160,16 @@ tests/
                     `shutdown_timeout 500ms` with a stalled client, SIGHUP
                     and SIGPIPE ignored; each waits for the server's
                     `phase=draining` line, so the order is deterministic
+  smoke.rs          the end-to-end smoke run (NFR-TEST-07): one binary
+                    serving a static and a proxy host to a test backend,
+                    200 requests over 32 parallel keep-alive connections
+                    (static 200/404/301, proxied 1 MiB GET and POST,
+                    chunked both ways, an early 413, a refused 502, a
+                    hanging 504), each response byte-exact (the sim's
+                    model for the core's own), every backend request
+                    byte-exact, one log line per entry (exact but for
+                    `conn=`), the fd count back to its baseline, then
+                    SIGTERM: `draining`, `done detached=0`, exit 0
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process
