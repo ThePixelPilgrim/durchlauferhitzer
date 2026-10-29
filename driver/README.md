@@ -88,7 +88,9 @@ src/
                     `DriverLog` (FR-LOG-07), `KeptReason`, `ShutdownPhase`
     format.rs         the line format (FR-LOG-05): `format_entry` (a
                       backend by its address in `Core::backends`),
-                      `format_driver`, the escaping
+                      `format_driver`, the escaping; untrusted values
+                      cut at 4 KiB as written, then `<key>_truncated=N`
+                      (OA4)
     buffer.rs         `EntryBuffer`: 64 KiB of whole entries, drop and
                       count when full, the `dropped` line once there is
                       room, before newer entries
@@ -214,8 +216,11 @@ tests/
   sys.rs            the wrappers on the real kernel, unprivileged
   log.rs            the line format: an exact line per kind, every
                     reason / failure / file error value, the escaping
-                    table, a seeded property (any entry is one line with
-                    no raw control byte, and parses back to its strings)
+                    table
+  log_property.rs   a seeded property: any entry is one line with no raw
+                    control byte, fits the 64 KiB buffer, and parses back
+                    to its strings (a value cut at 4 KiB, OA4: the
+                    longest prefix that fits, and the count of the rest)
   log_sink.rs       the sink on a pipe: O_NONBLOCK set and the flags put
                     back, a stalled reader (writes never block, whole
                     entries dropped and counted, one `dropped` line), a

@@ -1049,8 +1049,16 @@ Failures, persistence, timeouts:
     (lowercase hex). So a line holds spaces only between fields, and no
     byte outside 0x20–0x7E but its final LF. Untrusted values (method,
     host, path) always go through this escaping; the path is the raw one
-    (FR-LOG-04).
-  - Kinds and keys, in this order (`[…]` is left out when absent):
+    (FR-LOG-04). *(Owner decision 2026-10-29, OA4, stage 4 final
+    review:)* each untrusted value is at most 4 KiB (4096 bytes) as
+    written, its quotes included. A longer one is cut between two escapes
+    (never inside `\xHH` or `\"`; a quoted one is closed with its quote)
+    and followed at once by ` <key>_truncated=N`, `N` the number of bytes
+    of the raw value not shown (a plain decimal). So every entry fits the
+    64 KiB buffer of FR-LOG-06.
+  - Kinds and keys, in this order (`[…]` is left out when absent; each
+    of `method`, `host` and `path` may be followed by its
+    `method_truncated`, `host_truncated` or `path_truncated`, OA4):
     - `kind=response conn peer status [method host path]` — `request` is
       `None`: no `method`/`host`/`path`; a request without `Host`: no
       `host`.

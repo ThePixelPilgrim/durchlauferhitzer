@@ -16,6 +16,12 @@
 //! and every control byte (0x00–0x1F, 0x7F), every byte ≥ 0x80, `=` and
 //! space is `\xHH` (lowercase hex). So a line holds spaces only between
 //! fields and no byte outside 0x20–0x7E but its final LF.
+//!
+//! An untrusted value (method, host, path) is at most 4 KiB as written,
+//! quotes included (owner decision 2026-10-29, OA4): a longer one is cut
+//! between two escapes (a quoted one closed with its quote) and followed
+//! by `<key>_truncated=N`, `N` the bytes of the raw value not shown. So
+//! every entry fits the sink's 64 KiB buffer.
 
 use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
@@ -192,42 +198,69 @@ fn method_field(out: &mut Vec<u8>, method: &Method) {
     }
 }
 
-/// ` key=value` with an untrusted value, escaped.
+/// The longest an untrusted value may be as written, quotes included
+/// (OA4).
+const MAX_VALUE: usize = 4096;
+
+/// ` key=value` with an untrusted value, escaped and capped at
+/// [`MAX_VALUE`] bytes as written (OA4); a value cut short is followed by
+/// ` <key>_truncated=N`, `N` the bytes of the raw value not shown.
 fn text(out: &mut Vec<u8>, key: &str, value: &str) {
     out.push(b' ');
     out.extend_from_slice(key.as_bytes());
     out.push(b'=');
-    escape(out, value.as_bytes());
+    let shown = escape(out, value.as_bytes(), MAX_VALUE);
+    let left = value.len().saturating_sub(shown);
+    if left > 0 {
+        let _ = write!(out, " {key}_truncated={left}");
+    }
 }
 
 fn is_plain(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"._:/@%+-[]".contains(&byte)
 }
 
-/// Writes `value` as a plain token or quoted (the module's grammar).
-fn escape(out: &mut Vec<u8>, value: &[u8]) {
+/// Writes `value` as a plain token or quoted (the module's grammar), in
+/// at most `cap` bytes (at least 2): as much of it as fits, a quoted one
+/// cut between two escapes and closed with its quote. Returns how many
+/// bytes of `value` were written.
+fn escape(out: &mut Vec<u8>, value: &[u8], cap: usize) -> usize {
     if !value.is_empty() && value.iter().copied().all(is_plain) {
-        out.extend_from_slice(value);
-        return;
+        let shown = value.get(..cap).unwrap_or(value);
+        out.extend_from_slice(shown);
+        return shown.len();
     }
     out.push(b'"');
+    // Room for the escapes, between the two quotes.
+    let mut room = cap.saturating_sub(2);
+    let mut shown = 0;
     for &byte in value {
-        match byte {
-            b'"' => out.extend_from_slice(b"\\\""),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            0x21..=0x7e if byte != b'=' => out.push(byte),
+        let mut unit = [0u8; 4];
+        let len = match byte {
+            b'"' | b'\\' => {
+                unit = [b'\\', byte, 0, 0];
+                2
+            }
+            0x21..=0x7e if byte != b'=' => {
+                unit[0] = byte;
+                1
+            }
             _ => {
                 const HEX: &[u8; 16] = b"0123456789abcdef";
-                out.extend_from_slice(b"\\x");
-                for nibble in [byte >> 4, byte & 0x0f] {
-                    if let Some(&digit) = HEX.get(usize::from(nibble)) {
-                        out.push(digit);
-                    }
-                }
+                let hex = |nibble: u8| HEX.get(usize::from(nibble)).copied().unwrap_or(b'0');
+                unit = [b'\\', b'x', hex(byte >> 4), hex(byte & 0x0f)];
+                4
             }
+        };
+        if len > room {
+            break;
         }
+        room -= len;
+        out.extend_from_slice(unit.get(..len).unwrap_or(&unit));
+        shown += 1;
     }
     out.push(b'"');
+    shown
 }
 
 fn reject_reason(out: &mut Vec<u8>, reason: &RejectReason) {
@@ -386,5 +419,167 @@ fn file_error(error: FileError) -> &'static str {
         FileError::Truncated => "truncated",
         FileError::Changed => "changed",
         FileError::Other => "other",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use durchlauferhitzer_core::http::request::{HttpError, Method};
+    use durchlauferhitzer_core::http::status::Status;
+    use durchlauferhitzer_core::{ConnId, Log, RejectReason, RequestLine, RequestSummary};
+
+    use super::{MAX_VALUE, format_entry};
+    use crate::log::buffer::CAPACITY;
+
+    /// `assert_eq!` for long strings: names the lengths and where they
+    /// first differ, not both strings in full.
+    fn same(left: impl AsRef<str>, right: impl AsRef<str>) {
+        let (left, right) = (left.as_ref(), right.as_ref());
+        if left != right {
+            let at = left
+                .bytes()
+                .zip(right.bytes())
+                .position(|(a, b)| a != b)
+                .unwrap_or(left.len().min(right.len()));
+            panic!(
+                "lengths {} and {}, first difference at {at}: {:?} vs {:?}",
+                left.len(),
+                right.len(),
+                left.get(at.saturating_sub(8)..)
+                    .unwrap_or("")
+                    .chars()
+                    .take(40)
+                    .collect::<String>(),
+                right
+                    .get(at.saturating_sub(8)..)
+                    .unwrap_or("")
+                    .chars()
+                    .take(40)
+                    .collect::<String>(),
+            );
+        }
+    }
+
+    fn line(entry: &Log) -> String {
+        let mut out = Vec::new();
+        format_entry(entry, &[], &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    fn response(method: Method, host: &str, path: &str) -> Log {
+        Log::Response {
+            conn: ConnId(1),
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            status: Status::Ok,
+            request: Some(RequestSummary {
+                method,
+                host: Some(host.to_owned()),
+                path: path.to_owned(),
+            }),
+        }
+    }
+
+    /// The `path` value and what follows it.
+    fn path_field(path: &str) -> String {
+        let full = line(&response(Method::Get, "h", path));
+        full.strip_prefix("kind=response conn=1 peer=192.0.2.7 status=200 method=GET host=h path=")
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap()
+            .to_owned()
+    }
+
+    /// OA4 (owner decision 2026-10-29): a value is at most 4 KiB as
+    /// written, its quotes included. One that fits exactly is whole.
+    #[test]
+    fn a_value_of_exactly_4_kib_is_whole() {
+        assert_eq!(MAX_VALUE, 4096);
+        let plain = "/".to_owned() + &"a".repeat(4095);
+        same(path_field(&plain), plain);
+        // Quoted: 4094 bytes and two quotes.
+        let quoted = "/".to_owned() + &"a".repeat(4092) + "?";
+        same(path_field(&quoted), format!("\"{quoted}\""));
+    }
+
+    /// OA4: a longer plain value is cut at 4 KiB; `path_truncated` counts
+    /// the raw bytes left out.
+    #[test]
+    fn a_long_plain_value_is_cut_and_counted() {
+        let path = "/".to_owned() + &"a".repeat(4999);
+        same(
+            path_field(&path),
+            format!("{} path_truncated=904", &path[..4096]),
+        );
+    }
+
+    /// OA4: a quoted value is cut on an escape boundary, never inside
+    /// `\xHH` or `\"`, and closed with its quote.
+    #[test]
+    fn a_long_quoted_value_is_cut_on_an_escape_boundary() {
+        // One byte too many for the quotes.
+        let path = "/".to_owned() + &"a".repeat(4093) + "?";
+        same(
+            path_field(&path),
+            format!("\"{}\" path_truncated=1", &path[..4094]),
+        );
+        // `\x0a` (four bytes) does not fit in the two left: cut before it.
+        let path = "/".to_owned() + &"a".repeat(4091) + "\nb";
+        same(
+            path_field(&path),
+            format!("\"{}\" path_truncated=2", &path[..4092]),
+        );
+        // All escaped: 1023 of `\x0a` are 4092 bytes, plus the quotes.
+        let path = "\n".repeat(2000);
+        same(
+            path_field(&path),
+            format!("\"{}\" path_truncated=977", "\\x0a".repeat(1023)),
+        );
+        // `\"` (two bytes) fits exactly in the last two.
+        let path = "/".to_owned() + &"a".repeat(4091) + "\"\"";
+        same(
+            path_field(&path),
+            format!("\"{}\\\"\" path_truncated=1", &path[..4092]),
+        );
+    }
+
+    /// OA4: method and host are capped the same way, each with its own
+    /// `<key>_truncated` right after it.
+    #[test]
+    fn method_and_host_are_capped_too() {
+        let method = "M".repeat(5000);
+        let host = " ".repeat(2000);
+        let entry = response(Method::Other(method.clone()), &host, "/");
+        same(
+            line(&entry),
+            format!(
+                "kind=response conn=1 peer=192.0.2.7 status=200 method={} \
+                 method_truncated=904 host=\"{}\" host_truncated=977 path=/\n",
+                &method[..4096],
+                "\\x20".repeat(1023)
+            ),
+        );
+    }
+
+    /// OA4: so every entry fits the sink's 64 KiB buffer, however long
+    /// its untrusted strings (each written four bytes per byte).
+    #[test]
+    fn every_entry_fits_the_buffer() {
+        let long = "\u{1}".repeat(CAPACITY);
+        let entry = response(Method::Other(long.clone()), &long, &long);
+        assert!(line(&entry).len() < 3 * (MAX_VALUE + 64));
+        let rejected = Log::Rejected {
+            conn: ConnId(u64::MAX),
+            peer: IpAddr::V4(Ipv4Addr::BROADCAST),
+            reason: RejectReason::Http {
+                error: HttpError::BadHeaderValue,
+                request: Some(RequestLine {
+                    method: Method::Other(long.clone()),
+                    path: long,
+                }),
+            },
+        };
+        assert!(line(&rejected).len() < CAPACITY);
     }
 }
