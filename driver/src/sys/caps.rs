@@ -9,6 +9,8 @@
 
 use std::io;
 
+use super::fd::{cvt, cvt_retry_ssize};
+
 /// The three capability sets of a thread (`capget`), one bit per
 /// capability (bit `n` is capability `n`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,15 +63,6 @@ fn header() -> Header {
     }
 }
 
-/// `-1` and errno to an error, for `syscall`'s `c_long`.
-fn cvt_long(ret: libc::c_long) -> io::Result<()> {
-    if ret == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
 /// Empties the calling thread's ambient set
 /// (`prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL)`); always allowed.
 pub fn clear_ambient() -> io::Result<()> {
@@ -86,7 +79,7 @@ pub fn clear_ambient() -> io::Result<()> {
             zero,
         )
     };
-    super::fd::cvt(ret).map(|_| ())
+    cvt(ret).map(|_| ())
 }
 
 /// Empties the calling thread's permitted, effective and inheritable sets
@@ -98,7 +91,10 @@ pub fn clear_capabilities() -> io::Result<()> {
     // SAFETY: `header` and `data` are a valid version-3 header and the
     // two data words that version takes; the kernel only reads them,
     // during the call.
-    cvt_long(unsafe { libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr()) })
+    cvt_retry_ssize(|| unsafe {
+        libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr())
+    })?;
+    Ok(())
 }
 
 /// The calling thread's capability sets (`capget`).
@@ -107,7 +103,9 @@ pub fn capabilities() -> io::Result<Capabilities> {
     let mut data = EMPTY;
     // SAFETY: `header` is a valid version-3 header and `data` the two
     // writable data words that version fills; both outlive the call.
-    cvt_long(unsafe { libc::syscall(libc::SYS_capget, &raw mut header, data.as_mut_ptr()) })?;
+    cvt_retry_ssize(|| unsafe {
+        libc::syscall(libc::SYS_capget, &raw mut header, data.as_mut_ptr())
+    })?;
     let [low, high] = data;
     let join = |low: u32, high: u32| u64::from(high) << 32 | u64::from(low);
     Ok(Capabilities {

@@ -129,7 +129,7 @@ impl Client {
             Interest::Read => read,
             Interest::Write => Readiness::Write,
             // Never set for a client; waiting for both is harmless.
-            Interest::ReadWrite => combine(read, Readiness::Write),
+            Interest::ReadWrite => read.combine(Readiness::Write),
         }
     }
 }
@@ -209,7 +209,7 @@ impl Upstream {
                     // A failed write under `Write` alone is reported at
                     // once, so the next write attempt must happen.
                     Interest::Write => Readiness::Write,
-                    Interest::ReadWrite => combine(read, write),
+                    Interest::ReadWrite => read.combine(write),
                 };
                 match readiness {
                     Readiness::None => None,
@@ -217,31 +217,6 @@ impl Upstream {
                 }
             }
         }
-    }
-}
-
-/// Whether a readiness includes reading.
-pub(crate) fn has_read(readiness: Readiness) -> bool {
-    match readiness {
-        Readiness::Read | Readiness::ReadWrite => true,
-        Readiness::None | Readiness::Write => false,
-    }
-}
-
-/// Whether a readiness includes writing.
-pub(crate) fn has_write(readiness: Readiness) -> bool {
-    match readiness {
-        Readiness::Write | Readiness::ReadWrite => true,
-        Readiness::None | Readiness::Read => false,
-    }
-}
-
-fn combine(a: Readiness, b: Readiness) -> Readiness {
-    match (has_read(a) || has_read(b), has_write(a) || has_write(b)) {
-        (false, false) => Readiness::None,
-        (true, false) => Readiness::Read,
-        (false, true) => Readiness::Write,
-        (true, true) => Readiness::ReadWrite,
     }
 }
 

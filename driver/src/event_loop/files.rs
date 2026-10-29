@@ -13,7 +13,7 @@ use durchlauferhitzer_core::{
     ConnError, ConnId, Event, FileError, FileId, FileMeta, FileStamp, RootId,
 };
 
-use super::{Driver, FileFailure};
+use super::{Driver, FileFailure, Freed};
 use crate::log::{DriverLog, LogEntry};
 use crate::pool::{Cancel, Job, JobResult};
 use crate::sys::fd::Io;
@@ -65,13 +65,6 @@ pub(super) enum StartRead {
     /// The file is not open (opening, closed or unknown): nothing to read
     /// and, after `CloseFile`, nothing may be delivered for it.
     NotOpen,
-}
-
-/// Whether a step closed a descriptor (paused listeners resume, DRV-16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Freed {
-    Descriptor,
-    Nothing,
 }
 
 /// The driver's file table: every file id from its `OpenFile` until its
@@ -304,13 +297,6 @@ impl Driver {
             None => Cancel::NotQueued,
         });
         self.freed(freed)
-    }
-
-    fn freed(&mut self, freed: Freed) -> io::Result<()> {
-        match freed {
-            Freed::Descriptor => self.descriptor_closed(),
-            Freed::Nothing => Ok(()),
-        }
     }
 
     /// The wake eventfd fired: every result the pool has is turned into

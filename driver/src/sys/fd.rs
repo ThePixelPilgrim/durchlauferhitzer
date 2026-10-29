@@ -41,6 +41,25 @@ pub(crate) fn cvt_retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<lib
     }
 }
 
+/// Like [`cvt_retry`], for calls that return a signed size (`ssize_t`,
+/// or `syscall`'s `c_long`) rather than a `c_int`: `-1` is the error in
+/// errno, any other value is returned as it is.
+pub(crate) fn cvt_retry_ssize<T>(mut call: impl FnMut() -> T) -> io::Result<T>
+where
+    T: Copy + PartialEq + From<i8>,
+{
+    loop {
+        let ret = call();
+        if ret != T::from(-1) {
+            return Ok(ret);
+        }
+        let err = io::Error::last_os_error();
+        if !errno_is(&err, libc::EINTR) {
+            return Err(err);
+        }
+    }
+}
+
 /// Turns the result of `read`/`send`/`sendfile` into an [`Io`], retrying
 /// on `EINTR`.
 pub(crate) fn transfer(mut call: impl FnMut() -> libc::ssize_t) -> Io {

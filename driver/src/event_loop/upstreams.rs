@@ -7,8 +7,8 @@ use std::os::fd::AsFd;
 
 use durchlauferhitzer_core::{BackendId, ConnError, Event, Interest, UpstreamId};
 
-use super::{Broken, Driver, conn_error, token};
-use crate::conns::{Answer, Eof, Phase, Token, Upstream, Writes, has_read, has_write};
+use super::{Broken, Driver, Freed, conn_error, log_register_failed, token};
+use crate::conns::{Answer, Eof, Phase, Token, Upstream, Writes};
 use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
 use crate::sys::fd::Io;
@@ -42,20 +42,13 @@ pub(super) fn write_mode(interest: Interest, writes: Writes, eof: Eof) -> Option
     }
 }
 
-/// Whether a step closed a descriptor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Closed {
-    Yes,
-    No,
-}
-
 /// Whether leaving `phase` closes a socket.
-fn holds_fd(phase: &Phase) -> Closed {
+fn holds_fd(phase: &Phase) -> Freed {
     match phase {
         Phase::Connecting(_) | Phase::Answering(Answer::Connected(_)) | Phase::Open { .. } => {
-            Closed::Yes
+            Freed::Descriptor
         }
-        Phase::Answering(Answer::Failed) | Phase::Failed => Closed::No,
+        Phase::Answering(Answer::Failed) | Phase::Failed => Freed::Nothing,
     }
 }
 
@@ -64,7 +57,7 @@ impl Driver {
     /// delivered as a later event (DRV-10), also when `connect()` or
     /// `socket()` decides at once.
     pub(super) fn connect(&mut self, up: UpstreamId, backend: BackendId) -> io::Result<()> {
-        let mut closed = Closed::No;
+        let mut freed = Freed::Nothing;
         let addr = usize::try_from(backend.0)
             .ok()
             .and_then(|i| self.core.backends().get(i))
@@ -93,7 +86,7 @@ impl Driver {
                     }
                     Err(_) => {
                         // The socket is closed with `connecting`.
-                        closed = Closed::Yes;
+                        freed = Freed::Descriptor;
                         Phase::Answering(Answer::Failed)
                     }
                 }
@@ -112,7 +105,7 @@ impl Driver {
             self.answers.push_back(up);
         }
         self.sync_upstream(up)?;
-        self.closed(closed)
+        self.freed(freed)
     }
 
     /// The queued answer of `up`'s connect, if `CloseUpstream` did not come
@@ -173,13 +166,13 @@ impl Driver {
             // epoll set; the error waits until the core reads or writes.
             Interest::None => Ok(()),
             Interest::Read => {
-                if has_read(readiness) || troubled {
+                if readiness.has_read() || troubled {
                     self.upstream_read(up)?;
                 }
                 Ok(())
             }
             Interest::Write => {
-                if has_write(readiness) || troubled {
+                if readiness.has_write() || troubled {
                     self.upstream_write(up)?;
                 }
                 Ok(())
@@ -187,10 +180,10 @@ impl Driver {
             Interest::ReadWrite => {
                 // Reads first, so the backend's bytes come before any
                 // error a write would hit.
-                if has_read(readiness) || troubled {
+                if readiness.has_read() || troubled {
                     self.upstream_read(up)?;
                 }
-                if has_write(readiness) {
+                if readiness.has_write() {
                     self.upstream_write(up)?;
                 }
                 Ok(())
@@ -209,7 +202,7 @@ impl Driver {
             upstream.phase = phase;
             return Ok(());
         };
-        let mut closed = Closed::No;
+        let mut freed = Freed::Nothing;
         let event = match take_error(fd.as_fd()) {
             Ok(None) => {
                 upstream.phase = Phase::Open {
@@ -223,7 +216,7 @@ impl Driver {
             // socket takes it out of the epoll set.
             Ok(Some(_)) | Err(_) => {
                 drop(fd);
-                closed = Closed::Yes;
+                freed = Freed::Descriptor;
                 Event::UpstreamFailed {
                     up,
                     error: ConnError::Other,
@@ -231,7 +224,7 @@ impl Driver {
             }
         };
         self.sync_upstream(up)?;
-        self.closed(closed)?;
+        self.freed(freed)?;
         self.deliver(event)
     }
 
@@ -346,8 +339,9 @@ impl Driver {
         let Some(error) = kept else {
             return self.sync_upstream(up);
         };
-        // The event is the queued one, delivered after `UpstreamReadClosed`.
-        let _ = self.upstream_failed(up, error)?;
+        // Its `UpstreamFailed` is queued, delivered after
+        // `UpstreamReadClosed`.
+        self.close_failed_upstream(up)?;
         self.broken.push_back(Broken::Upstream(up, error));
         Ok(())
     }
@@ -355,14 +349,20 @@ impl Driver {
     /// The socket failed: it is closed now (the core does no more with it
     /// than `CloseUpstream`), and the event to report is returned.
     fn upstream_failed(&mut self, up: UpstreamId, error: ConnError) -> io::Result<Event> {
-        let mut closed = Closed::No;
+        self.close_failed_upstream(up)?;
+        Ok(Event::UpstreamFailed { up, error })
+    }
+
+    /// Closes a failed upstream's socket; the id stays until
+    /// `CloseUpstream`.
+    fn close_failed_upstream(&mut self, up: UpstreamId) -> io::Result<()> {
+        let mut freed = Freed::Nothing;
         if let Some(upstream) = self.upstreams.get_mut(&up) {
-            closed = holds_fd(&upstream.phase);
+            freed = holds_fd(&upstream.phase);
             upstream.phase = Phase::Failed;
         }
         self.sync_upstream(up)?;
-        self.closed(closed)?;
-        Ok(Event::UpstreamFailed { up, error })
+        self.freed(freed)
     }
 
     pub(super) fn set_upstream_interest(
@@ -410,46 +410,36 @@ impl Driver {
             upstream.registered = wanted;
             return Ok(());
         };
-        let errno = err.raw_os_error().unwrap_or(0);
-        self.log
-            .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
+        log_register_failed(&mut self.log, &err);
         // Closing the socket takes it out of the epoll set; only the
         // branches that drop it count as a closed descriptor (DRV-16).
-        let closed = match upstream.phase {
+        let freed = match upstream.phase {
             Phase::Connecting(_) => {
                 upstream.phase = Phase::Answering(Answer::Failed);
                 upstream.registered = None;
                 self.answers.push_back(up);
-                Closed::Yes
+                Freed::Descriptor
             }
             Phase::Open { .. } => {
                 upstream.phase = Phase::Failed;
                 upstream.registered = None;
                 self.broken
                     .push_back(Broken::Upstream(up, conn_error(&err)));
-                Closed::Yes
+                Freed::Descriptor
             }
             // Never registered (wanted `None`), so never here; the socket,
             // if any, is kept.
-            Phase::Answering(_) | Phase::Failed => Closed::No,
+            Phase::Answering(_) | Phase::Failed => Freed::Nothing,
         };
-        self.closed(closed)
+        self.freed(freed)
     }
 
     /// Closes the socket, also while its connect is pending; nothing more
     /// is delivered for the id (a queued answer included).
     pub(super) fn close_upstream(&mut self, up: UpstreamId) -> io::Result<()> {
         match self.upstreams.remove(&up) {
-            Some(upstream) => self.closed(holds_fd(&upstream.phase)),
+            Some(upstream) => self.freed(holds_fd(&upstream.phase)),
             None => Ok(()),
-        }
-    }
-
-    /// Paused listeners resume when a socket was closed (DRV-16).
-    fn closed(&mut self, closed: Closed) -> io::Result<()> {
-        match closed {
-            Closed::Yes => self.descriptor_closed(),
-            Closed::No => Ok(()),
         }
     }
 }

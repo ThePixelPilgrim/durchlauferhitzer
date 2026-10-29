@@ -106,6 +106,14 @@ enum LogWait {
     Writable,
 }
 
+/// Whether a step closed a descriptor: paused listeners resume when one
+/// did (DRV-16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Freed {
+    Descriptor,
+    Nothing,
+}
+
 /// The signalfd the loop reads (A9), with what the signals have done so
 /// far.
 #[derive(Debug)]
@@ -631,6 +639,12 @@ impl Driver {
             }
         }
     }
+}
+
+/// Logs a failed `epoll_ctl` for one socket (DRV-15, FR-LOG-07).
+fn log_register_failed(log: &mut LogSink, err: &io::Error) {
+    let errno = err.raw_os_error().unwrap_or(0);
+    log.write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
 }
 
 /// A token's epoll value, or an error for an id beyond the token space.

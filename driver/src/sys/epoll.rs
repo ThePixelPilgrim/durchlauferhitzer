@@ -18,6 +18,35 @@ pub enum Readiness {
 }
 
 impl Readiness {
+    /// Whether it includes reading.
+    pub fn has_read(self) -> bool {
+        match self {
+            Readiness::Read | Readiness::ReadWrite => true,
+            Readiness::None | Readiness::Write => false,
+        }
+    }
+
+    /// Whether it includes writing.
+    pub fn has_write(self) -> bool {
+        match self {
+            Readiness::Write | Readiness::ReadWrite => true,
+            Readiness::None | Readiness::Read => false,
+        }
+    }
+
+    /// Both together: reading if either reads, writing if either writes.
+    pub fn combine(self, other: Readiness) -> Readiness {
+        match (
+            self.has_read() || other.has_read(),
+            self.has_write() || other.has_write(),
+        ) {
+            (false, false) => Readiness::None,
+            (true, false) => Readiness::Read,
+            (false, true) => Readiness::Write,
+            (true, true) => Readiness::ReadWrite,
+        }
+    }
+
     fn bits(self) -> u32 {
         let (read, write) = (libc::EPOLLIN as u32, libc::EPOLLOUT as u32);
         match self {

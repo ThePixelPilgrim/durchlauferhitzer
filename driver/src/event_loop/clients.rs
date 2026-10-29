@@ -7,8 +7,8 @@ use std::os::fd::AsFd;
 use durchlauferhitzer_core::{ConnError, ConnId, Event, Interest};
 
 use super::accept::{AcceptError, Accepting, Logging, Resume, classify};
-use super::{Broken, Driver, conn_error, token};
-use crate::conns::{Client, Eof, Health, Token, has_read, has_write};
+use super::{Broken, Driver, Freed, conn_error, log_register_failed, token};
+use crate::conns::{Client, Eof, Health, Token};
 use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
 use crate::sys::fd::Io;
@@ -53,6 +53,14 @@ impl Driver {
             }
         }
         Ok(())
+    }
+
+    /// Paused listeners resume when a step closed a descriptor (DRV-16).
+    pub(super) fn freed(&mut self, freed: Freed) -> io::Result<()> {
+        match freed {
+            Freed::Descriptor => self.descriptor_closed(),
+            Freed::Nothing => Ok(()),
+        }
     }
 
     /// The driver closed a descriptor: paused listeners resume at once
@@ -104,9 +112,7 @@ impl Driver {
         if let Err(err) = self.epoll.add(fd.as_fd(), raw, Readiness::None) {
             // DRV-15: the core never heard of it (its first event must be
             // `Accepted`), so the socket is dropped and the reason logged.
-            let errno = err.raw_os_error().unwrap_or(0);
-            self.log
-                .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
+            log_register_failed(&mut self.log, &err);
             return Ok(());
         }
         self.next_conn = self.next_conn.saturating_add(1);
@@ -135,21 +141,21 @@ impl Driver {
         match client.interest {
             Interest::None => {}
             Interest::Read => {
-                if has_read(readiness) {
+                if readiness.has_read() {
                     self.client_read(conn)?;
                 }
             }
             Interest::Write => {
-                if has_write(readiness) {
+                if readiness.has_write() {
                     self.client_write(conn)?;
                 }
             }
             // Never set for a client.
             Interest::ReadWrite => {
-                if has_read(readiness) {
+                if readiness.has_read() {
                     self.client_read(conn)?;
                 }
-                if has_write(readiness) {
+                if readiness.has_write() {
                     self.client_write(conn)?;
                 }
             }
@@ -309,9 +315,7 @@ impl Driver {
         // Best effort: if this fails too, the socket stays registered
         // until `Close` drops it.
         let _ = self.epoll.delete(client.fd.as_fd());
-        let errno = err.raw_os_error().unwrap_or(0);
-        self.log
-            .write(LogEntry::Driver(DriverLog::RegisterFailed { errno }));
+        log_register_failed(&mut self.log, err);
         client.health = Health::Broken;
         self.broken.push_back(Broken::Client(conn, conn_error(err)));
     }

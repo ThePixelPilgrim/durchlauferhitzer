@@ -3,7 +3,7 @@
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
-use super::fd::{cvt, cvt_retry, errno_is};
+use super::fd::{cvt, cvt_retry_ssize, errno_is};
 
 /// A non-blocking, close-on-exec `eventfd`. It is readable (for epoll)
 /// while its counter is non-zero. `notify` may be called from any thread.
@@ -35,17 +35,15 @@ impl EventFd {
     /// already readable, so that is not an error.
     pub fn notify(&self) -> io::Result<()> {
         let one: u64 = 1;
-        let ret = cvt_retry(|| {
+        let ret = cvt_retry_ssize(|| {
             // SAFETY: `one` is readable for the 8 bytes written.
-            let n = unsafe {
+            unsafe {
                 libc::write(
                     self.fd.as_raw_fd(),
                     (&raw const one).cast::<libc::c_void>(),
                     size_of::<u64>(),
                 )
-            };
-            // 8 or -1.
-            libc::c_int::try_from(n).unwrap_or(-1)
+            }
         });
         match ret {
             Ok(_) => Ok(()),
@@ -58,17 +56,15 @@ impl EventFd {
     /// last drain, 0 if there were none.
     pub fn drain(&self) -> io::Result<u64> {
         let mut count: u64 = 0;
-        let ret = cvt_retry(|| {
+        let ret = cvt_retry_ssize(|| {
             // SAFETY: `count` is writable for the 8 bytes read.
-            let n = unsafe {
+            unsafe {
                 libc::read(
                     self.fd.as_raw_fd(),
                     (&raw mut count).cast::<libc::c_void>(),
                     size_of::<u64>(),
                 )
-            };
-            // 8 or -1.
-            libc::c_int::try_from(n).unwrap_or(-1)
+            }
         });
         match ret {
             Ok(_) => Ok(count),

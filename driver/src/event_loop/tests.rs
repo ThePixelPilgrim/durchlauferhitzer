@@ -153,7 +153,7 @@ fn a_readahead_without_a_pool_leaves_the_file_idle() {
     );
     assert_eq!(
         driver.files.close(file, |_| crate::pool::Cancel::NotQueued),
-        super::files::Freed::Descriptor
+        super::Freed::Descriptor
     );
 }
 

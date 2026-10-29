@@ -6,7 +6,7 @@ use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
-use super::fd::{cvt, cvt_retry, errno_is};
+use super::fd::{cvt, cvt_retry_ssize, errno_is};
 
 /// The signals the driver handles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,17 +85,15 @@ impl SignalFd {
         // SAFETY: an all-zero `signalfd_siginfo` is a valid value.
         let mut info: libc::signalfd_siginfo = unsafe { zeroed() };
         let len = size_of::<libc::signalfd_siginfo>();
-        let ret = cvt_retry(|| {
+        let ret = cvt_retry_ssize(|| {
             // SAFETY: `info` is writable for `len` bytes.
-            let n = unsafe {
+            unsafe {
                 libc::read(
                     self.fd.as_raw_fd(),
                     (&raw mut info).cast::<libc::c_void>(),
                     len,
                 )
-            };
-            // `len` (128) or -1.
-            libc::c_int::try_from(n).unwrap_or(-1)
+            }
         });
         match ret {
             Ok(_) => Signal::from_number(info.ssi_signo)

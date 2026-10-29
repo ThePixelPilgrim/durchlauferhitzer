@@ -10,7 +10,7 @@ use std::path::Path;
 
 use durchlauferhitzer_core::{FileError, FileKind};
 
-use super::fd::{Io, cvt_retry, errno_is, transfer};
+use super::fd::{Io, cvt_retry, cvt_retry_ssize, errno_is, transfer};
 
 /// The open flags of the file contract: `O_RDONLY | O_NONBLOCK | O_NOCTTY |
 /// O_CLOEXEC` (`O_NONBLOCK` so a FIFO cannot hang the opening worker).
@@ -72,10 +72,10 @@ fn openat2(
     // The flags are a bit pattern: reinterpret, never sign-extend.
     how.flags = u64::from(flags as u32);
     how.resolve = resolve;
-    let fd = cvt_retry(|| {
+    let fd = cvt_retry_ssize(|| {
         // SAFETY: `path` is a NUL-terminated string and `how` a valid
         // `open_how` of the size passed; the kernel only reads both.
-        let ret = unsafe {
+        unsafe {
             libc::syscall(
                 libc::SYS_openat2,
                 dir.as_raw_fd(),
@@ -83,10 +83,11 @@ fn openat2(
                 &raw const how,
                 size_of::<libc::open_how>(),
             )
-        };
-        // A descriptor or -1: always fits a c_int.
-        libc::c_int::try_from(ret).unwrap_or(-1)
+        }
     })?;
+    // A descriptor: always fits a c_int.
+    let fd = libc::c_int::try_from(fd)
+        .map_err(|_| io::Error::other("openat2 returned a descriptor beyond c_int"))?;
     // SAFETY: `fd` was just created by `openat2` and nothing else owns it.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
@@ -147,12 +148,8 @@ pub fn readahead(fd: BorrowedFd<'_>, offset: u64, len: u64) -> io::Result<()> {
     let offset = libc::off64_t::try_from(offset)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset too large"))?;
     let len = usize::try_from(len).unwrap_or(usize::MAX);
-    cvt_retry(|| {
-        // SAFETY: `readahead` takes no pointers.
-        let ret = unsafe { libc::readahead(fd.as_raw_fd(), offset, len) };
-        // 0 or -1.
-        libc::c_int::try_from(ret).unwrap_or(-1)
-    })?;
+    // SAFETY: `readahead` takes no pointers.
+    cvt_retry_ssize(|| unsafe { libc::readahead(fd.as_raw_fd(), offset, len) })?;
     Ok(())
 }
 
