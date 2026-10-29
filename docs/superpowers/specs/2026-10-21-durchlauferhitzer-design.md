@@ -1229,7 +1229,9 @@ Failures, persistence, timeouts:
   the capabilities are cleared all the same. *(Status, owner decision 2026-10-29, O4:)* CI guards the
   root-only cases: it builds the test binaries that run the server as
   the runner user and runs them with `sudo` and
-  `DURCHLAUFERHITZER_REQUIRE_ROOT=1`, so a root skip there is a failure.
+  `DURCHLAUFERHITZER_REQUIRE_ROOT=1`, so a root skip there is a failure;
+  the step fails unless its list names every test file that runs the
+  server (stage 4 final review), so a new one cannot miss it.
 - **FR-PROC-04** [done] At startup the driver opens every static root
   (backends are IP literals and need no resolution, FR-CFG-16), checks
   `openat2` support and the descriptor budget (NFR-RES-05), and fails
