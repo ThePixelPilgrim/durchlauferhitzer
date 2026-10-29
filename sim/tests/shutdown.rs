@@ -735,3 +735,28 @@ fn a_partly_pipelined_head_that_stalls_gets_408() {
     finish_client(&mut sim, c);
     assert!(sim.is_drained(), "{}", sim.trace());
 }
+
+/// A fixed response in flight when the drain begins (a 404 queued
+/// keep-alive, the client stalled): it completes as queued, then the
+/// connection closes instead of waiting for the next request.
+#[test]
+fn an_inflight_fixed_response_completes_then_closes() {
+    let mut sim = sim();
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Budget(10));
+    sim.send(c, MISSING);
+    sim.run_until_idle();
+    sim.begin_drain();
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    sim.set_client_window(c, Window::Unlimited);
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        not_found_keep_alive(),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    finish_client(&mut sim, c);
+    assert!(sim.is_drained(), "{}", sim.trace());
+}

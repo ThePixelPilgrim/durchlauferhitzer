@@ -22,7 +22,14 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     sim.set_disk_delay(random_disk_delay(&mut rng));
     let mut clients: Vec<Client> = Vec::new();
     let steps = rng.usize(5..80);
+    let plan = shutdown_plan(seed, STATIC_SPAN);
+    let mut marks = Marks::default();
     for step in 0..steps {
+        if plan.drain_due(step, &marks) {
+            clients.extend(drain_witnesses(&mut sim, step));
+        }
+        let ids: Vec<ConnId> = clients.iter().map(|c| c.id).collect();
+        shutdown_at(&mut sim, plan, step, &mut marks, &ids);
         let op = rng.u8(0..100);
         if op < 25 || step < 3 || clients.is_empty() {
             let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, rng.u8(1..4)));
@@ -73,6 +80,16 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
         }
         collect(&mut sim, &mut clients);
     }
+    // A shutdown the steps did not reach comes now.
+    if plan.drain_due(END, &marks) {
+        clients.extend(drain_witnesses(&mut sim, steps));
+    }
+    let ids: Vec<ConnId> = clients.iter().map(|c| c.id).collect();
+    shutdown_at(&mut sim, plan, END, &mut marks, &ids);
+    // The longest wait left: a disk answer (45 s), then a pipelined head's
+    // deadline (10 s); `keepalive_timeout` is 60 s.
+    check_drain_finishes(&mut sim, plan, &ids, Duration::from_secs(59));
+    collect(&mut sim, &mut clients);
     // Wind down: every client sends EOF, then 5 minutes pass (longer than
     // any disk delay, so every open and readahead is answered), again
     // while anything is still due: with late timers each wake runs out
@@ -105,8 +122,9 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
         "files left open\ntrace:\n{}",
         sim.trace()
     );
+    check_wound_down(&sim, &marks);
     for client in &clients {
-        check_client(&sim, &tree, client, coverage);
+        check_client(&sim, &tree, client, &marks, coverage);
     }
     for log in sim.logs() {
         match log {
@@ -156,23 +174,57 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
                 RejectReason::Route(_)
                 | RejectReason::Body(_)
                 | RejectReason::Timeout(TimeoutKind::RequestBody) => {}
-                // The net never drains (`tests/shutdown.rs` does).
+                // Counted by the oracle (`check_client`), which knows
+                // a refusal from a cut exchange.
                 RejectReason::ShuttingDown => {}
             }
         }
     }
     // Every connection slot is free again, orphaned opens included: a full
-    // house of new connections is accepted.
-    let logged = sim.logs().len();
-    for i in 0..6 {
-        sim.connect(IpAddr::V4(Ipv4Addr::new(198, 51, 100, i)));
-    }
-    assert_eq!(
-        sim.logs().get(logged..).unwrap_or_default(),
-        [],
-        "connection slots still taken after the run\ntrace:\n{}",
-        sim.trace()
-    );
+    // house of new connections is accepted (refused, once shut down).
+    let peers: Vec<IpAddr> = (0..6)
+        .map(|i| IpAddr::V4(Ipv4Addr::new(198, 51, 100, i)))
+        .collect();
+    check_full_house(&mut sim, &marks, &peers);
+}
+
+/// The static net's shutdown steps: below its longest schedule (80 steps).
+pub(crate) const STATIC_SPAN: usize = 80;
+
+/// Two clients the drain finds in known states. One has a keep-alive
+/// response queued: a `404` it does not read yet (`Window::Budget(0)`),
+/// with (on an odd `step`) a second request pipelined behind it in the
+/// same read, which must get the drain's `503` (FR-PROC-05b); alone, the
+/// connection must close after the `404`. The other is idle keep-alive,
+/// its `404` read: the drain must close it at once.
+fn drain_witnesses(sim: &mut Sim, step: usize) -> [Client; 2] {
+    let witness = |sim: &mut Sim, host: u8, window: Window, templates: Vec<Vec<u8>>| {
+        let id = sim.connect(IpAddr::V4(Ipv4Addr::new(203, 0, 113, host)));
+        sim.set_client_window(id, window);
+        sim.send(id, &templates.concat());
+        sim.run_until_idle();
+        Client {
+            id,
+            queue: VecDeque::new(),
+            front_started: false,
+            started: templates.len(),
+            started_head: 0,
+            pipelined_sends: usize::from(templates.len() > 1),
+            templates,
+            eof: false,
+            received: Vec::new(),
+            ended: false,
+        }
+    };
+    let in_flight = if step % 2 == 1 {
+        vec![VALID.to_vec(), VALID.to_vec()]
+    } else {
+        vec![VALID.to_vec()]
+    };
+    [
+        witness(sim, 9, Window::Budget(0), in_flight),
+        witness(sim, 10, Window::Unlimited, vec![VALID.to_vec()]),
+    ]
 }
 
 /// Let 5 minutes pass (longer than any disk delay and any deadline): once
@@ -216,8 +268,9 @@ pub(crate) fn replay_seed() -> Option<u64> {
 }
 
 /// Run one seed; on failure, panic with `SIM_SEED=<seed>`, the seed's
-/// timer order and the original message (which carries the trace).
-pub(crate) fn run_reporting(seed: u64, run: impl FnOnce()) {
+/// timer order, its shutdown plan and the original message (which
+/// carries the trace).
+pub(crate) fn run_reporting(seed: u64, plan: ShutdownPlan, run: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(run)) {
         let message = payload
             .downcast_ref::<String>()
@@ -225,7 +278,7 @@ pub(crate) fn run_reporting(seed: u64, run: impl FnOnce()) {
             .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
             .unwrap_or_default();
         panic!(
-            "SIM_SEED={seed} failed (timer order {:?}): {message}",
+            "SIM_SEED={seed} failed (timer order {:?}, shutdown {plan:?}): {message}",
             timer_order(seed)
         );
     }
@@ -235,10 +288,14 @@ pub(crate) fn run_reporting(seed: u64, run: impl FnOnce()) {
 fn random_fault_schedules() {
     let mut coverage = Coverage::default();
     match replay_seed() {
-        Some(seed) => run_reporting(seed, || run_seed(seed, &mut coverage)),
+        Some(seed) => run_reporting(seed, shutdown_plan(seed, STATIC_SPAN), || {
+            run_seed(seed, &mut coverage)
+        }),
         None => {
             for seed in 0..SEEDS {
-                run_reporting(seed, || run_seed(seed, &mut coverage));
+                run_reporting(seed, shutdown_plan(seed, STATIC_SPAN), || {
+                    run_seed(seed, &mut coverage)
+                });
             }
             eprintln!(
                 "COVERAGE statuses={:?} http={} header={} send={} disk={} conns={} per_ip={} \
@@ -267,6 +324,7 @@ fn random_fault_schedules() {
                 coverage.redirect_query,
                 coverage.respelled_route
             );
+            eprintln!("SHUTDOWN COVERAGE {:?}", coverage.shutdown);
             coverage.check();
         }
     }

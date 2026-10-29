@@ -59,6 +59,8 @@ pub(crate) struct Coverage {
     /// 200s on the `/@%C3%A4` route through an escaped or re-cased
     /// spelling of its segment.
     pub(crate) respelled_route: usize,
+    /// The drains and aborts (`shutdown.rs`).
+    pub(crate) shutdown: ShutdownCoverage,
 }
 
 /// `grown` must be well clear of zero, so a refactor cannot silently lose
@@ -106,6 +108,7 @@ impl Coverage {
         for (what, n) in named {
             assert!(n > 0, "no {what} in any seed");
         }
+        self.shutdown.check();
     }
 }
 
@@ -186,10 +189,15 @@ pub(crate) fn redirect_renderings(path: &str, body: BodyMode) -> (Vec<Rendering>
 
 pub(crate) const BOTH: [Persistence; 2] = [Persistence::KeepAlive, Persistence::Close];
 
-/// The response `log` announces, if it announces one, with the exact bytes
-/// it may be sent as. A logged request status that does not follow from
-/// the tree is an error.
-pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announced<'t>>, String> {
+/// The response `log` (written in `phase`) announces, if it announces
+/// one, with the exact bytes it may be sent as. A logged request status
+/// that does not follow from the tree is an error; during the drain a
+/// request may be answered `503` with close instead (FR-PROC-05).
+pub(crate) fn announced<'t>(
+    log: &Log,
+    tree: &'t Tree,
+    phase: Phase,
+) -> Result<Option<Announced<'t>>, String> {
     let (status, request) = match log {
         Log::Response {
             status, request, ..
@@ -209,6 +217,8 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
                 RejectReason::Body(RequestBodyError::TooLarge | RequestBodyError::ClosedEarly) => {
                     return Ok(None);
                 }
+                // An exchange the abort cut: nothing is answered.
+                RejectReason::ShuttingDown if phase == Phase::AbortCut => return Ok(None),
                 RejectReason::Limit(_) | RejectReason::ShuttingDown => Status::ServiceUnavailable,
                 // Not emitted in this stage; a route miss is answered 404.
                 RejectReason::Route(_) => Status::NotFound,
@@ -233,6 +243,17 @@ pub(crate) fn announced<'t>(log: &Log, tree: &'t Tree) -> Result<Option<Announce
         Some(Method::Head) => BodyMode::HeadOnly,
         Some(Method::Get | Method::Other(_)) | None => BodyMode::Full,
     };
+    if phase == Phase::Draining && status == Status::ServiceUnavailable {
+        if request.is_none() {
+            return Err(format!("{log:?}: a drain's 503 without its request"));
+        }
+        return Ok(Some(Announced {
+            status,
+            body,
+            renderings: fixed_renderings(status, &[Persistence::Close], body),
+            file: None,
+        }));
+    }
     let Some(request) = request.filter(|r| r.host.as_deref() == Some("example.test")) else {
         return Ok(Some(Announced {
             status,
@@ -436,30 +457,67 @@ pub(crate) struct Cut {
 
 /// Check one client's received bytes against its requests, the logs and
 /// the tree.
-pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &mut Coverage) {
+pub(crate) fn check_client(
+    sim: &Sim,
+    tree: &Tree,
+    client: &Client,
+    marks: &Marks,
+    coverage: &mut Coverage,
+) {
     let fail = |what: String| -> ! {
         panic!("conn={}: {what}\ntrace:\n{}", client.id.0, sim.trace());
     };
-    let logs: Vec<&Log> = sim
+    // Each of the connection's logs with the phase it was written in.
+    let phased: Vec<(&Log, Phase)> = sim
         .logs()
         .iter()
-        .filter(|l| log_conn(l) == client.id)
+        .enumerate()
+        .filter(|(_, l)| log_conn(l) == client.id)
+        .map(|(i, l)| (l, marks.phase(i)))
         .collect();
+    let logs: Vec<&Log> = phased.iter().map(|(l, _)| *l).collect();
+    // A connection refused (over a limit, or while shutting down) has no
+    // request: its 503 answers none.
+    let refusal = |log: &Log, phase: Phase| match log {
+        Log::Rejected {
+            reason: RejectReason::Limit(_),
+            ..
+        } => true,
+        Log::Rejected {
+            reason: RejectReason::ShuttingDown,
+            ..
+        } => phase != Phase::AbortCut,
+        Log::Response { .. }
+        | Log::Rejected { .. }
+        | Log::Reset { .. }
+        | Log::FileAborted { .. }
+        | Log::ProxiedResponse { .. }
+        | Log::BackendFailed { .. } => false,
+    };
+    let refused = phased.iter().any(|&(l, p)| refusal(l, p));
     let mut expected = Vec::new();
+    // The phase each announced response was logged in.
+    let mut expected_phase = Vec::new();
     // Every announced response but a connection refusal answers the next
     // request template: its persistence follows from that request.
     let mut templates = client.templates.iter();
-    for log in &logs {
-        match announced(log, tree) {
+    for &(log, phase) in &phased {
+        if phase == Phase::AbortCut {
+            coverage.shutdown.abort_cut += 1;
+        }
+        match announced(log, tree, phase) {
             Ok(Some(mut a)) => {
-                let refusal = matches!(
-                    log,
-                    Log::Rejected {
-                        reason: RejectReason::Limit(_),
-                        ..
+                if refusal(log, phase) {
+                    if matches!(
+                        log,
+                        Log::Rejected {
+                            reason: RejectReason::ShuttingDown,
+                            ..
+                        }
+                    ) {
+                        coverage.shutdown.refused_connection += 1;
                     }
-                );
-                if !refusal {
+                } else {
                     let Some(template) = templates.next() else {
                         fail(format!("{log:?} answers no request sent"));
                     };
@@ -482,11 +540,17 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
                                 r.path
                             ));
                         }
-                        let allowed = expected_persistence(template, a.status);
+                        // A head rendered during the drain says close
+                        // (FR-PROC-05 "Core half").
+                        let allowed = match phase {
+                            Phase::Serving => expected_persistence(template, a.status),
+                            Phase::Draining | Phase::AbortCut => &[Persistence::Close],
+                        };
                         a.renderings.retain(|r| allowed.contains(&r.persistence));
                     }
                 }
                 expected.push(a);
+                expected_phase.push(phase);
             }
             Ok(None) => {}
             Err(e) => fail(e),
@@ -495,6 +559,8 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
     // What arrived is, in order, a prefix of what the core logged, each
     // response exactly as rendered; the last may be cut short.
     let mut seen: Vec<Seen> = Vec::new();
+    // The phase the last complete response was logged in.
+    let mut last_seen_phase: Option<Phase> = None;
     let mut cut: Option<Cut> = None;
     let mut rest = client.received.as_slice();
     for (index, a) in expected.iter().enumerate() {
@@ -508,6 +574,14 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
                 persistence: r.persistence,
                 body: a.body,
             });
+            last_seen_phase = expected_phase.get(index).copied();
+            if last_seen_phase == Some(Phase::Draining) {
+                if a.status != Status::ServiceUnavailable {
+                    coverage.shutdown.closing_head += 1;
+                } else if !refused {
+                    coverage.shutdown.refused_request += 1;
+                }
+            }
             rest = rest.get(r.bytes.len()..).unwrap_or_default();
             if let (Some((f, policy)), BodyMode::Full) = (a.file, a.body) {
                 if f.expected_abort(policy).is_some() {
@@ -582,22 +656,22 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
     // (send or disk timeout, reset, file abort) or a refusal was closed at
     // once.
     if truncated || statuses.len() < announced_statuses.len() {
-        let abandoned = matches!(
-            logs.last(),
-            Some(Log::Rejected {
-                reason: RejectReason::Timeout(TimeoutKind::Send | TimeoutKind::Disk),
-                ..
-            }) | Some(Log::Reset { .. })
-                | Some(Log::FileAborted { .. })
-        );
-        let refused_at_once = statuses.is_empty()
-            && matches!(
-                logs.as_slice(),
-                [Log::Rejected {
-                    reason: RejectReason::Limit(_),
+        let aborted = matches!(phased.last(), Some((_, Phase::AbortCut)));
+        let abandoned = aborted
+            || matches!(
+                logs.last(),
+                Some(Log::Rejected {
+                    reason: RejectReason::Timeout(TimeoutKind::Send | TimeoutKind::Disk),
                     ..
-                }]
+                }) | Some(Log::Reset { .. })
+                    | Some(Log::FileAborted { .. })
             );
+        // A refusal is closed at once, or cut by the abort before it is
+        // out (silently: its refusal is logged already, FR-PROC-05c).
+        let refused_at_once = statuses.is_empty() && refused && phased.len() == 1;
+        if aborted && !refused_at_once {
+            coverage.shutdown.abort_truncated += 1;
+        }
         if !abandoned && !refused_at_once {
             fail(format!(
                 "received {statuses:?} (truncated: {truncated}) of {announced_statuses:?}"
@@ -668,11 +742,12 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
             coverage.aborted_first_chunk += 1;
         }
     }
-    let refused = statuses.contains(&Status::ServiceUnavailable);
-    if refused && statuses.len() != 1 {
-        fail(format!("503 is not the only response: {statuses:?}"));
+    if refused && statuses.len() > 1 {
+        fail(format!(
+            "a refused connection's 503 is not its only response: {statuses:?}"
+        ));
     }
-    let answered = statuses.len() - usize::from(refused);
+    let answered = statuses.len() - usize::from(refused && !statuses.is_empty());
     if answered > client.started {
         fail(format!(
             "{answered} responses to {} requests started",
@@ -700,15 +775,21 @@ pub(crate) fn check_client(sim: &Sim, tree: &Tree, client: &Client, coverage: &m
     let shut = sim
         .trace()
         .contains(&format!(" conn={} -> ShutdownWrite", client.id.0));
+    // During the drain it also does after a keep-alive response queued
+    // before the drain began (FR-PROC-05 "Core half", FR-PROC-05b).
     if shut
         && !truncated
         && seen
             .last()
             .is_none_or(|s| s.persistence != Persistence::Close)
     {
-        fail(format!(
-            "the connection was shut down after {seen:?}, whose last response does not close"
-        ));
+        if marks.shut_down() && last_seen_phase == Some(Phase::Serving) {
+            coverage.shutdown.shut_after_keep_alive += 1;
+        } else {
+            fail(format!(
+                "the connection was shut down after {seen:?}, whose last response does not close"
+            ));
+        }
     }
     for (slot, status) in coverage.statuses.iter_mut().zip(STATUSES) {
         *slot += statuses.iter().filter(|s| **s == status).count();

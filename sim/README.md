@@ -88,6 +88,9 @@ tests/
     oracle.rs           what each client must receive; coverage
     run.rs              one random schedule; the test over all seeds;
                         seed replay for every net of the binary
+    shutdown.rs         the shutdown plans (drain, drain
+                        then abort, abort), where they fell in the log,
+                        and the checks they add
     proxy/              the randomized proxy net (see below)
       mod.rs              random configs, coverage, the test over all seeds
       request.rs          random client requests (smuggling attempts among
@@ -132,6 +135,19 @@ SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_fault_
 One seed in four of either net (`seed % 4 == 0`) runs with late timers
 (`TimerOrder::Late`); the order follows from the seed alone, and a failure
 prints it beside `SIM_SEED`.
+
+One seed in five of the static net (`seed % 5 == 0`) also shuts the server down
+(FR-PROC-05, `faults/shutdown.rs`): it calls `begin_drain` at a seeded
+step, half of those call `abort_all` later, and some call `abort_all`
+without a drain. The plan follows from the seed alone, by an RNG of its
+own (the other seeds keep their schedules), and a failure prints it too.
+The oracles check what the spec says of the drain: a head logged before
+it keeps what it said, one logged after it says `Connection: close` or is
+the `503` with close for a request completed during it; a connection
+accepted meanwhile is refused (`Rejected { ShuttingDown }`); the abort
+logs each exchange it cuts; no upstream opens once the drain began; a
+plain drain finishes (no connection left open) within the deadlines it
+waits on; the core is drained (`is_drained`) after the wind-down.
 
 Both nets (the whole `faults` binary) run with a date set (`Sim::set_date`,
 the RFC 9110 example `Sun, 06 Nov 1994 08:49:37 GMT`), so every response

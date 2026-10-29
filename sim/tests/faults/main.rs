@@ -168,6 +168,7 @@ mod oracle;
 )]
 mod proxy;
 mod run;
+mod shutdown;
 mod split;
 
 use fixed::*;
@@ -175,3 +176,4 @@ use generator::*;
 use model::*;
 use oracle::*;
 use run::{assert_clock_done, replay_seed, run_reporting};
+use shutdown::*;

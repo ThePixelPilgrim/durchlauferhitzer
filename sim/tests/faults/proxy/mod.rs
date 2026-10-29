@@ -312,10 +312,14 @@ impl ProxyCoverage {
 fn random_proxy_schedules() {
     let mut coverage = ProxyCoverage::default();
     match replay_seed() {
-        Some(seed) => run_reporting(seed, || run_proxy_seed(seed, &mut coverage)),
+        Some(seed) => run_reporting(seed, ShutdownPlan::None, || {
+            run_proxy_seed(seed, &mut coverage)
+        }),
         None => {
             for seed in 0..PROXY_SEEDS {
-                run_reporting(seed, || run_proxy_seed(seed, &mut coverage));
+                run_reporting(seed, ShutdownPlan::None, || {
+                    run_proxy_seed(seed, &mut coverage)
+                });
             }
             eprintln!("PROXY COVERAGE {:?}", coverage.seen);
             coverage.check();
