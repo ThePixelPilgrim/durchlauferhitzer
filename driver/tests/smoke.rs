@@ -55,6 +55,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -152,15 +153,18 @@ fn pattern(seed: usize, len: usize) -> Vec<u8> {
 }
 
 fn page() -> Vec<u8> {
-    pattern(1, 300 * 1024)
+    static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    BYTES.get_or_init(|| pattern(1, 300 * 1024)).clone()
 }
 
 fn get_body() -> Vec<u8> {
-    pattern(2, MIB)
+    static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    BYTES.get_or_init(|| pattern(2, MIB)).clone()
 }
 
 fn post_body() -> Vec<u8> {
-    pattern(3, MIB)
+    static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    BYTES.get_or_init(|| pattern(3, MIB)).clone()
 }
 
 /// A chunked body with `chunks` of these sizes, hex in mixed case and
@@ -183,11 +187,17 @@ fn chunked(seed: usize, sizes: &[usize]) -> Vec<u8> {
 }
 
 fn chunked_request_body() -> Vec<u8> {
-    chunked(10, &[1, 0xAB, 0x1_0000, 0x3_0000, 7, 0x2_0001])
+    static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    BYTES
+        .get_or_init(|| chunked(10, &[1, 0xAB, 0x1_0000, 0x3_0000, 7, 0x2_0001]))
+        .clone()
 }
 
 fn chunked_response_body() -> Vec<u8> {
-    chunked(20, &[0x8000, 3, 0x4_0000, 0xFF])
+    static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    BYTES
+        .get_or_init(|| chunked(20, &[0x8000, 3, 0x4_0000, 0xFF]))
+        .clone()
 }
 
 /// What the backend gets for each kind it sees (FR-PROXY-04…11): the
