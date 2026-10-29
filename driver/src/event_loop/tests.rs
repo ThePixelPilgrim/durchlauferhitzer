@@ -583,10 +583,14 @@ fn proxy_lines_name_the_backend_by_its_address() {
 }
 
 /// NFR-PERF-04, DRV-11: every client socket the loop accepts and every
-/// upstream socket it connects gets `TCP_NODELAY` (off by default).
+/// upstream socket it connects gets `TCP_NODELAY` (off by default), and
+/// keeps the kernel's `SO_SNDBUF`/`SO_RCVBUF` (owner decision 2026-10-29,
+/// O1: no buffer size is ever set).
 #[test]
 fn clients_and_upstreams_get_tcp_nodelay() {
     use std::net::{TcpListener, TcpStream};
+
+    use crate::sys::socket::buffer_sizes;
 
     let backend = TcpListener::bind("127.0.0.1:0").unwrap();
     let config = format!(
@@ -598,13 +602,22 @@ fn clients_and_upstreams_get_tcp_nodelay() {
     let (log, _logs) = LogSink::channel();
     let mut driver = Driver::new(core, Vec::new(), Vec::new(), 1, log).unwrap();
     let nodelay = |fd: &OwnedFd| TcpStream::from(fd.try_clone().unwrap()).nodelay().unwrap();
+    let sizes = |fd: &OwnedFd| buffer_sizes(fd.as_fd()).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let _peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (accepted, _) = listener.accept().unwrap();
     assert!(!accepted.nodelay().unwrap(), "the kernel's default");
-    driver.accepted(OwnedFd::from(accepted), peer()).unwrap();
-    assert!(nodelay(&driver.clients[&ConnId(1)].fd));
+    // The kernel's defaults for an established socket (it grows the send
+    // buffer once a connection is set up, so an unconnected socket's
+    // sizes differ): the same socket before the driver has it.
+    let accepted = OwnedFd::from(accepted);
+    let kernel = sizes(&accepted);
+    driver.accepted(accepted, peer()).unwrap();
+    let client = &driver.clients[&ConnId(1)].fd;
+    assert!(nodelay(client));
+    // NFR-PERF-04: no buffer size is set, so autotuning stays on.
+    assert_eq!(sizes(client), kernel, "an accepted socket's buffer sizes");
 
     let up = UpstreamId(1);
     driver.connect(up, BackendId(0)).unwrap();
@@ -615,4 +628,21 @@ fn clients_and_upstreams_get_tcp_nodelay() {
         }
     };
     assert!(nodelay(fd));
+    // A loopback connect is set up at once; compare with a plain socket
+    // connected to the same backend, once both are connected.
+    let upstream = TcpStream::from(fd.try_clone().unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while upstream.peer_addr().is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the upstream never connected"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let plain = OwnedFd::from(TcpStream::connect(backend.local_addr().unwrap()).unwrap());
+    assert_eq!(
+        sizes(fd),
+        sizes(&plain),
+        "an upstream socket's buffer sizes"
+    );
 }

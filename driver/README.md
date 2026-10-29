@@ -119,7 +119,8 @@ src/
                       (`ConnectStart`), `take_error`, `set_nodelay`, `read`,
                       `write` (MSG_NOSIGNAL), `shutdown_write`, `local_addr`,
                       `is_listening_stream` (TCP only, `SO_PROTOCOL`),
-                      `ipv6_only` (`V6Only`)
+                      `ipv6_only` (`V6Only`), `buffer_sizes`
+                      (`BufferSizes`: SO_SNDBUF / SO_RCVBUF, read only)
     file.rs           `openat2_beneath` (RESOLVE_BENEATH |
                       RESOLVE_NO_SYMLINKS, `OPEN_FLAGS`), `openat2_supported`,
                       `open_dir_path` (O_PATH roots), `fstat` → `Stat`,

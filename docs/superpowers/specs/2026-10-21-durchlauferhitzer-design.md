@@ -1613,12 +1613,14 @@ Targets are set in stage 7 from measurements; none are invented here.
   be set in stage 7.
 - **NFR-PERF-03** [stage 7] Concurrent connections per core at a given
   memory budget: target to be set in stage 7.
-- **NFR-PERF-04** [stage 4] Writes in large pieces with `TCP_NODELAY`;
+- **NFR-PERF-04** [done] Every client and upstream socket has
+  `TCP_NODELAY`; each buffer is written until done or blocked (DRV-03);
   `SO_RCVBUF`/`SO_SNDBUF` are never set (kernel autotuning stays on).
-  *(Status after stage 4 Task 10:)* `TCP_NODELAY` on every client and
-  upstream socket is tested; the loop writes each buffer whole until the
-  socket would block and sets no buffer size, but no test pins those two,
-  so this stays open.
+  *(Owner decision 2026-10-29, O1:)* pinned by
+  `clients_and_upstreams_get_tcp_nodelay`: an accepted and an upstream
+  socket have `TCP_NODELAY` and the kernel's own buffer sizes (those of
+  the same kind of socket the driver never touched); the write rule is
+  the driver contract's (DRV-03), tested with it.
 - **NFR-PERF-05** [stage 7] TCP behaviour under `tc netem` (delay, loss,
   recovery after pauses); fill-drain-refill vs. double buffering and the
   body buffer size decided by measurement: target to be set in stage 7.

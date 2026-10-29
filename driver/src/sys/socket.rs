@@ -138,6 +138,24 @@ pub fn set_nodelay(fd: BorrowedFd<'_>) -> io::Result<()> {
     set_int_option(fd.as_raw_fd(), libc::IPPROTO_TCP, libc::TCP_NODELAY, 1)
 }
 
+/// A socket's buffer sizes as the kernel reports them (`SO_SNDBUF`,
+/// `SO_RCVBUF`). The driver never sets them (NFR-PERF-04); the tests read
+/// them to check that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferSizes {
+    pub send: libc::c_int,
+    pub receive: libc::c_int,
+}
+
+/// Reads `SO_SNDBUF` and `SO_RCVBUF`.
+pub fn buffer_sizes(fd: BorrowedFd<'_>) -> io::Result<BufferSizes> {
+    let raw = fd.as_raw_fd();
+    Ok(BufferSizes {
+        send: get_int_option(raw, libc::SOL_SOCKET, libc::SO_SNDBUF)?,
+        receive: get_int_option(raw, libc::SOL_SOCKET, libc::SO_RCVBUF)?,
+    })
+}
+
 /// Reads into `buf`. An empty `buf` returns `Done(0)` without a system
 /// call (a 0 from `read` would look like the end of stream).
 pub fn read(fd: BorrowedFd<'_>, buf: &mut [u8]) -> Io {
