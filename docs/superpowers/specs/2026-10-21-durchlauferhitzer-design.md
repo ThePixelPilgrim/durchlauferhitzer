@@ -12,10 +12,11 @@ Status: approved — **single source of truth** for what the product must do.
   (new ID or edited text), then cited.
 - Status tags: **[done]** implemented and tested (stages 1–4);
   **[done in core; driver stage 4]** the core's half is done and the
-  epoll driver's is due (none left after stage 4); **[done; X stage N]** done, with the follow-up X
-  due in stage N (e.g. NFR-MAINT-04's CI hardening); **[stage N]** due in that stage of the
-  timeline; **[open]** waits for an owner decision (see "Open decisions"
-  at the end). "since stage N" notes when a decision was taken.
+  epoll driver's is due (none left after stage 4); **[done; X stage N]**
+  done, with the follow-up X due in stage N (e.g. NFR-MAINT-04's CI
+  hardening); **[stage N]** due in that stage of the timeline;
+  **[open]** waits for an owner decision (see "Open decisions" at the
+  end). "since stage N" notes when a decision was taken.
 - Rationale is kept short and next to its requirement, in *italics*.
 - Exact enum names, module layout and buffer sizes are implementation
   details unless a requirement names them; the driver contract lives in the
@@ -1813,8 +1814,7 @@ project working and tested.
 3. **Reverse proxy** [done] — backend connections in the simulation,
    header handling, `strip_prefix`, body streaming with backpressure,
    502/504, misbehaving backends.
-4. **epoll driver + binary** [done; open: NFR-PERF-04, NFR-PORT-01 and
-   NFR-PORT-03, see their notes] — the real driver, worker pool, `eventfd`,
+4. **epoll driver + binary** [done] — the real driver, worker pool, `eventfd`,
    `sendfile`, `openat2`, logging output, CLI, privilege drop, systemd
    socket activation, SIGTERM drain, a few smoke tests over real loopback
    sockets. First runnable release.

@@ -11,8 +11,8 @@ for every rule.
 
 ## Build
 
-Linux 5.14 or later on x86_64 or aarch64 (glibc), and the stable Rust
-toolchain pinned in `rust-toolchain.toml`:
+Linux 5.14 or later on x86_64 or aarch64 (glibc; CI builds and tests
+both), and the stable Rust toolchain pinned in `rust-toolchain.toml`:
 
 ```sh
 cargo build --release --locked
@@ -26,13 +26,17 @@ durchlauferhitzer --check examples/durchlauferhitzer.conf
 ```
 
 prints `ok` (exit 0), or the first error as `<path>:<line>:<column>:
-<message>` on stderr (exit 1). It only reads the file: no socket is bound and
+<message>` on stderr (exit 1); a file that cannot be read is
+`durchlauferhitzer: <path>: <reason>` (exit 1). It only reads the file: no socket is bound and
 no static root is opened.
 
 ## Try it
 
 The example config listens on `127.0.0.1:8080` and runs as any normal user
-(no root). Its static roots must exist:
+(no root). Its static roots must exist. They are under `/tmp`, which every
+user can write to: on a shared machine another user could create
+`/tmp/durchlauferhitzer` first (or a symlink there), so use roots you own
+instead and change them in the config. On your own machine:
 
 ```sh
 mkdir -p /tmp/durchlauferhitzer/www /tmp/durchlauferhitzer/well-known
@@ -64,8 +68,10 @@ lower `max_connections`), and the privileges (below).
 ## Privileges
 
 - Started as a normal user, the server keeps that user (a `user` setting is
-  then ignored, and that is logged once). Ports below 1024 need root or
-  socket activation; a refused bind is a startup error naming the address.
+  then ignored, and that is logged once). Ports below 1024 need root,
+  `CAP_NET_BIND_SERVICE`, a lowered `net.ipv4.ip_unprivileged_port_start`,
+  or socket activation; a refused bind is a startup error naming the
+  address.
 - Started as root (any of the real, effective or saved uid 0), `user` is
   required: after binding and opening the static roots the server drops to
   that user and group for good, and refuses to run as root otherwise
@@ -113,7 +119,9 @@ exit 2.
   cut at once.
 - `SIGHUP` and `SIGPIPE` are ignored.
 - Exit codes: 0 after any shutdown (and `--check` on a valid config), 1 for
-  an invalid config or bad arguments, 2 for a startup failure.
+  an invalid or unreadable config or bad arguments, 2 for a startup
+  failure or a failure of the event loop itself (printed as
+  `durchlauferhitzer: event loop: <reason>`).
 
 ## Repository layout
 
