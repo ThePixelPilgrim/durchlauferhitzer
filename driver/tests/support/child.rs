@@ -10,8 +10,8 @@
 //! The setup before `exec` needs `pre_exec`, which is `unsafe`: it lives in
 //! the one module [`pre_exec`] below, the only `unsafe` code of the test
 //! crate (controller ruling R2), and calls only async-signal-safe
-//! functions (`close`, `dup2`, `setrlimit`, and `setresuid` and `prctl`,
-//! see there).
+//! functions (`close`, `dup2`, `setrlimit`, and `setresuid`, `prctl`,
+//! `setgroups`, `setresgid`, `capget` and `capset`, see there).
 
 #![allow(
     clippy::unwrap_used,
@@ -144,7 +144,28 @@ pub struct Setup {
     pub effective_uid: Option<u32>,
     /// A seccomp filter installed before `exec`.
     pub filter: Filter,
+    /// Capabilities the child gets before `exec` (only possible as root).
+    pub caps: Caps,
 }
+
+/// Capabilities for the child (OA2: the server clears them all).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Caps {
+    /// What it inherits from the test process.
+    #[default]
+    Inherited,
+    /// `CAP_NET_BIND_SERVICE` added to its inheritable set; it stays
+    /// root. The privilege drop (`setuid`) leaves that set alone.
+    Inheritable,
+    /// Run as uid/gid [`NOBODY`] with `CAP_NET_BIND_SERVICE` ambient
+    /// (and so permitted and effective after `exec`), as systemd's
+    /// `AmbientCapabilities=` gives a non-root service. Instead of
+    /// [`Setup::as_nobody`].
+    AmbientAsNobody,
+}
+
+/// `CAP_NET_BIND_SERVICE` (`linux/capability.h`).
+pub const CAP_NET_BIND_SERVICE: u32 = 10;
 
 /// A seccomp filter for the child (owner decision 2026-10-29, O3).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -224,6 +245,14 @@ pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
     }
     if let Some((soft, hard)) = setup.nofile {
         pre_exec::limit_nofile(&mut cmd, soft, hard);
+    }
+    match setup.caps {
+        Caps::Inherited => {}
+        Caps::Inheritable => pre_exec::inheritable_cap(&mut cmd, CAP_NET_BIND_SERVICE),
+        Caps::AmbientAsNobody => {
+            assert!(!setup.as_nobody, "AmbientAsNobody sets the ids itself");
+            pre_exec::nobody_with_ambient_cap(&mut cmd, NOBODY, CAP_NET_BIND_SERVICE);
+        }
     }
     match setup.filter {
         Filter::None => {}
@@ -580,6 +609,102 @@ mod pre_exec {
         };
         // SAFETY: the hook calls only `setresuid` and reads errno; it
         // neither allocates nor locks.
+        unsafe { cmd.pre_exec(hook) };
+    }
+
+    /// `_LINUX_CAPABILITY_VERSION_3`: a header (version, pid 0 for the
+    /// calling thread) and two data words of (effective, permitted,
+    /// inheritable), low then high 32 bits.
+    const CAP_VERSION_3: u32 = 0x2008_0522;
+
+    /// Reads the calling thread's capability words (`capget`).
+    fn capget(data: &mut [u32; 6]) -> io::Result<()> {
+        let mut header: [u32; 2] = [CAP_VERSION_3, 0];
+        // SAFETY: `header` is a version-3 header and `data` the two data
+        // structs (three `u32`s each) that version fills; both live
+        // through the call.
+        let ret =
+            unsafe { libc::syscall(libc::SYS_capget, header.as_mut_ptr(), data.as_mut_ptr()) };
+        if ret == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Sets the calling thread's capability words (`capset`).
+    fn capset(data: &[u32; 6]) -> io::Result<()> {
+        let header: [u32; 2] = [CAP_VERSION_3, 0];
+        // SAFETY: `header` is a version-3 header and `data` the two data
+        // structs that version takes; the kernel only reads them.
+        let ret = unsafe { libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr()) };
+        if ret == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Adds capability `cap` (< 32) to the root child's inheritable set
+    /// (allowed: it is in the permitted set). Not in R2's list: `capget`
+    /// and `capset` are single system calls that take no lock and
+    /// allocate nothing.
+    pub fn inheritable_cap(cmd: &mut Command, cap: u32) {
+        let hook = move || {
+            let mut data = [0u32; 6];
+            capget(&mut data)?;
+            data[2] |= 1 << cap;
+            capset(&data)
+        };
+        // SAFETY: the hook calls only `capget` and `capset` and reads
+        // errno; it neither allocates nor locks.
+        unsafe { cmd.pre_exec(hook) };
+    }
+
+    /// Runs the root child as uid and gid `id` with capability `cap`
+    /// (< 32) ambient: `PR_SET_KEEPCAPS` keeps the permitted set through
+    /// `setresuid`, then the permitted and inheritable sets become `cap`
+    /// alone and `cap` is raised into the ambient set, so after `exec` it
+    /// is permitted, effective and ambient. Not in R2's list: `prctl`,
+    /// `setgroups`, `setresgid`, `setresuid`, `capset` are single system
+    /// calls in a single-threaded child (glibc's cross-thread broadcast
+    /// has no other thread to reach) that take no lock and allocate
+    /// nothing.
+    pub fn nobody_with_ambient_cap(cmd: &mut Command, id: u32, cap: u32) {
+        let hook = move || {
+            let zero: libc::c_ulong = 0;
+            let check = |ret: libc::c_int| {
+                if ret == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            };
+            // SAFETY: `prctl(PR_SET_KEEPCAPS, 1)` takes no pointers.
+            check(unsafe {
+                libc::prctl(libc::PR_SET_KEEPCAPS, 1 as libc::c_ulong, zero, zero, zero)
+            })?;
+            let groups = [id];
+            // SAFETY: `groups` is readable for the one entry passed.
+            check(unsafe { libc::setgroups(1, groups.as_ptr()) })?;
+            // SAFETY: `setresgid` takes no pointers.
+            check(unsafe { libc::setresgid(id, id, id) })?;
+            // SAFETY: `setresuid` takes no pointers.
+            check(unsafe { libc::setresuid(id, id, id) })?;
+            let bit = 1 << cap;
+            capset(&[0, bit, bit, 0, 0, 0])?;
+            // SAFETY: `prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap)`
+            // takes no pointers.
+            check(unsafe {
+                libc::prctl(
+                    libc::PR_CAP_AMBIENT,
+                    libc::c_ulong::from(libc::PR_CAP_AMBIENT_RAISE.unsigned_abs()),
+                    libc::c_ulong::from(cap),
+                    zero,
+                    zero,
+                )
+            })
+        };
+        // SAFETY: the hook calls only the system calls listed above and
+        // reads errno; it neither allocates nor locks.
         unsafe { cmd.pre_exec(hook) };
     }
 

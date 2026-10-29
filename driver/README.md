@@ -49,7 +49,8 @@ src/
                       numbers)
     privileges.rs     A8: `drop_privileges` (root, any uid 0 (O6), needs
                       `user` and drops to it; non-root keeps, logged); no
-                      port check (O7)
+                      port check (O7); then, root or not, every
+                      capability cleared and checked (OA2)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
                     `next_deadline`, dispatch, `TimerFired`), `deliver`
                     (one `handle` call, its actions in order, then the
@@ -135,6 +136,10 @@ src/
                       first)
     user.rs           `lookup_user` (getpwnam_r), `drop_to` (all three
                       uids checked after), `uids` (getresuid), `euid`
+    caps.rs           the calling thread's capabilities (OA2):
+                      `clear_ambient` (PR_CAP_AMBIENT_CLEAR_ALL),
+                      `clear_capabilities` (capset to empty),
+                      `capabilities` (capget → `Capabilities`)
     rlimit.rs         `nofile`, `raise_nofile`, `set_soft_nofile`
                       (RLIMIT_NOFILE)
 tests/
@@ -197,7 +202,11 @@ tests/
                     (`drop_to` in the server's process) and serves, and a
                     systemd socket below 1024 serves as nobody; a real
                     uid of 0 under an effective nobody counts as root
-                    (exit 2 without `user`, every uid dropped with one)
+                    (exit 2 without `user`, every uid dropped with one);
+                    every capability set of every server thread is
+                    empty (OA2): as nobody started with an ambient
+                    `CAP_NET_BIND_SERVICE`, and as root started with it
+                    inheritable
   stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
                     the test binary: non-blocking while it lives, a second
                     one refused (`AlreadyExists`), the mode back after it
@@ -242,8 +251,9 @@ tests/
                     before the server binds: a known, rare race, left as
                     it is), the
                     child's setup before exec (`pre_exec`: closed fds,
-                    fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`); the
-                    test crate's only `unsafe`),
+                    fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`),
+                    capabilities (`Caps`); the test crate's only
+                    `unsafe`),
                     a guard that kills a running server on drop; signals
                     by the shell's `kill`, stderr read line by line while
                     the server runs (`Lines`), a bounded wait for the exit
@@ -262,7 +272,8 @@ loads the config, then: the `openat2` probe beneath the first root (or
 `/`), the roots (`O_PATH | O_DIRECTORY`), the listeners (systemd's,
 `systemd.rs`, or bound in config order, the first failure named), the
 descriptor budget (`process/budget.rs`), the privilege drop
-(`process/privileges.rs`), the signal mask and its `signalfd` (before
+and the clearing of every capability (`process/privileges.rs`, while
+the process has one thread), the signal mask and its `signalfd` (before
 any thread, so the disk workers inherit it), the stderr log sink, then
 `Driver::new` with `limits.disk_threads`, `Driver::watch_signals` with
 the signalfd and `limits.shutdown_timeout`, and `Driver::run`. Every

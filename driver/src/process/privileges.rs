@@ -7,15 +7,51 @@
 //!   2026-10-28, O6): such a process could become root again.
 //! - After binding: as root, `user` is required (never root after
 //!   binding) and the process drops to it for good (`drop_to`); as
-//!   non-root nothing is dropped, and a set `user` is logged as kept.
+//!   non-root the ids are kept, and a set `user` is logged as kept.
+//! - Then, root or not, every capability is cleared (owner decision
+//!   2026-10-29, OA2): the ambient set, then the permitted, effective and
+//!   inheritable sets, checked with `capget`. Capabilities are per
+//!   thread: this runs while the process has one thread (A11 step 7,
+//!   before the signal mask and the disk workers), so every later
+//!   thread starts with none.
 
 use super::Failure;
 use crate::log::{DriverLog, KeptReason};
+use crate::sys::caps::{Capabilities, capabilities, clear_ambient, clear_capabilities};
 use crate::sys::user::{Uids, drop_to, lookup_user, uids};
 
-/// A8, the drop (A11 step 7): returns the entry to log once the log sink
-/// exists, if any.
+/// A8, the drop (A11 step 7), then OA2, the capabilities: returns the
+/// entry to log once the log sink exists, if any.
 pub(super) fn drop_privileges(user: Option<&str>) -> Result<Option<DriverLog>, Failure> {
+    let note = drop_ids(user)?;
+    clear_all_capabilities()?;
+    Ok(note)
+}
+
+/// OA2: no capability is left in any set of this (the only) thread.
+fn clear_all_capabilities() -> Result<(), Failure> {
+    clear_ambient().map_err(|err| {
+        Failure(format!(
+            "cannot clear the ambient capabilities (prctl PR_CAP_AMBIENT_CLEAR_ALL): {err}"
+        ))
+    })?;
+    clear_capabilities()
+        .map_err(|err| Failure(format!("cannot clear the capabilities (capset): {err}")))?;
+    match capabilities() {
+        Ok(Capabilities::NONE) => Ok(()),
+        Ok(left) => Err(Failure(format!(
+            "capabilities left after clearing them (capget): permitted {:#x}, \
+             effective {:#x}, inheritable {:#x}",
+            left.permitted, left.effective, left.inheritable
+        ))),
+        Err(err) => Err(Failure(format!(
+            "cannot read the capabilities (capget): {err}"
+        ))),
+    }
+}
+
+/// A8: drops to `user` as root; keeps the ids as non-root.
+fn drop_ids(user: Option<&str>) -> Result<Option<DriverLog>, Failure> {
     let ids = uids().map_err(|err| Failure(format!("getresuid: {err}")))?;
     match (privilege(ids), user) {
         (Privilege::NotRoot, None) => Ok(None),

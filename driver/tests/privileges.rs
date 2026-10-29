@@ -9,7 +9,9 @@
 //!   which CI's root step sets): `user` unset is exit 2, an unknown
 //!   user is exit 2, and with `user nobody` the server drops to nobody
 //!   (`drop_to`, in this subprocess only) and serves; root is any uid 0
-//!   (O6), so a real uid of 0 under an effective nobody counts as root.
+//!   (O6), so a real uid of 0 under an effective nobody counts as root;
+//! - root or not, every capability set of every server thread ends up
+//!   empty (OA2).
 
 #![allow(
     clippy::unwrap_used,
@@ -26,8 +28,8 @@ use std::fs;
 use std::net::SocketAddr;
 
 use child::{
-    NOBODY, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, free_port, get, is_root,
-    run, text,
+    Caps, NOBODY, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, free_port, get,
+    is_root, run, text,
 };
 
 fn loopback(port: u16) -> SocketAddr {
@@ -181,6 +183,78 @@ fn as_root_the_server_drops_to_the_user() {
     assert_eq!(field("Groups:"), [NOBODY], "{status}");
     let stderr = server.kill();
     assert!(!stderr.contains("kind=privileges"), "{stderr}");
+}
+
+/// The capability sets of every thread of `pid` (the main thread and
+/// the four disk workers), from `/proc/<pid>/task/*/status`: CapInh,
+/// CapPrm, CapEff and CapAmb.
+fn thread_caps(pid: u32) -> Vec<[u64; 4]> {
+    let tasks = child::threads(pid, 5);
+    assert_eq!(tasks.len(), 5, "{tasks:?}");
+    tasks
+        .iter()
+        .map(|task| {
+            let status = fs::read_to_string(task.join("status")).unwrap();
+            ["CapInh:", "CapPrm:", "CapEff:", "CapAmb:"].map(|key| {
+                let hex = status
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .unwrap()
+                    .trim();
+                u64::from_str_radix(hex, 16).unwrap()
+            })
+        })
+        .collect()
+}
+
+/// OA2 (owner decision 2026-10-29): a non-root server started with a
+/// capability (systemd's `AmbientCapabilities=` say) clears every set
+/// after binding, in every thread (the disk workers start later and
+/// inherit the empty sets). It still logs that it kept its ids.
+#[test]
+fn as_non_root_every_capability_is_cleared() {
+    if !root_or_skip() {
+        return;
+    }
+    let dir = TempDir::new();
+    let addr = loopback(free_port());
+    let path = static_config(&dir, addr, "user nobody;");
+    let setup = Setup {
+        caps: Caps::AmbientAsNobody,
+        ..Setup::default()
+    };
+    let server = Running::start(&[&path], setup, addr);
+    let response = get(addr, "/index.html");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    let caps = thread_caps(server.pid());
+    assert!(caps.iter().all(|sets| *sets == [0; 4]), "{caps:x?}");
+    let stderr = server.kill();
+    assert!(
+        stderr.starts_with("kind=privileges action=kept reason=not_root\n"),
+        "{stderr}"
+    );
+}
+
+/// OA2: a root server drops to `user` and clears its capabilities: the
+/// inheritable set, which `setuid` leaves alone, too.
+#[test]
+fn as_root_every_capability_is_cleared_after_the_drop() {
+    if !root_or_skip() {
+        return;
+    }
+    let dir = TempDir::new();
+    let addr = loopback(free_port());
+    let path = static_config(&dir, addr, "user nobody;");
+    let setup = Setup {
+        caps: Caps::Inheritable,
+        ..Setup::default()
+    };
+    let server = Running::start(&[&path], setup, addr);
+    let response = get(addr, "/index.html");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    let caps = thread_caps(server.pid());
+    assert!(caps.iter().all(|sets| *sets == [0; 4]), "{caps:x?}");
+    drop(server);
 }
 
 /// FR-PROC-02: with a socket from systemd a port below 1024 needs no root.

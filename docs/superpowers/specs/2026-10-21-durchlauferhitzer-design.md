@@ -1208,7 +1208,15 @@ Failures, persistence, timeouts:
   the user's (exit 2 on any failure). As non-root
   nothing is dropped; with `user` set, that is logged once (controller
   ruling R5): `kind=privileges action=kept reason=not_root`
-  (FR-LOG-05). *(Status, owner decision 2026-10-29, O4:)* CI guards the
+  (FR-LOG-05). *(Owner decision 2026-10-29, OA2, stage 4 final review:)*
+  then, root or not (as root after the drop), every capability is
+  cleared: the ambient set (`prctl(PR_CAP_AMBIENT,
+  PR_CAP_AMBIENT_CLEAR_ALL)`), then the permitted, effective and
+  inheritable sets (`capset` to empty), checked with `capget` (all three
+  empty); any failure is exit 2 naming the step. This runs while the
+  process has one thread (capabilities are per thread), so every later
+  thread starts with none. `action=kept` is about the ids: they are kept,
+  the capabilities are cleared all the same. *(Status, owner decision 2026-10-29, O4:)* CI guards the
   root-only cases: it builds the test binaries that run the server as
   the runner user and runs them with `sudo` and
   `DURCHLAUFERHITZER_REQUIRE_ROOT=1`, so a root skip there is a failure.
