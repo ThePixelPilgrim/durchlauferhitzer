@@ -9,6 +9,8 @@ in the [design spec](../docs/superpowers/specs/2026-10-21-durchlauferhitzer-desi
 
 The package is `durchlauferhitzer`: a library (so tests can drive its parts)
 plus the `durchlauferhitzer` binary.
+How to build it, check a config, run it, use systemd socket activation
+and stop it: [`../README.md`](../README.md).
 
 Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 

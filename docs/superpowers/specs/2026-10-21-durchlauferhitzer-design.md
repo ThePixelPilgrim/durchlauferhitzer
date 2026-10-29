@@ -10,9 +10,9 @@ Status: approved — **single source of truth** for what the product must do.
   *withdrawn*. Plans, reviews, ledgers and commit messages cite IDs instead
   of restating requirements. A new owner decision is written here first
   (new ID or edited text), then cited.
-- Status tags: **[done]** implemented and tested (stages 1–3);
+- Status tags: **[done]** implemented and tested (stages 1–4);
   **[done in core; driver stage 4]** the core's half is done and the
-  epoll driver's is due; **[done; X stage N]** done, with the follow-up X
+  epoll driver's is due (none left after stage 4); **[done; X stage N]** done, with the follow-up X
   due in stage N (e.g. NFR-MAINT-04's CI hardening); **[stage N]** due in that stage of the
   timeline; **[open]** waits for an owner decision (see "Open decisions"
   at the end). "since stage N" notes when a decision was taken.
@@ -221,13 +221,13 @@ Structure and values:
   more IP socket addresses; no duplicates; no port 0), `user` (optional),
   at most one `limits` block and one or more `host` blocks.
   Overlapping binds such as `0.0.0.0:80` + `127.0.0.1:80` are only detected
-  at bind time [stage 4]: the addresses are bound in config order
+  at bind time [done in stage 4]: the addresses are bound in config order
   (`SO_REUSEADDR`, not `SO_REUSEPORT`), and the first failure
   (`EADDRINUSE`, `EACCES`, ...) is a startup error naming its address
   (exit 2; stage 4 amendment A6, Task 8). An IPv6 `listen` address accepts IPv6 only (the
   listener sets `IPV6_V6ONLY`, whatever the host's `bindv6only`); IPv4
   needs its own `listen` line, so `0.0.0.0:80` + `[::]:80` bind together
-  (owner decision 2026-10-27) [stage 4].
+  (owner decision 2026-10-27) [done in stage 4].
 - **FR-CFG-11** [done] `user` matches `[a-z_][a-z0-9_-]{0,31}`.
 - **FR-CFG-12** [done] A `host` block takes one or more names: ASCII
   letters, digits, `-` and `.` without a leading or trailing `.`, an IPv4
@@ -246,7 +246,7 @@ Structure and values:
   `proxy <backend>`.
 - **FR-CFG-15** [done] A static root is an absolute path without `.`, `..`
   or empty components and without a trailing `/` (except `/` itself). That
-  it exists is checked by the driver at startup [stage 4]: each root is
+  it exists is checked by the driver at startup [done in stage 4]: each root is
   opened once, `O_PATH | O_DIRECTORY`; one that is missing or not a
   directory is a startup error naming it (exit 2; stage 4 Task 8).
 - **FR-CFG-16** [done] A proxy backend is an IP literal with a port,
@@ -425,7 +425,7 @@ Core-generated responses:
   answered with a body, since no method was accepted. *(since stage 2;
   supersedes the stage 2 Task 3 ruling "parse errors keep a body")*
 - **FR-HTTP-22** [done] Core-generated responses carry no `Server` header.
-- **FR-HTTP-22a** [done in the core; the epoll driver: stage 4]
+- **FR-HTTP-22a** [done]
   Core-generated responses carry a `Date` header; the driver supplies the
   wall-clock time (the core stays free of clocks). (Stage 4 amendment A3,
   owner-approved 2026-10-27:)
@@ -1028,7 +1028,7 @@ Failures, persistence, timeouts:
   of the same exchange (timeout, abort) adds its own entry.
 - **FR-LOG-04** [done] Logs carry the raw (validated, ASCII) path; the
   decoded path is never logged or echoed.
-- **FR-LOG-05** [stage 4] The driver writes each entry as one `key=value`
+- **FR-LOG-05** [done] The driver writes each entry as one `key=value`
   line to stderr, escaping untrusted fields. *(Stage 4 format, Task 7. No
   timestamp: stage 4 plan decision 4, owner-approved; journald and
   collectors add their own.)*
@@ -1088,7 +1088,7 @@ Failures, persistence, timeouts:
     spelling (`HttpError::BadHeaderValue` → `bad_header_value`).
   - Example: `kind=rejected conn=3 peer=192.0.2.7
     reason=http.bad_header_value method=GET path="/a\x20b"` (one line).
-- **FR-LOG-06** [stage 4] Logging never blocks: if stderr is backed up,
+- **FR-LOG-06** [done] Logging never blocks: if stderr is backed up,
   entries are dropped and counted, and the count is logged once output
   catches up. *(Stage 4 Task 7:)* stderr's file description is set to
   `O_NONBLOCK`; its original blocking mode is put back when the sink is
@@ -1113,7 +1113,7 @@ Failures, persistence, timeouts:
   write. *(Stage 4 Task 9, R3:)* before that, at the end of the run, the
   driver's final flush waits for stderr to become writable (`poll`) for
   at most 1 s in all, writing as it can, then gives up (FR-PROC-05).
-- **FR-LOG-07** [core half done; the driver half: stage 4] `Rejected` for
+- **FR-LOG-07** [done] `Rejected` for
   a parse error after the request line carries the method and path. The
   driver logs `EMFILE`/`ENFILE` and driver-bug closes distinctly. (Stage 4
   amendment A5, owner-approved 2026-10-27:) the reason is
@@ -1150,7 +1150,7 @@ Failures, persistence, timeouts:
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
-- **FR-PROC-01** [stage 4] `durchlauferhitzer <config-path>` runs the
+- **FR-PROC-01** [done] `durchlauferhitzer <config-path>` runs the
   server; `durchlauferhitzer --check <config-path>` validates the config
   (FR-CFG-06 errors) and exits. *(Stage 4 Task 8, builder calls:)*
   `--check` loads the config and nothing else (no socket, no root is
@@ -1164,7 +1164,7 @@ Failures, persistence, timeouts:
   usage: durchlauferhitzer <config-path>
          durchlauferhitzer --check <config-path>
   ```
-- **FR-PROC-02** [stage 4] If systemd passes listening sockets (socket
+- **FR-PROC-02** [done] If systemd passes listening sockets (socket
   activation, `LISTEN_FDS`), they are used and the process never needs
   root. *(Stage 4 amendment A7, Task 8:)* `LISTEN_PID` must be the
   process's pid and `LISTEN_FDS` at least 1; the descriptors start at 3
@@ -1186,7 +1186,7 @@ Failures, persistence, timeouts:
   descriptor is only taken if it is open without close-on-exec (every
   descriptor the process opens itself has the flag), so the driver never
   claims one of its own.
-- **FR-PROC-03** [stage 4] Otherwise the process binds itself: it starts as
+- **FR-PROC-03** [done] Otherwise the process binds itself: it starts as
   root only if it needs a port below 1024, binds, then switches to `user`;
   it refuses to keep running as root if `user` is unset. *(Stage 4
   amendment A8, Task 8:)* the port numbers are not checked up front
@@ -1208,7 +1208,7 @@ Failures, persistence, timeouts:
   nothing is dropped; with `user` set, that is logged once (controller
   ruling R5): `kind=privileges action=kept reason=not_root`
   (FR-LOG-05).
-- **FR-PROC-04** [stage 4] At startup the driver opens every static root
+- **FR-PROC-04** [done] At startup the driver opens every static root
   (backends are IP literals and need no resolution, FR-CFG-16), checks
   `openat2` support and the descriptor budget (NFR-RES-05), and fails
   with a clear error otherwise. *(Stage 4 Task 8, amendment A11:)* the
@@ -1249,7 +1249,7 @@ Failures, persistence, timeouts:
   `no_socket_lands_on_a_standard_descriptor` pins the runtime's
   behaviour). Caveat: where `/dev/null` cannot be opened (a bare chroot)
   the runtime aborts the process (SIGABRT) before `main`.
-- **FR-PROC-05** [stage 4] Shutdown has two speeds and two targets (owner
+- **FR-PROC-05** [done; target restart stage 6, FR-PROC-07] Shutdown has two speeds and two targets (owner
   decision):
   - *Graceful* (SIGTERM): stop accepting work, let in-flight requests
     finish, keep-alive connections are closed after their current
@@ -1314,7 +1314,7 @@ Failures, persistence, timeouts:
     stalled stderr), then gives up; the process exits 0, whether the
     drain finished or was cut (FR-PROC-05a). A failure of the loop
     itself stays exit 2.
-- **FR-PROC-05b** [done in the core; the epoll driver: stage 4] (Owner
+- **FR-PROC-05b** [done] (Owner
   decision 2026-10-27, stage 4 Task 2 review D1.) During the drain, a
   complete request pipelined behind the response in flight is answered
   `503` with `Connection: close` after that response, not dropped. The
@@ -1336,7 +1336,7 @@ Failures, persistence, timeouts:
   retry an idempotent request (RFC 9112 §9.3.1). A request sent after
   the SIGTERM is answered 503 in this sense: its first bytes were
   buffered before the drain, the rest completes the head afterwards.
-- **FR-PROC-05c** [done in the core; the epoll driver: stage 4] (Owner
+- **FR-PROC-05c** [done] (Owner
   decision 2026-10-27, stage 4 Task 2 review D2; it replaces A4's "`Log`
   entries as for a reset".) `abort_all` logs one `Rejected { reason:
   ShuttingDown }` for each connection that had an exchange in flight: a
@@ -1345,12 +1345,12 @@ Failures, persistence, timeouts:
   Idle keep-alive connections, connections without a byte of their
   request, lingering connections, and connections refused with 503
   (whose refusal is logged already, builder call) are cut silently.
-- **FR-PROC-05d** [done in the core; the epoll driver: stage 4] (Owner
+- **FR-PROC-05d** [done] (Owner
   decision 2026-10-27.) A connection delivered after `begin_drain` anyway
   (or after `abort_all`) is answered 503 and closed like one over the
   connection limits, and logged as `Rejected` with the reason
   `RejectReason::ShuttingDown`.
-- **FR-PROC-05a** [stage 4] Exit codes: 0 success (including `--check` on a
+- **FR-PROC-05a** [done] Exit codes: 0 success (including `--check` on a
   valid config), 1 invalid config, 2 startup failure (e.g. a port in use,
   a missing static root). *(Stage 4 Task 8, builder call recorded per the
   plan:)* bad arguments exit 1, with the usage (FR-PROC-01).
@@ -1390,7 +1390,7 @@ Failures, persistence, timeouts:
   -30). Proven by the randomized proxy net: every byte the client gets
   against a model of the rewritten response written from this spec,
   independent of the core's renderers.
-- **NFR-SEC-04** [done in core; driver stage 4] No escape from a static
+- **NFR-SEC-04** [done] No escape from a static
   root: dot segments and their encodings, encoded `/`, `\`, NUL and
   controls are rejected (FR-HTTP-13/14), dotfiles are 404
   (FR-STATIC-09), and the driver resolves strictly beneath the root without
@@ -1402,7 +1402,7 @@ Failures, persistence, timeouts:
 - **NFR-SEC-06** [done] No header injection: CR, LF, NUL and other control
   bytes are never accepted in header values, reasons or targets, and only
   validated bytes are rendered into heads.
-- **NFR-SEC-07** [done in core; driver stage 4] No log injection: decoded
+- **NFR-SEC-07** [done] No log injection: decoded
   control bytes cannot reach the core (FR-HTTP-14), logs keep the raw
   path (FR-LOG-04), and the driver escapes untrusted fields (FR-LOG-05).
 - **NFR-SEC-08** [done by construction] Not an open proxy: a proxied
@@ -1414,12 +1414,13 @@ Failures, persistence, timeouts:
   resumable, with total work O(`max_head`) per head however it is split; the
   chunked validator re-judges at most 35 bytes per call. *(stage 1 review
   I1: a stateless rescan let ~7 MB/s of input saturate the loop)*
-- **NFR-SEC-11** [done in core; driver stage 4] A slow client, slow disk
+- **NFR-SEC-11** [done] A slow client, slow disk
   or slow backend never stalls other connections: the core never blocks,
   disk work runs on driver workers, and every waiting state has a
   deadline.
-- **NFR-SEC-12** [stage 4/5] Least privilege: never root after binding
-  (FR-PROC-03); Landlock and seccomp (FR-PROC-06).
+- **NFR-SEC-12** [done; Landlock and seccomp stage 5] Least privilege:
+  never root after binding (FR-PROC-03, done in stage 4); Landlock and
+  seccomp (FR-PROC-06).
 - **NFR-SEC-13** [stage 5] Parsers and the config language are fuzzed.
 
 ### NFR-RES — Resource bounds
@@ -1481,7 +1482,7 @@ Failures, persistence, timeouts:
   chunked`, at least 51 bytes (`X / HTTP/1.1`, `Host:a`,
   `Transfer-Encoding:chunked`, the blank line), and that head had to fit
   in the buffer.
-- **NFR-RES-05** [done in core; driver stage 4] File-descriptor
+- **NFR-RES-05** [done] File-descriptor
   budget: at most `max_connections` files are open or being opened
   (orphans included, FR-CONN-11); at most 2 × `max_connections` client
   sockets (refused ones included); from stage 3 at most one upstream socket
@@ -1542,12 +1543,18 @@ Failures, persistence, timeouts:
 
 ### NFR-PORT — Platform
 
-- **NFR-PORT-01** [stage 4] Linux ≥ 5.14, x86_64 and aarch64.
-- **NFR-PORT-02** [stage 4] Links against the system glibc; no other C.
+- **NFR-PORT-01** [stage 4] Linux ≥ 5.14, x86_64 and aarch64. *(Status
+  after stage 4 Task 10:)* the driver crate refuses to build on anything
+  but 64-bit Linux, and CI builds and tests it on x86_64 only; aarch64 is
+  not built or tested anywhere yet, so this stays open.
+- **NFR-PORT-02** [done] Links against the system glibc; no other C.
 - **NFR-PORT-03** [stage 4] `openat2` is required (startup error without
-  it; the probe is FR-PROC-04 step 3).
+  it; the probe is FR-PROC-04 step 3). *(Status after stage 4 Task 10:)*
+  every file open uses `openat2` and every startup runs the probe (each
+  test of the binary passes it), but the error path (`ENOSYS`) is not
+  tested: no kernel the tests run on lacks `openat2`, so this stays open.
 - **NFR-PORT-04** [stage 5] Landlock is used when available (FR-PROC-06).
-- **NFR-PORT-05** [stage 4] systemd is optional (FR-PROC-02/03): without
+- **NFR-PORT-05** [done] systemd is optional (FR-PROC-02/03): without
   `LISTEN_PID`/`LISTEN_FDS` the process binds itself (stage 4 Task 8).
 - **NFR-PORT-06** [done] Stable Rust (toolchain pinned in
   `rust-toolchain.toml`), edition 2024.
@@ -1574,7 +1581,7 @@ Failures, persistence, timeouts:
   a name prefix), and the tree is checked for all targets
   (`cargo tree --target all`). CI also runs the script's offline self-test
   (`scripts/test-check-product-deps.sh`).
-- **NFR-MAINT-05** [done in core; driver stage 4] `unsafe` is forbidden
+- **NFR-MAINT-05** [done] `unsafe` is forbidden
   in the core; the driver confines it to a small, documented `libc`
   wrapper module.
 - **NFR-MAINT-06** [done] Exhaustive enum handling: no `_ =>` arm on an
@@ -1608,6 +1615,10 @@ Targets are set in stage 7 from measurements; none are invented here.
   memory budget: target to be set in stage 7.
 - **NFR-PERF-04** [stage 4] Writes in large pieces with `TCP_NODELAY`;
   `SO_RCVBUF`/`SO_SNDBUF` are never set (kernel autotuning stays on).
+  *(Status after stage 4 Task 10:)* `TCP_NODELAY` on every client and
+  upstream socket is tested; the loop writes each buffer whole until the
+  socket would block and sets no buffer size, but no test pins those two,
+  so this stays open.
 - **NFR-PERF-05** [stage 7] TCP behaviour under `tc netem` (delay, loss,
   recovery after pauses); fill-drain-refill vs. double buffering and the
   body buffer size decided by measurement: target to be set in stage 7.
@@ -1649,7 +1660,7 @@ Targets are set in stage 7 from measurements; none are invented here.
 - **NFR-TEST-06** [done] Bounded memory, intact bytes,
   fill-drain-refill and write sizes are asserted with bodies far larger
   than the buffers.
-- **NFR-TEST-07** [stage 4] Smoke tests over real loopback sockets; a sim
+- **NFR-TEST-07** [done] Smoke tests over real loopback sockets; a sim
   mode with late timers, `Sim::set_timer_order(TimerOrder::Late)` (default
   `TimerOrder::OnTime`): `advance` wakes once, at its end, and delivers
   every queued I/O and every disk completion due by then before the
@@ -1663,7 +1674,8 @@ Targets are set in stage 7 from measurements; none are invented here.
 
 The binding text is the contract in the module docs of
 `core/src/core/contract.rs`; these are its headlines. Status: [done] where the
-sim implements and checks it; the epoll driver is [stage 4].
+sim implements and checks it; the epoll driver follows every one since
+stage 4 (its tests are in `driver/`).
 
 - **DRV-01** Connection ids are allocated by the driver and never reused;
   the first event for a connection is `Accepted`.
@@ -1737,21 +1749,21 @@ sim implements and checks it; the epoll driver is [stage 4].
   `backend_reset_after`; tests
   `early_413_then_reset_during_the_upload_is_relayed`,
   `reset_after_a_complete_close_delimited_tail_while_the_client_drains`.)*
-- **DRV-11** [stage 4] Sockets are non-blocking on `epoll`, with
+- **DRV-11** [done] Sockets are non-blocking on `epoll`, with
   `TCP_NODELAY` (NFR-PERF-04); `RLIMIT_NOFILE` is checked against
   NFR-RES-05 at startup.
-- **DRV-12** [stage 4] Logs are formatted and written per FR-LOG-05/06.
-- **DRV-13** [done in the sim; the epoll driver: stage 4] The driver calls
+- **DRV-12** [done] Logs are formatted and written per FR-LOG-05/06.
+- **DRV-13** [done] The driver calls
   `set_date(unix_secs)` with the wall-clock second whenever it changes,
   before the next `handle` call (FR-HTTP-22a); it emits nothing.
-- **DRV-14** [done in the sim; the epoll driver: stage 4] Shutdown
+- **DRV-14** [done] Shutdown
   (FR-PROC-05): the driver closes its listeners, then calls
   `begin_drain`, runs its loop until `is_drained()` or `shutdown_timeout`,
   and calls `abort_all` on expiry, a second SIGTERM or SIGINT; each call
   comes between two `handle` calls, and `handle` keeps working after
   them. After `abort_all` the driver exits without waiting for orphaned
   opens (it does not poll `is_drained` again).
-- **DRV-15** [stage 4] *(Owner decision 2026-10-28, O2.)* A failed
+- **DRV-15** [done] *(Owner decision 2026-10-28, O2.)* A failed
   `epoll_ctl` for one client or upstream socket fails only that socket: the
   driver logs it (a driver log, FR-LOG-07) and reports it as for a socket
   error, `Failed` or `UpstreamFailed`, after the actions of the current
@@ -1760,7 +1772,7 @@ sim implements and checks it; the epoll driver is [stage 4].
   `Accepted`, DRV-01). Only `epoll_wait` failing, or `epoll_ctl` on the
   loop's own descriptors (listeners, wake eventfd, signalfd), ends the
   loop.
-- **DRV-16** [stage 4] *(Owner decision 2026-10-28, O1.)* An `accept`
+- **DRV-16** [done] *(Owner decision 2026-10-28, O1.)* An `accept`
   failure that is not transient (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`
   and any unexpected errno) is logged (FR-LOG-07) and pauses every
   listener. They resume at the first of: the driver closing any descriptor
@@ -1788,7 +1800,8 @@ project working and tested.
 3. **Reverse proxy** [done] — backend connections in the simulation,
    header handling, `strip_prefix`, body streaming with backpressure,
    502/504, misbehaving backends.
-4. **epoll driver + binary** — the real driver, worker pool, `eventfd`,
+4. **epoll driver + binary** [done; open: NFR-PERF-04, NFR-PORT-01 and
+   NFR-PORT-03, see their notes] — the real driver, worker pool, `eventfd`,
    `sendfile`, `openat2`, logging output, CLI, privilege drop, systemd
    socket activation, SIGTERM drain, a few smoke tests over real loopback
    sockets. First runnable release.
