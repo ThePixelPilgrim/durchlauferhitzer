@@ -1,4 +1,4 @@
-//! Tests for the `containment` block (FR-CFG-25) and `ipv6_prefix`.
+//! Tests for the `containment` block (FR-CFG-25).
 
 use super::super::super::model::{Layer, SeccompAction};
 use super::*;
@@ -9,6 +9,24 @@ fn with_containment(inner: &str) -> String {
     cfg(&format!(
         "containment {{\n  {inner}\n}}\nhost a {{ path / {{ static /s; }} }}\n"
     ))
+}
+
+fn no_effect(key: &str, with: &str) -> ConfigErrorKind {
+    ConfigErrorKind::NoEffect {
+        key: key.to_string(),
+        with: with.to_string(),
+    }
+}
+
+#[test]
+fn no_effect_error_reads_clearly() {
+    let e = load(&with_containment("seccomp off;\n  seccomp_action kill;"))
+        .err()
+        .map(|e| e.to_string());
+    assert_eq!(
+        e.as_deref(),
+        Some("4:3: `seccomp_action` has no effect with `seccomp off`")
+    );
 }
 
 #[test]
@@ -76,11 +94,11 @@ fn seccomp_action_parses() {
 fn seccomp_action_with_seccomp_off_is_an_error() {
     assert_eq!(
         err(&with_containment("seccomp off;\n  seccomp_action kill;")),
-        (invalid("seccomp_action", "kill"), 4, 3)
+        (no_effect("seccomp_action", "seccomp off"), 4, 3)
     );
     assert_eq!(
         err(&with_containment("seccomp_action fail;\n  seccomp off;")),
-        (invalid("seccomp_action", "fail"), 3, 3)
+        (no_effect("seccomp_action", "seccomp off"), 3, 3)
     );
 }
 
@@ -208,22 +226,4 @@ fn containment_key_list_is_complete() {
         }
     }
     assert!(seen.iter().all(|s| *s), "a key is missing from ALL");
-}
-
-#[test]
-fn ipv6_prefix_in_limits() {
-    let config = ok(&with_limit("ipv6_prefix 48;"));
-    assert_eq!(config.limits.ipv6_prefix, 48);
-    for bad in ["31", "129", "64x", "0", ""] {
-        let text = with_limit(&format!("ipv6_prefix \"{bad}\";"));
-        assert_eq!(err(&text), (invalid("ipv6_prefix", bad), 3, 3), "{bad:?}");
-    }
-    assert_eq!(
-        err(&with_limit("ipv6_prefix;")),
-        (
-            ConfigErrorKind::WrongValueCount("ipv6_prefix".to_string()),
-            3,
-            3
-        )
-    );
 }

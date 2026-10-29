@@ -213,6 +213,12 @@ pub enum ConfigErrorKind {
         value: String,
     },
     WrongValueCount(String),
+    /// A setting that does nothing given another (`with` is that setting as
+    /// written, e.g. `seccomp off`).
+    NoEffect {
+        key: String,
+        with: String,
+    },
     DuplicateHost(String),
     DuplicatePath(String),
     RouteNeedsOneAction,
@@ -247,6 +253,9 @@ impl fmt::Display for ConfigError {
             }
             ConfigErrorKind::WrongValueCount(key) => {
                 write!(f, "wrong number of values for `{key}`")
+            }
+            ConfigErrorKind::NoEffect { key, with } => {
+                write!(f, "`{key}` has no effect with `{with}`")
             }
             ConfigErrorKind::DuplicateHost(name) => write!(f, "duplicate host `{name}`"),
             ConfigErrorKind::DuplicatePath(path) => write!(f, "duplicate path `{path}`"),

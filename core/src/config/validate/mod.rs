@@ -452,8 +452,13 @@ fn parse_containment(block: &Block) -> Result<Containment, ConfigError> {
         }
     }
     if let (Some(setting), Layer::Off) = (action, containment.seccomp) {
-        let value = setting.values.first().map_or("", String::as_str);
-        return Err(invalid_value(&setting.key, value, setting.pos));
+        return fail(
+            ConfigErrorKind::NoEffect {
+                key: setting.key.clone(),
+                with: "seccomp off".to_string(),
+            },
+            setting.pos,
+        );
     }
     Ok(containment)
 }

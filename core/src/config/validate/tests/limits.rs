@@ -415,3 +415,20 @@ fn memory_budget_without_a_limits_block_is_checked_at_the_first_host() {
         })
     );
 }
+
+/// `per_key_caps` covers the range of `ipv6_prefix`; the rest is here.
+#[test]
+fn ipv6_prefix_needs_one_number() {
+    assert_eq!(
+        err(&with_limit("ipv6_prefix \"\";")),
+        (invalid("ipv6_prefix", ""), 3, 3)
+    );
+    assert_eq!(
+        err(&with_limit("ipv6_prefix;")),
+        (
+            ConfigErrorKind::WrongValueCount("ipv6_prefix".to_string()),
+            3,
+            3
+        )
+    );
+}
