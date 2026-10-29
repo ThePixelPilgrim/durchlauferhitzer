@@ -21,14 +21,16 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     let tree = Tree::random(&mut sim, &mut rng, big, long);
     sim.set_disk_delay(random_disk_delay(&mut rng));
     let mut clients: Vec<Client> = Vec::new();
+    // Kept apart from `clients`, so no random step touches them.
+    let mut witnesses: Vec<Client> = Vec::new();
     let steps = rng.usize(5..80);
     let plan = shutdown_plan(seed, STATIC_SPAN);
     let mut marks = Marks::default();
     for step in 0..steps {
         if plan.drain_due(step, &marks) {
-            clients.extend(drain_witnesses(&mut sim, step));
+            witnesses.extend(drain_witnesses(&mut sim, step));
         }
-        let ids: Vec<ConnId> = clients.iter().map(|c| c.id).collect();
+        let ids: Vec<ConnId> = clients.iter().chain(&witnesses).map(|c| c.id).collect();
         shutdown_at(&mut sim, plan, step, &mut marks, &ids);
         let op = rng.u8(0..100);
         if op < 25 || step < 3 || clients.is_empty() {
@@ -40,18 +42,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
             if rng.u8(0..3) == 0 {
                 sim.set_client_window(id, random_window(&mut rng, big));
             }
-            clients.push(Client {
-                id,
-                queue: VecDeque::new(),
-                front_started: false,
-                started: 0,
-                started_head: 0,
-                templates: Vec::new(),
-                pipelined_sends: 0,
-                eof: false,
-                received: Vec::new(),
-                ended: false,
-            });
+            clients.push(Client::new(id, Role::Random));
         } else {
             let i = rng.usize(0..clients.len());
             let Some(client) = clients.get_mut(i) else {
@@ -64,7 +55,10 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
                     }
                 }
                 60..68 => sim.set_client_window(client.id, random_window(&mut rng, big)),
-                68..72 => sim.reset(client.id),
+                68..72 => {
+                    sim.reset(client.id);
+                    client.reset = ClientReset::Yes;
+                }
                 72..78 => {
                     sim.send_eof(client.id);
                     client.eof = true;
@@ -79,11 +73,14 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
             sim.run_until_idle();
         }
         collect(&mut sim, &mut clients);
+        collect(&mut sim, &mut witnesses);
     }
     // A shutdown the steps did not reach comes now.
     if plan.drain_due(END, &marks) {
-        clients.extend(drain_witnesses(&mut sim, steps));
+        witnesses.extend(drain_witnesses(&mut sim, steps));
     }
+    // The witnesses are checked like every client, and exactly.
+    clients.append(&mut witnesses);
     let ids: Vec<ConnId> = clients.iter().map(|c| c.id).collect();
     shutdown_at(&mut sim, plan, END, &mut marks, &ids);
     // The longest wait left: a disk answer (45 s), then a pipelined head's
@@ -125,6 +122,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     check_wound_down(&sim, &marks);
     for client in &clients {
         check_client(&sim, &tree, client, &marks, coverage);
+        check_witness(&sim, client, &marks, &mut coverage.shutdown);
     }
     for log in sim.logs() {
         match log {
@@ -191,39 +189,53 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
 /// The static net's shutdown steps: below its longest schedule (80 steps).
 pub(crate) const STATIC_SPAN: usize = 80;
 
-/// Two clients the drain finds in known states. One has a keep-alive
-/// response queued: a `404` it does not read yet (`Window::Budget(0)`),
-/// with (on an odd `step`) a second request pipelined behind it in the
-/// same read, which must get the drain's `503` (FR-PROC-05b); alone, the
-/// connection must close after the `404`. The other is idle keep-alive,
-/// its `404` read: the drain must close it at once.
+/// Two clients the drain finds in known states (`check_witness` knows
+/// their bytes). One has a keep-alive response queued: a `404` it does
+/// not read yet (`Window::Budget(0)`), with (on an odd `step`) a second
+/// request pipelined behind it in the same read, which must get the
+/// drain's `503` (FR-PROC-05b); alone, the connection must close after
+/// the `404`. The other is idle keep-alive, its `404` read: the drain
+/// must close it at once.
 fn drain_witnesses(sim: &mut Sim, step: usize) -> [Client; 2] {
-    let witness = |sim: &mut Sim, host: u8, window: Window, templates: Vec<Vec<u8>>| {
+    let witness = |sim: &mut Sim, host: u8, window: Window, role: Role, templates: Vec<Vec<u8>>| {
         let id = sim.connect(IpAddr::V4(Ipv4Addr::new(203, 0, 113, host)));
         sim.set_client_window(id, window);
-        sim.send(id, &templates.concat());
+        let bytes = templates.concat();
+        sim.send(id, &bytes);
         sim.run_until_idle();
-        Client {
-            id,
-            queue: VecDeque::new(),
-            front_started: false,
-            started: templates.len(),
-            started_head: 0,
-            pipelined_sends: usize::from(templates.len() > 1),
-            templates,
-            eof: false,
-            received: Vec::new(),
-            ended: false,
-        }
+        let mut client = Client::new(id, role);
+        client.started = templates.len();
+        client.pipelined_sends = usize::from(templates.len() > 1);
+        client.sent = bytes.len();
+        client.templates = templates;
+        client
     };
     let in_flight = if step % 2 == 1 {
-        vec![VALID.to_vec(), VALID.to_vec()]
+        witness(
+            sim,
+            9,
+            Window::Budget(0),
+            Role::PipelinedWitness,
+            vec![VALID.to_vec(), VALID.to_vec()],
+        )
     } else {
-        vec![VALID.to_vec()]
+        witness(
+            sim,
+            9,
+            Window::Budget(0),
+            Role::InFlightWitness,
+            vec![VALID.to_vec()],
+        )
     };
     [
-        witness(sim, 9, Window::Budget(0), in_flight),
-        witness(sim, 10, Window::Unlimited, vec![VALID.to_vec()]),
+        in_flight,
+        witness(
+            sim,
+            10,
+            Window::Unlimited,
+            Role::IdleWitness,
+            vec![VALID.to_vec()],
+        ),
     ]
 }
 

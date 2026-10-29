@@ -129,3 +129,38 @@ pub(crate) fn drain_alts(
         }
     }
 }
+
+/// Whether the shutdown may have dropped exchange `i` of `story` without
+/// a word (its outcome otherwise matched nothing, and nothing more was
+/// received or logged): the client cut the story itself (`truncated`: a
+/// reset, an end of stream anywhere, the abort's log), the abort found
+/// the connection open, or none of the request's bytes had been read by
+/// the core when the drain began (FR-PROC-05b "buffered": an idle
+/// connection is closed at once, and the lingering close after an
+/// in-flight response discards what the kernel holds). A request the core
+/// had read part of must be answered: the drain's 503 with close, or its
+/// own error; behind a head rendered during the drain nothing is, but
+/// that head closes, which the outcome of the exchange before matched.
+pub(crate) fn silent_stop(
+    sim: &Sim,
+    story: &Story,
+    i: usize,
+    marks: &Marks,
+    truncated: bool,
+) -> Result<&'static str, String> {
+    if truncated {
+        return Ok("drain: the client cut the story");
+    }
+    if marks.cut_by_abort.contains(&story.conn) {
+        return Ok("abort: closed before a request");
+    }
+    let start: usize = story.exchanges[..i].iter().map(Exchange::send_len).sum();
+    match marks.read_at_drain(story.conn) {
+        Some(read) if read <= start => Ok("drain: closed before a request"),
+        read => Err(format!(
+            "the request vanished: the core had read {read:?} bytes of the connection when \
+             the drain began, the request starts at byte {start} (the core read {} in all)",
+            sim.delivered_to_server(story.conn)
+        )),
+    }
+}

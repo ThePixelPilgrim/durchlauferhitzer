@@ -12,6 +12,13 @@
 //! with `503`, logged `Rejected { ShuttingDown }`; the abort cuts every
 //! connection, logging `Rejected { ShuttingDown }` for each exchange in
 //! flight; no upstream is opened once the drain began.
+//!
+//! A request the spec says must be answered may not vanish: what the
+//! core had read of each connection when the drain began (`AtDrain`, the
+//! sim's count of delivered bytes: FR-PROC-05b's "buffered" input) and
+//! which connections the abort found open are recorded, so the oracles
+//! can tell a request the drain may drop (none of it read when the drain
+//! began) from one it must answer.
 
 use super::*;
 
@@ -51,7 +58,7 @@ pub(crate) fn shutdown_plan(seed: u64, span: usize) -> ShutdownPlan {
 }
 
 /// Where the shutdown calls fell in the log, for the oracles.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Marks {
     /// `sim.logs().len()` when `begin_drain` was called.
     pub(crate) drain: Option<usize>,
@@ -59,6 +66,44 @@ pub(crate) struct Marks {
     pub(crate) abort: Option<(usize, usize)>,
     /// `sim.upstreams().len()` when the drain (or the abort) began.
     pub(crate) upstreams: Option<usize>,
+    /// Each net connection as `begin_drain` found it.
+    pub(crate) at_drain: BTreeMap<ConnId, AtDrain>,
+    /// The net connections `abort_all` found not yet closed: it cut them,
+    /// so whatever they still had to say is lost (FR-PROC-05 "fast").
+    pub(crate) cut_by_abort: BTreeSet<ConnId>,
+}
+
+/// One connection when the drain began, as the network and the disk saw
+/// it (not the core's state).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AtDrain {
+    /// Client bytes the core had read (`Sim::delivered_to_server`): only
+    /// these can be buffered input the drain must answer (FR-PROC-05b).
+    pub(crate) read: usize,
+    /// Whether a file was being opened for it.
+    pub(crate) opening: Opening,
+}
+
+/// Whether an `OpenFile` of the connection was still unanswered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Opening {
+    /// Its request was parsed before the drain: it gets its own status
+    /// (with close), never the drain's 503.
+    File,
+    Nothing,
+}
+
+impl Marks {
+    /// Bytes of `conn` the core had read when the drain began, if it
+    /// began with `conn` among the net's connections.
+    pub(crate) fn read_at_drain(&self, conn: ConnId) -> Option<usize> {
+        self.at_drain.get(&conn).map(|a| a.read)
+    }
+
+    /// Whether a plain drain ran (no abort followed it).
+    pub(crate) fn plain_drain(&self) -> bool {
+        self.drain.is_some() && self.abort.is_none()
+    }
 }
 
 /// When a log entry was written, relative to the shutdown.
@@ -139,6 +184,15 @@ pub(crate) fn shutdown_at(
     if plan.drain_due(step, marks) {
         marks.drain = Some(sim.logs().len());
         marks.upstreams.get_or_insert(sim.upstreams().len());
+        for &conn in clients {
+            let opening = if sim.opening_file(conn) {
+                Opening::File
+            } else {
+                Opening::Nothing
+            };
+            let read = sim.delivered_to_server(conn);
+            marks.at_drain.insert(conn, AtDrain { read, opening });
+        }
         sim.begin_drain();
         if abort.is_none() {
             for &conn in clients {
@@ -146,11 +200,20 @@ pub(crate) fn shutdown_at(
                     sim.set_client_window(conn, Window::Unlimited);
                 }
             }
+            // They read at once, before any clock step can expire a send
+            // deadline the stalled window ran down.
+            sim.run_until_idle();
         }
     }
     if abort.is_some_and(|a| step >= a) && marks.abort.is_none() {
         let start = sim.logs().len();
         marks.upstreams.get_or_insert(sim.upstreams().len());
+        marks.cut_by_abort.extend(
+            clients
+                .iter()
+                .copied()
+                .filter(|&conn| sim.state(conn) != SimConnState::Closed),
+        );
         sim.abort_all();
         marks.abort = Some((start, sim.logs().len()));
     }
@@ -251,6 +314,15 @@ pub(crate) struct ShutdownCoverage {
     pub(crate) abort_cut: usize,
     /// Responses the abort cut short.
     pub(crate) abort_truncated: usize,
+    /// Responses to a request whose file was being opened when the drain
+    /// began: its own status, with close.
+    pub(crate) opened_before_drain: usize,
+    /// Connections whose request went unanswered behind a keep-alive
+    /// answer during the drain, as allowed: none of it was read when the
+    /// drain began.
+    pub(crate) dropped_unread: usize,
+    /// Witnesses whose bytes were checked exactly.
+    pub(crate) witnesses: usize,
 }
 
 impl ShutdownCoverage {
@@ -268,9 +340,72 @@ impl ShutdownCoverage {
             ),
             ("exchange cut by the abort", self.abort_cut),
             ("response cut short by the abort", self.abort_truncated),
+            (
+                "own status for an open in flight at the drain",
+                self.opened_before_drain,
+            ),
+            (
+                "unanswered request unread at the drain",
+                self.dropped_unread,
+            ),
+            ("witness checked exactly", self.witnesses),
         ];
         for (what, n) in named {
             assert!(n > 0, "no {what} in any seed");
         }
     }
+}
+
+/// A witness of the static net receives exactly what the spec says
+/// (`run.rs` sets them up just before the drain): after a plain drain
+/// the pipelined one its `404` keep-alive and then the `503` with close
+/// for the request behind it (FR-PROC-05b), the other in-flight one its
+/// `404` and then the shutdown of the sending side, the idle one its
+/// `404` and then the close at once (no shutdown, nothing more). With an
+/// abort after the drain the in-flight ones, whose windows stay shut,
+/// receive nothing. A witness over the connection limits is refused
+/// instead, and `check_client` judges it like any refused connection.
+pub(crate) fn check_witness(
+    sim: &Sim,
+    client: &Client,
+    marks: &Marks,
+    coverage: &mut ShutdownCoverage,
+) {
+    let over_limit = sim.logs().iter().any(|l| {
+        matches!(
+            l,
+            Log::Rejected { conn, reason: RejectReason::Limit(_), .. } if *conn == client.id
+        )
+    });
+    if over_limit {
+        return;
+    }
+    let not_found = not_found_keep_alive();
+    let unavailable = fixed(
+        Status::ServiceUnavailable,
+        Persistence::Close,
+        BodyMode::Full,
+    );
+    let shut = sim
+        .trace()
+        .contains(&format!(" conn={} -> ShutdownWrite", client.id.0));
+    let (want, want_shut): (Vec<u8>, Option<bool>) = match (client.role, marks.plain_drain()) {
+        (Role::Random, _) => return,
+        (Role::PipelinedWitness, true) => ([not_found, unavailable].concat(), Some(true)),
+        (Role::InFlightWitness, true) => (not_found, Some(true)),
+        (Role::PipelinedWitness | Role::InFlightWitness, false) => (Vec::new(), None),
+        (Role::IdleWitness, true | false) => (not_found, Some(false)),
+    };
+    if client.received != want || want_shut.is_some_and(|w| w != shut) {
+        panic!(
+            "witness conn={} ({:?}) received {:?} (shut down: {shut}), want {:?} (shut down: \
+             {want_shut:?})\ntrace:\n{}",
+            client.id.0,
+            client.role,
+            String::from_utf8_lossy(&client.received),
+            String::from_utf8_lossy(&want),
+            sim.trace()
+        );
+    }
+    coverage.witnesses += 1;
 }

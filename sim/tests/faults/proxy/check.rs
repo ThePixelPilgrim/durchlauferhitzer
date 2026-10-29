@@ -290,16 +290,22 @@ pub(crate) fn check_story(
             }
             continue;
         }
-        // The drain closed the connection before this request was read:
-        // nothing more arrived, and no upstream was opened for it.
+        // The story stops here without a word: nothing more arrived, and
+        // no upstream was opened for it. Only where the spec lets the
+        // shutdown drop the request (`silent_stop`).
         if marks.shut_down()
             && c.pos == c.received.len()
             && c.lpos == c.logs.len()
             && run.up.is_none()
         {
-            ended = true;
-            coverage.add("drain: closed before a request");
-            continue;
+            match silent_stop(sim, story, i, marks, truncated) {
+                Ok(what) => {
+                    ended = true;
+                    coverage.add(what);
+                    continue;
+                }
+                Err(e) => fail(format!("exchange {i}: {e}")),
+            }
         }
         let why: Vec<String> = candidates
             .iter()
