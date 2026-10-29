@@ -661,6 +661,41 @@ fn descriptors(pid: u32, listener: &str) -> (usize, usize) {
     (total, connections)
 }
 
+/// A loopback port held for the whole test by a socket that is bound but
+/// never listens: the local end of a connection to a throwaway listener.
+/// A connect to it is refused every time, and no other socket can bind
+/// the port while it is held (unlike a released free port).
+struct RefusedPort {
+    addr: SocketAddr,
+    _held: (TcpStream, TcpStream),
+}
+
+impl RefusedPort {
+    fn new() -> RefusedPort {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (remote, _) = listener.accept().unwrap();
+        RefusedPort {
+            addr: local.local_addr().unwrap(),
+            _held: (local, remote),
+        }
+    }
+}
+
+/// The descriptor count once it is stable: the same in two samples 5 ms
+/// apart with no connection left, at most [`PATIENCE`].
+fn settled_descriptors(pid: u32, listener: &str) -> usize {
+    let mut last = descriptors(pid, listener);
+    let stable = eventually(|| {
+        let now = descriptors(pid, listener);
+        let same = now == last && now.1 == 0;
+        last = now;
+        same
+    });
+    assert!(stable, "connections left before the load: {last:?}");
+    last.0
+}
+
 /// Polls `cond` every 5 ms until it holds, at most [`PATIENCE`].
 fn eventually(mut cond: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + PATIENCE;
@@ -689,7 +724,10 @@ fn smoke_static_and_proxy_in_parallel_then_sigterm() {
     let (results_in, results) = mpsc::channel();
     thread::spawn(move || backend(backend_listener, results_in));
     // A port nothing listens on: the connect is refused (502).
-    let down = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let refused = RefusedPort::new();
+    let down = refused.addr;
+    let probe = TcpStream::connect(down).map(|_| ()).map_err(|e| e.kind());
+    assert_eq!(probe, Err(io::ErrorKind::ConnectionRefused), "{down}");
 
     let addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let conf = format!(
@@ -715,12 +753,7 @@ host proxy.test {{
     exchange(&mut warm, Kind::File, 0, 0);
     drop(warm);
     let listener = listener_inode(addr);
-    assert!(
-        eventually(|| descriptors(pid, &listener).1 == 0),
-        "connections left before the load: {:?}",
-        descriptors(pid, &listener)
-    );
-    let baseline = descriptors(pid, &listener).0;
+    let baseline = settled_descriptors(pid, &listener);
 
     let plan = plan();
     thread::scope(|scope| {
@@ -760,6 +793,7 @@ host proxy.test {{
     let status = server.wait_exit(PATIENCE);
     assert_eq!(status.code(), Some(0), "{status}");
     assert!(results.try_recv().is_err(), "a backend connection too many");
+    drop(refused);
 
     let mut got: Vec<String> = lines.all().iter().map(|l| without_conn(l)).collect();
     // No `privileges` line: a non-root server without `user` logs none.
