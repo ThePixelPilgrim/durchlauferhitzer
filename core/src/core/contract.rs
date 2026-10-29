@@ -442,7 +442,9 @@
 //!   byte of their request are closed at once (`Close`, nothing logged); a
 //!   partly received head completes and is answered `503` with
 //!   `Connection: close`, as is any request completed later, one
-//!   pipelined behind a head queued keep-alive before the drain included;
+//!   pipelined behind a head queued keep-alive before the drain included
+//!   (a head the parser rejects keeps its own error with `Connection:
+//!   close`: owner decision 2026-10-29, FR-PROC-05b);
 //!   exchanges in flight finish (a head already queued keeps what it said,
 //!   any head rendered from now on says `Connection: close`, and a request
 //!   pipelined behind such a head is not answered: owner decision

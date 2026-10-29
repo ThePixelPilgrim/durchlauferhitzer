@@ -1299,7 +1299,8 @@ Failures, persistence, timeouts:
     connections and connections that have not received a byte are closed
     at once (silently); a partly received head completes and is answered
     503 with `Connection: close`, like every request completed during the
-    drain; every exchange in flight (fixed, static, proxied) finishes,
+    drain (a head the parser rejects keeps its own error, FR-PROC-05b);
+    every exchange in flight (fixed, static, proxied) finishes,
     with `Connection: close` in any head rendered after the drain began
     (a head already queued keeps what it said), then the connection takes
     the normal close path (lingering close), unless a request was
@@ -1361,6 +1362,12 @@ Failures, persistence, timeouts:
   retry an idempotent request (RFC 9112 §9.3.1). A request sent after
   the SIGTERM is answered 503 in this sense: its first bytes were
   buffered before the drain, the rest completes the head afterwards.
+  *Owner decision 2026-10-29 (stage 4 fix-wave re-review):* the 503
+  answers a request, and a head the parser rejects is none: during the
+  drain such a head (partly received or buffered before the drain, or
+  completed after it) keeps its own error as the parser decides (400,
+  408, 413, 414, 431, 505) with `Connection: close`, not the drain's 503
+  (test `a_malformed_request_pipelined_during_the_drain_keeps_its_400`).
 - **FR-PROC-05c** [done] (Owner
   decision 2026-10-27, stage 4 Task 2 review D2; it replaces A4's "`Log`
   entries as for a reset".) `abort_all` logs one `Rejected { reason:
