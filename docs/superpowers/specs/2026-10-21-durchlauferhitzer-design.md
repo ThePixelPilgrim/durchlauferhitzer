@@ -1548,11 +1548,14 @@ Failures, persistence, timeouts:
   but 64-bit Linux, and CI builds and tests it on x86_64 only; aarch64 is
   not built or tested anywhere yet, so this stays open.
 - **NFR-PORT-02** [done] Links against the system glibc; no other C.
-- **NFR-PORT-03** [stage 4] `openat2` is required (startup error without
-  it; the probe is FR-PROC-04 step 3). *(Status after stage 4 Task 10:)*
-  every file open uses `openat2` and every startup runs the probe (each
-  test of the binary passes it), but the error path (`ENOSYS`) is not
-  tested: no kernel the tests run on lacks `openat2`, so this stays open.
+- **NFR-PORT-03** [done] `openat2` is required (startup error without
+  it; the probe is FR-PROC-04 step 3). Every file open uses `openat2` and
+  every startup runs the probe (each test of the binary passes it).
+  *(Owner decision 2026-10-29, O3:)* the error path is tested on a kernel
+  that has `openat2`: the binary runs under a seccomp filter
+  (`PR_SET_NO_NEW_PRIVS`, then a filter that checks the architecture and
+  fails only `openat2` with `ENOSYS`) and must exit 2 with the probe's
+  message (`startup.rs` `without_openat2_startup_is_exit_2`).
 - **NFR-PORT-04** [stage 5] Landlock is used when available (FR-PROC-06).
 - **NFR-PORT-05** [done] systemd is optional (FR-PROC-02/03): without
   `LISTEN_PID`/`LISTEN_FDS` the process binds itself (stage 4 Task 8).

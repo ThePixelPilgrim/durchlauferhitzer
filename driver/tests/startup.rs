@@ -19,8 +19,8 @@ use std::fs;
 use std::net::{SocketAddr, TcpListener};
 
 use child::{
-    PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, fd_target, free_port, get, run,
-    text, threads,
+    Filter, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, fd_target, free_port, get,
+    run, text, threads,
 };
 
 /// A config serving `dir/www` on `listen`, written to `dir`.
@@ -77,6 +77,26 @@ fn a_missing_static_root_is_exit_2_naming_it() {
         "{stderr}"
     );
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
+}
+
+/// NFR-PORT-03 (owner decision 2026-10-29, O3): on a kernel without
+/// `openat2` (a seccomp filter makes it fail with `ENOSYS`), the probe
+/// stops startup: exit 2 with its message.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn without_openat2_startup_is_exit_2() {
+    let dir = TempDir::new();
+    let path = static_config(&dir, &loopback(free_port()).to_string());
+    let setup = Setup {
+        filter: Filter::Openat2Enosys,
+        ..Setup::non_root()
+    };
+    let output = run(&[&path], setup);
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: the kernel has no openat2 (Linux 5.6 or later is needed)\n"
+    );
 }
 
 #[test]

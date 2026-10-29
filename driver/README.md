@@ -145,7 +145,9 @@ tests/
                     overlapping listen addresses are exit 2 naming them;
                     every thread blocks SIGTERM/SIGINT/SIGPIPE/SIGHUP;
                     `disk_threads` workers; fds 0-2 closed at exec are
-                    `/dev/null` (the Rust runtime), so no socket lands there
+                    `/dev/null` (the Rust runtime), so no socket lands there;
+                    under a seccomp filter that fails `openat2` with
+                    ENOSYS (NFR-PORT-03) the probe is exit 2 with its message
   systemd.rs        socket activation of the binary: a listener passed as
                     fd 3 (`sh -c` sets `LISTEN_PID=$$`) is served; an
                     address not configured, a configured address without a
@@ -234,7 +236,8 @@ tests/
                     before the server binds: a known, rare race, left as
                     it is), the
                     child's setup before exec (`pre_exec`: closed fds,
-                    fd 3, RLIMIT_NOFILE; the test crate's only `unsafe`),
+                    fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`); the
+                    test crate's only `unsafe`),
                     a guard that kills a running server on drop; signals
                     by the shell's `kill`, stderr read line by line while
                     the server runs (`Lines`), a bounded wait for the exit

@@ -10,7 +10,8 @@
 //! The setup before `exec` needs `pre_exec`, which is `unsafe`: it lives in
 //! the one module [`pre_exec`] below, the only `unsafe` code of the test
 //! crate (controller ruling R2), and calls only async-signal-safe
-//! functions (`close`, `dup2`, `setrlimit`, and `setresuid`, see there).
+//! functions (`close`, `dup2`, `setrlimit`, and `setresuid` and `prctl`,
+//! see there).
 
 #![allow(
     clippy::unwrap_used,
@@ -141,6 +142,20 @@ pub struct Setup {
     /// Only the effective uid set to this before `exec` (the real uid
     /// stays; `exec` copies the effective into the saved one).
     pub effective_uid: Option<u32>,
+    /// A seccomp filter installed before `exec`.
+    pub filter: Filter,
+}
+
+/// A seccomp filter for the child (owner decision 2026-10-29, O3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Filter {
+    /// No filter.
+    #[default]
+    None,
+    /// `openat2` fails with `ENOSYS`, as on a kernel without it; every
+    /// other system call passes.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    Openat2Enosys,
 }
 
 impl Setup {
@@ -209,6 +224,11 @@ pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
     }
     if let Some((soft, hard)) = setup.nofile {
         pre_exec::limit_nofile(&mut cmd, soft, hard);
+    }
+    match setup.filter {
+        Filter::None => {}
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        Filter::Openat2Enosys => pre_exec::openat2_enosys(&mut cmd),
     }
     (cmd, keep)
 }
@@ -579,6 +599,78 @@ mod pre_exec {
         };
         // SAFETY: the hook calls only `setrlimit` (async-signal-safe) and
         // reads errno; it neither allocates nor locks.
+        unsafe { cmd.pre_exec(hook) };
+    }
+
+    /// The audit architecture of this target (`AUDIT_ARCH_*` in
+    /// `linux/audit.h`: the ELF machine, 64-bit, little-endian).
+    #[cfg(target_arch = "x86_64")]
+    const AUDIT_ARCH: u32 = 0xC000_003E;
+    #[cfg(target_arch = "aarch64")]
+    const AUDIT_ARCH: u32 = 0xC000_00B7;
+
+    /// Installs a seccomp filter in the child that fails `openat2` with
+    /// `ENOSYS` (owner decision 2026-10-29, O3). It checks the
+    /// architecture first, so only this target's `openat2` number is
+    /// matched; every other system call is allowed. `PR_SET_NO_NEW_PRIVS`
+    /// comes first, so no privilege is needed. Not in R2's list: `prctl`
+    /// is a single system call that takes no lock and allocates nothing.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub fn openat2_enosys(cmd: &mut Command) {
+        let stmt = |code: u32, k: u32| libc::sock_filter {
+            code: u16::try_from(code).unwrap(),
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jump_eq = |k: u32, jt: u8, jf: u8| libc::sock_filter {
+            code: u16::try_from(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K).unwrap(),
+            jt,
+            jf,
+            k,
+        };
+        let load = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
+        // `seccomp_data`: `nr` at offset 0, `arch` at offset 4.
+        let openat2 = u32::try_from(libc::SYS_openat2).unwrap();
+        let enosys = u32::try_from(libc::ENOSYS).unwrap();
+        // Built before the fork; the hook only reads it.
+        let program: [libc::sock_filter; 6] = [
+            stmt(load, 4),
+            jump_eq(AUDIT_ARCH, 0, 3),
+            stmt(load, 0),
+            jump_eq(openat2, 0, 1),
+            stmt(
+                libc::BPF_RET | libc::BPF_K,
+                libc::SECCOMP_RET_ERRNO | enosys,
+            ),
+            stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW),
+        ];
+        let hook = move || {
+            // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS)` takes no pointers.
+            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            let fprog = libc::sock_fprog {
+                len: 6,
+                filter: program.as_ptr().cast_mut(),
+            };
+            // SAFETY: `fprog` points to `program`, six valid instructions
+            // that live in this closure for the whole call; the kernel
+            // only reads them (it copies the filter).
+            let ret = unsafe {
+                libc::prctl(
+                    libc::PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &raw const fprog,
+                )
+            };
+            if ret == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        };
+        // SAFETY: the hook calls only `prctl` and reads errno; it neither
+        // allocates nor locks.
         unsafe { cmd.pre_exec(hook) };
     }
 }
