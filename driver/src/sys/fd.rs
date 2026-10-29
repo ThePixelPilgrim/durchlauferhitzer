@@ -188,7 +188,13 @@ static CLAIMS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// and nothing owns it yet; once claimed it has the flag, so a second
 /// claim fails. Refused: the standard descriptors (0–2), a number that is
 /// not open (`EBADF`), and one with close-on-exec set (`InvalidInput`).
-pub fn claim_inherited(raw: RawFd) -> io::Result<OwnedFd> {
+///
+/// Crate-private (review A2): the argument holds only for a process
+/// whose own descriptors all come from std and this crate. Code outside
+/// the crate may open one without the flag (`libc::open`, a C library),
+/// which this would then take from its owner; inside the crate only the
+/// systemd sockets (`systemd.rs`) are claimed, at startup.
+pub(crate) fn claim_inherited(raw: RawFd) -> io::Result<OwnedFd> {
     if raw < 3 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -213,4 +219,29 @@ pub fn claim_inherited(raw: RawFd) -> io::Result<OwnedFd> {
     // nothing in this process owns it (see above); the flag now set makes
     // every later claim of it fail, so this is its only owner.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd;
+
+    use super::claim_inherited;
+
+    /// `claim_inherited` refuses what this process created itself (std
+    /// sets close-on-exec), the standard descriptors and a number that is
+    /// not open; the positive case (systemd's fd 3) runs in the binary
+    /// (`tests/systemd.rs`).
+    #[test]
+    fn claim_inherited_refuses_own_and_standard_descriptors() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let err = claim_inherited(file.as_raw_fd()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+        for raw in [0, 1, 2] {
+            let err = claim_inherited(raw).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{raw}: {err}");
+        }
+        let err = claim_inherited(1 << 20).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF), "{err}");
+    }
 }

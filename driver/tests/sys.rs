@@ -630,25 +630,6 @@ fn writing_to_a_pipe_without_reader_is_broken_pipe() {
     }
 }
 
-/// `claim_inherited` refuses what this process created itself (std sets
-/// close-on-exec), the standard descriptors and a number that is not
-/// open; the positive case (systemd's fd 3) runs in the binary
-/// (`tests/systemd.rs`).
-#[test]
-fn claim_inherited_refuses_own_and_standard_descriptors() {
-    use durchlauferhitzer::sys::fd::claim_inherited;
-    let dir = TempDir::new();
-    let file = fs::File::create(dir.path().join("own")).unwrap();
-    let err = claim_inherited(file.as_raw_fd()).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
-    for raw in [0, 1, 2] {
-        let err = claim_inherited(raw).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{raw}: {err}");
-    }
-    let err = claim_inherited(1 << 20).unwrap_err();
-    assert_eq!(err.raw_os_error(), Some(libc::EBADF), "{err}");
-}
-
 /// `uids` (getresuid) agrees with `/proc/self/status`.
 #[test]
 fn uids_match_proc_status() {

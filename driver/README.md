@@ -112,8 +112,9 @@ src/
                       `set_status_flags` (`StatusFlags`, `Blocking`:
                       O_NONBLOCK), `wait_writable` (poll(2), the final
                       flush), `pipe` (pipe2, O_CLOEXEC);
-                      `claim_inherited` (an inherited descriptor: open
-                      without FD_CLOEXEC, then marked)
+                      `claim_inherited` (crate-private, A2: an
+                      inherited descriptor: open without FD_CLOEXEC,
+                      then marked)
     env.rs            `remove_vars`: only while the process has one thread
     epoll.rs          `Epoll` (level-triggered), `Readiness` (mirrors the
                       core's `Interest`), `EpollEvent`, `Trouble`
