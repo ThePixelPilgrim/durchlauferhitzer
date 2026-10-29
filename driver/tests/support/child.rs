@@ -5,7 +5,8 @@
 //! a guard that kills a running server (SIGKILL) when dropped, so no
 //! test leaves a child behind, and for the shutdown tests: signals sent
 //! with the shell's `kill`, the server's stderr read line by line while
-//! it runs ([`Lines`]), and a bounded wait for its exit.
+//! it runs ([`Lines`]), and a bounded wait for its exit. [`run_program`]
+//! runs another program with the same setup, as a control.
 //!
 //! The setup before `exec` needs `pre_exec`, which is `unsafe`: it lives in
 //! the one module [`pre_exec`] below, the only `unsafe` code of the test
@@ -197,7 +198,7 @@ impl Setup {
 /// The command for `args` with `setup` applied; stdout and stderr piped,
 /// stdin null.
 pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
-    let mut cmd = match &setup.listen_fd {
+    let cmd = match &setup.listen_fd {
         None => {
             let mut cmd = Command::new(exe());
             cmd.args(args);
@@ -216,6 +217,13 @@ pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
             cmd
         }
     };
+    prepare(cmd, Path::new(exe()), setup)
+}
+
+/// `setup` applied to `cmd`, which runs `program`; stdout and stderr
+/// piped, stdin null. The descriptors to keep open until the spawn come
+/// with it.
+fn prepare(mut cmd: Command, program: &Path, setup: Setup) -> (Command, Vec<OwnedFd>) {
     cmd.env_remove("LISTEN_PID")
         .env_remove("LISTEN_FDS")
         .env_remove("LISTEN_FDNAMES")
@@ -223,7 +231,7 @@ pub fn command(args: &[&str], setup: Setup) -> (Command, Vec<OwnedFd>) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if setup.as_nobody || setup.effective_uid.is_some() {
-        assert_reachable_by_others(Path::new(exe()));
+        assert_reachable_by_others(program);
     }
     if setup.as_nobody {
         cmd.uid(NOBODY).gid(NOBODY);
@@ -298,6 +306,21 @@ fn assert_reachable_by_others(exe: &Path) {
 /// Runs the binary to completion with `args` and `setup`.
 pub fn run(args: &[&str], setup: Setup) -> Output {
     let (mut cmd, _keep) = command(args, setup);
+    let child = cmd.spawn().unwrap();
+    wait_bounded(child)
+}
+
+/// Runs `program` (not the server) to completion with `args` and `setup`:
+/// a control that shows what the setup gives a child. A systemd socket
+/// (`listen_fd`) is the server's alone.
+pub fn run_program(program: &str, args: &[&str], setup: Setup) -> Output {
+    assert!(
+        setup.listen_fd.is_none(),
+        "a systemd socket is for the server"
+    );
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    let (mut cmd, _keep) = prepare(cmd, Path::new(program), setup);
     let child = cmd.spawn().unwrap();
     wait_bounded(child)
 }

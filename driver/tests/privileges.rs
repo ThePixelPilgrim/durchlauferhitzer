@@ -7,11 +7,13 @@
 //! - as root (these tests skip with a printed reason unless the tests run
 //!   as root, and fail instead with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`,
 //!   which CI's root step sets): `user` unset is exit 2, an unknown
-//!   user and one whose primary group is 0 (OA3) are exit 2, and with `user nobody` the server drops to nobody
-//!   (`drop_to`, in this subprocess only) and serves; root is any uid 0
+//!   user and one whose primary group is 0 (OA3) are exit 2, and with
+//!   `user nobody` the server drops to nobody (`drop_to`, in this
+//!   subprocess only) and serves; root is any uid 0
 //!   (O6), so a real uid of 0 under an effective nobody counts as root;
 //! - root or not, every capability set of every server thread ends up
-//!   empty (OA2).
+//!   empty (OA2); a control (`cat /proc/self/status` with the same setup)
+//!   first shows the setup grants `CAP_NET_BIND_SERVICE`.
 
 #![allow(
     clippy::unwrap_used,
@@ -28,8 +30,8 @@ use std::fs;
 use std::net::SocketAddr;
 
 use child::{
-    Caps, NOBODY, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, free_port, get,
-    is_root, run, text,
+    CAP_NET_BIND_SERVICE, Caps, NOBODY, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config,
+    free_port, get, is_root, run, run_program, text,
 };
 
 fn loopback(port: u16) -> SocketAddr {
@@ -226,6 +228,26 @@ fn thread_caps(pid: u32) -> Vec<[u64; 4]> {
         .collect()
 }
 
+/// The capability set `key` (`CapInh:`, `CapEff:`, `CapAmb:` ...) of a
+/// `cat /proc/self/status` started with `setup`: the control that shows
+/// the setup really hands the server the capability it then clears.
+fn control_caps(setup: Setup, key: &str) -> u64 {
+    let output = run_program("/bin/cat", &["/proc/self/status"], setup);
+    assert_exit(&output, 0);
+    let status = text(&output.stdout);
+    let hex = status
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .unwrap_or_else(|| panic!("no {key} in {status}"))
+        .trim();
+    u64::from_str_radix(hex, 16).unwrap()
+}
+
+/// Whether `CAP_NET_BIND_SERVICE` is in the capability set `set`.
+fn has_bind_cap(set: u64) -> bool {
+    set & (1 << CAP_NET_BIND_SERVICE) != 0
+}
+
 /// OA2 (owner decision 2026-10-29): a non-root server started with a
 /// capability (systemd's `AmbientCapabilities=` say) clears every set
 /// after binding, in every thread (the disk workers start later and
@@ -238,11 +260,16 @@ fn as_non_root_every_capability_is_cleared() {
     let dir = TempDir::new();
     let addr = loopback(free_port());
     let path = static_config(&dir, addr, "user nobody;");
-    let setup = Setup {
+    let setup = || Setup {
         caps: Caps::AmbientAsNobody,
         ..Setup::default()
     };
-    let server = Running::start(&[&path], setup, addr);
+    // Control: the setup gives the capability (ambient, so effective).
+    for key in ["CapAmb:", "CapEff:"] {
+        let set = control_caps(setup(), key);
+        assert!(has_bind_cap(set), "{key} {set:x}");
+    }
+    let server = Running::start(&[&path], setup(), addr);
     let response = get(addr, "/index.html");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let caps = thread_caps(server.pid());
@@ -264,11 +291,14 @@ fn as_root_every_capability_is_cleared_after_the_drop() {
     let dir = TempDir::new();
     let addr = loopback(free_port());
     let path = static_config(&dir, addr, "user nobody;");
-    let setup = Setup {
+    let setup = || Setup {
         caps: Caps::Inheritable,
         ..Setup::default()
     };
-    let server = Running::start(&[&path], setup, addr);
+    // Control: the setup gives the capability (inheritable).
+    let set = control_caps(setup(), "CapInh:");
+    assert!(has_bind_cap(set), "CapInh: {set:x}");
+    let server = Running::start(&[&path], setup(), addr);
     let response = get(addr, "/index.html");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let caps = thread_caps(server.pid());
