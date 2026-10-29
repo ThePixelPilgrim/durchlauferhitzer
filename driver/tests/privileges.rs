@@ -304,6 +304,30 @@ fn a_systemd_socket_below_1024_needs_no_root() {
     );
 }
 
+/// Owner decision 2026-10-28 (O3, FR-PROC-03): root with a socket from
+/// systemd and no `user` is exit 2 too; the socket changes nothing.
+#[test]
+fn as_root_with_a_systemd_socket_and_no_user_is_exit_2() {
+    if !root_or_skip() {
+        return;
+    }
+    let listener = std::net::TcpListener::bind(loopback(0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dir = TempDir::new();
+    let path = static_config(&dir, addr, "");
+    let setup = Setup {
+        listen_fd: Some(std::os::fd::OwnedFd::from(listener)),
+        ..Setup::default()
+    };
+    let output = run(&[&path], setup);
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: running as root without `user`: \
+         the server never keeps root after binding\n"
+    );
+}
+
 /// Root is any uid 0 (owner decision 2026-10-28, O6): a process whose
 /// real uid is 0 but whose effective (and so saved) uid is nobody's
 /// counts as root, so `user` is required.
