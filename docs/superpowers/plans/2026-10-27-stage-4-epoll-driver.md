@@ -53,6 +53,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   - Before the first `set_date` (the sim's default), no `Date` header is sent. The sim sets a fixed date in tests that check it.
   - The send-buffer bound (1 KiB) and the head-buffer slack are rechecked for the 37 added bytes.
 - **A4, shutdown API in the core (FR-PROC-05, core half).**
+  - *Superseded by spec FR-PROC-05 (core half) and FR-PROC-05b to 05d:* where they differ (the first bullet's "`Connection: close` semantics" for every in-flight response), the spec holds.
   - `Core::begin_drain(now, &mut actions)` starts a graceful drain:
     - idle keep-alive connections are closed at once;
     - a connection in `ReadingHead` with no byte yet is closed;
@@ -61,6 +62,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   - `Core::is_drained(&self) -> bool` is true once no connection, upstream, file or orphaned open is left.
   - `Core::abort_all(&mut actions)` is the fast path. It closes every connection, upstream and open file at once (`Log` entries as for a reset), and leaves orphaned opens to be answered later as usual.
   - *Amended by owner decisions 2026-10-27 (Task 2 review), written into the spec:* a request pipelined behind an in-flight response during the drain gets 503 with `Connection: close` (FR-PROC-05b); `abort_all` logs `Rejected { ShuttingDown }` per cut exchange instead of reset-like entries, and the driver exits after it without waiting for orphaned opens (FR-PROC-05c, DRV-14); a connection delivered during the drain is logged `Rejected { ShuttingDown }` (FR-PROC-05d).
+  - *Owner decision 2026-10-29 (stage 4 final review), written into the spec (FR-PROC-05b):* it confirms the controller ruling of 2026-10-27: a request pipelined behind a head rendered after the drain began (which says `Connection: close`) is not answered.
   - The driver closes the listeners itself before `begin_drain`.
 - **A5, FR-LOG-07 (core half).** `Rejected` for a parse error found after a valid request line carries the method and the raw path: `RejectReason::Http` gains an optional `RequestSummary`-like `method + path`. Driver-bug closes and `EMFILE`/`ENFILE` get their own driver log kinds (`DriverLog`, Task 7). They are not core `Log`s.
 - **A6, bind overlap (FR-CFG-10).** Binding is attempted for every `listen` address in config order. The first failure (`EADDRINUSE`, for example `0.0.0.0:80` plus `127.0.0.1:80`, or `EACCES`) is a startup error naming the address (exit 2). `SO_REUSEADDR` is set on listeners and `SO_REUSEPORT` is not (stage 7). *Amended by owner decision 2026-10-27 (Task 4 review), written into the spec (FR-CFG-10):* every IPv6 listener sets `IPV6_V6ONLY = 1`, so an IPv6 address accepts IPv6 only and `0.0.0.0:80` + `[::]:80` bind together on every host; IPv4 needs its own `listen` line.
@@ -90,6 +92,7 @@ The binding driver text is the module docs of `core/src/core/contract.rs`. Carry
   - Opens use `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` with `O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`, then `fstat`. Readahead uses `readahead(2)`.
   - Errno maps to `FileError` by the contract's table.
 - **A11, startup order (FR-PROC-04).**
+  - *Superseded by spec FR-PROC-04,* whose eleven steps (it adds the signal mask and the log sink) are authoritative.
   1. Parse args.
   2. Load the config (exit 1).
   3. Check the kernel for `openat2` with a probe open of `"."` beneath the first root, or of `/` if there is none (exit 2).

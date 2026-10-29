@@ -1273,8 +1273,8 @@ Failures, persistence, timeouts:
     covers the three calls, the closing of idle and fresh connections,
     the 503 for requests completed during the drain and the closing after
     in-flight exchanges; the details marked FR-PROC-05b to 05d are owner
-    decisions of 2026-10-27 from the stage 4 Task 2 review;
-    [done in the core]): `Core::begin_drain(now, actions)` starts the
+    decisions of 2026-10-27 from the stage 4 Task 2 review, the
+    exception in FR-PROC-05b one of 2026-10-29): `Core::begin_drain(now, actions)` starts the
     graceful drain once the driver closed its listeners: idle keep-alive
     connections and connections that have not received a byte are closed
     at once (silently); a partly received head completes and is answered
@@ -1326,8 +1326,9 @@ Failures, persistence, timeouts:
   it announced keep-alive, the connection then parses its buffered input
   (a complete request gets the 503, a partial one completes within its
   header deadline first) or, with none buffered, closes (lingering close)
-  instead of waiting for the next request. *Controller ruling
-  2026-10-27 (reconciling A4 with D1):* the exception is a head rendered
+  instead of waiting for the next request. *Owner decision 2026-10-29
+  (stage 4 final review; it confirms the controller ruling of 2026-10-27
+  that reconciled A4 with D1):* the exception is a head rendered
   after the drain began (a file still being opened, a backend still being
   connected to or awaited): it says `Connection: close` per A4, and
   nothing may follow a closing response, so a request pipelined behind it
@@ -1612,8 +1613,11 @@ Failures, persistence, timeouts:
   `core/src/` over ~900 lines).
 - **NFR-MAINT-11** [done] Every change passes `cargo fmt --check`,
   `cargo clippy --workspace --all-targets --locked -- -D warnings`,
-  `cargo test --workspace --locked` and `scripts/check-product-deps.sh`,
-  locally and in CI.
+  `cargo test --workspace --locked`, `scripts/check-product-deps.sh` and
+  the docs build (`RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+  --no-deps`), locally and in CI. CI also runs the dependency check's
+  self-test (`scripts/test-check-product-deps.sh`); a green CI run is
+  enough for it, it need not run locally (owner, 2026-10-28).
 
 ### NFR-PERF — Performance
 

@@ -1,5 +1,5 @@
 //! Shutdown (FR-PROC-05, stage 4 amendment A4, with the owner decisions
-//! of 2026-10-27 in FR-PROC-05b to 05d): the graceful drain, the
+//! of 2026-10-27 and 2026-10-29 in FR-PROC-05b to 05d): the graceful drain, the
 //! fast path, and the 503 that answers work arriving during the drain.
 
 use super::{Action, ConnId, Core, Mode};
@@ -33,8 +33,8 @@ impl Core {
     ///   partly received head above (FR-PROC-05b, owner decision
     ///   2026-10-27). Behind a head rendered during the drain (a file
     ///   being opened, a backend being connected to or awaited), which
-    ///   says `Connection: close`, it is not answered (controller ruling
-    ///   2026-10-27);
+    ///   says `Connection: close`, it is not answered (owner decision
+    ///   2026-10-29, FR-PROC-05b);
     /// - a connection delivered by `Accepted` anyway is answered 503 and
     ///   closed like one over the limits, logged as
     ///   [`RejectReason::ShuttingDown`].

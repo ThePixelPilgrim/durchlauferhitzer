@@ -575,7 +575,8 @@ fn the_core_still_answers_after_abort_all() {
     );
 }
 
-/// Controller ruling 2026-10-27 (FR-PROC-05b, reconciling A4 with D1): a
+/// Owner decision 2026-10-29 (FR-PROC-05b; it confirms the controller
+/// ruling of 2026-10-27 that reconciled A4 with D1): a
 /// head rendered after the drain began says `Connection: close`, and
 /// nothing may follow a closing response, so a request pipelined behind a
 /// file still being opened is not answered.
