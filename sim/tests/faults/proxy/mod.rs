@@ -14,10 +14,13 @@
 //! body and send timeouts) that waits until the other stories of its round
 //! are done, so the clock only runs out deadlines the model knows. Every
 //! round ends with all its connections and upstreams closed; the seed ends
-//! with no open upstream, file or connection and every slot free.
+//! with no open upstream, file or connection and every slot free. One seed
+//! in five shuts the server down in the middle of a round and ends with
+//! that round (`drain.rs`).
 
 mod check;
 mod chunks;
+mod drain;
 mod draw;
 mod drive;
 mod outcome;
@@ -35,6 +38,7 @@ use durchlauferhitzer_core::{BackendFailure, BackendId, UpstreamId};
 use super::*;
 use check::*;
 use chunks::*;
+use drain::*;
 use draw::*;
 use drive::*;
 use outcome::*;
@@ -295,6 +299,12 @@ pub(crate) const REQUIRED: &[&str] = &[
     "backend head at the limit",
     "backend head just too large",
     "large body",
+    // Shutdown (FR-PROC-05, `drain.rs`).
+    "drain: 503 to a request",
+    "drain: closing head",
+    "drain: closed before a request",
+    "abort: exchange cut",
+    "abort: response cut short",
 ];
 
 impl ProxyCoverage {
@@ -312,12 +322,12 @@ impl ProxyCoverage {
 fn random_proxy_schedules() {
     let mut coverage = ProxyCoverage::default();
     match replay_seed() {
-        Some(seed) => run_reporting(seed, ShutdownPlan::None, || {
+        Some(seed) => run_reporting(seed, shutdown_plan(seed, PROXY_SPAN), || {
             run_proxy_seed(seed, &mut coverage)
         }),
         None => {
             for seed in 0..PROXY_SEEDS {
-                run_reporting(seed, ShutdownPlan::None, || {
+                run_reporting(seed, shutdown_plan(seed, PROXY_SPAN), || {
                     run_proxy_seed(seed, &mut coverage)
                 });
             }

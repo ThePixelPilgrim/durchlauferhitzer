@@ -88,7 +88,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     shutdown_at(&mut sim, plan, END, &mut marks, &ids);
     // The longest wait left: a disk answer (45 s), then a pipelined head's
     // deadline (10 s); `keepalive_timeout` is 60 s.
-    check_drain_finishes(&mut sim, plan, &ids, Duration::from_secs(59));
+    check_drain_finishes(&mut sim, plan, &marks, &ids, Duration::from_secs(59));
     collect(&mut sim, &mut clients);
     // Wind down: every client sends EOF, then 5 minutes pass (longer than
     // any disk delay, so every open and readahead is answered), again

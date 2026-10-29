@@ -20,7 +20,7 @@ fn line(name: &str, value: &[u8]) -> Line {
 }
 
 /// One generated request and what the core must make of it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Request {
     /// Head and body as the client sends them.
     pub(crate) wire: Vec<u8>,
@@ -40,7 +40,7 @@ pub(crate) struct Request {
     pub(crate) tag: Option<&'static str>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Verdict {
     /// A head the parser must reject: logged `Rejected { Http(e) }`,
     /// answered with the status of the model's own table

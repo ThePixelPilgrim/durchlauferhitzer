@@ -723,7 +723,7 @@ fn relay_alts(
 }
 
 /// `r` as sent to a client that closes after it.
-fn closing(r: &Relay) -> Relay {
+pub(crate) fn closing(r: &Relay) -> Relay {
     let mut r = r.clone();
     r.persistence = Persistence::Close;
     let end = r.head.len() - 2;
