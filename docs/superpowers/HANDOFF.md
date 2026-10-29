@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-29, after stage 4 closed on `main` (final review and fix wave landed).
+Last updated 2026-10-29, after stage 5 Task 1 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -11,7 +11,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 2 Static files | done (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
 | 3 Reverse proxy | done (`576a77c..b583d96`) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
-| 5 Containment | **next:** brainstorm and write the stage 5 plan from the spec's Timeline and the carry-forwards below; the owner approves it before any task starts |
+| 5 Containment | **in progress** — plan `docs/superpowers/plans/2026-10-29-stage-5-containment.md` (owner-approved `bc2f7d3`; decisions of 2026-10-29 in the spec: FR-CFG-25, FR-CONN-13, FR-PROC-06/07, NFR-SEC-13, NFR-PORT-04/07, NFR-TEST-08). Task 1 ✅ (`containment` block, `ipv6_prefix`; `NoEffect` config error); **next: Task 2** (FR-CONN-13: IPv6 prefix grouping, fair refused pool) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -36,7 +36,8 @@ The stage 4 review record lists every owner decision and ruling of stage 4, the 
 
 ## Branches
 
-- `main` holds all verified work.
+- `main` holds all verified work. Each stage 5 task is cut as `stage5-taskN` from `main` and fast-forwarded after review.
+- Branch deletion is refused for this session (HTTP 403 from the git proxy): the owner deletes merged branches from their own clone.
 - Fully contained in `main`, safe to delete when the owner says so: `claude/magical-dijkstra-2eoh4y`, `unify`, `stage3-task4` … `stage3-task9`, `stage3-final`, `stage4-plan`, `stage4-task1` … `stage4-task10`, `gate-docs`, `stage4-final`, `stage4-final-a`, `stage4-final-b`, `stage4-final-r2a`, `stage4-final-r2b` (the last four were rebased into `stage4-final`; their own commits are superseded, not lost).
 - `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A session that missed `claude/magical-dijkstra-2eoh4y` redid stage 3 Tasks 1–4 there; everything worth keeping was ported (stage 3 record, "Unification"); it has 12 commits not on `main` by design. The owner decides on deletion.
 
