@@ -1431,15 +1431,35 @@ Failures, persistence, timeouts:
     process may only read files and directories beneath its static roots
     (and nothing else on the file system). "Partly supported" means the
     kernel's Landlock ABI cannot enforce that (e.g. Landlock disabled, or an
-    ABI that leaves a needed right unrestricted). *Builder call:* network
-    rules (Landlock ABI 4) are not part of stage 5.
+    ABI that leaves a needed right unrestricted). (owner decision 2026-10-29, stage 5 builder check) Any
+    Landlock ABI that can restrict file access to reading beneath the roots
+    (ABI 1, Linux 5.14) counts as supported, also for `landlock required`:
+    rights an older ABI cannot restrict (truncation before ABI 3, device
+    `ioctl` before ABI 5) are covered by keeping those calls out of, or
+    argument-limited in, the seccomp allow-list, and the startup log names
+    each gap and what covers it. With seccomp `off` or missing, such a gap
+    makes Landlock "partly supported". *Builder call:* network rules
+    (Landlock ABI 4) are not part of stage 5.
   - seccomp: a per-architecture allow-list (x86_64, aarch64) of exactly the
     system calls the server makes after startup, installed for every thread
-    before the loop runs. An unexpected call gets `seccomp_action`: `fail`
-    (the default) returns an error and the server keeps running; `kill`
-    ends the process. A crash or misbehaviour caused by a failed call is a
+    before the loop runs. (owner decision 2026-10-29, stage 5 builder check) It checks call numbers plus
+    the arguments that matter most and are stable: `socket` only for
+    `AF_INET`/`AF_INET6` stream sockets, `mmap`/`mprotect` never with
+    `PROT_EXEC`, `clone` only with thread flags, and `prctl`, `fcntl` and
+    `ioctl` only for the operations the server uses. An unexpected call gets
+    `seccomp_action`: `fail` (the default) returns `EPERM` and the server
+    keeps running; `kill` ends the process. Every blocked call is logged by
+    the kernel (`SECCOMP_FILTER_FLAG_LOG`: the audit or kernel log, with the
+    call number); the startup log says so, so an operator knows where to
+    look. *Builder call:* the allow-list is proven by running the end-to-end
+    tests under `kill` in CI on the x86_64 and aarch64 runners (Ubuntu
+    24.04's glibc) and in a Debian 12 container (glibc 2.36) on x86_64. A crash or misbehaviour caused by a failed call is a
     bug in the server (a missing allow-list entry or wrong error handling),
     never the intended effect.
+  - (owner decision 2026-10-29, stage 5 builder check) Stage 5 sandboxes strictly: no `execve`, no reading
+    outside the roots. Stage 6's restart (FR-PROC-07) must therefore not
+    rely on exec-ing the new binary from inside the sandbox; it adapts its
+    design to that (owner accepts the stage 6 rework).
   - All containment code lives in one small driver module behind one
     interface, so a build without it (a future unikernel port, NFR-PORT-07)
     can leave it out without touching the core.
@@ -1451,7 +1471,10 @@ Failures, persistence, timeouts:
   accepting, drains and exits. Such a restart may change hosts, routes,
   backends and limits only; a new `listen`, `user` or static root is
   rejected with a clear error (never half-applied) and needs a full
-  restart.
+  restart. *(Owner decision 2026-10-29, stage 5 builder check:)* the stage
+  5 sandbox (FR-PROC-06) forbids `execve` and reads outside the roots, so
+  the non-systemd path cannot exec from inside it; stage 6 designs a path
+  that works with the sandbox.
 
 ---
 
