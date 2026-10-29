@@ -114,6 +114,8 @@ enum Eof {
 #[derive(Debug)]
 struct SimConn {
     to_server: VecDeque<u8>,
+    /// Client bytes handed to the core so far (`Received`).
+    delivered: usize,
     eof: Eof,
     client: ClientSide,
     received: Vec<u8>,
@@ -212,6 +214,7 @@ impl Sim {
             conn,
             SimConn {
                 to_server: VecDeque::new(),
+                delivered: 0,
                 eof: Eof::NotSent,
                 client: ClientSide::Live,
                 received: Vec::new(),
@@ -341,6 +344,7 @@ impl Sim {
         for (dst, src) in spare.iter_mut().zip(c.to_server.drain(..n)) {
             *dst = src;
         }
+        c.delivered += n;
         self.pending_read = Some(Pending::Conn(conn));
         self.deliver(Event::Received { conn, len: n });
         true
@@ -391,6 +395,13 @@ impl Sim {
     /// Client bytes not yet delivered to the server.
     pub fn queued_to_server(&self, conn: ConnId) -> usize {
         self.conn(conn).to_server.len()
+    }
+
+    /// Client bytes the core has read on `conn` so far (delivered with
+    /// `Received`): what it may have buffered, as opposed to what the
+    /// kernel still holds (`queued_to_server`) or a reset discarded.
+    pub fn delivered_to_server(&self, conn: ConnId) -> usize {
+        self.conn(conn).delivered
     }
 
     /// The interest the core last set for `conn`.

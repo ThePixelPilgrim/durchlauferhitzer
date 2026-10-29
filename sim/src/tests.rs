@@ -492,3 +492,29 @@ fn upstream_read_write_with_nothing_to_write_is_a_violation() {
     };
     sim.check_upstream_view(up, &view);
 }
+
+#[test]
+fn delivered_to_server_counts_what_the_core_read() {
+    let mut sim = Sim::new(CONFIG);
+    let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    sim.set_read_chunk(c, 3);
+    sim.send(c, b"GET / HTTP/1.1\r\n");
+    assert_eq!(sim.delivered_to_server(c), 0);
+    sim.run_until_idle();
+    assert_eq!(sim.delivered_to_server(c), 16);
+    assert_eq!(sim.queued_to_server(c), 0);
+}
+
+#[test]
+fn opening_file_lasts_until_the_open_is_answered() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv", "f", b"x");
+    sim.set_disk_delay(Duration::from_secs(1));
+    let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert!(!sim.opening_file(c));
+    sim.send(c, b"GET /f HTTP/1.1\r\nHost: a.test\r\n\r\n");
+    sim.run_until_idle();
+    assert!(sim.opening_file(c), "{}", sim.trace());
+    sim.advance(Duration::from_secs(1));
+    assert!(!sim.opening_file(c), "{}", sim.trace());
+}

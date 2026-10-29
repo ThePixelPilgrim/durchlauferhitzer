@@ -118,6 +118,14 @@ impl Sim {
             .count()
     }
 
+    /// Whether an `OpenFile` emitted for `conn` is not answered yet (as
+    /// the driver sees it: no `FileOpened` or `FileFailed` delivered).
+    pub fn opening_file(&self, conn: ConnId) -> bool {
+        self.files
+            .values()
+            .any(|t| t.conn == conn && matches!(t.phase, Phase::Opening))
+    }
+
     /// Deliver every disk completion that is due.
     pub(crate) fn pump_disk(&mut self) -> bool {
         let mut progress = false;
