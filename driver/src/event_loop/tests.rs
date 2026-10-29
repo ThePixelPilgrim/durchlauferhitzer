@@ -649,3 +649,31 @@ fn clients_and_upstreams_get_tcp_nodelay() {
         "an upstream socket's buffer sizes"
     );
 }
+
+/// A3 (review A, Minor 3): one readiness of a listener accepts at most
+/// [`ACCEPT_BATCH`] (64) connections, so a flood of connects cannot hold
+/// the loop from its other descriptors and timers; the rest wait in the
+/// backlog, and the level-triggered listener is reported again.
+///
+/// [`ACCEPT_BATCH`]: super::clients::ACCEPT_BATCH
+#[test]
+fn one_readiness_accepts_at_most_64_connections() {
+    use crate::sys::socket::{local_addr, tcp_listen};
+    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 1024).unwrap();
+    let addr = local_addr(listener.as_fd()).unwrap();
+    let config = "listen 127.0.0.1:8080; limits { max_connections 1000; \
+        max_connections_per_ip 1000; } host a.test { path / { proxy 127.0.0.1:9; \
+        max_request_body 1MiB; max_response_body 1MiB; } }";
+    let core = Core::new(load(config).unwrap());
+    let (log, _logs) = LogSink::channel();
+    let mut driver = Driver::new(core, vec![listener], Vec::new(), 4, log).unwrap();
+    // `connect` returns once the handshake is done: all 100 are queued.
+    let _streams: Vec<std::net::TcpStream> = (0..100)
+        .map(|_| std::net::TcpStream::connect(addr).unwrap())
+        .collect();
+    assert_eq!(super::clients::ACCEPT_BATCH, 64);
+    driver.accept_all(0).unwrap();
+    assert_eq!(driver.clients.len(), 64);
+    driver.accept_all(0).unwrap();
+    assert_eq!(driver.clients.len(), 100);
+}

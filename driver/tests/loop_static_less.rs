@@ -1,6 +1,6 @@
 //! The epoll event loop on loopback with a config that has no static
-//! roots (stage 4 Task 5): fixed responses, keep-alive, the lingering
-//! close, a proxied exchange to a std backend, a backend's early answer
+//! roots (stage 4 Task 5): fixed responses, keep-alive, a burst of
+//! connects larger than one accept batch (A3), the lingering close, a proxied exchange to a std backend, a backend's early answer
 //! followed by a reset (the stage 3 I1 rule, DRV-10) and the header
 //! timeout (DRV-06). The fd-count check after a client reset is in
 //! `tests/loop_fd_leak.rs`, alone in its binary (R4).
@@ -63,6 +63,33 @@ fn stop_expecting(server: Server, logs: &[Log]) {
     assert_eq!(exit, Exit::Stopped);
     let expected: Vec<LogEntry> = logs.iter().cloned().map(LogEntry::Core).collect();
     assert_eq!(entries, expected);
+}
+
+/// A3: a burst of connects larger than one accept batch (64) is accepted
+/// in full: the listener is reported again until its backlog is empty.
+/// All 120 connect before any is served (the backlog is 128).
+#[test]
+fn a_burst_of_more_than_64_connects_is_accepted_in_full() {
+    let (_backend, backend_addr) = backend();
+    let config = config(backend_addr).replace("limits {", "limits { max_connections_per_ip 200;");
+    let server = Server::start(&config);
+    let mut clients: Vec<_> = (0..120).map(|_| server.connect()).collect();
+    for client in &mut clients {
+        client
+            .write_all(b"GET /x HTTP/1.1\r\nHost: other.test\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    }
+    for client in &mut clients {
+        let response = read_to_eof(client).unwrap();
+        assert!(
+            response.starts_with(b"HTTP/1.1 404 "),
+            "{}",
+            text(&response)
+        );
+    }
+    let (exit, entries) = server.stop();
+    assert_eq!(exit, Exit::Stopped);
+    assert_eq!(entries.len(), 120, "{entries:?}");
 }
 
 #[test]

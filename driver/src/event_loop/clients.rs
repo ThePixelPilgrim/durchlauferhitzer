@@ -16,12 +16,18 @@ use crate::sys::socket::{
     accept_nonblocking, read, set_nodelay, shutdown_write, take_error, write,
 };
 
+/// The most connections one readiness of a listener accepts (review A,
+/// Minor 3): a flood of connects cannot hold the loop from its other
+/// descriptors and timers. The rest wait in the backlog; the listener is
+/// level-triggered, so the next wait reports it again at once.
+pub(super) const ACCEPT_BATCH: usize = 64;
+
 impl Driver {
-    /// Accepts every pending connection on listener `i`, until it would
-    /// block. A failure that is not transient is logged (at most once a
-    /// second) and pauses every listener (DRV-16).
+    /// Accepts the pending connections on listener `i`, until it would
+    /// block or [`ACCEPT_BATCH`] are in. A failure that is not transient is
+    /// logged (at most once a second) and pauses every listener (DRV-16).
     pub(super) fn accept_all(&mut self, i: u32) -> io::Result<()> {
-        loop {
+        for _ in 0..ACCEPT_BATCH {
             match self.accepting.state() {
                 Accepting::Open => {}
                 Accepting::Paused { .. } => return Ok(()),
@@ -46,6 +52,7 @@ impl Driver {
                 },
             }
         }
+        Ok(())
     }
 
     /// The driver closed a descriptor: paused listeners resume at once

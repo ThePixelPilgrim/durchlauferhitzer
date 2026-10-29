@@ -62,7 +62,8 @@ src/
     accept.rs         the accept pause (DRV-16): `classify` (transient or
                       pause), `AcceptGate` (paused until a descriptor
                       closes or the 1 s retry; one log line a second)
-    clients.rs        accept, client reads, writes and errors, client
+    clients.rs        accept (at most `ACCEPT_BATCH`, 64, per readiness),
+                      client reads, writes and errors, client
                       actions, resuming the listeners
     upstreams.rs      `Connect` and its later answer, upstream reads and
                       writes by interest, error deferral, upstream actions
@@ -230,7 +231,8 @@ tests/
                     reader catches up (EPOLLOUT), then idles without a
                     spin; alone in its binary (CPU time is process-wide)
   loop_static_less.rs  the event loop on loopback, no static roots: fixed
-                    responses, keep-alive, lingering close, a proxied
+                    responses, keep-alive, 120 connects at once (more
+                    than one accept batch, A3), lingering close, a proxied
                     exchange, an early 413 then a reset (I1), a client
                     reset under interest `None`, the header timeout
   loop_fd_leak.rs   a client reset mid-relay leaks no descriptor; alone in
@@ -333,7 +335,10 @@ leaves a choice, this is what the loop does:
   `SO_ERROR` (`ECONNRESET`/`EPIPE` are `Reset`; a hang-up without an error
   is `Reset` too). The end of stream is reported once; the socket is not
   read again after it.
-- **Accept** (DRV-16). Loops until it would block. `ECONNABORTED`,
+- **Accept** (DRV-16). Loops until it would block, at most 64 times
+  per readiness (A3, `ACCEPT_BATCH`): the listener is level-triggered,
+  so the rest of a burst is accepted on the next turn, after the other
+  ready descriptors. `ECONNABORTED`,
   `EPROTO` and `EPERM` are skipped. Any other failure (`EMFILE`, `ENFILE`,
   `ENOBUFS`, `ENOMEM`, ...) is logged (`DriverLog::AcceptFailed`, at most
   once a second) and takes every listener out of the wait, so the loop
