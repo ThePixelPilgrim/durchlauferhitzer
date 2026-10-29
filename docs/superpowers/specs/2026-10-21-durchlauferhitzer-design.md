@@ -220,7 +220,8 @@ Structure and values:
   error.
 - **FR-CFG-10** [done] Top level allows only `listen` (required; one or
   more IP socket addresses; no duplicates; no port 0), `user` (optional),
-  at most one `limits` block and one or more `host` blocks.
+  at most one `limits` block, at most one `containment` block (FR-CFG-25,
+  [stage 5]) and one or more `host` blocks.
   Overlapping binds such as `0.0.0.0:80` + `127.0.0.1:80` are only detected
   at bind time [done in stage 4]: the addresses are bound in config order
   (`SO_REUSEADDR`, not `SO_REUSEPORT`), and the first failure
@@ -289,6 +290,7 @@ Structure and values:
   | `disk_threads` | 4 (disk worker pool size) | [done] |
   | `shutdown_timeout` | 30s (FR-PROC-05) | [done] |
   | `memory_limit` | 1GiB (budget for per-connection buffers, FR-CFG-21) | [done] |
+  | `ipv6_prefix` | 64 (per-IP grouping of IPv6 peers, FR-CONN-13; (owner decision 2026-10-29, stage 5 brainstorm)) | [stage 5] |
 
 - **FR-CFG-21** [done] Counts and sizes in `limits` are ≥ 1, durations are
   non-zero, `max_request_line` ≤ `max_head`, and `max_head` ≤ 1 MiB.
@@ -298,7 +300,9 @@ Structure and values:
     per-IP setting; when the key is not written its default is
     `min(64, max_connections)`, owner decision 2026-10-27); `max_headers` 1–1000; every duration (including
     `shutdown_timeout`) 1 ms – 24 h (written `1440m`); `disk_threads` 1–64; `memory_limit`
-    1 MiB – 1 TiB (written `1024GiB`).
+    1 MiB – 1 TiB (written `1024GiB`); `ipv6_prefix` 32–128 (a plain
+    number of bits; *builder call, stage 5 brainstorm:* below /32 one group
+    would span whole providers, so it is refused) [stage 5].
   - The config is rejected when `max_connections` × worst case per
     connection > `memory_limit`. The worst case is NFR-RES-01's buffer sum
     (`worst_case_per_connection` in `core/src/config/model.rs`); the proxy
@@ -310,6 +314,25 @@ Structure and values:
     refused (503) connections, the shared 4 KiB lingering scratch buffer,
     and driver-side buffers (disk readahead, the log buffer).
   - Arithmetic saturates; nothing wraps.
+- **FR-CFG-25** [stage 5] (owner decision 2026-10-29, stage 5 brainstorm) The optional top-level
+  `containment` block sets how strictly the containment layers of
+  FR-PROC-06 apply:
+
+  | key | values | default |
+  |---|---|---|
+  | `landlock` | `off`, `best_effort`, `required` | `best_effort` |
+  | `seccomp` | `off`, `best_effort`, `required` | `best_effort` |
+  | `seccomp_action` | `fail`, `kill` | `fail` |
+
+  `best_effort` uses the layer where the kernel supports it and otherwise
+  logs that it is missing and serves; `required` makes a missing or only
+  partly supported layer a startup error (exit 2, naming the layer and what
+  is missing); `off` skips the layer (and says so in the startup log).
+  `seccomp_action` is what an unexpected system call gets: `fail` makes it
+  return an error and the server keeps running; `kill` ends the process at
+  once. The setting is only meaningful with `seccomp` not `off`; written
+  with `seccomp off` it is an error (*builder call*: a setting that does
+  nothing is refused rather than ignored).
 - **FR-CFG-22** [done] Durations are `<u64>` followed by `ms`, `s` or `m`;
   sizes are plain bytes or `<u64>` followed by `KiB`, `MiB` or `GiB`; any
   other form, or an overflowing value, is an error.
@@ -999,9 +1022,16 @@ Failures, persistence, timeouts:
   a client EOF outside the lingering close closes it silently, except in
   the middle of a proxied request body, where it is logged
   (FR-PROXY-26, owner decision 2026-10-27).
-- **FR-CONN-13** [stage 5] Per-IP grouping of IPv6 peers by prefix (e.g.
-  /64), and fairness of the refused-connection pool; both before internet
-  exposure.
+- **FR-CONN-13** [stage 5] Per-IP grouping of IPv6 peers by prefix, and
+  fairness of the refused-connection pool; both before internet exposure.
+  (owner decision 2026-10-29, stage 5 brainstorm) IPv6 peers are counted for `max_connections_per_ip`
+  (FR-CONN-09) and orphans (FR-CONN-11) by their first `ipv6_prefix` bits
+  (FR-CFG-20, default /64, settable); IPv4 peers and IPv4-mapped IPv6 peers
+  stay per address. *Builder call, stage 5 brainstorm:* the refused pool
+  (FR-CONN-10) is shared fairly by holding at most `max_connections_per_ip`
+  refused connections per peer group at once; a further connection from a
+  group already at that count is logged as rejected and closed at once
+  with nothing written, so one source cannot crowd the 503s of others out.
 
 ### FR-LOG — Logging
 
@@ -1389,8 +1419,30 @@ Failures, persistence, timeouts:
   a missing static root). *(Stage 4 Task 8, builder call recorded per the
   plan:)* bad arguments exit 1, with the usage (FR-PROC-01).
 - **FR-PROC-06** [stage 5] Containment: Landlock restricts file access to
-  the static roots (a clear warning at startup if unavailable, and the
-  server runs); seccomp allow-lists the syscalls.
+  the static roots; seccomp allow-lists the system calls. (owner decision 2026-10-29, stage 5 brainstorm)
+  - Each layer is `off`, `best_effort` (the default) or `required` per
+    FR-CFG-25. Best effort: used where the kernel supports it; where it is
+    missing, or only partly supported, the startup log says so in one line
+    and the server serves. Required: a missing or only partly supported
+    layer stops startup (exit 2) with a message naming the layer and what is
+    missing. The startup log states each layer's outcome (active, missing,
+    partial, off).
+  - Landlock: after the privilege drop and before any worker thread, the
+    process may only read files and directories beneath its static roots
+    (and nothing else on the file system). "Partly supported" means the
+    kernel's Landlock ABI cannot enforce that (e.g. Landlock disabled, or an
+    ABI that leaves a needed right unrestricted). *Builder call:* network
+    rules (Landlock ABI 4) are not part of stage 5.
+  - seccomp: a per-architecture allow-list (x86_64, aarch64) of exactly the
+    system calls the server makes after startup, installed for every thread
+    before the loop runs. An unexpected call gets `seccomp_action`: `fail`
+    (the default) returns an error and the server keeps running; `kill`
+    ends the process. A crash or misbehaviour caused by a failed call is a
+    bug in the server (a missing allow-list entry or wrong error handling),
+    never the intended effect.
+  - All containment code lives in one small driver module behind one
+    interface, so a build without it (a future unikernel port, NFR-PORT-07)
+    can leave it out without touching the core.
 - **FR-PROC-07** [stage 6] Zero-downtime restart. With systemd: socket
   activation; the old process drains while new connections wait in the
   accept queue. Without systemd: on a signal, exec the new binary with the
@@ -1455,7 +1507,13 @@ Failures, persistence, timeouts:
 - **NFR-SEC-12** [done; Landlock and seccomp stage 5] Least privilege:
   never root after binding (FR-PROC-03, done in stage 4); Landlock and
   seccomp (FR-PROC-06).
-- **NFR-SEC-13** [stage 5] Parsers and the config language are fuzzed.
+- **NFR-SEC-13** [stage 5] Parsers and the config language are fuzzed:
+  the request-head parser, the chunked-body validator, the response-head
+  parser and the config parser and validator, each a fuzz target that must
+  never panic, hang or exceed its memory bound. *Builder call, stage 5
+  brainstorm:* `cargo-fuzz` (libFuzzer, nightly Rust) as test-only tooling
+  (NFR-MAINT-02); nothing of it reaches the binary, which stays on stable
+  Rust (NFR-PORT-06). Runs nightly and on demand (NFR-TEST-08).
 
 ### NFR-RES — Resource bounds
 
@@ -1597,11 +1655,18 @@ Failures, persistence, timeouts:
   (`PR_SET_NO_NEW_PRIVS`, then a filter that checks the architecture and
   fails only `openat2` with `ENOSYS`) and must exit 2 with the probe's
   message (`startup.rs` `without_openat2_startup_is_exit_2`).
-- **NFR-PORT-04** [stage 5] Landlock is used when available (FR-PROC-06).
+- **NFR-PORT-04** [stage 5] Landlock and seccomp are used when available,
+  best effort unless the config requires them (FR-PROC-06, FR-CFG-25).
 - **NFR-PORT-05** [done] systemd is optional (FR-PROC-02/03): without
   `LISTEN_PID`/`LISTEN_FDS` the process binds itself (stage 4 Task 8).
 - **NFR-PORT-06** [done] Stable Rust (toolchain pinned in
   `rust-toolchain.toml`), edition 2024.
+- **NFR-PORT-07** [later, not pursued now] (owner decision 2026-10-29, stage 5 brainstorm) Runs in
+  every environment it can: with systemd when present, standalone without
+  it, on x86_64 and aarch64; adapting it to a unikernel deployment should
+  stay feasible. Nothing in the core may depend on Linux-only facilities
+  (it is sans-IO already); Linux-specific containment stays in one driver
+  module (FR-PROC-06).
 
 ### NFR-MAINT — Maintainability and supply chain
 
@@ -1718,7 +1783,17 @@ Targets are set in stage 7 from measurements; none are invented here.
   every queued I/O and every disk completion due by then before the
   overdue `TimerFired`, as a real loop that overslept does. The randomized
   nets run one seed in four (`seed % 4 == 0`) in it.
-- **NFR-TEST-08** [stage 5] Long randomized runs and fuzzing.
+- **NFR-TEST-08** [stage 5] Long randomized runs and fuzzing. (owner decision 2026-10-29, stage 5 brainstorm)
+  A scheduled GitHub workflow runs them nightly, and it can be started by
+  hand (`workflow_dispatch`). Long runs are the randomized sim nets with
+  many more seeds than the per-push gate (the seed range set by an
+  environment variable); fuzzing runs each NFR-SEC-13 target for a fixed
+  time. A failure reports what replays it: the seed (with its timer order
+  and drain plan) or the fuzz input, kept as a workflow artifact. Stage 5
+  also closes two gaps in the nets: backends that send some bytes and then
+  reset are drawn in the randomized proxy net, and the static net's drain
+  oracle gets a parser model, so it no longer accepts a 503 for a head the
+  parser rejects (FR-PROC-05b).
 
 ---
 
@@ -1865,8 +1940,10 @@ project working and tested.
    socket activation, SIGTERM drain, a few smoke tests over real loopback
    sockets. First runnable release.
 5. **Containment** — Landlock (restrict file access to static roots),
-   seccomp (allow-list of syscalls), long randomized simulation runs,
-   fuzzing, IPv6 per-IP grouping.
+   seccomp (allow-list of syscalls), both best effort unless required by
+   the config (FR-PROC-06, FR-CFG-25); long randomized simulation runs and
+   fuzzing, nightly and on demand (NFR-TEST-08, NFR-SEC-13); IPv6 per-IP
+   grouping by a settable prefix and a fair refused pool (FR-CONN-13).
 6. **Zero-downtime restart** — FR-PROC-07.
 7. **Scaling and efficiency** — N driver threads with `SO_REUSEPORT`,
    backend connection pooling, conditional requests (ETag /
