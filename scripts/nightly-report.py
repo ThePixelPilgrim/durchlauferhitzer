@@ -25,7 +25,8 @@ normalized text, which names the failure, not the seed or input:
                message with run-varying numbers replaced by N;
   fuzz         job, target, and the same panic location and message, or
                the kind (oom, timeout, leak, crash);
-  older glibc  job and the failing test's name.
+  older glibc  job and the failing test's name;
+  a job that timed out or was cancelled (no record): `<job>|timeout-or-cancelled`.
 Log text is untrusted: it only ever lands in record fields and issue
 bodies (fenced), never in a command line other than as one argv item.
 """
@@ -133,6 +134,9 @@ def describe(job, f):
     if kind == "unrecognized":
         key = f"{job}|unrecognized"
         reason = "failed without a recognized failure"
+    elif kind == "timeout-or-cancelled":
+        key = f"{job}|timeout-or-cancelled"
+        reason = "timed out or was cancelled, no failure record"
     elif job == "older-glibc":
         key = f"{job}|{test}"
         reason = f"{test} failed"
@@ -386,13 +390,24 @@ def load_records(directory):
 
 
 def add_missing(records, needs, run_url):
-    """A record for each failed job (by `needs`) that left none."""
+    """A record for each failed or cancelled job (by `needs`) that left
+    none. A job ended by `timeout-minutes` concludes `cancelled` and runs
+    no `if: failure()` step, so it never writes a record; a job cancelled
+    by hand looks the same and is reported too (controller ruling
+    2026-11-02)."""
     have = {r["job"] for r in records}
     out = list(records)
     for job, info in needs.items():
-        if isinstance(info, dict) and info.get("result") == "failure" and job not in have:
+        if not isinstance(info, dict) or job in have:
+            continue
+        result = info.get("result")
+        if result == "failure":
             why = "The job failed but left no failure record; see the run."
             out.append(make_record(job, "", run_url, [_unrecognized(why)]))
+        elif result == "cancelled":
+            why = "The job timed out (timeout-minutes) or was cancelled; see the run."
+            f = _failure(kind="timeout-or-cancelled", panic_text=why)
+            out.append(make_record(job, "", run_url, [f]))
     return out
 
 

@@ -242,9 +242,12 @@ jobs:
     # labelled `nightly`, at most three per run. The only job that may
     # write issues (the built-in token, no other secret); it reads the
     # failure records and runs nothing from the checkout but the script.
+    # A job ended by `timeout-minutes` concludes `cancelled`, so cancelled
+    # jobs are reported too (`always()`: a run cancelled by hand files as
+    # well; controller ruling 2026-11-02).
     name: report failures
     needs: [long-runs, fuzz, older-glibc]
-    if: ${{ !cancelled() && contains(needs.*.result, 'failure') }}
+    if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -263,7 +266,8 @@ jobs:
           path: failures
       - name: File or update issues
         # A failed job that left no record (it failed before writing
-        # one) still gets an issue, from `needs`.
+        # one) still gets an issue, from `needs`; so does a cancelled one
+        # (timed out), as `<job>|timeout-or-cancelled`.
         run: |
           printf '%s' "$NEEDS" > needs.json
           python3 scripts/nightly-report.py report --records failures \

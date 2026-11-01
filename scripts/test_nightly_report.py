@@ -456,6 +456,27 @@ class Cli(unittest.TestCase):
             self.assertEqual([r["job"] for r in records], ["long-runs", "fuzz"])
             self.assertEqual(records[1]["failures"][0]["kind"], "unrecognized")
 
+    def test_a_cancelled_job_without_a_record_is_timeout_or_cancelled(self):
+        # A job ended by `timeout-minutes` (or cancelled by hand) concludes
+        # `cancelled` and writes no record (controller ruling 2026-11-02).
+        records = [nr.make_record("long-runs", "x86_64", RUN, [nr._unrecognized("x")])]
+        needs = {
+            "long-runs": {"result": "cancelled"},
+            "fuzz": {"result": "cancelled"},
+            "older-glibc": {"result": "skipped"},
+        }
+        records = nr.add_missing(records, needs, RUN)
+        self.assertEqual([r["job"] for r in records], ["long-runs", "fuzz"])
+        f = records[1]["failures"][0]
+        self.assertEqual(f["kind"], "timeout-or-cancelled")
+        fp, title = nr.describe("fuzz", f)
+        self.assertEqual(fp, nr.fingerprint("fuzz|timeout-or-cancelled"))
+        self.assertEqual(
+            title, f"nightly: fuzz — timed out or was cancelled, no failure record [{fp}]"
+        )
+        groups = nr.group(records)
+        self.assertEqual(len(groups), 2)
+
     def test_a_missing_log_is_unrecognized(self):
         self.assertEqual(nr.record_older_glibc(None, WS)[0]["kind"], "unrecognized")
 

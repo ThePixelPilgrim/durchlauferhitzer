@@ -157,7 +157,7 @@ cd fuzz && cargo +nightly fuzz run --debug-assertions request_head -- -max_total
 
 A failing seed prints its `SIM_SEED=<seed>` replay line; the targets and
 crash replay are in [`fuzz/README.md`](fuzz/README.md).
-A failing nightly job files or updates a GitHub issue labelled `nightly`,
+A failing (or timed-out) nightly job files or updates a GitHub issue labelled `nightly`,
 keyed by a fingerprint of the failure (`scripts/nightly-report.py`).
 
 ## Repository layout
