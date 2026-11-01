@@ -17,7 +17,7 @@ on:
         type: number
         default: 600
 
-# The jobs only read the repository.
+# The jobs only read the repository; only `report` writes issues.
 permissions:
   contents: read
 
@@ -25,6 +25,8 @@ env:
   # A scheduled run has no inputs: the defaults above.
   SIM_SEEDS: ${{ inputs.seeds || '0..200000' }}
   FUZZ_SECONDS: ${{ inputs.fuzz_seconds || 600 }}
+  # The failure records link the run.
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
 jobs:
   long-runs:
@@ -70,6 +72,22 @@ jobs:
           path: |
             failing-seed.txt
             long-runs.log
+      # Every job's failure record (scripts/nightly-report.py) goes to
+      # `report`, which files or updates the issue.
+      - name: Failure record
+        if: failure()
+        run: >-
+          python3 scripts/nightly-report.py record --job long-runs
+          --arch "$ARCH" --run-url "$RUN_URL" --out failure.json long-runs.log
+        env:
+          ARCH: ${{ matrix.arch }}
+      - name: Upload the failure record
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-failure-long-runs-${{ matrix.arch }}
+          path: failure.json
+          if-no-files-found: ignore
 
   fuzz:
     name: fuzz
@@ -101,11 +119,13 @@ jobs:
         # -rss_limit_mb for the process, -malloc_limit_mb for one
         # allocation (inputs are a few KiB, so 64 MiB in one malloc
         # is a bug) and -timeout per input; a crash, leak, OOM or timeout
-        # input lands in fuzz/artifacts/<target>/.
+        # input lands in fuzz/artifacts/<target>/. Each target's output
+        # is kept in fuzz/logs/<target>.log for the failure record.
         working-directory: fuzz
         run: |
           set -uo pipefail
           status=0
+          mkdir -p logs
           for t in $TARGETS; do
             echo "== $t ($FUZZ_SECONDS s)"
             # The head targets get HTTP tokens (fuzz/http.dict).
@@ -113,7 +133,7 @@ jobs:
             case "$t" in *_head) dict=(-dict=http.dict) ;; esac
             cargo +"$NIGHTLY" fuzz run --debug-assertions "$t" -- \
               -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -malloc_limit_mb=64 -timeout=10 \
-              "${dict[@]}" || status=1
+              "${dict[@]}" 2>&1 | tee "logs/$t.log" || status=1
           done
           exit "$status"
       - name: Save the corpus
@@ -128,6 +148,19 @@ jobs:
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts
+      - name: Failure record
+        if: failure()
+        run: >-
+          python3 scripts/nightly-report.py record --job fuzz --arch x86_64
+          --toolchain "$NIGHTLY" --run-url "$RUN_URL" --out failure.json
+          fuzz/logs/*.log
+      - name: Upload the failure record
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-failure-fuzz
+          path: failure.json
+          if-no-files-found: ignore
 
   older-glibc:
     # Debian 12 (glibc 2.36): the seccomp allow-list holds for an older
@@ -155,10 +188,11 @@ jobs:
       TMPDIR: /tmp
     steps:
       - name: Install build tools
-        # gcc is only the linker against the system glibc.
+        # gcc is only the linker against the system glibc; python3 writes
+        # the failure record.
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev git util-linux
+          apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev git util-linux python3
           command -v setpriv
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install rustup and the pinned toolchain
@@ -188,3 +222,53 @@ jobs:
       - name: Skips
         if: always()
         run: grep 'skipped:' driver-tests.log || echo "no skips"
+      - name: Failure record
+        if: failure()
+        run: >-
+          python3 scripts/nightly-report.py record --job older-glibc --arch x86_64
+          --run-url "$RUN_URL" --out failure.json driver-tests.log
+      - name: Upload the failure record
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-failure-older-glibc
+          path: failure.json
+          if-no-files-found: ignore
+
+  report:
+    # A failing job files or updates a GitHub issue keyed by the
+    # failure's fingerprint (NFR-TEST-08, scripts/nightly-report.py):
+    # a comment on an open one, a reopened closed one, or a new one
+    # labelled `nightly`, at most three per run. The only job that may
+    # write issues (the built-in token, no other secret); it reads the
+    # failure records and runs nothing from the checkout but the script.
+    name: report failures
+    needs: [long-runs, fuzz, older-glibc]
+    if: ${{ !cancelled() && contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts/nightly-report.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      # Pinned by commit: the v8.0.2 tag as of 2026-11-01.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: nightly-failure-*
+          path: failures
+      - name: File or update issues
+        # A failed job that left no record (it failed before writing
+        # one) still gets an issue, from `needs`.
+        run: |
+          printf '%s' "$NEEDS" > needs.json
+          python3 scripts/nightly-report.py report --records failures \
+            --needs needs.json --run-url "$RUN_URL"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEEDS: ${{ toJSON(needs) }}
