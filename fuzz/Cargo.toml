@@ -1,0 +1,44 @@
+# Fuzz targets for the parsers and the config language (NFR-SEC-13).
+# Test-only tooling (NFR-MAINT-02): outside the workspace and the product
+# tree, built with nightly Rust by `cargo fuzz` (see README.md).
+[package]
+name = "durchlauferhitzer-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+durchlauferhitzer-core = { path = "../core" }
+
+[[bin]]
+name = "request_head"
+path = "fuzz_targets/request_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunked"
+path = "fuzz_targets/chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response_head"
+path = "fuzz_targets/response_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false

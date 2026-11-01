@@ -147,6 +147,7 @@ exit 2.
 - [`core/`](core) — the product: a sans-IO HTTP core with zero dependencies (config, parsing, routing, static files, proxying).
 - [`driver/`](driver) — the `durchlauferhitzer` binary: the Linux `epoll` driver that runs the core over real sockets, files, threads and signals.
 - [`sim/`](sim) — test-only simulation driver: simulated network, clock, file system and backends, with contract checks and randomized runs.
+- [`fuzz/`](fuzz) — test-only fuzz targets for the parsers and the config (outside the workspace).
 - [`examples/`](examples) — documented example configuration.
 - [`docs/superpowers/`](docs/superpowers) — design spec, implementation plans per stage, and review records.
 - [`scripts/`](scripts) — CI helpers (product dependency check).

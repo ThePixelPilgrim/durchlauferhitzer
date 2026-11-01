@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["core", "sim", "driver"]
+# Test-only fuzz targets (NFR-SEC-13): their own crate and lock file,
+# built with nightly Rust by `cargo fuzz`, never by the gate.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
