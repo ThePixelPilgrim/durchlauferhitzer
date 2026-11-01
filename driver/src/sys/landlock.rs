@@ -8,12 +8,14 @@ use std::io;
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
-use super::fd::cvt;
+use super::fd::set_no_new_privs;
 
 /// The kernel's Landlock ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Abi {
-    /// No Landlock: not built in (`ENOSYS`) or not enabled (`EOPNOTSUPP`).
+    /// No usable Landlock: not built in (`ENOSYS`), disabled
+    /// (`EOPNOTSUPP`), or the probe refused (e.g. `EPERM` from a
+    /// container's seccomp filter).
     Missing,
     /// The highest ABI version the kernel supports (1 is Linux 5.14).
     Version(u32),
@@ -126,8 +128,12 @@ pub fn gaps(abi: u32) -> Vec<Gap> {
 /// rule per root allowing only `READ_FILE | READ_DIR` (added from the
 /// descriptor, an `O_PATH` one is enough: no path lookup), then
 /// `PR_SET_NO_NEW_PRIVS` and `landlock_restrict_self`. Threads that
-/// already run are not restricted. `abi` must not exceed the kernel's
-/// ([`abi`]), or the ruleset is `EINVAL`. No root: nothing is readable.
+/// already run are not restricted. `abi` must not name a filesystem
+/// right the kernel lacks (pass the kernel's [`abi`] or less), or the
+/// ruleset is `EINVAL`. No root: nothing is readable. Each error names
+/// its step (and root, by index) and keeps its [`io::ErrorKind`]; a
+/// failure of `landlock_restrict_self` leaves `no_new_privs` set without
+/// a restriction.
 pub fn restrict_to_reading(roots: &[BorrowedFd<'_>], abi: u32) -> io::Result<()> {
     let attr = RulesetAttr {
         handled_access_fs: handled_access(abi),
@@ -142,8 +148,8 @@ pub fn restrict_to_reading(roots: &[BorrowedFd<'_>], abi: u32) -> io::Result<()>
             0_u32,
         )
     };
-    let ruleset = descriptor(ret)?;
-    for root in roots {
+    let ruleset = descriptor(ret).map_err(step("landlock_create_ruleset"))?;
+    for (i, root) in roots.iter().enumerate() {
         let rule = PathBeneathAttr {
             allowed_access: READ_FILE | READ_DIR,
             parent_fd: root.as_raw_fd(),
@@ -159,25 +165,19 @@ pub fn restrict_to_reading(roots: &[BorrowedFd<'_>], abi: u32) -> io::Result<()>
                 0_u32,
             )
         };
-        check(ret)?;
+        check(ret).map_err(step(&format!("landlock_add_rule (root {i})")))?;
     }
-    let zero: libc::c_ulong = 0;
-    // SAFETY: `PR_SET_NO_NEW_PRIVS` takes no pointers; the kernel
-    // requires the three unused arguments to be 0.
-    cvt(unsafe {
-        libc::prctl(
-            libc::PR_SET_NO_NEW_PRIVS,
-            1 as libc::c_ulong,
-            zero,
-            zero,
-            zero,
-        )
-    })?;
+    set_no_new_privs().map_err(step("PR_SET_NO_NEW_PRIVS"))?;
     // SAFETY: `ruleset` is an open Landlock ruleset descriptor; no
     // pointers are passed.
     let ret =
         unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset.as_raw_fd(), 0_u32) };
-    check(ret)
+    check(ret).map_err(step("landlock_restrict_self"))
+}
+
+/// Prefixes an error with the step that failed, keeping its kind.
+fn step(what: &str) -> impl FnOnce(io::Error) -> io::Error + '_ {
+    move |err| io::Error::new(err.kind(), format!("{what}: {err}"))
 }
 
 /// `syscall`'s `-1`-and-errno check for a call returning 0.

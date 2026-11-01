@@ -136,7 +136,8 @@ src/
                       flush), `pipe` (pipe2, O_CLOEXEC);
                       `claim_inherited` (crate-private, A2: an
                       inherited descriptor: open without FD_CLOEXEC,
-                      then marked)
+                      then marked); `set_no_new_privs` (crate-private,
+                      seccomp and Landlock)
     env.rs            `remove_vars`: only while the process has one thread
     epoll.rs          `Epoll` (level-triggered), `Readiness` (mirrors the
                       core's `Interest`; `has_read`, `has_write`,

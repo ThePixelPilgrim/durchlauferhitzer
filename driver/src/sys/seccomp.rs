@@ -3,7 +3,7 @@
 
 use std::io;
 
-use super::fd::cvt;
+use super::fd::set_no_new_privs;
 
 /// `__AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE` (`linux/audit.h`).
 const AUDIT_64BIT_LE: u32 = 0x8000_0000 | 0x4000_0000;
@@ -65,18 +65,7 @@ pub fn install(program: &[libc::sock_filter]) -> io::Result<()> {
                 format!("a filter of {} instructions", program.len()),
             )
         })?;
-    let zero: libc::c_ulong = 0;
-    // SAFETY: `PR_SET_NO_NEW_PRIVS` takes no pointers; the kernel
-    // requires the three unused arguments to be 0.
-    cvt(unsafe {
-        libc::prctl(
-            libc::PR_SET_NO_NEW_PRIVS,
-            1 as libc::c_ulong,
-            zero,
-            zero,
-            zero,
-        )
-    })?;
+    set_no_new_privs()?;
     let prog = libc::sock_fprog {
         len,
         filter: program.as_ptr().cast_mut(),

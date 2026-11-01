@@ -2,7 +2,8 @@
 //! `-1`/errno checks every wrapper uses; plus the descriptor-level calls
 //! of the log sink (FR-LOG-06): `write(2)`, the file status flags
 //! (`O_NONBLOCK`), `poll(2)` for writability (the bounded final flush),
-//! and `pipe2` (its tests write to a pipe).
+//! and `pipe2` (its tests write to a pipe); `PR_SET_NO_NEW_PRIVS` for
+//! seccomp and Landlock.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -29,6 +30,24 @@ pub(crate) fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
     } else {
         Ok(ret)
     }
+}
+
+/// `prctl(PR_SET_NO_NEW_PRIVS, 1)`: no later `execve` can gain
+/// privileges, so seccomp and Landlock need none. It cannot be undone.
+pub(crate) fn set_no_new_privs() -> io::Result<()> {
+    let zero: libc::c_ulong = 0;
+    // SAFETY: `PR_SET_NO_NEW_PRIVS` takes no pointers; the kernel
+    // requires the three unused arguments to be 0.
+    cvt(unsafe {
+        libc::prctl(
+            libc::PR_SET_NO_NEW_PRIVS,
+            1 as libc::c_ulong,
+            zero,
+            zero,
+            zero,
+        )
+    })?;
+    Ok(())
 }
 
 /// Like [`cvt`], retrying while the call is interrupted (`EINTR`).
