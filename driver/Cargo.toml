@@ -26,3 +26,9 @@ libc = { version = "0.2.191", default-features = false }
 [[test]]
 name = "env_remove"
 harness = false
+
+# `sys::seccomp::install` filters the whole process: one test in its own
+# process, with its own `main`.
+[[test]]
+name = "seccomp_self"
+harness = false

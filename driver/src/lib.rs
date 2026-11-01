@@ -15,6 +15,7 @@ compile_error!(
 );
 
 mod conns;
+mod containment;
 pub mod event_loop;
 pub mod log;
 mod pool;

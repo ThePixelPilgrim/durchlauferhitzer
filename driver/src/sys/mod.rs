@@ -13,6 +13,7 @@ pub mod eventfd;
 pub mod fd;
 pub mod file;
 pub mod rlimit;
+pub mod seccomp;
 pub mod signal;
 pub mod socket;
 pub mod user;

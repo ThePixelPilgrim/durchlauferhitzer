@@ -95,6 +95,21 @@ src/
     buffer.rs         `EntryBuffer`: 64 KiB of whole entries, drop and
                       count when full, the `dropped` line once there is
                       room, before newer entries
+  containment.rs    containment (FR-PROC-06, crate-private): for now only
+                    the filter generator
+    filter.rs         the seccomp allow-list: `Arch` (`X86_64 | Aarch64`,
+                      `current()`), one table per arch (the calls the
+                      server makes after startup, grouped by purpose, from
+                      `strace -f` over the driver tests), `program(arch,
+                      action)`: the arch check, then each call with its
+                      argument checks (`socket` AF_INET/AF_INET6 streams,
+                      `mmap`/`mprotect` without PROT_EXEC, `clone` with
+                      glibc's thread flags, `prctl` PR_SET_NAME, `fcntl`
+                      F_GETFD/F_GETFL/F_SETFL; `clone3` ENOSYS), the
+                      action for the rest (`fail`: EPERM, `kill`); never
+                      `truncate`, `ftruncate`, `ioctl` or `execve`
+      tests.rs          a classic-BPF interpreter runs the program on
+                        synthetic calls, both tables, both actions
   systemd.rs        socket activation (A7, crate-private): `take_sockets`
                     reads and removes `LISTEN_PID`/`LISTEN_FDS`
                     (`parse_env`, pure), claims fds 3.., checks each (TCP,
@@ -149,6 +164,11 @@ src/
                       `capabilities` (capget → `Capabilities`)
     rlimit.rs         `nofile`, `raise_nofile`, `set_soft_nofile`
                       (RLIMIT_NOFILE)
+    seccomp.rs        `supported` (`Support`: ERRNO and KILL_PROCESS
+                      available, SECCOMP_GET_ACTION_AVAIL), `install`
+                      (PR_SET_NO_NEW_PRIVS, then the filter with TSYNC |
+                      LOG; a thread that cannot be synchronized is an
+                      error)
 tests/
   cli.rs            the binary in a subprocess: the usage for bad
                     arguments, `--check` (ok, each kind of error with its
@@ -216,6 +236,11 @@ tests/
                     empty (OA2): as nobody started with an ambient
                     `CAP_NET_BIND_SERVICE`, and as root started with it
                     inheritable
+  seccomp_self.rs   `install` in the test's own process (no harness, one
+                    test): a filter refusing `getppid` (EPERM) covers the
+                    main thread and a thread started before it
+                    (`/proc/self/task/*/status`: `Seccomp: 2`); an empty
+                    or too long program is `InvalidInput`
   stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
                     the test binary: non-blocking while it lives, a second
                     one refused (`AlreadyExists`), the mode back after it
