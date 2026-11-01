@@ -497,7 +497,7 @@ fn forward_alts(
                 Timing::Eager => BackendExp {
                     bytes: fwd.bytes.clone(),
                     min: match script.ending {
-                        Ending::Reset(_) => 0,
+                        Ending::Reset(_) | Ending::ResetAfter(_) => 0,
                         Ending::Done { .. } | Ending::Eof(_) => fwd.head_len,
                     },
                     max: fwd.bytes.len(),
@@ -510,6 +510,21 @@ fn forward_alts(
                 tags.push("early response");
             }
             tags.extend(script.tag);
+            if let Ending::ResetAfter(k) = script.ending {
+                let cut = match &script.reply {
+                    Reply::Relay(r) => r.cut.is_some(),
+                    Reply::Fail(_) => false,
+                };
+                tags.push(if k == 0 {
+                    "reset with bytes: none"
+                } else if k < script.head_end {
+                    "reset with bytes: within the head"
+                } else if cut {
+                    "reset with bytes: within the body"
+                } else {
+                    "reset with bytes: after the head, no cut"
+                });
+            }
             if script.head_end > 0 && script.wire.starts_with(b"HTTP/1.1 10") {
                 tags.push("interim heads");
             }
@@ -617,7 +632,7 @@ fn relay_alts(
     };
     let mut whole = cont.to_vec();
     whole.extend_from_slice(&r.head);
-    let cut_alt = |kind: BackendFailure, n: usize, tags: &[&'static str]| {
+    let cut_alt = |kind: BackendFailure, n: usize, delivery: Delivery, tags: &[&'static str]| {
         let mut bytes = whole.clone();
         bytes.extend_from_slice(&r.body[..n.min(r.body.len())]);
         let mut tags = tags.to_vec();
@@ -625,7 +640,10 @@ fn relay_alts(
         tags.push(cut_tag(kind));
         Alt {
             bytes,
-            cut: true,
+            cut: match delivery {
+                Delivery::Prefix => true,
+                Delivery::All => false,
+            },
             logs: vec![proxied.clone(), failed(kind)],
             closes: true,
             upstream: Some(up.clone()),
@@ -655,6 +673,7 @@ fn relay_alts(
             return vec![cut_alt(
                 BackendFailure::ResponseTimeout,
                 k - script.head_end,
+                Delivery::Prefix,
                 &tags,
             )];
         }
@@ -697,12 +716,15 @@ fn relay_alts(
             }
             let mut t = tags.clone();
             t.push("body error after the response head");
-            out.push(cut_alt(*e, *bound, &t));
+            out.push(cut_alt(*e, *bound, Delivery::Prefix, &t));
         }
         return out;
     }
-    if let Some((kind, n)) = r.cut {
-        return vec![cut_alt(kind, n, &tags)];
+    if let Some((kind, n, delivery)) = r.cut {
+        if delivery == Delivery::All {
+            tags.push("cut Reset with every byte before it");
+        }
+        return vec![cut_alt(kind, n, delivery, &tags)];
     }
     tags.push(match r.kind {
         BodyKind::None => "body None",

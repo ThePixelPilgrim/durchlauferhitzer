@@ -9,8 +9,14 @@ use super::*;
 pub(crate) enum Ending {
     /// Everything is sent; then maybe an end of stream.
     Done { eof: bool },
-    /// The first `n` bytes are sent, then the backend resets.
+    /// The first `n` bytes are sent, then the backend resets once the
+    /// core went idle (`Sim::backend_reset`: bytes the driver has not read
+    /// by then are lost).
     Reset(usize),
+    /// The first `n` bytes are sent with the reset queued behind them
+    /// (`Sim::backend_reset_after`): the driver reports every one of them
+    /// before the reset (DRV-10).
+    ResetAfter(usize),
     /// The first `n` bytes are sent, then the backend closes.
     Eof(usize),
 }
@@ -59,8 +65,34 @@ pub(crate) struct Relay {
     /// The body breaks a rule at this offset into `body`: a cut, or a 502
     /// when the offending bytes came with the head.
     pub(crate) fails: Option<(Vec<BackendFailure>, usize)>,
-    /// The backend fails after this many body bytes: a cut.
-    pub(crate) cut: Option<(BackendFailure, usize)>,
+    /// The backend fails after this many body bytes: a cut, in which the
+    /// client gets those bytes as `Delivery` says.
+    pub(crate) cut: Option<(BackendFailure, usize, Delivery)>,
+}
+
+/// What a client gets of a response the backend cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// Any prefix of the head and the body bytes before the cut.
+    Prefix,
+    /// The head and every body byte before the cut, then the close: a
+    /// reset is reported only by a read after the bytes before it (DRV-10),
+    /// and the upstream is read only once every body byte read before was
+    /// sent (NFR-RES-04), the head ahead of them. (Without a body byte to
+    /// relay nothing holds the read back while the head is still queued:
+    /// the cut may drop part of it, `Prefix`.)
+    All,
+}
+
+/// Which resets a script may end with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Resets {
+    /// Only `Ending::Reset`.
+    Late,
+    /// Also `Ending::ResetAfter`: the backend answers only once the core
+    /// wrote the request head, so every reset is reported by a read
+    /// (DRV-10), never by a write under `Write` alone.
+    WithBytes,
 }
 
 /// What the response answers.
@@ -78,6 +110,7 @@ pub(crate) struct Ctx {
     pub(crate) need_body: bool,
     /// Allow a large body (the client's window is not tiny).
     pub(crate) large: bool,
+    pub(crate) resets: Resets,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,6 +499,13 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         } else {
             match rng.u8(0..10) {
                 0 => Ending::Reset(rng.usize(0..=body_end)),
+                // Before any byte, within the body, at its end, anywhere.
+                2 if ctx.resets == Resets::WithBytes => Ending::ResetAfter(match rng.u8(0..5) {
+                    0 => 0,
+                    1 => rng.usize(head_end..=body_end),
+                    2 => body_end,
+                    _ => rng.usize(0..=body_end),
+                }),
                 1 if kind != BodyKind::UntilClose => Ending::Eof(rng.usize(0..=body_end)),
                 _ => Ending::Done {
                     eof: kind == BodyKind::UntilClose || rng.bool(),
@@ -516,9 +556,11 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     };
     // A failure before the head is complete is a 502 too.
     let reply = match ending {
-        Ending::Reset(k) if k < head_end => Reply::Fail(BackendFailure::Reset),
+        Ending::Reset(k) | Ending::ResetAfter(k) if k < head_end => {
+            Reply::Fail(BackendFailure::Reset)
+        }
         Ending::Eof(k) if k < head_end => Reply::Fail(BackendFailure::ClosedEarly),
-        Ending::Reset(_) | Ending::Eof(_) | Ending::Done { .. } => reply,
+        Ending::Reset(_) | Ending::ResetAfter(_) | Ending::Eof(_) | Ending::Done { .. } => reply,
     };
     Script {
         wire,
@@ -622,13 +664,32 @@ fn relay(
     }
     let complete = |k: usize| k >= body_end && kind != BodyKind::UntilClose;
     let cut = match ending {
-        Ending::Reset(k) if !complete(k) && kind != BodyKind::None => {
-            Some((BackendFailure::Reset, k.saturating_sub(head_end)))
+        Ending::Reset(k) if !complete(k) && kind != BodyKind::None => Some((
+            BackendFailure::Reset,
+            k.saturating_sub(head_end),
+            Delivery::Prefix,
+        )),
+        // Every body byte before the reset reaches the client; of a
+        // chunked body, up to the last whole unit of framing (an
+        // incomplete size line or CRLF is held back, NFR-RES-04).
+        Ending::ResetAfter(k) if !complete(k) && kind != BodyKind::None => {
+            let sent = k.saturating_sub(head_end);
+            let n = match chunk {
+                Some(c) if kind == BodyKind::Chunked => forwardable(&unit_ends(c), sent),
+                Some(_) | None => sent,
+            };
+            let delivery = match n {
+                0 => Delivery::Prefix,
+                _ => Delivery::All,
+            };
+            Some((BackendFailure::Reset, n, delivery))
         }
-        Ending::Eof(k) if !complete(k) && kind != BodyKind::None => {
-            Some((BackendFailure::ClosedEarly, k.saturating_sub(head_end)))
-        }
-        Ending::Reset(_) | Ending::Eof(_) | Ending::Done { .. } => None,
+        Ending::Eof(k) if !complete(k) && kind != BodyKind::None => Some((
+            BackendFailure::ClosedEarly,
+            k.saturating_sub(head_end),
+            Delivery::Prefix,
+        )),
+        Ending::Reset(_) | Ending::ResetAfter(_) | Ending::Eof(_) | Ending::Done { .. } => None,
     };
     Reply::Relay(Relay {
         status: code,

@@ -243,7 +243,7 @@ impl Story {
 fn script_target(script: &Script) -> usize {
     match script.ending {
         Ending::Done { .. } => script.wire.len(),
-        Ending::Reset(k) | Ending::Eof(k) => k,
+        Ending::Reset(k) | Ending::ResetAfter(k) | Ending::Eof(k) => k,
     }
 }
 
@@ -404,8 +404,19 @@ fn do_step(
             };
             if run.sent < target {
                 let n = rng.usize(1..=target - run.sent);
-                sim.backend_send(up, &script.wire[run.sent..run.sent + n]);
+                let piece = &script.wire[run.sent..run.sent + n];
                 run.sent += n;
+                match script.ending {
+                    // The last piece goes with the reset behind it.
+                    Ending::ResetAfter(_) if run.sent == target => {
+                        run.ended = true;
+                        sim.backend_reset_after(up, piece);
+                    }
+                    Ending::ResetAfter(_)
+                    | Ending::Done { .. }
+                    | Ending::Reset(_)
+                    | Ending::Eof(_) => sim.backend_send(up, piece),
+                }
             } else {
                 run.ended = true;
                 match script.ending {
@@ -415,6 +426,7 @@ fn do_step(
                         sim.run_until_idle();
                         sim.backend_reset(up);
                     }
+                    Ending::ResetAfter(_) => sim.backend_reset_after(up, &[]),
                 }
             }
         }

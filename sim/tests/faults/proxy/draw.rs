@@ -62,6 +62,21 @@ pub(crate) fn random_exchange(
             valid_only: false,
             need_body: false,
             large: rng.u8(0..3) == 0,
+            // An eager backend may answer while the request head is still
+            // being written: a reset then fails that write at once.
+            resets: match timing {
+                Timing::Eager => Resets::Late,
+                Timing::Normal
+                | Timing::Early { .. }
+                | Timing::ConnectHang
+                | Timing::Silent
+                | Timing::PartialHead(_)
+                | Timing::ClientBodyStall(_)
+                | Timing::BackendBodyStall(_)
+                | Timing::RelayStall(_)
+                | Timing::ClientStall
+                | Timing::HeadDuringUpload { .. } => Resets::WithBytes,
+            },
         };
         script = Some(random_script(rng, &ctx));
     }
@@ -109,6 +124,7 @@ fn timed_exchange(
         valid_only: true,
         need_body: kind == 5,
         large: false,
+        resets: Resets::Late,
     };
     let script = matches!(kind, 2 | 5 | 6 | 7).then(|| random_script(rng, &ctx));
     let (connect, timing) = match kind {

@@ -290,6 +290,12 @@ pub(crate) const REQUIRED: &[&str] = &[
     "cut BadChunk",
     "cut BodyTooLarge",
     "cut ResponseTimeout",
+    // Bytes, then a reset behind them (`Sim::backend_reset_after`).
+    "reset with bytes: none",
+    "reset with bytes: within the head",
+    "reset with bytes: within the body",
+    "reset with bytes: after the head, no cut",
+    "cut Reset with every byte before it",
     "client send timeout",
     "client reset",
     "client end of stream",

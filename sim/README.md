@@ -123,13 +123,16 @@ clients (bodies by `Content-Length` and chunked, `Expect`, oversized bodies,
 pipelining, half-closes, resets, smuggling attempts) against random backends
 (refused, hanging or slow connects; `Content-Length`, chunked,
 close-delimited and empty responses of up to 2 MiB; interim heads; malformed
-and hostile heads; bytes after the body; resets and ends of stream anywhere;
+and hostile heads; bytes after the body; resets and ends of stream anywhere,
+a reset also queued right behind the bytes before it, `backend_reset_after`;
 random windows), on two proxy routes beside a static one, with random body
 limits and timeouts. Each exchange is predicted by a model written from the
 spec, not from the core: the backend must receive exactly the rewritten
 request and the client's body, and the client exactly the rewritten head and
 the backend's body bytes, a cut connection with its log, or the predicted
-4xx/5xx. Timed scenarios (connect, response, body, head and send timeouts)
+4xx/5xx. A response cut by a reset behind its bytes delivers every body
+byte before it, then the cut is logged `BackendFailed { Reset }`
+(FR-PROXY-26, DRV-10, NFR-RES-04). Timed scenarios (connect, response, body, head and send timeouts)
 run alone in their round, so the clock only runs out deadlines the model
 knows. To replay one failing seed (of both nets):
 
