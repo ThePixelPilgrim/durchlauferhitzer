@@ -27,6 +27,12 @@ normalized text, which names the failure, not the seed or input:
                the kind (oom, timeout, leak, crash);
   older glibc  job and the failing test's name;
   a job that timed out or was cancelled (no record): `<job>|timeout-or-cancelled`.
+Limit: a panic located in the standard library or a dependency (a
+location starting `rustc/` or `registry/`) is keyed on that location
+alone, not on the workspace frame that called it: the nightly runs
+without RUST_BACKTRACE, so the panic text carries no backtrace frames
+(and the record keeps only the message lines). Such panics with the same
+message from different callers share one issue.
 Log text is untrusted: it only ever lands in record fields and issue
 bodies (fenced), never in a command line other than as one argv item.
 """
@@ -510,9 +516,9 @@ def report(records, gh, date):
     )
     actions = decide(group(records), issues)
     if any(a["op"] == "create" for a in actions):
-        labels = json.loads(gh(["label", "list", "--limit", "1000", "--json", "name"]) or "[]")
-        if LABEL not in {lab.get("name") for lab in labels}:
-            gh(["label", "create", LABEL, "--color", LABEL_COLOR, "--description", LABEL_DESCRIPTION])
+        # Idempotent: creates the label, or updates the one there.
+        gh(["label", "create", LABEL, "--color", LABEL_COLOR, "--description", LABEL_DESCRIPTION,
+            "--force"])
     lines = ["## Nightly failures", ""]
     for a in actions:
         g, n = a["group"], a["number"]
@@ -538,7 +544,9 @@ def report(records, gh, date):
 
 
 def _gh(args, body=None):
-    done = subprocess.run(["gh", *args], input=body, text=True, capture_output=True)
+    # Without a body gh gets no stdin at all (it never waits on one).
+    stdin = {"input": body} if body is not None else {"stdin": subprocess.DEVNULL}
+    done = subprocess.run(["gh", *args], text=True, capture_output=True, **stdin)
     if done.returncode != 0:
         sys.stderr.write(done.stderr)
         raise SystemExit(f"gh {args[0]} {args[1]} failed ({done.returncode})")

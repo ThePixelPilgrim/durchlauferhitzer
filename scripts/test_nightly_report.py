@@ -351,15 +351,13 @@ class Decision(unittest.TestCase):
 class Apply(unittest.TestCase):
     """The gh calls, against a fake gh that records argv lists."""
 
-    def run_report(self, records, issues, labels):
+    def run_report(self, records, issues):
         calls = []
 
         def gh(args, body=None):
             calls.append((args, body))
             if args[:2] == ["issue", "list"]:
                 return json.dumps(issues)
-            if args[:2] == ["label", "list"]:
-                return json.dumps([{"name": n} for n in labels])
             return ""
 
         summary = nr.report(records, gh, "2026-11-02")
@@ -367,11 +365,13 @@ class Apply(unittest.TestCase):
 
     def test_create_makes_the_label_and_the_issue(self):
         rec = _record("long-runs", "x86_64", nr.record_long_runs(SIM_LOG, WS))
-        calls, summary = self.run_report([rec], [], [])
+        calls, summary = self.run_report([rec], [])
         argv = [c[0] for c in calls]
         self.assertEqual(argv[0][:2], ["issue", "list"])
+        # Idempotent: `--force` creates the label or updates it; no list.
         self.assertIn(["label", "create", "nightly", "--color", "B60205",
-                       "--description", "A failing nightly job (NFR-TEST-08)"], argv)
+                       "--description", "A failing nightly job (NFR-TEST-08)", "--force"], argv)
+        self.assertFalse([a for a in argv if a[:2] == ["label", "list"]])
         create = [c for c in calls if c[0][:2] == ["issue", "create"]]
         self.assertEqual(len(create), 1)
         args, body = create[0]
@@ -383,22 +383,23 @@ class Apply(unittest.TestCase):
         self.assertIn("conn 17 got 503", body)
         self.assertIn("created", summary)
 
-    def test_the_label_is_not_created_twice(self):
+    def test_no_label_call_without_a_new_issue(self):
         rec = _record("long-runs", "x86_64", nr.record_long_runs(SIM_LOG, WS))
-        calls, _ = self.run_report([rec], [], ["nightly"])
-        self.assertFalse([c for c in calls if c[0][:2] == ["label", "create"]])
+        fp = nr.describe("long-runs", rec["failures"][0])[0]
+        calls, _ = self.run_report([rec], [{"number": 5, "state": "OPEN", "title": "t [%s]" % fp}])
+        self.assertFalse([c for c in calls if c[0][0] == "label"])
 
     def test_comment_and_reopen(self):
         rec = _record("long-runs", "x86_64", nr.record_long_runs(SIM_LOG, WS))
         fp = nr.describe("long-runs", rec["failures"][0])[0]
-        calls, _ = self.run_report([rec], [{"number": 5, "state": "OPEN", "title": "t [%s]" % fp}], [])
+        calls, _ = self.run_report([rec], [{"number": 5, "state": "OPEN", "title": "t [%s]" % fp}])
         (c,) = [c for c in calls if c[0][0] == "issue" and c[0][1] != "list"]
         self.assertEqual(c[0][:3], ["issue", "comment", "5"])
         self.assertIn("2026-11-02", c[1])
         self.assertIn(RUN, c[1])
         self.assertIn("SIM_SEED=48213", c[1])
 
-        calls, _ = self.run_report([rec], [{"number": 5, "state": "CLOSED", "title": "t [%s]" % fp}], [])
+        calls, _ = self.run_report([rec], [{"number": 5, "state": "CLOSED", "title": "t [%s]" % fp}])
         ops = [c for c in calls if c[0][0] == "issue" and c[0][1] != "list"]
         self.assertEqual([c[0][:3] for c in ops], [["issue", "reopen", "5"], ["issue", "comment", "5"]])
         self.assertIn("Regressed", ops[1][1])
@@ -408,10 +409,41 @@ class Apply(unittest.TestCase):
         for i in range(4):
             log = DEBIAN_LOG.replace("seccomp_kill_on_unlisted_call", "case_%s" % "abcd"[i])
             recs.append(_record("older-glibc", "x86_64", nr.record_older_glibc(log, WS)))
-        calls, summary = self.run_report(recs, [], ["nightly"])
+        calls, summary = self.run_report(recs, [])
         self.assertEqual(len([c for c in calls if c[0][:2] == ["issue", "create"]]), 3)
         self.assertIn("not filed", summary)
         self.assertIn("containment::case_d", summary)
+
+
+class GhRunner(unittest.TestCase):
+    """`_gh` runs `gh` with the body on stdin, or no stdin at all."""
+
+    def run_gh(self, body):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen.update(kwargs, argv=argv)
+            return nr.subprocess.CompletedProcess(argv, 0, stdout="out", stderr="")
+
+        real = nr.subprocess.run
+        nr.subprocess.run = fake_run
+        try:
+            out = nr._gh(["issue", "list"], body=body)
+        finally:
+            nr.subprocess.run = real
+        self.assertEqual(out, "out")
+        return seen
+
+    def test_without_a_body_stdin_is_devnull(self):
+        seen = self.run_gh(None)
+        self.assertEqual(seen["argv"], ["gh", "issue", "list"])
+        self.assertIs(seen.get("stdin"), nr.subprocess.DEVNULL)
+        self.assertNotIn("input", seen)
+
+    def test_a_body_goes_to_stdin(self):
+        seen = self.run_gh("text")
+        self.assertEqual(seen.get("input"), "text")
+        self.assertNotIn("stdin", seen)
 
 
 class Bodies(unittest.TestCase):
