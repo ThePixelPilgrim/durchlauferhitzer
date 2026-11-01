@@ -1447,11 +1447,15 @@ Failures, persistence, timeouts:
     (Landlock ABI 4) are not part of stage 5.
   - seccomp: a per-architecture allow-list (x86_64, aarch64) of exactly the
     system calls the server makes after startup, installed for every thread
-    before the loop runs. (owner decision 2026-10-29, stage 5 builder check) It checks call numbers plus
-    the arguments that matter most and are stable: `socket` only for
-    `AF_INET`/`AF_INET6` stream sockets, `mmap`/`mprotect` never with
-    `PROT_EXEC`, `clone` only with thread flags, and `prctl`, `fcntl` and
-    `ioctl` only for the operations the server uses. *(Owner decision
+    before the loop runs. (owner decision 2026-10-29, stage 5 builder
+    check) It checks call numbers plus the arguments that matter most and
+    are stable: `socket` only for `AF_INET`/`AF_INET6` stream sockets with
+    protocol 0, `mmap`/`mprotect` never with `PROT_EXEC`, `clone` only with
+    thread flags, `prctl` and `fcntl` only for the operations the server
+    uses, `tgkill` only with `SIGABRT` (the abort path); `ioctl` is not
+    allowed at all. The fatal paths (signal return and handler setup,
+    `getpid`, `tgkill`) are listed, so a crash still ends the process the
+    normal way (stage 5 Task 3 review). *(Owner decision
     2026-11-01, stage 5 Task 3 review:)* a process whose personality has
     `READ_IMPLIES_EXEC` set (inherited across exec on aarch64, e.g.
     `setarch -X`) defeats the `PROT_EXEC` check, so startup checks it:

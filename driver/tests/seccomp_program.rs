@@ -3,9 +3,10 @@
 //! environment variable what to do under the filter (no harness, no new
 //! `unsafe`).
 //!
-//! - `abort`: the fatal paths (FR-PROC-06) are listed, so an abort still
-//!   ends the process by `SIGABRT` (glibc: `getpid`, `gettid`, `tgkill`;
-//!   std: `rt_sigaction`, `rt_sigreturn` in its fault handlers).
+//! - `abort`: an abort still ends the process by `SIGABRT` under the
+//!   filter (glibc's path: `getpid`, `gettid`, `tgkill`). The fatal-path
+//!   group's `rt_sigaction` and `rt_sigreturn` (std's fault handlers) are
+//!   listed but not exercised here.
 //! - `fstat`: `sys::file::fstat` works under the filter (it calls the
 //!   `fstat` system call itself, never `newfstatat`).
 

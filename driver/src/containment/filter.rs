@@ -10,9 +10,11 @@
 //! The tables list exactly the calls the server makes once the filter is
 //! installed (right before the loop runs): derived with `strace -f` over
 //! the driver tests, plus the rare paths named per group. Calls made only
-//! during startup are not listed. Never listed: `truncate`, `ftruncate`
-//! and `ioctl` (they cover Landlock's gaps before ABI 3 and 5), `execve`,
-//! and stats by path (`newfstatat`, `statx`).
+//! during startup are not listed. Never listed: `ioctl` (it covers
+//! Landlock's gap before ABI 5), `truncate` and `ftruncate` (they narrow,
+//! but cannot close, the gap before ABI 3: `openat2` with `O_TRUNC` is out
+//! of the filter's reach, FR-PROC-06), `execve`, and stats by path
+//! (`newfstatat`, `statx`).
 
 use durchlauferhitzer_core::config::SeccompAction;
 
