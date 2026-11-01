@@ -133,8 +133,10 @@ jobs:
       image: debian:12
       # Docker's own seccomp profile would filter every process (the
       # tests that check "no filter" would see one, and its EPERMs could
-      # hide a call missing from our allow-list).
-      options: --security-opt seccomp=unconfined
+      # hide a call missing from our allow-list). CAP_SYS_PTRACE, which
+      # Docker drops, lets root read /proc/<pid>/fd of a server running
+      # as nobody, as root on the host can.
+      options: --security-opt seccomp=unconfined --cap-add SYS_PTRACE
     defaults:
       run:
         # The container's default shell is sh.
