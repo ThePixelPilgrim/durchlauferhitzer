@@ -46,6 +46,12 @@ pub const USAGE: &str =
 /// as root and the case needs a non-root server (`nobody`).
 pub const NOBODY: u32 = 65534;
 
+#[path = "conf.rs"]
+mod conf;
+
+#[allow(unused_imports, reason = "each test binary uses part")]
+pub use conf::{Containment, PROXY_ROUTE, TempDir, config, seccomp_kill};
+
 pub fn exe() -> &'static str {
     env!("CARGO_BIN_EXE_durchlauferhitzer")
 }
@@ -53,53 +59,6 @@ pub fn exe() -> &'static str {
 /// Whether this test process runs as root.
 pub fn is_root() -> bool {
     durchlauferhitzer::sys::user::euid() == 0
-}
-
-/// A directory under the system temp dir, removed on drop; readable by
-/// everyone, so a server running as `nobody` can read its config.
-pub struct TempDir(PathBuf);
-
-impl TempDir {
-    pub fn new() -> TempDir {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("dlh-cli-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        set_mode(&path, 0o755);
-        TempDir(path)
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.0
-    }
-
-    /// Writes `text` to `name`, readable by everyone.
-    pub fn file(&self, name: &str, text: &str) -> PathBuf {
-        let path = self.0.join(name);
-        fs::write(&path, text).unwrap();
-        set_mode(&path, 0o644);
-        path
-    }
-
-    /// A directory `name`, readable by everyone.
-    pub fn dir(&self, name: &str) -> PathBuf {
-        let path = self.0.join(name);
-        fs::create_dir_all(&path).unwrap();
-        set_mode(&path, 0o755);
-        path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
 /// A free loopback port for a server that no other socket can be given
@@ -127,17 +86,6 @@ pub fn free_port() -> u16 {
     }
     panic!("no free port in {low}-{}", low + span - 1);
 }
-
-/// A config with one listener and one host whose `/` route is `route`
-/// (the inside of the `path` block), plus `extra` top-level lines.
-pub fn config(listen: &str, extra: &str, route: &str) -> String {
-    format!("listen {listen};\n{extra}\nhost example.test {{\n  path / {{ {route} }}\n}}\n")
-}
-
-/// A proxy route to an address nothing listens on (the tests that use it
-/// never send a request there).
-pub const PROXY_ROUTE: &str =
-    "proxy 127.0.0.1:9; max_request_body 1MiB; max_response_body unlimited;";
 
 /// How the child is set up before `exec`.
 #[derive(Default)]
@@ -483,6 +431,7 @@ impl Running {
 
     /// Kills the server and returns its stderr.
     pub fn kill(mut self) -> String {
+        self.assert_not_sigsys();
         let _ = self.child.kill();
         let _ = self.child.wait();
         let mut stderr = Vec::new();
@@ -493,8 +442,27 @@ impl Running {
     }
 }
 
+impl Running {
+    /// Fails the test if the server has already been ended by `SIGSYS`
+    /// (the seccomp `kill` action): a call missing from the allow-list.
+    fn assert_not_sigsys(&mut self) {
+        use std::os::unix::process::ExitStatusExt;
+        if let Ok(Some(status)) = self.child.try_wait() {
+            assert_ne!(
+                status.signal(),
+                Some(libc::SIGSYS),
+                "the server was killed by SIGSYS: a system call missing from the seccomp \
+                 allow-list (driver/src/containment/filter.rs)"
+            );
+        }
+    }
+}
+
 impl Drop for Running {
     fn drop(&mut self) {
+        if !thread::panicking() {
+            self.assert_not_sigsys();
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

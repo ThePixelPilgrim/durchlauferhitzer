@@ -32,7 +32,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use child::{PATIENCE, Running, Setup, TempDir, config, free_port, get, text};
+use child::{Containment, PATIENCE, Running, Setup, TempDir, config, free_port, get, text};
 
 /// The size of the slow download: far more than loopback's socket
 /// buffers hold, so the response is still in flight at the signal.
@@ -86,7 +86,7 @@ fn static_server(limits: &str) -> StaticServer {
         &format!("limits {{ {limits} }}"),
         &format!("static {};", www.display()),
     );
-    let path = dir.file("static.conf", &conf);
+    let path = dir.config("static.conf", &conf, Containment::Switch);
     let server = Running::start(&[path.to_str().unwrap()], Setup::non_root(), addr);
     StaticServer {
         _dir: dir,
@@ -284,7 +284,7 @@ fn sigterm_lets_a_proxied_upload_finish() {
         "limits { shutdown_timeout 20s; }",
         &format!("proxy {backend}; max_request_body 8MiB; max_response_body 1MiB;"),
     );
-    let path = dir.file("proxy.conf", &conf);
+    let path = dir.config("proxy.conf", &conf, Containment::Switch);
     let mut server = Running::start(&[path.to_str().unwrap()], Setup::non_root(), addr);
     let mut lines = server.lines();
     let body: Vec<u8> = (0..LEN).map(|i| u8::try_from(i % 253).unwrap()).collect();

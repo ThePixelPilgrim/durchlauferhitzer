@@ -15,10 +15,14 @@ mod child;
 
 use std::net::TcpListener;
 
-use child::{PROXY_ROUTE, Setup, TempDir, USAGE, assert_exit, config, run, text};
+use child::{Containment, PROXY_ROUTE, Setup, TempDir, USAGE, assert_exit, config, run, text};
 
 fn valid(dir: &TempDir) -> String {
-    let path = dir.file("ok.conf", &config("127.0.0.1:8080", "", PROXY_ROUTE));
+    let path = dir.config(
+        "ok.conf",
+        &config("127.0.0.1:8080", "", PROXY_ROUTE),
+        Containment::Switch,
+    );
     path.to_str().unwrap().to_owned()
 }
 
@@ -72,7 +76,7 @@ fn check_on_an_invalid_config_prints_the_error_with_its_position() {
         ),
     ];
     for (i, (conf, message)) in cases.into_iter().enumerate() {
-        let path = dir.file(&format!("bad{i}.conf"), conf);
+        let path = dir.config(&format!("bad{i}.conf"), conf, Containment::Invalid);
         let path = path.to_str().unwrap();
         let output = run(&["--check", path], Setup::default());
         assert_exit(&output, 1);
@@ -117,7 +121,7 @@ fn check_opens_no_root_and_binds_no_port() {
         "",
         &format!("static {};", missing.to_str().unwrap()),
     );
-    let path = dir.file("check.conf", &conf);
+    let path = dir.config("check.conf", &conf, Containment::Switch);
     let output = run(&["--check", path.to_str().unwrap()], Setup::default());
     assert_exit(&output, 0);
     assert_eq!(text(&output.stdout), "ok\n");

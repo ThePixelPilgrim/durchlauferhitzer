@@ -60,7 +60,7 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use child::{PATIENCE, Running, Setup, TempDir, free_port, text};
+use child::{Containment, PATIENCE, Running, Setup, TempDir, free_port, seccomp_kill, text};
 use durchlauferhitzer_core::http::request::Persistence;
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
@@ -745,7 +745,7 @@ host proxy.test {{
 ",
         www = www.display()
     );
-    let path = dir.file("smoke.conf", &conf);
+    let path = dir.config("smoke.conf", &conf, Containment::Switch);
     let mut server = Running::start(&[path.to_str().unwrap()], Setup::non_root(), addr);
     let lines = server.lines();
     let pid = server.pid();
@@ -809,6 +809,13 @@ host proxy.test {{
         layers[1].starts_with("kind=containment layer=seccomp "),
         "{layers:?}"
     );
+    // Under the seccomp kill switch the whole run was under `kill`.
+    if seccomp_kill() {
+        assert_eq!(
+            layers[1], "kind=containment layer=seccomp state=active action=kill log=kernel",
+            "{layers:?}"
+        );
+    }
     // No `privileges` line: a non-root server without `user` logs none.
     let mut want = vec![DRAINING.to_owned(), DONE.to_owned()];
     want.extend(log_lines(Kind::File, backend_addr, down));

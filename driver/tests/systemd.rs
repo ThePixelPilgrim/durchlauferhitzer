@@ -22,7 +22,10 @@ use std::fs::File;
 use std::net::{SocketAddr, TcpListener};
 use std::os::fd::OwnedFd;
 
-use child::{PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, free_port, get, run, text};
+use child::{
+    Containment, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, free_port, get, run,
+    text,
+};
 
 fn listener() -> (OwnedFd, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -45,7 +48,7 @@ fn the_server_serves_on_the_socket_systemd_passed() {
     // shows the socket is served.
     let www = dir.dir("www");
     let conf = config(&addr.to_string(), "", &format!("static {};", www.display()));
-    let path = dir.file("systemd.conf", &conf);
+    let path = dir.config("systemd.conf", &conf, Containment::Switch);
     let server = Running::start(&[path.to_str().unwrap()], activated(fd), addr);
     let response = get(addr, "/missing");
     assert!(
@@ -60,7 +63,11 @@ fn a_socket_for_an_address_not_configured_is_exit_2() {
     let (fd, addr) = listener();
     let other = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let dir = TempDir::new();
-    let path = dir.file("other.conf", &config(&other.to_string(), "", PROXY_ROUTE));
+    let path = dir.config(
+        "other.conf",
+        &config(&other.to_string(), "", PROXY_ROUTE),
+        Containment::Switch,
+    );
     let output = run(&[path.to_str().unwrap()], activated(fd));
     assert_exit(&output, 2);
     let stderr = text(&output.stderr);
@@ -78,9 +85,10 @@ fn a_configured_address_without_a_socket_is_exit_2() {
     let (fd, addr) = listener();
     let missing = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let dir = TempDir::new();
-    let path = dir.file(
+    let path = dir.config(
         "two.conf",
         &config(&format!("{addr} {missing}"), "", PROXY_ROUTE),
+        Containment::Switch,
     );
     let output = run(&[path.to_str().unwrap()], activated(fd));
     assert_exit(&output, 2);
@@ -94,7 +102,11 @@ fn a_configured_address_without_a_socket_is_exit_2() {
 fn a_listen_pid_that_is_not_ours_is_exit_2() {
     let (fd, addr) = listener();
     let dir = TempDir::new();
-    let path = dir.file("pid.conf", &config(&addr.to_string(), "", PROXY_ROUTE));
+    let path = dir.config(
+        "pid.conf",
+        &config(&addr.to_string(), "", PROXY_ROUTE),
+        Containment::Switch,
+    );
     let setup = Setup {
         listen_pid: Some("1".to_owned()),
         ..activated(fd)
@@ -111,9 +123,10 @@ fn a_listen_pid_that_is_not_ours_is_exit_2() {
 #[test]
 fn a_descriptor_that_is_not_a_listening_socket_is_exit_2() {
     let dir = TempDir::new();
-    let path = dir.file(
+    let path = dir.config(
         "file.conf",
         &config(&format!("127.0.0.1:{}", free_port()), "", PROXY_ROUTE),
+        Containment::Switch,
     );
     let file = OwnedFd::from(File::open(&path).unwrap());
     let output = run(&[path.to_str().unwrap()], activated(file));
@@ -130,7 +143,11 @@ fn a_connected_socket_is_not_a_listener() {
     let (fd, addr) = listener();
     let stream = std::net::TcpStream::connect(addr).unwrap();
     let dir = TempDir::new();
-    let path = dir.file("conn.conf", &config(&addr.to_string(), "", PROXY_ROUTE));
+    let path = dir.config(
+        "conn.conf",
+        &config(&addr.to_string(), "", PROXY_ROUTE),
+        Containment::Switch,
+    );
     let output = run(&[path.to_str().unwrap()], activated(OwnedFd::from(stream)));
     assert_exit(&output, 2);
     assert_eq!(
@@ -161,7 +178,11 @@ fn a_dual_stack_ipv6_socket_is_exit_2() {
         }
     }
     let dir = TempDir::new();
-    let path = dir.file("dual.conf", &config(&addr.to_string(), "", PROXY_ROUTE));
+    let path = dir.config(
+        "dual.conf",
+        &config(&addr.to_string(), "", PROXY_ROUTE),
+        Containment::Switch,
+    );
     let output = run(&[path.to_str().unwrap()], activated(fd));
     assert_exit(&output, 2);
     assert_eq!(
@@ -186,7 +207,7 @@ fn an_ipv6_only_socket_is_served() {
     let dir = TempDir::new();
     let www = dir.dir("www");
     let conf = config(&addr.to_string(), "", &format!("static {};", www.display()));
-    let path = dir.file("v6.conf", &conf);
+    let path = dir.config("v6.conf", &conf, Containment::Switch);
     let server = Running::start(&[path.to_str().unwrap()], activated(fd), addr);
     let response = get(addr, "/missing");
     assert!(response.starts_with("HTTP/1.1 404 "), "{response}");

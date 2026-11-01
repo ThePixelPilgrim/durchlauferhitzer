@@ -232,7 +232,8 @@ tests/
                     of its exchange (DRV-13), one log line per entry
                     (exact but for `conn=`), the fd count back to its
                     baseline, then SIGTERM: `draining`, `done
-                    detached=0`, exit 0
+                    detached=0`, exit 0 (the seccomp line `action=kill`
+                    under the kill switch)
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process
@@ -331,7 +332,7 @@ tests/
   unsafe_confined.rs  NFR-MAINT-05: `allow(unsafe_code)` (or `expect`) appears
                     in `core/src` and `driver/src` (every file, unit
                     tests included) only on `pub mod sys;` in `src/lib.rs`
-  support/child.rs  running the binary: temp configs, a free port (below
+  support/child.rs  running the binary: temp configs (conf.rs), a free port (below
                     the kernel's ephemeral range, so no other socket is
                     given it before the server binds; a new one per pick
                     within the process; only another program binding
@@ -347,7 +348,11 @@ tests/
                     `unsafe`),
                     a guard that kills a running server on drop; signals
                     by the shell's `kill`, stderr read line by line while
-                    the server runs (`Lines`), a bounded wait for the exit
+                    the server runs (`Lines`), a bounded wait for the exit;
+                    a server ended by SIGSYS fails its test
+  support/conf.rs   temp dirs and config files (`TempDir::config`, with
+                    `Containment`: the seccomp kill switch's block, the
+                    text's own, or none for an invalid config)
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
   support/server.rs the loop tests' harness: a `Driver` in a thread on an
                     ephemeral port (`start_static` opens the config's roots
@@ -565,6 +570,14 @@ Notes on the wrappers:
   aarch64 clear it for a 64-bit binary, so on the CI runners); with
   `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1` that is a failure
   instead. CI does not set it.
+- Tests: with `DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1` every config the
+  server tests write (`TempDir::config` with `Containment::Switch`) gets
+  `containment { landlock required; seccomp required; seccomp_action
+  kill; }`, so a call missing from the allow-list ends the server by
+  SIGSYS and fails the test (FR-PROC-06). `containment.rs` keeps its own
+  blocks, and invalid configs (exit 1 at load) get none. The loop tests
+  run the driver in the test process, without a filter. CI runs the
+  driver tests and the root step both ways.
 - Tests: the signalfd test is a unit test in `src/sys/signal.rs`, because it
   raises a thread-directed signal (`pthread_kill` on its own thread) — a
   process-directed one could reach another test thread and kill the run.

@@ -39,6 +39,15 @@ jobs:
           # (driver/README.md).
           DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
           DURCHLAUFERHITZER_REQUIRE_LANDLOCK: "1"
+      - name: Driver tests under seccomp kill
+        # Every server the tests start has both layers required and
+        # `seccomp_action kill` (driver/README.md): a call missing from
+        # the allow-list ends the server and fails its test.
+        run: cargo test -p durchlauferhitzer --locked
+        env:
+          DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
+          DURCHLAUFERHITZER_REQUIRE_LANDLOCK: "1"
+          DURCHLAUFERHITZER_TEST_SECCOMP_KILL: "1"
       - name: Root tests (as root; a root skip is a failure)
         # The test binaries that run the server are built as the runner
         # user (cargo never runs as root) and run with sudo: the privilege
@@ -48,7 +57,8 @@ jobs:
         # that runs the server (those that include the child helper,
         # `support/child.rs`), but the ones excluded with a reason, so a
         # new server test cannot miss this step. Excluded: free_port (it
-        # checks the port helper and starts no server).
+        # checks the port helper and starts no server). Each binary runs
+        # twice: as configured, then under seccomp kill.
         run: |
           set -euo pipefail
           tests=(budget cli containment privileges shutdown smoke startup systemd)
@@ -70,10 +80,13 @@ jobs:
           chmod a+x "$HOME"
           cd driver
           for bin in $bins; do
-            echo "== $bin"
-            sudo env DURCHLAUFERHITZER_REQUIRE_ROOT=1 \
-              DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
-              DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 TMPDIR=/tmp "$bin"
+            for kill in 0 1; do
+              echo "== $bin (seccomp kill switch: $kill)"
+              sudo env DURCHLAUFERHITZER_REQUIRE_ROOT=1 \
+                DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
+                DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 \
+                DURCHLAUFERHITZER_TEST_SECCOMP_KILL="$kill" TMPDIR=/tmp "$bin"
+            done
           done
       - name: Product dependency check
         run: scripts/check-product-deps.sh

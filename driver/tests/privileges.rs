@@ -30,8 +30,8 @@ use std::fs;
 use std::net::SocketAddr;
 
 use child::{
-    CAP_NET_BIND_SERVICE, Caps, NOBODY, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config,
-    free_port, get, is_root, run, run_program, text,
+    CAP_NET_BIND_SERVICE, Caps, Containment, NOBODY, PROXY_ROUTE, Running, Setup, TempDir,
+    assert_exit, config, free_port, get, is_root, run, run_program, text,
 };
 
 fn loopback(port: u16) -> SocketAddr {
@@ -65,13 +65,14 @@ fn root_or_skip() -> bool {
 fn static_config(dir: &TempDir, addr: SocketAddr, extra: &str) -> String {
     let www = dir.dir("www");
     fs::write(www.join("index.html"), "hello\n").unwrap();
-    let path = dir.file(
+    let path = dir.config(
         "privileges.conf",
         &config(
             &addr.to_string(),
             extra,
             &format!("static {};", www.display()),
         ),
+        Containment::Switch,
     );
     path.to_str().unwrap().to_owned()
 }
@@ -107,13 +108,14 @@ fn as_non_root_a_privileged_port_is_exit_2_naming_it() {
         return;
     }
     let dir = TempDir::new();
-    let path = dir.file(
+    let path = dir.config(
         "low.conf",
         &config(
             &format!("127.0.0.1:{} 127.0.0.1:1023", free_port()),
             "",
             PROXY_ROUTE,
         ),
+        Containment::Switch,
     );
     let output = run(&[path.to_str().unwrap()], Setup::non_root());
     assert_exit(&output, 2);

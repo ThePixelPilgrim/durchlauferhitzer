@@ -21,8 +21,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use child::{
-    Filter, Lines, Running, Setup, TempDir, assert_exit, free_port, get, run, run_program, text,
-    threads,
+    Containment, Filter, Lines, Running, Setup, TempDir, assert_exit, free_port, get, run,
+    run_program, text, threads,
 };
 use durchlauferhitzer::sys::landlock::{Abi, abi};
 
@@ -108,7 +108,9 @@ impl Site {
             self.two.display(),
             self.www.display()
         );
-        let path = self.dir.file("containment.conf", &conf);
+        let path = self
+            .dir
+            .config("containment.conf", &conf, Containment::AsWritten);
         path.to_str().unwrap().to_owned()
     }
 

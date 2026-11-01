@@ -32,7 +32,7 @@ mod child;
 use std::fs;
 use std::net::SocketAddr;
 
-use child::{PROXY_ROUTE, Running, Setup, TempDir, assert_exit, free_port, run, text};
+use child::{Containment, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, free_port, run, text};
 
 const LIMITS: &str = "limits { max_connections 16; }";
 
@@ -52,7 +52,7 @@ fn configs(dir: &TempDir, addr: SocketAddr) -> Vec<(String, u64)> {
         .into_iter()
         .enumerate()
         .map(|(i, (conf, needed))| {
-            let path = dir.file(&format!("budget{i}.conf"), &conf);
+            let path = dir.config(&format!("budget{i}.conf"), &conf, Containment::Switch);
             (path.to_str().unwrap().to_owned(), needed + inherited)
         })
         .collect()

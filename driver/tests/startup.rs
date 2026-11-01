@@ -19,8 +19,8 @@ use std::fs;
 use std::net::{SocketAddr, TcpListener};
 
 use child::{
-    Filter, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, fd_target, free_port, get,
-    run, text, threads,
+    Containment, Filter, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, fd_target,
+    free_port, get, run, text, threads,
 };
 
 /// A config serving `dir/www` on `listen`, written to `dir`.
@@ -28,7 +28,7 @@ fn static_config(dir: &TempDir, listen: &str) -> String {
     let www = dir.dir("www");
     fs::write(www.join("index.html"), "hello\n").unwrap();
     let conf = config(listen, "", &format!("static {};", www.display()));
-    let path = dir.file("static.conf", &conf);
+    let path = dir.config("static.conf", &conf, Containment::Switch);
     path.to_str().unwrap().to_owned()
 }
 
@@ -65,7 +65,7 @@ fn a_missing_static_root_is_exit_2_naming_it() {
         "",
         &format!("static {};", missing.display()),
     );
-    let path = dir.file("missing.conf", &conf);
+    let path = dir.config("missing.conf", &conf, Containment::Switch);
     let output = run(&[path.to_str().unwrap()], Setup::non_root());
     assert_exit(&output, 2);
     let stderr = text(&output.stderr);
@@ -108,7 +108,7 @@ fn a_root_that_is_a_file_is_exit_2_naming_it() {
         "",
         &format!("static {};", file.display()),
     );
-    let path = dir.file("file.conf", &conf);
+    let path = dir.config("file.conf", &conf, Containment::Switch);
     let output = run(&[path.to_str().unwrap()], Setup::non_root());
     assert_exit(&output, 2);
     let stderr = text(&output.stderr);
@@ -126,7 +126,11 @@ fn a_port_in_use_is_exit_2_naming_the_address() {
     let taken = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = taken.local_addr().unwrap();
     let dir = TempDir::new();
-    let path = dir.file("taken.conf", &config(&addr.to_string(), "", PROXY_ROUTE));
+    let path = dir.config(
+        "taken.conf",
+        &config(&addr.to_string(), "", PROXY_ROUTE),
+        Containment::Switch,
+    );
     let output = run(&[path.to_str().unwrap()], Setup::non_root());
     assert_exit(&output, 2);
     let stderr = text(&output.stderr);
@@ -143,9 +147,10 @@ fn a_port_in_use_is_exit_2_naming_the_address() {
 fn overlapping_listen_addresses_fail_at_the_second() {
     let port = free_port();
     let dir = TempDir::new();
-    let path = dir.file(
+    let path = dir.config(
         "overlap.conf",
         &config(&format!("0.0.0.0:{port} 127.0.0.1:{port}"), "", PROXY_ROUTE),
+        Containment::Switch,
     );
     let output = run(&[path.to_str().unwrap()], Setup::non_root());
     assert_exit(&output, 2);
@@ -197,7 +202,7 @@ fn disk_threads_sets_the_worker_count() {
         "limits { disk_threads 2; }",
         &format!("static {};", www.display()),
     );
-    let path = dir.file("threads.conf", &conf);
+    let path = dir.config("threads.conf", &conf, Containment::Switch);
     let server = Running::start(&[path.to_str().unwrap()], Setup::non_root(), addr);
     let tasks = threads(server.pid(), 3);
     // No more than that come later either.
