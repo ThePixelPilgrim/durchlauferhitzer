@@ -138,6 +138,10 @@ SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_proxy_
 SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_fault_schedules
 ```
 
+`SIM_SEEDS=<from>..<to>` runs both nets over that range instead of their
+defaults (`0..1500` static, `0..400` proxy); the nightly workflow's long
+runs use it (NFR-TEST-08). `SIM_SEED` wins over it.
+
 In the static net every connection is checked as it is accepted against
 a model of the connection limits written from the spec
 (`faults/admission.rs`): counted, refused with `503`, or closed at once

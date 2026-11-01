@@ -326,7 +326,7 @@ fn random_proxy_schedules() {
             run_proxy_seed(seed, &mut coverage)
         }),
         None => {
-            for seed in 0..PROXY_SEEDS {
+            for seed in seed_range(0..PROXY_SEEDS) {
                 run_reporting(seed, shutdown_plan(seed, PROXY_SPAN), || {
                     run_proxy_seed(seed, &mut coverage)
                 });

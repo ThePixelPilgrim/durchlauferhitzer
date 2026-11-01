@@ -1,5 +1,7 @@
 //! One random schedule, and the test over all seeds.
 
+use std::ops::Range;
+
 use super::*;
 
 /// One random schedule. Panics (sim invariant or check) on failure.
@@ -291,6 +293,35 @@ pub(crate) fn replay_seed() -> Option<u64> {
     }
 }
 
+/// The seeds a randomized net runs: `default`, or the range
+/// `SIM_SEEDS=<from>..<to>` sets (the nightly long runs, NFR-TEST-08).
+/// `SIM_SEED` (one seed) wins over it.
+pub(crate) fn seed_range(default: Range<u64>) -> Range<u64> {
+    match std::env::var("SIM_SEEDS") {
+        Ok(value) => seeds_from(Some(&value), default),
+        Err(std::env::VarError::NotPresent) => seeds_from(None, default),
+        Err(std::env::VarError::NotUnicode(value)) => {
+            panic!("SIM_SEEDS={value:?} is not <from>..<to>")
+        }
+    }
+}
+
+/// `seed_range` on the variable's value, if set; panics on anything but
+/// `<from>..<to>` with `from < to` (both `u64`).
+fn seeds_from(value: Option<&str>, default: Range<u64>) -> Range<u64> {
+    let Some(value) = value else {
+        return default;
+    };
+    let range = value
+        .split_once("..")
+        .and_then(|(from, to)| Some(from.parse::<u64>().ok()?..to.parse::<u64>().ok()?));
+    match range {
+        Some(range) if range.is_empty() => panic!("SIM_SEEDS={value:?} is an empty range"),
+        Some(range) => range,
+        None => panic!("SIM_SEEDS={value:?} is not <from>..<to>"),
+    }
+}
+
 /// Run one seed; on failure, panic with `SIM_SEED=<seed>`, the seed's
 /// timer order, its shutdown plan and the original message (which
 /// carries the trace).
@@ -316,7 +347,7 @@ fn random_fault_schedules() {
             run_seed(seed, &mut coverage)
         }),
         None => {
-            for seed in 0..SEEDS {
+            for seed in seed_range(0..SEEDS) {
                 run_reporting(seed, shutdown_plan(seed, STATIC_SPAN), || {
                     run_seed(seed, &mut coverage)
                 });
@@ -353,4 +384,33 @@ fn random_fault_schedules() {
             coverage.check();
         }
     }
+}
+
+#[test]
+fn seed_range_defaults_without_sim_seeds() {
+    assert_eq!(seeds_from(None, 0..1500), 0..1500);
+}
+
+#[test]
+fn seed_range_takes_sim_seeds() {
+    assert_eq!(seeds_from(Some("0..200000"), 0..1500), 0..200000);
+    assert_eq!(seeds_from(Some("7..9"), 0..400), 7..9);
+}
+
+#[test]
+#[should_panic(expected = "SIM_SEEDS=\"1500\" is not <from>..<to>")]
+fn seed_range_rejects_a_single_number() {
+    seeds_from(Some("1500"), 0..1500);
+}
+
+#[test]
+#[should_panic(expected = "SIM_SEEDS=\"0..x\" is not <from>..<to>")]
+fn seed_range_rejects_garbage() {
+    seeds_from(Some("0..x"), 0..1500);
+}
+
+#[test]
+#[should_panic(expected = "SIM_SEEDS=\"9..9\" is an empty range")]
+fn seed_range_rejects_an_empty_range() {
+    seeds_from(Some("9..9"), 0..1500);
 }
