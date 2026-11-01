@@ -9,6 +9,11 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     let mut rng = fastrand::Rng::with_seed(seed);
     // One seed in three allows long request lines (and long paths).
     let long = rng.u8(0..3) == 0;
+    let limits = if long {
+        HeadLimits::Long
+    } else {
+        HeadLimits::Short
+    };
     let (peers, prefix) = peer_pool(seed);
     let mut sim = dated_sim(&prefix.apply(if long {
         LONG_RANDOM_CONFIG
@@ -128,7 +133,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     );
     check_wound_down(&sim, &marks);
     for client in &clients {
-        check_client(&sim, &tree, client, &marks, coverage);
+        check_client(&sim, &tree, client, &marks, limits, coverage);
         check_witness(&sim, client, &marks, &mut coverage.shutdown);
     }
     for log in sim.logs() {

@@ -25,31 +25,48 @@ pub(crate) const STATUSES: [Status; 12] = [
 ];
 
 /// Request templates without static files that the random clients draw
-/// from.
-pub(crate) const REQUESTS: &[&[u8]] = &[
+/// from, each with what the parser makes of it (`parse.rs`).
+pub(crate) const REQUESTS: &[(&[u8], Parse)] = &[
     // 404, keep-alive.
-    b"GET /x HTTP/1.1\r\nHost: other.test\r\n\r\n",
-    b"GET /y HTTP/1.1\r\nHost: other.test\r\n\r\n",
-    b"HEAD / HTTP/1.1\r\nHost: other.test\r\n\r\n",
+    (b"GET /x HTTP/1.1\r\nHost: other.test\r\n\r\n", Parse::Request),
+    (b"GET /y HTTP/1.1\r\nHost: other.test\r\n\r\n", Parse::Request),
+    (b"HEAD / HTTP/1.1\r\nHost: other.test\r\n\r\n", Parse::Request),
     // Matched proxy route, whose backend refuses every connect: 502,
     // keep-alive (with a request body: close unless all of it was read).
-    b"GET /api/v HTTP/1.1\r\nHost: example.test\r\n\r\n",
-    b"HEAD /api/v HTTP/1.1\r\nHost: example.test\r\n\r\n",
-    b"POST /api/v HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\nhi",
+    (b"GET /api/v HTTP/1.1\r\nHost: example.test\r\n\r\n", Parse::Request),
+    (b"HEAD /api/v HTTP/1.1\r\nHost: example.test\r\n\r\n", Parse::Request),
+    (
+        b"POST /api/v HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\nhi",
+        Parse::Request,
+    ),
     // Explicit close and HTTP/1.0.
-    b"GET /c HTTP/1.1\r\nHost: other.test\r\nConnection: close\r\n\r\n",
-    b"GET /old HTTP/1.0\r\n\r\n",
+    (
+        b"GET /c HTTP/1.1\r\nHost: other.test\r\nConnection: close\r\n\r\n",
+        Parse::Request,
+    ),
+    (b"GET /old HTTP/1.0\r\n\r\n", Parse::Request),
     // Unread body: close after the response.
-    b"POST /b HTTP/1.1\r\nHost: other.test\r\nContent-Length: 5\r\n\r\nhello",
-    // Malformed: 400.
-    b"GET / HTTP/1.1\nHost: a\n\n",
-    b"\x00\xffgarbage\r\n\r\n",
+    (
+        b"POST /b HTTP/1.1\r\nHost: other.test\r\nContent-Length: 5\r\n\r\nhello",
+        Parse::Request,
+    ),
+    // Malformed: 400 (a bare LF ends the request line; a NUL byte).
+    (b"GET / HTTP/1.1\nHost: a\n\n", Parse::Rejected),
+    (b"\x00\xffgarbage\r\n\r\n", Parse::Rejected),
     // Unsupported version: 505.
-    b"GET / HTTP/1.2\r\nHost: other.test\r\n\r\n",
-    // Over-long request line: 414.
-    b"GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n",
-    // Head that never ends within max_head: 431.
-    b"GET / HTTP/1.1\r\nHost: other.test\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    (b"GET / HTTP/1.2\r\nHost: other.test\r\n\r\n", Parse::Rejected),
+    // Over-long request line: 414; under the long limits the line fits,
+    // and the head has no `Host`: 400.
+    (
+        b"GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n",
+        Parse::Rejected,
+    ),
+    // Head that never ends within max_head: 431. Under the long limits
+    // it fits, still open, and the next template continues it.
+    (
+        b"GET / HTTP/1.1\r\nHost: other.test\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Parse::RejectedUnderShortLimits,
+    ),
 ];
 
 /// Paths (relative to a static route) the random clients ask for: files,
@@ -182,7 +199,9 @@ pub(crate) fn random_request(rng: &mut fastrand::Rng, long_dir: Option<&str>) ->
     if rng.u8(0..10) < 7 {
         random_static_request(rng, long_dir)
     } else {
-        rng.choice(REQUESTS).map(|r| r.to_vec()).unwrap_or_default()
+        rng.choice(REQUESTS)
+            .map(|(r, _)| r.to_vec())
+            .unwrap_or_default()
     }
 }
 

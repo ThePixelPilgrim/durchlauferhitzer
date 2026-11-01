@@ -164,6 +164,7 @@ mod fixed;
 mod generator;
 mod model;
 mod oracle;
+mod parse;
 #[allow(
     clippy::indexing_slicing,
     reason = "the proxy net indexes its own generated exchanges and buffers; an out-of-range index is a bug in the net, reported with its seed like any failure"
@@ -180,6 +181,7 @@ use fixed::*;
 use generator::*;
 use model::*;
 use oracle::*;
+use parse::*;
 use run::{assert_clock_done, replay_seed, run_reporting, seed_range};
 use shutdown::*;
 use unanswered::*;

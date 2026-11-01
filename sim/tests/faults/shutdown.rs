@@ -323,6 +323,9 @@ pub(crate) struct ShutdownCoverage {
     pub(crate) dropped_unread: usize,
     /// Witnesses whose bytes were checked exactly.
     pub(crate) witnesses: usize,
+    /// Heads the parser model rejects, answered during the drain with
+    /// their own error, not the drain's 503 (FR-PROC-05b).
+    pub(crate) own_error: usize,
 }
 
 impl ShutdownCoverage {
@@ -349,6 +352,10 @@ impl ShutdownCoverage {
                 self.dropped_unread,
             ),
             ("witness checked exactly", self.witnesses),
+            (
+                "rejected head with its own error during the drain",
+                self.own_error,
+            ),
         ];
         for (what, n) in named {
             assert!(n > 0, "no {what} in any seed");

@@ -354,7 +354,7 @@ enum Found {
 }
 
 /// The raw path of `template`'s request target, without the query.
-fn template_path(template: &[u8]) -> String {
+pub(crate) fn template_path(template: &[u8]) -> String {
     let line = String::from_utf8_lossy(template);
     let target = line.split(' ').nth(1).unwrap_or_default();
     target.split('?').next().unwrap_or_default().to_owned()
@@ -469,6 +469,7 @@ pub(crate) fn check_client(
     tree: &Tree,
     client: &Client,
     marks: &Marks,
+    limits: HeadLimits,
     coverage: &mut Coverage,
 ) {
     let fail = |what: String| -> ! {
@@ -557,6 +558,18 @@ pub(crate) fn check_client(
                         && let Err(e) = check_request_line(error, request.as_ref(), template)
                     {
                         fail(e);
+                    }
+                    if phase == Phase::Draining {
+                        let k = consumed - 1;
+                        let judged = Drained {
+                            log,
+                            refusable,
+                            k,
+                            limits,
+                        };
+                        if let Err(e) = judged.check(&client.templates, &mut coverage.shutdown) {
+                            fail(e);
+                        }
                     }
                     // Rejections always close (their renderings already do).
                     if let Log::Response { request, .. } = log {

@@ -89,6 +89,8 @@ tests/
     admission.rs        the peers of each seed and the spec's model of
                         what the connection limits admit
     oracle.rs           what each client must receive; coverage
+    parse.rs            the parser model of the request templates: which
+                        heads the parser rejects (no drain `503` for them)
     unanswered.rs       no request the spec says must be answered vanishes
     run.rs              one random schedule; the test over all seeds;
                         seed replay for every net of the binary
@@ -169,7 +171,10 @@ steps of a round without a timed scenario (or after the last round), the
 round runs on, and the seed ends with it; an exchange whose head is
 rendered during the drain must match the model's outcome for a client
 that closes, or the drain's `503`; a head the parser rejects keeps its
-own error (owner decision 2026-10-29, FR-PROC-05b).
+own error (owner decision 2026-10-29, FR-PROC-05b). The static net
+holds the same rule against a parser model of its templates
+(`faults/parse.rs`, written into the template table, not taken from the
+parser): a drain's `503` for a head the model rejects fails the seed.
 No request may vanish (`faults/unanswered.rs`, and `silent_stop` in
 `faults/proxy/drain.rs`): the drain records what the core had read of
 each connection (`Sim::delivered_to_server`, FR-PROC-05b's "buffered"
