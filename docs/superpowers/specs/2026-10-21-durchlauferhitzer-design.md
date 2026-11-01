@@ -1498,8 +1498,9 @@ Failures, persistence, timeouts:
     `getpid`, `tgkill`) are listed, so a crash still ends the process the
     normal way (stage 5 Task 3 review). *(Owner decision
     2026-11-01, stage 5 Task 3 review:)* a process whose personality has
-    `READ_IMPLIES_EXEC` set (inherited across exec on aarch64, e.g.
-    `setarch -X`) defeats the `PROT_EXEC` check, so startup checks it:
+    `READ_IMPLIES_EXEC` set defeats the `PROT_EXEC` check, so startup
+    checks it (defence in depth: a 64-bit exec clears the flag on both
+    x86_64 and aarch64, as the CI runners show with `setarch -X`):
     if set, seccomp counts as "partly supported" (logged under
     `best_effort`, exit 2 under `required`). An unexpected call gets
     `seccomp_action`: `fail` (the default) returns `EPERM` and the server
