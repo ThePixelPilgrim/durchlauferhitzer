@@ -112,6 +112,14 @@ impl Outcome {
     }
 }
 
+/// Landlock's outcome as `restrict_files` leaves it, with the ABI it was
+/// applied at (`None`: not applied), for `restrict_calls` to settle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Files {
+    outcome: Outcome,
+    abi: Option<u32>,
+}
+
 /// What to do with Landlock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FilesPlan {
@@ -142,19 +150,25 @@ enum Fit {
 /// `roots`, at the kernel's ABI. Call it while the process has one
 /// thread: threads already running are not restricted. The outcome's
 /// gaps are all uncovered until [`restrict_calls`] settles them.
-pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<Outcome, Failure> {
+pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<Files, Failure> {
     match files_plan(config.landlock, landlock::abi())? {
-        FilesPlan::Skip(state) => Ok(Outcome::skipped(LayerName::Landlock, state)),
+        FilesPlan::Skip(state) => Ok(Files {
+            outcome: Outcome::skipped(LayerName::Landlock, state),
+            abi: None,
+        }),
         FilesPlan::Apply(abi) => {
             let roots: Vec<BorrowedFd<'_>> = roots.iter().map(AsFd::as_fd).collect();
             landlock::restrict_to_reading(&roots, abi)
                 .map_err(|err| Failure(format!("landlock: {err}")))?;
             let gaps = landlock::gaps(abi).into_iter().map(Gap::from).collect();
-            Ok(Outcome::applied(
-                LayerName::Landlock,
-                State::Active(Applied::Abi(abi)),
-                gaps,
-            ))
+            Ok(Files {
+                outcome: Outcome::applied(
+                    LayerName::Landlock,
+                    State::Active(Applied::Abi(abi)),
+                    gaps,
+                ),
+                abi: Some(abi),
+            })
         }
     }
 }
@@ -164,7 +178,7 @@ pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<
 /// outcomes, Landlock's first, in the order they are logged.
 pub(crate) fn restrict_calls(
     config: &Containment,
-    landlock: Outcome,
+    landlock: Files,
 ) -> Result<[Outcome; 2], Failure> {
     let persona = seccomp::personality().map_err(|err| Failure(format!("personality: {err}")))?;
     let plan = calls_plan(
@@ -246,7 +260,15 @@ fn calls_plan(
 /// installed (`seccomp` active or partial); otherwise it makes Landlock
 /// partial, a failure under `required`. Truncation stays uncovered and
 /// changes nothing (owner decision 2026-11-01).
-fn cover(layer: Layer, mut landlock: Outcome, seccomp: State) -> Result<Outcome, Failure> {
+fn cover(layer: Layer, files: Files, seccomp: State) -> Result<Outcome, Failure> {
+    let Files {
+        outcome: mut landlock,
+        abi,
+    } = files;
+    // Only an applied Landlock has gaps.
+    let Some(abi) = abi else {
+        return Ok(landlock);
+    };
     let Some(at) = landlock
         .uncovered
         .iter()
@@ -263,24 +285,13 @@ fn cover(layer: Layer, mut landlock: Outcome, seccomp: State) -> Result<Outcome,
         State::Off => "off",
         State::Missing => "missing",
     };
-    // Only an applied Landlock has gaps.
-    let applied = match landlock.state {
-        State::Active(applied) | State::Partial(applied) => applied,
-        State::Off | State::Missing => return Ok(landlock),
-    };
     match layer {
-        Layer::Required => {
-            let abi = match applied {
-                Applied::Abi(abi) => abi.to_string(),
-                Applied::Filter(_) => "?".to_owned(),
-            };
-            Err(Failure(format!(
-                "landlock is required but the kernel's Landlock (ABI {abi}) cannot \
-                 restrict device_ioctl, and seccomp, which covers it, is {seccomp}"
-            )))
-        }
+        Layer::Required => Err(Failure(format!(
+            "landlock is required but the kernel's Landlock (ABI {abi}) cannot \
+             restrict device_ioctl, and seccomp, which covers it, is {seccomp}"
+        ))),
         Layer::Off | Layer::BestEffort => {
-            landlock.state = State::Partial(applied);
+            landlock.state = State::Partial(Applied::Abi(abi));
             Ok(landlock)
         }
     }

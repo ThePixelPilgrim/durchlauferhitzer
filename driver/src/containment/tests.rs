@@ -5,7 +5,7 @@ use durchlauferhitzer_core::config::{Layer, SeccompAction};
 
 use super::filter::Arch;
 use super::{
-    Applied, CallsPlan, FilesPlan, Fit, Gap, LayerName, Outcome, State, calls_plan, cover,
+    Applied, CallsPlan, Files, FilesPlan, Fit, Gap, LayerName, Outcome, State, calls_plan, cover,
     files_plan,
 };
 use crate::process::Failure;
@@ -151,13 +151,16 @@ fn read_implies_exec_makes_seccomp_partial() {
     );
 }
 
-/// The outcome `restrict_files` returns for an applied ABI.
-fn landlock(abi: u32) -> Outcome {
-    Outcome::applied(
-        LayerName::Landlock,
-        State::Active(Applied::Abi(abi)),
-        abi_gaps(abi),
-    )
+/// What `restrict_files` returns for an applied ABI.
+fn landlock(abi: u32) -> Files {
+    Files {
+        outcome: Outcome::applied(
+            LayerName::Landlock,
+            State::Active(Applied::Abi(abi)),
+            abi_gaps(abi),
+        ),
+        abi: Some(abi),
+    }
 }
 
 fn abi_gaps(abi: u32) -> Vec<Gap> {
@@ -186,7 +189,11 @@ fn a_landlock_that_is_not_applied_has_nothing_to_cover() {
         for state in [State::Off, State::Missing] {
             for seccomp in FILTERED.into_iter().chain(UNFILTERED) {
                 let skipped = Outcome::skipped(LayerName::Landlock, state);
-                assert_eq!(cover(layer, skipped.clone(), seccomp).unwrap(), skipped);
+                let files = Files {
+                    outcome: skipped.clone(),
+                    abi: None,
+                };
+                assert_eq!(cover(layer, files, seccomp).unwrap(), skipped);
             }
         }
     }
@@ -197,7 +204,10 @@ fn abi_5_and_later_need_no_cover() {
     for layer in [Layer::BestEffort, Layer::Required] {
         for seccomp in FILTERED.into_iter().chain(UNFILTERED) {
             for abi in [5, 6, 7] {
-                assert_eq!(cover(layer, landlock(abi), seccomp).unwrap(), landlock(abi));
+                assert_eq!(
+                    cover(layer, landlock(abi), seccomp).unwrap(),
+                    landlock(abi).outcome
+                );
             }
         }
     }

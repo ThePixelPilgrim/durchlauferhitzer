@@ -195,7 +195,10 @@ fn both_off_apply_nothing() {
 }
 
 /// FR-PROC-06: device `ioctl` before ABI 5 is covered by the filter
-/// only; without it a required Landlock is exit 2 naming the gap.
+/// only; without it a required Landlock is exit 2 naming the gap. Every
+/// kernel we test on (CI included) has ABI 5 or later, so this skips
+/// there; the decision is pinned by the unit tests of `cover`
+/// (`src/containment/tests.rs`) for every ABI before 5.
 #[test]
 fn seccomp_off_fails_a_required_landlock_before_abi_5() {
     let abi = match abi() {
@@ -280,10 +283,15 @@ fn a_landlock_the_kernel_lacks_is_logged_missing_under_best_effort() {
     assert!(response.ends_with("\r\n\r\ninside\n"), "{response}");
 }
 
-/// Under Landlock a file beneath each root is served; nothing outside
-/// the roots is, by any path (FR-PROC-06, FR-STATIC).
+/// Landlock does not get in the way: with it required, a file beneath
+/// each root is served, every path out of the roots through the file
+/// system is still 404 (dot and empty segments are 400, refused before
+/// it).
+/// The 404s come from the server's own `openat2` beneath the root
+/// (`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), which Landlock backs up
+/// unseen; Landlock's enforcement itself is proven in `landlock_self.rs`.
 #[test]
-fn under_landlock_files_beneath_the_roots_are_served_and_nothing_else() {
+fn with_landlock_files_beneath_the_roots_are_served_and_paths_out_are_404() {
     let site = Site::new();
     let (_server, mut lines) = site.start("landlock required;", Setup::non_root());
     lines.wait_for(SECCOMP_ACTIVE);
@@ -295,29 +303,51 @@ fn under_landlock_files_beneath_the_roots_are_served_and_nothing_else() {
         );
         assert!(response.ends_with(&format!("\r\n\r\n{body}")), "{response}");
     }
+    // Paths that reach the file system: refused beneath the root.
+    for path in ["/out.txt", "/up/outside.txt"] {
+        let response = get(site.addr, path);
+        assert!(
+            response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{path}: {response}"
+        );
+    }
+    // Dot segments, plain or encoded, and an empty segment: refused by
+    // the target parser.
     for path in [
-        "/out.txt",
-        "/up/outside.txt",
+        "//outside.txt",
         "/two/../outside.txt",
         "/%2e%2e/outside.txt",
         "/two/%2e%2e/%2e%2e/outside.txt",
-        "//outside.txt",
     ] {
         let response = get(site.addr, path);
-        assert!(!response.contains("outside\n"), "{path}: {response}");
-        assert!(response.starts_with("HTTP/1.1 4"), "{path}: {response}");
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "{path}: {response}"
+        );
     }
+}
+
+/// Skips the test with `reason`, or fails it when
+/// `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1` (the arm64 CI job).
+fn skip_read_implies_exec(reason: &str) {
+    const REQUIRE: &str = "DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC";
+    assert!(
+        std::env::var_os(REQUIRE).is_none_or(|v| v != "1"),
+        "{reason}, but {REQUIRE}=1 requires the test"
+    );
+    println!("skipped: {reason}");
 }
 
 /// `READ_IMPLIES_EXEC` (`setarch -X`) defeats the `PROT_EXEC` check:
 /// exit 2 under `seccomp required`. Only where the kernel keeps the flag
-/// across `exec` (aarch64; x86_64 clears it for a 64-bit binary).
+/// across `exec` (aarch64; x86_64 clears it for a 64-bit binary); a skip
+/// is a failure with `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1`.
 #[test]
 fn read_implies_exec_fails_a_required_seccomp() {
     const SETARCH: &str = "/usr/bin/setarch";
     let arch = std::env::consts::ARCH;
     if !Path::new(SETARCH).exists() {
-        println!("skipped: no {SETARCH}");
+        skip_read_implies_exec(&format!("no {SETARCH}"));
         return;
     }
     let probe = run_program(
@@ -327,7 +357,9 @@ fn read_implies_exec_fails_a_required_seccomp() {
     );
     let persona = u32::from_str_radix(text(&probe.stdout).trim(), 16).unwrap_or(0);
     if !probe.status.success() || persona & 0x0040_0000 == 0 {
-        println!("skipped: `setarch {arch} -X` gives no READ_IMPLIES_EXEC across exec here");
+        skip_read_implies_exec(&format!(
+            "`setarch {arch} -X` gives no READ_IMPLIES_EXEC across exec here"
+        ));
         return;
     }
     let site = Site::new();

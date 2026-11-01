@@ -18,7 +18,7 @@ use std::time::Duration;
 use durchlauferhitzer_core::Core;
 use durchlauferhitzer_core::config::{Config, Containment, load};
 
-use crate::containment::{self, Outcome};
+use crate::containment::{self, Files};
 use crate::event_loop::{Driver, Exit};
 use crate::log::{DriverLog, LogEntry, LogSink};
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
@@ -150,7 +150,7 @@ struct Ready {
     /// The `containment` block (FR-CFG-25).
     containment: Containment,
     /// Landlock's outcome (A11 step 7a); the filter settles its gaps.
-    landlock: Outcome,
+    landlock: Files,
 }
 
 /// A11 steps 3 to 7a: the `openat2` probe, the static roots, the

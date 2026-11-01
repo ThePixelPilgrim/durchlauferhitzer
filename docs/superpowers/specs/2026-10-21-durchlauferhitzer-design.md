@@ -1302,7 +1302,8 @@ Failures, persistence, timeouts:
   7. the privilege drop (FR-PROC-03; exit 2);
   7a. *(stage 5 Task 5)* Landlock (FR-PROC-06), while the process has
       one thread and before anything else opens a path (exit 2 for a
-      required layer it cannot apply);
+      required layer it cannot apply, or that the kernel offers but
+      refuses, in any mode);
   8. the signal mask: SIGTERM, SIGINT, SIGPIPE and SIGHUP are blocked
      and a `signalfd` opened for them, before any other thread exists, so
      every thread inherits the mask and neither SIGPIPE nor SIGHUP can
@@ -1458,8 +1459,8 @@ Failures, persistence, timeouts:
   - Landlock: after the privilege drop and before any worker thread, the
     process may only read files and directories beneath its static roots
     (and nothing else on the file system). "Partly supported" means the
-    kernel's Landlock ABI cannot enforce that (e.g. Landlock disabled, or an
-    ABI that leaves a needed right unrestricted). (owner decision 2026-10-29, stage 5 builder check) Any
+    kernel's Landlock ABI cannot enforce that (e.g. an ABI that leaves a
+    needed right unrestricted; a disabled Landlock is missing). (owner decision 2026-10-29, stage 5 builder check) Any
     Landlock ABI that can restrict file access to reading beneath the roots
     (ABI 1, Linux 5.14) counts as supported, also for `landlock required`:
     rights an older ABI cannot restrict are named in the startup log with
@@ -1472,11 +1473,12 @@ Failures, persistence, timeouts:
     `truncate` uncovered, and the README recommends Linux ≥ 6.2 (≥ 6.10 for
     every right natively) and roots the server user cannot write. *Builder call:* network rules
     (Landlock ABI 4) are not part of stage 5.
-  - *(Stage 5 Task 5, builder calls:)* the startup log line of each layer
-    is FR-LOG-05's `containment` kind. A layer the kernel offers but
-    refuses to apply (an error of `landlock_restrict_self` or of
-    installing the filter) is exit 2 whatever the mode: it is no missing
-    layer, and the process may be half restricted. The exit-2 messages
+  - *(Owner decision 2026-11-01, stage 5 Task 5 review:)* a layer the
+    kernel offers but refuses to apply (an error of
+    `landlock_restrict_self` or of installing the filter) is exit 2
+    whatever the mode: it is no missing layer, and the process may be
+    half restricted. *(Stage 5 Task 5, builder calls:)* the startup log
+    line of each layer is FR-LOG-05's `containment` kind. The exit-2 messages
     are `<layer> is required but the kernel has none`, `seccomp is
     required but it has no allow-list for this architecture`, `seccomp is
     required but the personality has READ_IMPLIES_EXEC, which defeats its

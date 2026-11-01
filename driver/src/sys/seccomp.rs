@@ -118,7 +118,7 @@ pub fn install(program: &[libc::sock_filter]) -> io::Result<()> {
         -1 => Err(io::Error::last_os_error()),
         // TSYNC: the id of the thread that could not be synchronized.
         tid => Err(io::Error::other(format!(
-            "seccomp: thread {tid} cannot be synchronized"
+            "thread {tid} cannot be synchronized"
         ))),
     }
 }
