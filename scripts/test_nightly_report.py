@@ -1,0 +1,464 @@
+"""Tests of scripts/nightly-report.py (NFR-TEST-08): failure records from
+canned logs, the fingerprint, and the comment / reopen / create decision.
+
+Run with `python3 -m unittest discover -s scripts -p 'test_*.py'`.
+"""
+
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import tempfile
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SPEC = importlib.util.spec_from_file_location(
+    "nightly_report", os.path.join(_HERE, "nightly-report.py")
+)
+nr = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(nr)
+
+RUN = "https://github.com/o/r/actions/runs/111"
+WS = "/home/runner/work/durchlauferhitzer/durchlauferhitzer"
+
+# The long runs' output (`--nocapture`): the inner panic, then
+# run_reporting's `SIM_SEED=..` panic, as this toolchain prints them.
+SIM_LOG = """\
+     Running tests/faults/main.rs (target/release/deps/faults-e4979b665c20f239)
+
+running 2 tests
+
+thread 'random_fault_schedules' (1047) panicked at sim/tests/faults/static_net.rs:412:13:
+conn 17 got 503 after 12ms, expected 200 (step 88)
+trace:
+ step 1: accept conn 17
+ step 2: read 4096
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'random_fault_schedules' (1047) panicked at sim/tests/faults/run.rs:336:9:
+SIM_SEED=48213 failed (timer order OnTime, shutdown Drain { drain: 31 }): conn 17 got 503 after 12ms, expected 200 (step 88)
+trace:
+ step 1: accept conn 17
+ step 2: read 4096
+test random_fault_schedules ... FAILED
+COVERAGE statuses=[1, 2] http=3
+test random_proxy_schedules ... ok
+
+failures:
+
+failures:
+    random_fault_schedules
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 291.20s
+"""
+
+# The same bug on another seed (other numbers, other arch).
+SIM_LOG_OTHER_SEED = (
+    SIM_LOG.replace("48213", "190007")
+    .replace("conn 17", "conn 4")
+    .replace("12ms", "7ms")
+    .replace("step 88", "step 3")
+    .replace("drain: 31", "drain: 2")
+    .replace("OnTime", "Late")
+)
+
+# A panic that is not wrapped by run_reporting (the coverage check).
+SIM_COVERAGE_LOG = """\
+running 1 test
+
+thread 'random_proxy_schedules' (77) panicked at sim/tests/faults/proxy.rs:930:9:
+coverage: only 3 of 40 reset cases reached
+test random_proxy_schedules ... FAILED
+
+failures:
+    random_proxy_schedules
+"""
+
+FUZZ_PANIC_LOG = """\
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3405691582
+#2\tINITED cov: 1234 ft: 1234 corp: 12/345b exec/s: 0 rss: 40Mb
+
+thread '<unnamed>' (2817) panicked at /home/runner/work/durchlauferhitzer/durchlauferhitzer/core/src/http/request.rs:312:17:
+index out of bounds: the len is 4 but the index is 9
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+==2817== ERROR: libFuzzer: deadly signal
+    #0 0x55d1a2 in __sanitizer_print_stack_trace
+SUMMARY: libFuzzer: deadly signal
+MS: 3 InsertByte-ChangeBit-CopyPart-; base unit: 5f1b
+artifact_prefix='/home/runner/work/durchlauferhitzer/durchlauferhitzer/fuzz/artifacts/request_head/'; Test unit written to /home/runner/work/durchlauferhitzer/durchlauferhitzer/fuzz/artifacts/request_head/crash-6b1f0c1f0e5a3cbbd0f3a0e4a7b2c9d8e1f2a3b4
+Base64: R0UB
+Error: Fuzz target exited with exit status: 77
+"""
+
+FUZZ_OOM_LOG = """\
+INFO: Seed: 12
+==3011== ERROR: libFuzzer: out-of-memory (malloc(67108865))
+   To change the out-of-memory limit use -rss_limit_mb=<N>
+SUMMARY: libFuzzer: out-of-memory
+artifact_prefix='/w/fuzz/artifacts/chunked/'; Test unit written to /w/fuzz/artifacts/chunked/oom-a1b2c3
+Base64: AAAA
+"""
+
+FUZZ_TIMEOUT_LOG = """\
+ALARM: working on the last Unit for 11 seconds
+       and the timeout value is 10 (use -timeout=N to change)
+==3120== ERROR: libFuzzer: timeout after 11 seconds
+SUMMARY: libFuzzer: timeout
+artifact_prefix='/w/fuzz/artifacts/config/'; Test unit written to /w/fuzz/artifacts/config/timeout-c0ffee
+"""
+
+FUZZ_CLEAN_LOG = """\
+INFO: Seed: 99
+Done 123456 runs in 601 second(s)
+"""
+
+DEBIAN_LOG = """\
+     Running unittests src/main.rs (/tmp/target/debug/deps/durchlauferhitzer-1a2b)
+
+running 3 tests
+test config::tests::parses ... ok
+
+test result: ok. 3 passed; 0 failed
+     Running tests/containment.rs (/tmp/target/debug/deps/containment-0f3a9c2b1d4e5f60)
+
+running 2 tests
+test landlock_denies_outside_root ... ok
+
+thread 'seccomp_kill_on_unlisted_call' (4242) panicked at driver/tests/containment.rs:211:5:
+server exited with signal 31 (SIGSYS) after 37 ms
+test seccomp_kill_on_unlisted_call ... FAILED
+
+failures:
+    seccomp_kill_on_unlisted_call
+
+test result: FAILED. 1 passed; 1 failed
+error: test failed, to rerun pass `-p durchlauferhitzer --test containment`
+"""
+
+
+class Normalization(unittest.TestCase):
+    def test_numbers_become_n(self):
+        self.assertEqual(
+            nr.normalize_message("conn 17 got 503 after 12ms (step 88)"),
+            "conn N got N after Nms (step N)",
+        )
+
+    def test_identifiers_keep_their_digits(self):
+        self.assertEqual(
+            nr.normalize_message("u64 h2 sha256 at 0x7ffd1234 x[3]"),
+            "u64 h2 sha256 at 0xN x[N]",
+        )
+
+    def test_whitespace_collapses(self):
+        self.assertEqual(nr.normalize_message("  a \t b  "), "a b")
+
+    def test_location_drops_column_and_workspace(self):
+        self.assertEqual(
+            nr.normalize_location(WS + "/core/src/http/request.rs:312:17", WS),
+            "core/src/http/request.rs:312",
+        )
+        self.assertEqual(
+            nr.normalize_location("sim/tests/faults/run.rs:336:9", WS),
+            "sim/tests/faults/run.rs:336",
+        )
+
+    def test_location_strips_registry_and_rustc_prefixes(self):
+        self.assertEqual(
+            nr.normalize_location(
+                "/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/x-1.0/src/a.rs:5:1",
+                WS,
+            ),
+            "registry/x-1.0/src/a.rs:5",
+        )
+        self.assertEqual(
+            nr.normalize_location("/rustc/8bab26f4f68e/library/core/src/str.rs:9:2", WS),
+            "rustc/library/core/src/str.rs:9",
+        )
+
+    def test_fingerprint_is_fp_and_8_hex_of_sha256(self):
+        import hashlib
+
+        want = "fp-" + hashlib.sha256(b"abc").hexdigest()[:8]
+        self.assertEqual(nr.fingerprint("abc"), want)
+
+
+class LongRuns(unittest.TestCase):
+    def test_sim_panic_takes_the_inner_location_and_the_seed(self):
+        (f,) = nr.record_long_runs(SIM_LOG, WS)
+        self.assertEqual(f["kind"], "panic")
+        self.assertEqual(f["test"], "random_fault_schedules")
+        self.assertEqual(f["location"], "sim/tests/faults/static_net.rs:412")
+        self.assertEqual(f["message"], "conn 17 got 503 after 12ms, expected 200 (step 88)")
+        self.assertEqual(f["seed"], "48213")
+        self.assertIn("timer order OnTime, shutdown Drain { drain: 31 }", f["panic_text"])
+        self.assertIn("SIM_SEED=48213 ", f["replay"])
+        self.assertIn("--test faults -- random_fault_schedules --exact", f["replay"])
+
+    def test_seeds_and_ids_normalize_away(self):
+        (a,) = nr.record_long_runs(SIM_LOG, WS)
+        (b,) = nr.record_long_runs(SIM_LOG_OTHER_SEED, WS)
+        self.assertNotEqual(a["seed"], b["seed"])
+        self.assertEqual(nr.describe("long-runs", a), nr.describe("long-runs", b))
+
+    def test_title(self):
+        (f,) = nr.record_long_runs(SIM_LOG, WS)
+        fp, title = nr.describe("long-runs", f)
+        self.assertRegex(fp, r"^fp-[0-9a-f]{8}$")
+        self.assertEqual(
+            title, f"nightly: long runs — panic at sim/tests/faults/static_net.rs:412 [{fp}]"
+        )
+
+    def test_an_unwrapped_panic_is_its_own_failure(self):
+        (f,) = nr.record_long_runs(SIM_COVERAGE_LOG, WS)
+        self.assertEqual(f["location"], "sim/tests/faults/proxy.rs:930")
+        self.assertEqual(f["seed"], "")
+        self.assertNotIn("SIM_SEED=", f["replay"])
+
+    def test_a_log_without_a_failure_is_unrecognized(self):
+        (f,) = nr.record_long_runs("error[E0425]: cannot find value `x`\n", WS)
+        self.assertEqual(f["kind"], "unrecognized")
+        fp, title = nr.describe("long-runs", f)
+        self.assertEqual(title, f"nightly: long runs — failed without a recognized failure [{fp}]")
+
+
+class Fuzz(unittest.TestCase):
+    def test_panic(self):
+        (f,) = nr.record_fuzz({"request_head": FUZZ_PANIC_LOG}, WS, "nightly-2026-10-31")
+        self.assertEqual(f["kind"], "panic")
+        self.assertEqual(f["test"], "request_head")
+        self.assertEqual(f["location"], "core/src/http/request.rs:312")
+        self.assertEqual(f["input"], "crash-6b1f0c1f0e5a3cbbd0f3a0e4a7b2c9d8e1f2a3b4")
+        self.assertEqual(
+            f["replay"],
+            "cd fuzz && cargo +nightly-2026-10-31 fuzz run --debug-assertions request_head "
+            "artifacts/request_head/crash-6b1f0c1f0e5a3cbbd0f3a0e4a7b2c9d8e1f2a3b4",
+        )
+        fp, title = nr.describe("fuzz", f)
+        self.assertEqual(
+            title, f"nightly: fuzz request_head — panic at core/src/http/request.rs:312 [{fp}]"
+        )
+
+    def test_panic_numbers_normalize_away(self):
+        other = FUZZ_PANIC_LOG.replace("len is 4", "len is 0").replace("index is 9", "index is 1")
+        other = other.replace("crash-6b1f", "crash-0000")
+        (a,) = nr.record_fuzz({"request_head": FUZZ_PANIC_LOG}, WS, "n")
+        (b,) = nr.record_fuzz({"request_head": other}, WS, "n")
+        self.assertEqual(nr.describe("fuzz", a)[0], nr.describe("fuzz", b)[0])
+
+    def test_the_target_is_part_of_the_fingerprint(self):
+        (a,) = nr.record_fuzz({"request_head": FUZZ_PANIC_LOG}, WS, "n")
+        (b,) = nr.record_fuzz({"response_head": FUZZ_PANIC_LOG}, WS, "n")
+        self.assertNotEqual(nr.describe("fuzz", a)[0], nr.describe("fuzz", b)[0])
+
+    def test_oom(self):
+        (f,) = nr.record_fuzz({"chunked": FUZZ_OOM_LOG}, WS, "n")
+        self.assertEqual((f["kind"], f["input"]), ("oom", "oom-a1b2c3"))
+        self.assertTrue(nr.describe("fuzz", f)[1].startswith("nightly: fuzz chunked — out of memory [fp-"))
+
+    def test_timeout(self):
+        (f,) = nr.record_fuzz({"config": FUZZ_TIMEOUT_LOG}, WS, "n")
+        self.assertEqual((f["kind"], f["input"]), ("timeout", "timeout-c0ffee"))
+        self.assertTrue(nr.describe("fuzz", f)[1].startswith("nightly: fuzz config — timeout [fp-"))
+
+    def test_clean_targets_are_skipped(self):
+        failures = nr.record_fuzz(
+            {"config": FUZZ_CLEAN_LOG, "chunked": FUZZ_OOM_LOG}, WS, "n"
+        )
+        self.assertEqual([f["test"] for f in failures], ["chunked"])
+
+
+class OlderGlibc(unittest.TestCase):
+    def test_the_failing_test_name(self):
+        (f,) = nr.record_older_glibc(DEBIAN_LOG, WS)
+        self.assertEqual(f["kind"], "test")
+        self.assertEqual(f["test"], "containment::seccomp_kill_on_unlisted_call")
+        self.assertIn("server exited with signal 31", f["panic_text"])
+        self.assertIn(
+            "cargo test -p durchlauferhitzer --locked --test containment -- "
+            "seccomp_kill_on_unlisted_call --exact",
+            f["replay"],
+        )
+        fp, title = nr.describe("older-glibc", f)
+        self.assertEqual(
+            title,
+            f"nightly: older glibc — containment::seccomp_kill_on_unlisted_call failed [{fp}]",
+        )
+
+    def test_only_the_name_counts(self):
+        (a,) = nr.record_older_glibc(DEBIAN_LOG, WS)
+        (b,) = nr.record_older_glibc(DEBIAN_LOG.replace("211:5", "300:1").replace("37 ms", "5 ms"), WS)
+        self.assertEqual(nr.describe("older-glibc", a), nr.describe("older-glibc", b))
+
+
+def _record(job, arch, failures):
+    return {"version": 1, "job": job, "arch": arch, "run_url": RUN, "failures": failures}
+
+
+class Decision(unittest.TestCase):
+    def groups(self, *logs):
+        records = [_record("long-runs", "x86_64", nr.record_long_runs(log, WS)) for log in logs]
+        return nr.group(records)
+
+    def test_none_creates(self):
+        (g,) = self.groups(SIM_LOG)
+        (a,) = nr.decide([g], [])
+        self.assertEqual((a["op"], a["number"]), ("create", None))
+
+    def test_open_comments(self):
+        (g,) = self.groups(SIM_LOG)
+        issues = [{"number": 7, "state": "OPEN", "title": "nightly: x [%s]" % g["fp"]}]
+        (a,) = nr.decide([g], issues)
+        self.assertEqual((a["op"], a["number"]), ("comment", 7))
+
+    def test_closed_reopens(self):
+        (g,) = self.groups(SIM_LOG)
+        issues = [{"number": 9, "state": "CLOSED", "title": "nightly: x [%s]" % g["fp"]}]
+        (a,) = nr.decide([g], issues)
+        self.assertEqual((a["op"], a["number"]), ("reopen", 9))
+
+    def test_an_open_issue_wins_over_a_closed_one(self):
+        (g,) = self.groups(SIM_LOG)
+        issues = [
+            {"number": 9, "state": "CLOSED", "title": "a [%s]" % g["fp"]},
+            {"number": 12, "state": "OPEN", "title": "b [%s]" % g["fp"]},
+        ]
+        self.assertEqual(nr.decide([g], issues)[0]["number"], 12)
+
+    def test_other_fingerprints_do_not_match(self):
+        (g,) = self.groups(SIM_LOG)
+        issues = [{"number": 7, "state": "OPEN", "title": "nightly: x [fp-00000000]"}]
+        self.assertEqual(nr.decide([g], issues)[0]["op"], "create")
+
+    def test_one_group_per_fingerprint(self):
+        records = [
+            _record("long-runs", "x86_64", nr.record_long_runs(SIM_LOG, WS)),
+            _record("long-runs", "arm64", nr.record_long_runs(SIM_LOG_OTHER_SEED, WS)),
+        ]
+        (g,) = nr.group(records)
+        self.assertEqual([o["arch"] for o in g["occurrences"]], ["x86_64", "arm64"])
+
+    def test_at_most_three_new_issues(self):
+        groups = [
+            {"fp": "fp-%08d" % i, "title": "t%d" % i, "occurrences": []} for i in range(5)
+        ]
+        issues = [{"number": 1, "state": "OPEN", "title": "x [fp-00000004]"}]
+        ops = [a["op"] for a in nr.decide(groups, issues)]
+        self.assertEqual(ops, ["create", "create", "create", "skip", "comment"])
+
+
+class Apply(unittest.TestCase):
+    """The gh calls, against a fake gh that records argv lists."""
+
+    def run_report(self, records, issues, labels):
+        calls = []
+
+        def gh(args, body=None):
+            calls.append((args, body))
+            if args[:2] == ["issue", "list"]:
+                return json.dumps(issues)
+            if args[:2] == ["label", "list"]:
+                return json.dumps([{"name": n} for n in labels])
+            return ""
+
+        summary = nr.report(records, gh, "2026-11-02")
+        return calls, summary
+
+    def test_create_makes_the_label_and_the_issue(self):
+        rec = _record("long-runs", "x86_64", nr.record_long_runs(SIM_LOG, WS))
+        calls, summary = self.run_report([rec], [], [])
+        argv = [c[0] for c in calls]
+        self.assertEqual(argv[0][:2], ["issue", "list"])
+        self.assertIn(["label", "create", "nightly", "--color", "B60205",
+                       "--description", "A failing nightly job (NFR-TEST-08)"], argv)
+        create = [c for c in calls if c[0][:2] == ["issue", "create"]]
+        self.assertEqual(len(create), 1)
+        args, body = create[0]
+        self.assertIn("--label", args)
+        self.assertIn("nightly", args)
+        self.assertIn("long runs (x86_64)", body)
+        self.assertIn(RUN, body)
+        self.assertIn("SIM_SEED=48213", body)
+        self.assertIn("conn 17 got 503", body)
+        self.assertIn("created", summary)
+
+    def test_the_label_is_not_created_twice(self):
+        rec = _record("long-runs", "x86_64", nr.record_long_runs(SIM_LOG, WS))
+        calls, _ = self.run_report([rec], [], ["nightly"])
+        self.assertFalse([c for c in calls if c[0][:2] == ["label", "create"]])
+
+    def test_comment_and_reopen(self):
+        rec = _record("long-runs", "x86_64", nr.record_long_runs(SIM_LOG, WS))
+        fp = nr.describe("long-runs", rec["failures"][0])[0]
+        calls, _ = self.run_report([rec], [{"number": 5, "state": "OPEN", "title": "t [%s]" % fp}], [])
+        (c,) = [c for c in calls if c[0][0] == "issue" and c[0][1] != "list"]
+        self.assertEqual(c[0][:3], ["issue", "comment", "5"])
+        self.assertIn("2026-11-02", c[1])
+        self.assertIn(RUN, c[1])
+        self.assertIn("SIM_SEED=48213", c[1])
+
+        calls, _ = self.run_report([rec], [{"number": 5, "state": "CLOSED", "title": "t [%s]" % fp}], [])
+        ops = [c for c in calls if c[0][0] == "issue" and c[0][1] != "list"]
+        self.assertEqual([c[0][:3] for c in ops], [["issue", "reopen", "5"], ["issue", "comment", "5"]])
+        self.assertIn("Regressed", ops[1][1])
+
+    def test_skipped_ones_go_to_the_summary(self):
+        recs = []
+        for i in range(4):
+            log = DEBIAN_LOG.replace("seccomp_kill_on_unlisted_call", "case_%s" % "abcd"[i])
+            recs.append(_record("older-glibc", "x86_64", nr.record_older_glibc(log, WS)))
+        calls, summary = self.run_report(recs, [], ["nightly"])
+        self.assertEqual(len([c for c in calls if c[0][:2] == ["issue", "create"]]), 3)
+        self.assertIn("not filed", summary)
+        self.assertIn("containment::case_d", summary)
+
+
+class Bodies(unittest.TestCase):
+    def test_a_fence_longer_than_any_backtick_run(self):
+        text = "a ```` b"
+        body = nr.fenced(text)
+        self.assertTrue(body.startswith("`````\n"))
+        self.assertTrue(body.endswith("\n`````"))
+
+    def test_panic_text_is_capped(self):
+        log = SIM_COVERAGE_LOG.replace(
+            "coverage: only 3 of 40 reset cases reached",
+            "coverage\n" + "x" * 10000,
+        )
+        (f,) = nr.record_long_runs(log, WS)
+        self.assertLessEqual(len(f["panic_text"]), nr.MAX_TEXT)
+
+
+class Cli(unittest.TestCase):
+    def test_record_writes_json_and_missing_jobs_are_synthesized(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "long-runs.log")
+            with open(log, "w") as fh:
+                fh.write(SIM_LOG)
+            out = os.path.join(d, "rec", "failure.json")
+            os.makedirs(os.path.dirname(out))
+            with contextlib.redirect_stdout(io.StringIO()):
+                nr.main(["record", "--job", "long-runs", "--arch", "arm64", "--run-url", RUN,
+                         "--workspace", WS, "--out", out, log])
+            with open(out) as fh:
+                rec = json.load(fh)
+            self.assertEqual((rec["job"], rec["arch"], rec["run_url"]), ("long-runs", "arm64", RUN))
+            self.assertEqual(rec["failures"][0]["seed"], "48213")
+
+            records = nr.load_records(d)
+            needs = {
+                "long-runs": {"result": "failure"},
+                "fuzz": {"result": "failure"},
+                "older-glibc": {"result": "success"},
+            }
+            records = nr.add_missing(records, needs, RUN)
+            self.assertEqual([r["job"] for r in records], ["long-runs", "fuzz"])
+            self.assertEqual(records[1]["failures"][0]["kind"], "unrecognized")
+
+    def test_a_missing_log_is_unrecognized(self):
+        self.assertEqual(nr.record_older_glibc(None, WS)[0]["kind"], "unrecognized")
+
+
+if __name__ == "__main__":
+    unittest.main()
