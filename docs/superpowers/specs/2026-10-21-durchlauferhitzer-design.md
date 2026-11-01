@@ -1435,11 +1435,15 @@ Failures, persistence, timeouts:
     ABI that leaves a needed right unrestricted). (owner decision 2026-10-29, stage 5 builder check) Any
     Landlock ABI that can restrict file access to reading beneath the roots
     (ABI 1, Linux 5.14) counts as supported, also for `landlock required`:
-    rights an older ABI cannot restrict (truncation before ABI 3, device
-    `ioctl` before ABI 5) are covered by keeping those calls out of, or
-    argument-limited in, the seccomp allow-list, and the startup log names
-    each gap and what covers it. With seccomp `off` or missing, such a gap
-    makes Landlock "partly supported". *Builder call:* network rules
+    rights an older ABI cannot restrict are named in the startup log with
+    what covers them: device `ioctl` before ABI 5 is covered by keeping
+    `ioctl` out of the seccomp allow-list (with seccomp `off` or missing,
+    that gap makes Landlock "partly supported"). *(Owner decision
+    2026-11-01, stage 5 Task 3 review:)* truncation before ABI 3 (Linux
+    < 6.2) cannot be covered: `openat2` passes `O_TRUNC` in a struct the
+    filter cannot read. It stays a documented gap, not "partial": logged as
+    `truncate` uncovered, and the README recommends Linux ≥ 6.2 (≥ 6.10 for
+    every right natively) and roots the server user cannot write. *Builder call:* network rules
     (Landlock ABI 4) are not part of stage 5.
   - seccomp: a per-architecture allow-list (x86_64, aarch64) of exactly the
     system calls the server makes after startup, installed for every thread
@@ -1447,7 +1451,12 @@ Failures, persistence, timeouts:
     the arguments that matter most and are stable: `socket` only for
     `AF_INET`/`AF_INET6` stream sockets, `mmap`/`mprotect` never with
     `PROT_EXEC`, `clone` only with thread flags, and `prctl`, `fcntl` and
-    `ioctl` only for the operations the server uses. An unexpected call gets
+    `ioctl` only for the operations the server uses. *(Owner decision
+    2026-11-01, stage 5 Task 3 review:)* a process whose personality has
+    `READ_IMPLIES_EXEC` set (inherited across exec on aarch64, e.g.
+    `setarch -X`) defeats the `PROT_EXEC` check, so startup checks it:
+    if set, seccomp counts as "partly supported" (logged under
+    `best_effort`, exit 2 under `required`). An unexpected call gets
     `seccomp_action`: `fail` (the default) returns `EPERM` and the server
     keeps running; `kill` ends the process. Every blocked call is logged by
     the kernel (`SECCOMP_FILTER_FLAG_LOG`: the audit or kernel log, with the
