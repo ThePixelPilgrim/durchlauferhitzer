@@ -63,6 +63,32 @@ pub(crate) fn template_parse(template: &[u8], limits: HeadLimits) -> HeadVerdict
     }
 }
 
+/// The heads a connection's templates form, in order, each with the
+/// index of its last template: under the long limits an open head
+/// (`HeadVerdict::Open`) is continued by the template sent after it, and
+/// so on while the last one joined is open, so the parser sees one head
+/// with the first template's request line and every template's lines.
+pub(crate) fn heads(templates: &[Vec<u8>], limits: HeadLimits) -> Vec<(Vec<u8>, usize)> {
+    let mut out = Vec::new();
+    let mut next = 0;
+    while let Some(first) = templates.get(next) {
+        let mut head = first.clone();
+        let mut last = next;
+        let mut joined = first;
+        while template_parse(joined, limits) == HeadVerdict::Open {
+            let Some(more) = templates.get(last + 1) else {
+                break;
+            };
+            head.extend_from_slice(more);
+            last += 1;
+            joined = more;
+        }
+        out.push((head, last));
+        next = last + 1;
+    }
+    out
+}
+
 /// A log the drain wrote for the `k`th template of a connection.
 pub(crate) struct Drained<'l> {
     pub(crate) log: &'l Log,
@@ -146,5 +172,28 @@ fn the_table_marks_each_malformed_template() {
             HeadLimits::Long
         ),
         HeadVerdict::Request
+    );
+}
+
+#[test]
+fn an_open_head_is_continued_by_the_next_template() {
+    let open = REQUESTS.last().map(|(t, _)| t.to_vec()).unwrap_or_default();
+    let old = b"GET /old HTTP/1.0\r\n\r\n".to_vec();
+    let next = b"GET /aaa HTTP/1.1\r\n\r\n".to_vec();
+    let templates = vec![open.clone(), old.clone(), next.clone()];
+    let joined = [open.clone(), old.clone()].concat();
+    assert_eq!(
+        heads(&templates, HeadLimits::Long),
+        vec![(joined, 1), (next.clone(), 2)]
+    );
+    // Under the short limits the open template is rejected on its own.
+    assert_eq!(
+        heads(&templates, HeadLimits::Short),
+        vec![(open.clone(), 0), (old, 1), (next, 2)]
+    );
+    // Open to the end: one head, still open.
+    assert_eq!(
+        heads(&[open.clone(), open.clone()], HeadLimits::Long),
+        vec![([open.clone(), open].concat(), 1)]
     );
 }

@@ -520,7 +520,9 @@ pub(crate) fn check_client(
     let mut expected_phase = Vec::new();
     // Every announced response but a connection refusal answers the next
     // request template: its persistence follows from that request.
-    let mut templates = client.templates.iter();
+    // Two templates may form one head (`heads`); `consumed` counts templates.
+    let heads = heads(&client.templates, limits);
+    let mut templates = heads.iter();
     let mut consumed = 0;
     for (n, &(log, phase)) in phased.iter().enumerate() {
         if phase == Phase::AbortCut {
@@ -547,10 +549,10 @@ pub(crate) fn check_client(
                         coverage.shutdown.refused_connection += 1;
                     }
                 } else {
-                    let Some(template) = templates.next() else {
+                    let Some((template, last)) = templates.next() else {
                         fail(format!("{log:?} answers no request sent"));
                     };
-                    consumed += 1;
+                    consumed = last + 1;
                     if let Log::Rejected {
                         reason: RejectReason::Http { error, request },
                         ..
