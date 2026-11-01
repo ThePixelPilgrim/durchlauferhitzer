@@ -867,6 +867,10 @@ Failures, persistence, timeouts:
   the end of a lingering close). This holds with and without a body,
   and whether the end of stream comes before or after the response head
   (test `client_half_close_still_gets_response`).
+  *Known behaviour (controller ruling 2026-11-02):* a backend reset right
+  behind a response head still queued for the client may cut part of that
+  head, as it cuts both connections; the spec makes no flush promise, and
+  the client sees a broken response either way.
 - **FR-PROXY-27** [done] A backend that answers before the request body
   is complete: the response is forwarded, body forwarding stops, and the
   client closes after the response (its body is unread). This holds also
