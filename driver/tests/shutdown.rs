@@ -505,10 +505,18 @@ fn a_stalled_log_reader_neither_stops_serving_nor_holds_the_exit() {
     let mut got = Vec::new();
     let mut buf = [0u8; 64 * 1024];
     let answer = b"\r\n\r\nsmall\n";
-    while got.windows(answer.len()).filter(|w| w == answer).count() < N {
+    // Count answers incrementally: only the new bytes, plus the tail an
+    // answer split across two reads may start in.
+    let mut answers = 0;
+    while answers < N {
         let n = conn.read(&mut buf).unwrap();
         assert!(n > 0, "the connection ended after {} bytes", got.len());
+        let from = got.len().saturating_sub(answer.len() - 1);
         got.extend_from_slice(&buf[..n]);
+        answers += got[from..]
+            .windows(answer.len())
+            .filter(|w| w == answer)
+            .count();
     }
     sender.join().unwrap();
     let ok = text(&got).matches("HTTP/1.1 200 OK\r\n").count();

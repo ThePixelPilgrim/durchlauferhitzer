@@ -171,7 +171,7 @@ fn skip_without(tool: &str) {
         std::env::var_os(REQUIRE).is_none_or(|v| v != "1"),
         "no `{tool}` here, but {REQUIRE}=1 requires the test"
     );
-    println!("skipped: no `{tool}` here");
+    eprintln!("skipped: no `{tool}` here");
 }
 
 /// Sets the server's soft `RLIMIT_NOFILE` with `prlimit --pid`, run as
@@ -204,6 +204,8 @@ fn set_soft_nofile(pid: u32, soft: u64) -> bool {
             false
         }
         Err(err) => panic!("{tool}: {err}"),
+        // 127: `setpriv` ran but could not exec `prlimit` (a plain
+        // `prlimit` that is missing is `NotFound` above).
         Ok(out) if out.status.code() == Some(127) => {
             skip_without("prlimit");
             false
