@@ -758,6 +758,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
             &shutdown.marks,
             &conns,
             Duration::from_secs(30),
+            net.send_idle,
         );
         wind_down(&mut sim, &mut stories, &mut assigned);
         for story in &stories {

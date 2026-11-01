@@ -219,19 +219,23 @@ pub(crate) fn shutdown_at(
     }
 }
 
-/// A plain drain that began finishes (FR-PROC-05: in-flight requests finish, then
-/// every connection closes): after `within`, which the net chooses as the
-/// longest chain of deadlines an exchange may still wait on and shorter
-/// than `keepalive_timeout`, no connection is `Open` any more (each is
-/// closed, or shut down for writing and lingering), although no client
-/// ended its stream. The clock moves in 1 s steps, so late timers fire
-/// near their deadlines too.
+/// A plain drain that began finishes (FR-PROC-05: in-flight requests
+/// finish, then every connection closes): after `within`, which the net
+/// chooses as the longest chain of deadlines an exchange may still wait
+/// on and shorter than `keepalive_timeout`, no connection is `Open` any
+/// more (each is closed, or shut down for writing and lingering), although
+/// no client ended its stream. Every byte a client accepts restarts
+/// `send_idle_timeout` (FR-CONN-08), so a connection that made send
+/// progress during the check may stay open until `send_idle` after its
+/// last progress (plus one clock step), when that is later. The clock
+/// moves in 1 s steps, so late timers fire near their deadlines too.
 pub(crate) fn check_drain_finishes(
     sim: &mut Sim,
     plan: ShutdownPlan,
     marks: &Marks,
     clients: &[ConnId],
     within: Duration,
+    send_idle: Duration,
 ) {
     match plan {
         ShutdownPlan::Drain { .. } if marks.drain.is_some() => {}
@@ -240,18 +244,51 @@ pub(crate) fn check_drain_finishes(
         | ShutdownPlan::DrainThenAbort { .. }
         | ShutdownPlan::Abort { .. } => return,
     }
-    for _ in 0..within.as_secs() {
-        sim.advance(Duration::from_secs(1));
+    let step = Duration::from_secs(1);
+    let start = sim.now();
+    let base = start.saturating_add(within);
+    // Per connection: bytes accepted so far, and the step that saw the
+    // last progress (the progress itself happened within that step).
+    let mut progress: BTreeMap<ConnId, (usize, Instant)> = clients
+        .iter()
+        .map(|&conn| (conn, (sim.accepted_by_client(conn), start)))
+        .collect();
+    loop {
+        let now = sim.now();
+        let mut waiting = now < base;
+        for (&conn, &(_, last)) in &progress {
+            if sim.state(conn) != SimConnState::Open {
+                continue;
+            }
+            let bound = base.max(last.saturating_add(send_idle).saturating_add(step));
+            assert!(
+                now < bound,
+                "conn={} still open {:?} into the drain check ({within:?}, or send_idle \
+                 {send_idle:?} after its last send progress {:?} into it)\ntrace:\n{}",
+                conn.0,
+                since(start, now),
+                since(start, last),
+                sim.trace()
+            );
+            waiting = true;
+        }
+        if !waiting {
+            return;
+        }
+        sim.advance(step);
+        let now = sim.now();
+        for (&conn, entry) in &mut progress {
+            let accepted = sim.accepted_by_client(conn);
+            if accepted != entry.0 {
+                *entry = (accepted, now);
+            }
+        }
     }
-    for &conn in clients {
-        assert_ne!(
-            sim.state(conn),
-            SimConnState::Open,
-            "conn={} still open {within:?} into the drain\ntrace:\n{}",
-            conn.0,
-            sim.trace()
-        );
-    }
+}
+
+/// The time from `from` to `to` (zero if `to` is earlier).
+fn since(from: Instant, to: Instant) -> Duration {
+    Duration::from_nanos(to.as_nanos().saturating_sub(from.as_nanos()))
 }
 
 /// After the wind-down: the core holds nothing (`is_drained`), and, once

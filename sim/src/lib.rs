@@ -119,6 +119,9 @@ struct SimConn {
     eof: Eof,
     client: ClientSide,
     received: Vec<u8>,
+    /// Bytes the client accepted so far (`Sent` and `FileSent`), kept
+    /// when `received` is taken.
+    accepted: usize,
     read_chunk: usize,
     window: Window,
     interest: Interest,
@@ -218,6 +221,7 @@ impl Sim {
                 eof: Eof::NotSent,
                 client: ClientSide::Live,
                 received: Vec::new(),
+                accepted: 0,
                 read_chunk: usize::MAX,
                 window: Window::Unlimited,
                 interest: Interest::None,
@@ -378,6 +382,7 @@ impl Sim {
         }
         c.window.take(n);
         c.received.extend_from_slice(&pending[..n]);
+        c.accepted += n;
         self.deliver(Event::Sent { conn, len: n });
         true
     }
@@ -390,6 +395,13 @@ impl Sim {
     /// Take the bytes the client has received so far on `conn`.
     pub fn take_received(&mut self, conn: ConnId) -> Vec<u8> {
         std::mem::take(&mut self.conn_mut(conn).received)
+    }
+
+    /// Bytes the client has accepted on `conn` so far (`Sent` and
+    /// `FileSent`), whether or not they were taken: each is send progress
+    /// that restarts `send_idle_timeout` (FR-CONN-08).
+    pub fn accepted_by_client(&self, conn: ConnId) -> usize {
+        self.conn(conn).accepted
     }
 
     /// Client bytes not yet delivered to the server.

@@ -506,6 +506,25 @@ fn delivered_to_server_counts_what_the_core_read() {
 }
 
 #[test]
+fn accepted_by_client_counts_sent_and_file_sent_bytes_and_survives_take() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv", "f", b"hello");
+    let c = sim.connect(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert_eq!(sim.accepted_by_client(c), 0);
+    sim.set_client_window(c, Window::Budget(10));
+    sim.send(c, b"GET /f HTTP/1.1\r\nHost: a.test\r\n\r\n");
+    sim.run_until_idle();
+    assert_eq!(sim.accepted_by_client(c), 10, "{}", sim.trace());
+    // Taking what the client received does not reset the count.
+    assert_eq!(sim.take_received(c).len(), 10);
+    sim.set_client_window(c, Window::Unlimited);
+    sim.run_until_idle();
+    let rest = sim.take_received(c);
+    assert!(rest.ends_with(b"hello"), "{}", sim.trace());
+    assert_eq!(sim.accepted_by_client(c), 10 + rest.len());
+}
+
+#[test]
 fn opening_file_lasts_until_the_open_is_answered() {
     let mut sim = Sim::new(CONFIG);
     sim.add_file("/srv", "f", b"x");

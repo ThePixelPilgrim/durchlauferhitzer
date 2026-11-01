@@ -216,7 +216,9 @@ impl Sim {
         let start = segment.offset as usize;
         let bytes = f.bytes[start..start + n as usize].to_vec();
         self.take_window(conn, n as usize);
-        self.conn_mut(conn).received.extend_from_slice(&bytes);
+        let c = self.conn_mut(conn);
+        c.received.extend_from_slice(&bytes);
+        c.accepted += bytes.len();
         self.deliver(Event::FileSent { conn, len: n });
         true
     }
