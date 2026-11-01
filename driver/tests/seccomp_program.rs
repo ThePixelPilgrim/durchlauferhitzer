@@ -52,7 +52,7 @@ impl Mode {
 
 fn filter() {
     let arch = Arch::current().expect("a filtered architecture");
-    install(&program(arch, SeccompAction::Fail)).expect("install");
+    install(&program(arch, SeccompAction::Fail, std::process::id())).expect("install");
 }
 
 /// The child: installs the filter, then runs `mode`.

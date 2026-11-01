@@ -12,6 +12,9 @@ const EPERM: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
 const ENOSYS: u32 = libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
 const KILL: u32 = libc::SECCOMP_RET_KILL_PROCESS;
 
+/// The server's pid the programs are built for.
+const PID: u32 = 4242;
+
 /// The thread flags glibc's `pthread_create` passes to `clone`.
 const THREAD: u64 = (libc::CLONE_VM
     | libc::CLONE_FS
@@ -95,7 +98,7 @@ fn call(arch: Arch, nr: u32, args: [u64; 6]) -> Call {
 fn each(mut f: impl FnMut(Arch, SeccompAction, &[libc::sock_filter])) {
     for arch in ARCHES {
         for action in ACTIONS {
-            f(arch, action, &program(arch, action));
+            f(arch, action, &program(arch, action, PID));
         }
     }
 }
@@ -194,7 +197,7 @@ fn a_foreign_architecture_gets_the_action() {
 #[test]
 fn x32_numbers_get_the_action() {
     for action in ACTIONS {
-        let prog = program(Arch::X86_64, action);
+        let prog = program(Arch::X86_64, action, PID);
         for entry in table(Arch::X86_64) {
             let got = run(&prog, &call(Arch::X86_64, entry.nr | 0x4000_0000, [0; 6]));
             assert_eq!(got, expected(action), "x32 {}", entry.name);
@@ -334,17 +337,23 @@ fn fcntl_only_for_its_commands() {
 }
 
 #[test]
-fn the_fatal_paths_are_allowed_and_tgkill_only_for_sigabrt() {
+fn the_fatal_paths_are_allowed_and_tgkill_only_for_sigabrt_to_itself() {
     each(|arch, action, prog| {
         for name in ["rt_sigreturn", "rt_sigaction", "getpid"] {
             let got = run(prog, &call(arch, nr(arch, name), [u64::MAX; 6]));
             assert_eq!(got, ALLOW, "{arch:?} {name}");
         }
         let tgkill = nr(arch, "tgkill");
-        let run = |sig: i32| run(prog, &call(arch, tgkill, [7, 8, sig as u64, 0, 0, 0]));
-        assert_eq!(run(libc::SIGABRT), ALLOW);
+        let run =
+            |pid: u64, sig: i32| run(prog, &call(arch, tgkill, [pid, 8, sig as u64, 0, 0, 0]));
+        let own = u64::from(PID);
+        assert_eq!(run(own, libc::SIGABRT), ALLOW);
         for sig in [0, libc::SIGKILL, libc::SIGTERM, libc::SIGSYS, libc::SIGSEGV] {
-            assert_eq!(run(sig), expected(action), "{sig}");
+            assert_eq!(run(own, sig), expected(action), "{sig}");
+        }
+        // Another process, even with SIGABRT.
+        for pid in [0, 1, own + 1, own - 1, u64::from(u32::MAX)] {
+            assert_eq!(run(pid, libc::SIGABRT), expected(action), "pid {pid}");
         }
     });
 }
@@ -355,7 +364,7 @@ fn the_fatal_paths_are_allowed_and_tgkill_only_for_sigabrt() {
 fn every_body_fits_under_a_jump() {
     for arch in ARCHES {
         for entry in table(arch) {
-            let len = body(entry.rule, EPERM).len();
+            let len = body(entry.rule, EPERM, PID).len();
             assert!(len <= usize::from(u8::MAX), "{} body: {len}", entry.name);
         }
     }

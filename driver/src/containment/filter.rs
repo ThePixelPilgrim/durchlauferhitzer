@@ -75,7 +75,8 @@ enum Rule {
     Prctl,
     /// `fcntl`: only the commands in [`FCNTL_COMMANDS`].
     Fcntl,
-    /// `tgkill`: only `SIGABRT` (glibc's `abort`).
+    /// `tgkill`: only `SIGABRT` (glibc's `abort`) to the server's own
+    /// process.
     Abort,
     /// `clone3`: `ENOSYS` whatever the action, so glibc falls back to
     /// `clone`, whose flags can be checked (`clone3` passes them in
@@ -237,8 +238,9 @@ const FCNTL_COMMANDS: &[u32] = &[
 ];
 
 /// The program for `arch`: every listed call allowed (with its argument
-/// checks), everything else answered by `action`.
-pub fn program(arch: Arch, action: SeccompAction) -> Vec<libc::sock_filter> {
+/// checks), everything else answered by `action`. `pid` is the server's
+/// own (`getpid`): the only process `tgkill` may signal.
+pub fn program(arch: Arch, action: SeccompAction, pid: u32) -> Vec<libc::sock_filter> {
     let deny = match action {
         SeccompAction::Fail => libc::SECCOMP_RET_ERRNO | errno(libc::EPERM),
         SeccompAction::Kill => libc::SECCOMP_RET_KILL_PROCESS,
@@ -253,7 +255,7 @@ pub fn program(arch: Arch, action: SeccompAction) -> Vec<libc::sock_filter> {
     // return, so the accumulator it loads never reaches the next entry,
     // and every jump is short (no body is longer than a few instructions).
     for entry in arch.table() {
-        let body = body(entry.rule, deny);
+        let body = body(entry.rule, deny, pid);
         prog.push(jump(JEQ, entry.nr, 0, offset(body.len())));
         prog.extend(body);
     }
@@ -285,8 +287,9 @@ const THREAD_FLAGS: u32 = (libc::CLONE_VM
     | libc::CLONE_PARENT_SETTID
     | libc::CLONE_CHILD_CLEARTID) as u32;
 
-/// The instructions after an entry's number matched.
-fn body(rule: Rule, deny: u32) -> Vec<libc::sock_filter> {
+/// The instructions after an entry's number matched; `pid` is the
+/// server's.
+fn body(rule: Rule, deny: u32, pid: u32) -> Vec<libc::sock_filter> {
     match rule {
         Rule::Allow => vec![ret(libc::SECCOMP_RET_ALLOW)],
         Rule::Enosys => vec![ret(libc::SECCOMP_RET_ERRNO | errno(libc::ENOSYS))],
@@ -316,7 +319,13 @@ fn body(rule: Rule, deny: u32) -> Vec<libc::sock_filter> {
         ],
         Rule::Prctl => one_of(arg(0), PRCTL_OPTIONS, deny),
         Rule::Fcntl => one_of(arg(1), FCNTL_COMMANDS, deny),
-        Rule::Abort => one_of(arg(2), &[libc::SIGABRT as u32], deny),
+        Rule::Abort => {
+            // `tgkill(tgid, tid, sig)`: `tgid` must be the server, then
+            // `sig` SIGABRT.
+            let mut out = vec![load(arg(0)), jump(JEQ, pid, 1, 0), ret(deny)];
+            out.extend(one_of(arg(2), &[libc::SIGABRT as u32], deny));
+            out
+        }
     }
 }
 

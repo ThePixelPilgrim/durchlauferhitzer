@@ -101,12 +101,12 @@ src/
                       `current()`), one table per arch (the calls the
                       server makes after startup, grouped by purpose, from
                       `strace -f` over the driver tests), `program(arch,
-                      action)`: the arch check, then each call with its
+                      action, pid)`: the arch check, then each call with its
                       argument checks (`socket` AF_INET/AF_INET6 streams,
                       protocol 0, `mmap`/`mprotect` without PROT_EXEC,
                       `clone` with glibc's thread flags, `prctl`
                       PR_SET_NAME, `fcntl` F_GETFD/F_GETFL/F_SETFL,
-                      `tgkill` SIGABRT; `clone3` ENOSYS), the action for
+                      `tgkill` SIGABRT to `pid`; `clone3` ENOSYS), the action for
                       the rest (`fail`: EPERM, `kill`); never `truncate`,
                       `ftruncate`, `ioctl`, `newfstatat` or `execve`.
                       A panic with `RUST_BACKTRACE` set opens

@@ -1452,7 +1452,8 @@ Failures, persistence, timeouts:
     are stable: `socket` only for `AF_INET`/`AF_INET6` stream sockets with
     protocol 0, `mmap`/`mprotect` never with `PROT_EXEC`, `clone` only with
     thread flags, `prctl` and `fcntl` only for the operations the server
-    uses, `tgkill` only with `SIGABRT` (the abort path); `ioctl` is not
+    uses, `tgkill` only with `SIGABRT` to the server's own process (the
+    abort path; the pid check, stage 5 Task 5); `ioctl` is not
     allowed at all. The fatal paths (signal return and handler setup,
     `getpid`, `tgkill`) are listed, so a crash still ends the process the
     normal way (stage 5 Task 3 review). *(Owner decision
