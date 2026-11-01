@@ -46,12 +46,13 @@ jobs:
         # `nobody`. The temp dirs are under /tmp and the binary must be
         # reachable for `nobody`. The list must name every test file
         # that runs the server (those that include the child helper,
-        # `support/child.rs`), but the ones excluded with a reason (none
-        # yet), so a new server test cannot miss this step.
+        # `support/child.rs`), but the ones excluded with a reason, so a
+        # new server test cannot miss this step. Excluded: free_port (it
+        # checks the port helper and starts no server).
         run: |
           set -euo pipefail
           tests=(budget cli containment privileges shutdown smoke startup systemd)
-          excluded=()
+          excluded=(free_port)
           found=$(grep -l '"support/child.rs"' driver/tests/*.rs \
             | xargs -n1 basename | sed 's/\.rs$//' | sort)
           listed=$(printf '%s\n' "${tests[@]}" "${excluded[@]}" | sed '/^$/d' | sort)

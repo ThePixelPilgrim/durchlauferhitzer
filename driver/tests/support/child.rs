@@ -102,17 +102,30 @@ fn set_mode(path: &Path, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-/// A loopback port that was free a moment ago (bound, read, released).
-///
-/// Another process may take it before the server binds it: a known, rare
-/// race, left as it is (a retry would have to rewrite the test's config).
-/// [`Running::start`] names it when the server's bind fails that way.
+/// A free loopback port for a server that no other socket can be given
+/// before the server binds it: the kernel hands out ports itself (`bind`
+/// to 0, `connect`) only from `net.ipv4.ip_local_port_range`, so it is
+/// one of the 16384 below it, a new one per pick (`free_port.rs`). Only
+/// another program binding that very port could take it.
 pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let ephemeral: u32 = range.split_whitespace().next().unwrap().parse().unwrap();
+    let low = ephemeral.saturating_sub(16384).max(1024);
+    let span = ephemeral.saturating_sub(low);
+    assert!(
+        span >= 1024,
+        "the ephemeral ports start at {ephemeral}: no room below them for test ports"
+    );
+    let start = std::process::id().wrapping_mul(7919) % span;
+    for _ in 0..span {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = u16::try_from(low + start.wrapping_add(n) % span).unwrap();
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no free port in {low}-{}", low + span - 1);
 }
 
 /// A config with one listener and one host whose `/` route is `route`
@@ -406,10 +419,10 @@ impl Running {
                 if let Some(mut err) = self.child.stderr.take() {
                     let _ = err.read_to_string(&mut stderr);
                 }
-                // The race of `free_port`: another process took the port.
+                // `free_port` leaves only another program binding the port.
                 let race = if stderr.contains("Address already in use") {
-                    " (the port from `free_port` was taken before the server \
-                     bound it, a known rare race: rerun the test)"
+                    " (another program bound the port from `free_port` before \
+                     the server did)"
                 } else {
                     ""
                 };

@@ -323,14 +323,21 @@ tests/
                     file, a sparse file over 4 GiB
   static_fd_leak.rs a client reset mid-`sendfile` closes the file and leaks
                     no descriptor; alone in its binary
+  free_port.rs      `free_port` against the race (CI, 2026-11-01): with
+                    every ephemeral loopback port held by `bind(0)`, the
+                    old pick (bind 0, read, release) comes up, `free_port`'s
+                    never; skipped, with a reason, where the descriptor
+                    limit cannot hold the whole range; alone in its binary
   unsafe_confined.rs  NFR-MAINT-05: `allow(unsafe_code)` (or `expect`) appears
                     in `core/src` and `driver/src` (every file, unit
                     tests included) only on `pub mod sys;` in `src/lib.rs`
-  support/child.rs  running the binary: temp configs, a free port (bound,
-                    read and released, so another process could take it
-                    before the server binds: a known, rare race, left as
-                    it is; a server exiting early with "Address already
-                    in use" names it), the binary checked to be reachable
+  support/child.rs  running the binary: temp configs, a free port (below
+                    the kernel's ephemeral range, so no other socket is
+                    given it before the server binds; a new one per pick
+                    within the process; only another program binding
+                    that port could take it, which a server exiting
+                    early with "Address already in use" names), the
+                    binary checked to be reachable
                     for `nobody` before it is started as nobody, the
                     child's setup before exec (`pre_exec`: closed fds,
                     fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`:
