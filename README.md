@@ -82,9 +82,11 @@ set `required` that the kernel cannot apply (below).
 
 After startup the server confines itself (config block `containment`,
 see the example config): Landlock lets it only read beneath its static
-roots, and a seccomp filter allows only the system calls it needs. By
-default each is used where the kernel has it; the startup log says what
-applies (`kind=containment ...`, one line per layer). A blocked call gets
+roots, and a seccomp filter allows only the system calls it needs. Each
+layer is `best_effort` (the default: used where the kernel has it,
+otherwise logged as missing), `required` (missing or partial is exit 2)
+or `off`; the startup log says what applies (`kind=containment ...`, one
+line per layer). A blocked call gets
 `EPERM` (or ends the process with `seccomp_action kill`) and is logged by
 the kernel:
 
