@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       seeds:
-        description: "Seed range of both randomized sim nets (SIM_SEEDS)"
+        description: "Seed range of both randomized sim nets (SIM_SEEDS); small ranges fail the coverage check; use SIM_SEED to replay one seed"
         type: string
         default: "0..200000"
       fuzz_seconds:
@@ -38,9 +38,11 @@ jobs:
             runner: ubuntu-24.04-arm
     name: long runs (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    # Full budget: about 5 min.
+    timeout-minutes: 60
     steps:
-      # Pinned by commit: the v4 tag (= v4.4.0) as of 2026-10-29.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Pinned by commit: the v7.0.1 tag (Node 24) as of 2026-11-01.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show
       - name: Randomized nets over SIM_SEEDS
@@ -62,7 +64,7 @@ jobs:
         run: grep -E '^SIM_SEED=[0-9]+ failed' long-runs.log | cut -c1-4000 > failing-seed.txt || true
       - name: Upload the failing seed
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failing-seed-${{ matrix.arch }}
           path: |
@@ -72,19 +74,21 @@ jobs:
   fuzz:
     name: fuzz
     runs-on: ubuntu-latest
+    # Full budget: 4 x 600 s plus install and build, about 45 min.
+    timeout-minutes: 90
     env:
       # The nightly is installed in this job only; the product builds with
       # the pinned stable toolchain (NFR-PORT-06).
       NIGHTLY: nightly-2026-10-31
       TARGETS: request_head chunked response_head config
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install nightly and cargo-fuzz
         run: |
           rustup toolchain install "$NIGHTLY" --profile minimal
           cargo +"$NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
       - name: Restore the corpus
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ github.run_id }}
@@ -94,9 +98,10 @@ jobs:
         run: cargo +"$NIGHTLY" fuzz build --debug-assertions
       - name: Fuzz each target for FUZZ_SECONDS
         # Every target runs even after one fails. Bounded memory and time:
-        # -rss_limit_mb (also the largest single allocation) and -timeout
-        # per input; a crash, leak, OOM or timeout input lands in
-        # fuzz/artifacts/<target>/.
+        # -rss_limit_mb for the process, -malloc_limit_mb for one
+        # allocation (inputs are a few KiB, so 64 MiB in one malloc
+        # is a bug) and -timeout per input; a crash, leak, OOM or timeout
+        # input lands in fuzz/artifacts/<target>/.
         working-directory: fuzz
         run: |
           set -uo pipefail
@@ -107,19 +112,19 @@ jobs:
             dict=()
             case "$t" in *_head) dict=(-dict=http.dict) ;; esac
             cargo +"$NIGHTLY" fuzz run --debug-assertions "$t" -- \
-              -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -timeout=10 \
+              -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -malloc_limit_mb=64 -timeout=10 \
               "${dict[@]}" || status=1
           done
           exit "$status"
       - name: Save the corpus
         if: always()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ github.run_id }}
       - name: Upload crash inputs
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts
@@ -129,6 +134,8 @@ jobs:
     # glibc than the runners' (Task 6 runs every server under kill).
     name: older glibc (debian 12)
     runs-on: ubuntu-latest
+    # About 1 min.
+    timeout-minutes: 30
     container:
       image: debian:12
       # Docker's own seccomp profile would filter every process (the
@@ -152,8 +159,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev git util-linux
-          command -v setpriv || apt-get install -y --no-install-recommends setpriv
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+          command -v setpriv
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install rustup and the pinned toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \

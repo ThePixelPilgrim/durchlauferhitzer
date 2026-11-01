@@ -26,8 +26,8 @@ jobs:
       # list against the files that include `support/child.rs`).
       SERVER_TESTS: budget cli containment privileges shutdown smoke startup systemd
     steps:
-      # Pinned by commit: the v4 tag (= v4.4.0) as of 2026-10-29.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Pinned by commit: the v7.0.1 tag (Node 24) as of 2026-11-01.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show
       - name: Architecture
@@ -97,6 +97,11 @@ jobs:
                 DURCHLAUFERHITZER_TEST_SECCOMP_KILL="$kill" TMPDIR=/tmp "$bin"
             done
           done
+      - name: Fuzz targets compile
+        # The fuzz crate (outside the workspace, test-only) on stable, so
+        # a core API change cannot silently break the targets; running
+        # them needs nightly (nightly.yml).
+        run: cargo check --manifest-path fuzz/Cargo.toml --locked
       - name: Product dependency check
         run: scripts/check-product-deps.sh
       - name: Product dependency check self-test

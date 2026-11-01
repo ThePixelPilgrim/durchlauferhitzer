@@ -29,7 +29,7 @@ http.dict           libFuzzer dictionary of HTTP tokens for the head targets
 ```sh
 cd fuzz
 cargo +nightly fuzz run --debug-assertions request_head -- \
-  -max_total_time=60 -rss_limit_mb=2048 -timeout=10 -dict=http.dict
+  -max_total_time=60 -rss_limit_mb=2048 -malloc_limit_mb=64 -timeout=10 -dict=http.dict
 ```
 
 A crash input lands in `fuzz/artifacts/<target>/`; replay it with
