@@ -16,8 +16,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use durchlauferhitzer_core::Core;
-use durchlauferhitzer_core::config::{Config, load};
+use durchlauferhitzer_core::config::{Config, Containment, load};
 
+use crate::containment::{self, Outcome};
 use crate::event_loop::{Driver, Exit};
 use crate::log::{DriverLog, LogEntry, LogSink};
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
@@ -132,7 +133,7 @@ fn serve(path: &Path) -> ExitStatus {
 /// A startup failure (exit 2): the message printed after
 /// `durchlauferhitzer: `.
 #[derive(Debug)]
-struct Failure(String);
+pub(crate) struct Failure(pub(crate) String);
 
 /// Everything the loop needs, once startup has passed its checks.
 #[derive(Debug)]
@@ -146,12 +147,19 @@ struct Ready {
     shutdown_timeout: Duration,
     /// Driver log entries of startup, written once the sink exists.
     notes: Vec<DriverLog>,
+    /// The `containment` block (FR-CFG-25).
+    containment: Containment,
+    /// Landlock's outcome (A11 step 7a); the filter settles its gaps.
+    landlock: Outcome,
 }
 
-/// A11 steps 3 to 7: the `openat2` probe, the static roots, the listeners
-/// (systemd's, A7, or bound here, A6), the descriptor budget
-/// (NFR-RES-05), the privilege drop (A8).
+/// A11 steps 3 to 7a: the `openat2` probe, the static roots, the
+/// listeners (systemd's, A7, or bound here, A6), the descriptor budget
+/// (NFR-RES-05), the privilege drop (A8), then Landlock (FR-PROC-06),
+/// while the process has one thread and before anything else opens a
+/// path.
 fn start_up(config: Config) -> Result<Ready, Failure> {
+    let containment = config.containment;
     let listen = config.listen.clone();
     let user = config.user.clone();
     let max_connections = config.limits.max_connections;
@@ -173,6 +181,7 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
     let notes = privileges::drop_privileges(user.as_deref())?
         .into_iter()
         .collect();
+    let landlock = containment::restrict_files(&containment, &roots)?;
     Ok(Ready {
         core,
         listeners,
@@ -180,6 +189,8 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
         disk_threads,
         shutdown_timeout,
         notes,
+        containment,
+        landlock,
     })
 }
 
@@ -233,12 +244,14 @@ fn bind(listen: &[SocketAddr]) -> Result<Vec<OwnedFd>, Failure> {
         .collect()
 }
 
-/// A11 steps 8 and 9: the signal mask and its signalfd (before the disk
+/// A11 steps 8 to 11: the signal mask and its signalfd (before the disk
 /// workers start, so they inherit the mask; A9), the stderr log sink, the
-/// driver reading the signals, then the loop. Every message is printed
-/// while no sink lives: before it is created, or after the driver holding
-/// it is gone. Every ending of the loop exits 0, a drain, an abort or a
-/// stop (A9); a failure of the loop itself exits 2.
+/// driver reading the signals, the seccomp filter (FR-PROC-06, step 10a:
+/// once the disk workers run, right before the loop) and the containment
+/// lines, then the loop. Every message is printed while no sink lives:
+/// before it is created, or after the driver holding it is gone. Every
+/// ending of the loop exits 0, a drain, an abort or a stop (A9); a
+/// failure of the loop itself, or of a containment layer, exits 2.
 fn run_loop(ready: Ready) -> ExitStatus {
     let Ready {
         core,
@@ -247,6 +260,8 @@ fn run_loop(ready: Ready) -> ExitStatus {
         disk_threads,
         shutdown_timeout,
         notes,
+        containment,
+        landlock,
     } = ready;
     // SIGTERM, SIGINT, SIGPIPE and SIGHUP: blocked in every thread, read
     // by the loop (SIGPIPE and SIGHUP ignored there).
@@ -278,9 +293,25 @@ fn run_loop(ready: Ready) -> ExitStatus {
             return ExitStatus::Startup;
         }
     };
-    let result = driver
-        .watch_signals(signals, shutdown_timeout)
-        .and_then(|()| driver.run());
+    if let Err(err) = driver.watch_signals(signals, shutdown_timeout) {
+        drop(driver);
+        report(format_args!("event loop: {err}"));
+        return ExitStatus::Startup;
+    }
+    match containment::restrict_calls(&containment, landlock) {
+        Ok(outcomes) => {
+            for outcome in outcomes {
+                driver.write_log(DriverLog::Containment(outcome));
+            }
+        }
+        Err(Failure(message)) => {
+            // The sink goes first (FR-LOG-06).
+            drop(driver);
+            report(message);
+            return ExitStatus::Startup;
+        }
+    }
+    let result = driver.run();
     // The sink goes with the driver (the signalfd too); only then may std
     // print again.
     drop(driver);

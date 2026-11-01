@@ -13,8 +13,10 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
+use durchlauferhitzer::containment::{Applied, Gap, LayerName, Outcome, State};
 use durchlauferhitzer::log::{format_driver, format_entry};
 use durchlauferhitzer::{DriverLog, KeptReason, ShutdownPhase};
+use durchlauferhitzer_core::config::SeccompAction;
 use durchlauferhitzer_core::http::chunked::ChunkedError;
 use durchlauferhitzer_core::http::request::{HttpError, Method};
 use durchlauferhitzer_core::http::response_head::ResponseError;
@@ -257,6 +259,89 @@ fn driver_kinds() {
     ];
     for (entry, expected) in cases {
         assert_eq!(driver_line(&entry), expected, "{entry:?}");
+    }
+}
+
+fn containment(layer: LayerName, state: State, covered: &[Gap], uncovered: &[Gap]) -> String {
+    driver_line(&DriverLog::Containment(Outcome {
+        layer,
+        state,
+        covered: covered.to_vec(),
+        uncovered: uncovered.to_vec(),
+    }))
+}
+
+/// One line per layer (FR-PROC-06): `abi` while Landlock applies, the
+/// action while the filter does (whose blocked calls the kernel logs);
+/// gaps the filter covers, then those nothing covers, joined by `+`.
+#[test]
+fn containment_lines() {
+    use Gap::{DeviceIoctl, ReadImpliesExec, Truncate};
+    use LayerName::{Landlock, Seccomp};
+    let abi = Applied::Abi;
+    let fail = Applied::Filter(SeccompAction::Fail);
+    let kill = Applied::Filter(SeccompAction::Kill);
+    let cases = [
+        (
+            containment(Landlock, State::Active(abi(7)), &[], &[]),
+            "kind=containment layer=landlock state=active abi=7\n",
+        ),
+        (
+            containment(Landlock, State::Active(abi(4)), &[DeviceIoctl], &[]),
+            "kind=containment layer=landlock state=active abi=4 gaps=device_ioctl \
+             covered_by=seccomp\n",
+        ),
+        (
+            containment(Landlock, State::Active(abi(2)), &[DeviceIoctl], &[Truncate]),
+            "kind=containment layer=landlock state=active abi=2 gaps=device_ioctl \
+             covered_by=seccomp uncovered=truncate\n",
+        ),
+        (
+            containment(Landlock, State::Partial(abi(4)), &[], &[DeviceIoctl]),
+            "kind=containment layer=landlock state=partial abi=4 uncovered=device_ioctl\n",
+        ),
+        (
+            containment(
+                Landlock,
+                State::Partial(abi(1)),
+                &[],
+                &[Truncate, DeviceIoctl],
+            ),
+            "kind=containment layer=landlock state=partial abi=1 \
+             uncovered=truncate+device_ioctl\n",
+        ),
+        (
+            containment(Landlock, State::Missing, &[], &[]),
+            "kind=containment layer=landlock state=missing\n",
+        ),
+        (
+            containment(Landlock, State::Off, &[], &[]),
+            "kind=containment layer=landlock state=off\n",
+        ),
+        (
+            containment(Seccomp, State::Active(fail), &[], &[]),
+            "kind=containment layer=seccomp state=active action=fail log=kernel\n",
+        ),
+        (
+            containment(Seccomp, State::Active(kill), &[], &[]),
+            "kind=containment layer=seccomp state=active action=kill log=kernel\n",
+        ),
+        (
+            containment(Seccomp, State::Partial(fail), &[], &[ReadImpliesExec]),
+            "kind=containment layer=seccomp state=partial action=fail log=kernel \
+             uncovered=read_implies_exec\n",
+        ),
+        (
+            containment(Seccomp, State::Missing, &[], &[]),
+            "kind=containment layer=seccomp state=missing\n",
+        ),
+        (
+            containment(Seccomp, State::Off, &[], &[]),
+            "kind=containment layer=seccomp state=off\n",
+        ),
+    ];
+    for (got, expected) in cases {
+        assert_eq!(got, expected);
     }
 }
 

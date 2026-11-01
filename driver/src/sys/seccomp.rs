@@ -1,5 +1,6 @@
-//! seccomp (FR-PROC-06): installing a filter for every thread, and the
-//! probe for whether the kernel has it.
+//! seccomp (FR-PROC-06): installing a filter for every thread, the probe
+//! for whether the kernel has it, and the personality check its
+//! `PROT_EXEC` rule depends on.
 
 use std::io;
 
@@ -47,6 +48,37 @@ pub fn supported() -> Support {
     }
 }
 
+/// Whether the process's personality makes every readable mapping
+/// executable (`READ_IMPLIES_EXEC`), which defeats the filter's
+/// `PROT_EXEC` check (FR-PROC-06).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Personality {
+    ReadImpliesExec,
+    Plain,
+}
+
+impl Personality {
+    /// The flag's state in a personality value.
+    pub const fn of(persona: u32) -> Self {
+        if persona & libc::READ_IMPLIES_EXEC as u32 != 0 {
+            Self::ReadImpliesExec
+        } else {
+            Self::Plain
+        }
+    }
+}
+
+/// The calling process's personality, read with `personality(0xffffffff)`
+/// (which changes nothing).
+pub fn personality() -> io::Result<Personality> {
+    // SAFETY: `personality` takes no pointers; 0xffffffff only reads.
+    let ret = unsafe { libc::personality(0xffff_ffff) };
+    match u32::try_from(ret) {
+        Ok(persona) => Ok(Personality::of(persona)),
+        Err(_) => Err(io::Error::last_os_error()),
+    }
+}
+
 /// Installs `program` for every thread of the process: first
 /// `PR_SET_NO_NEW_PRIVS` (so no privilege is needed), then
 /// `SECCOMP_SET_MODE_FILTER` with `SECCOMP_FILTER_FLAG_TSYNC` (every
@@ -88,5 +120,24 @@ pub fn install(program: &[libc::sock_filter]) -> io::Result<()> {
         tid => Err(io::Error::other(format!(
             "seccomp: thread {tid} cannot be synchronized"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Personality, personality};
+
+    #[test]
+    fn read_implies_exec_is_bit_0x0400000() {
+        assert_eq!(Personality::of(0), Personality::Plain);
+        assert_eq!(Personality::of(0x0040_0000), Personality::ReadImpliesExec);
+        // PER_LINUX32 | ADDR_NO_RANDOMIZE | READ_IMPLIES_EXEC.
+        assert_eq!(Personality::of(0x0044_0008), Personality::ReadImpliesExec);
+        assert_eq!(Personality::of(0x0004_0008), Personality::Plain);
+    }
+
+    #[test]
+    fn the_test_process_has_a_plain_personality() {
+        assert_eq!(personality().unwrap(), Personality::Plain);
     }
 }

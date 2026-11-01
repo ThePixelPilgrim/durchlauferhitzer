@@ -1,0 +1,345 @@
+//! Containment at startup (FR-PROC-06) in the built binary, each test a
+//! server run as non-root (as `nobody` when the tests run as root): the
+//! startup log's `containment` line per layer, the seccomp filter and
+//! `no_new_privs` in every thread, `required` against a layer hidden by a
+//! test seccomp filter (exit 2) and `best_effort` against the same
+//! (logged missing, serving), and reads under Landlock.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test helpers outside #[test] functions; clippy.toml allows these in tests"
+)]
+
+#[path = "support/child.rs"]
+mod child;
+
+use std::fs;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+
+use child::{
+    Filter, Lines, Running, Setup, TempDir, assert_exit, free_port, get, run, run_program, text,
+    threads,
+};
+use durchlauferhitzer::sys::landlock::{Abi, abi};
+
+const SECCOMP_ACTIVE: &str = "kind=containment layer=seccomp state=active action=fail log=kernel";
+const SECCOMP_OFF: &str = "kind=containment layer=seccomp state=off";
+const SECCOMP_MISSING: &str = "kind=containment layer=seccomp state=missing";
+const LANDLOCK_OFF: &str = "kind=containment layer=landlock state=off";
+const LANDLOCK_MISSING: &str = "kind=containment layer=landlock state=missing";
+
+/// Whether the seccomp filter is installed when Landlock's line is
+/// written (it covers device `ioctl` before ABI 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seccomp {
+    Filtered,
+    Unfiltered,
+}
+
+/// Landlock's line for this kernel's ABI (FR-LOG-05).
+fn landlock_line(seccomp: Seccomp) -> String {
+    let Abi::Version(abi) = abi() else {
+        return LANDLOCK_MISSING.to_owned();
+    };
+    let head = "kind=containment layer=landlock";
+    match (abi, seccomp) {
+        (5.., _) => format!("{head} state=active abi={abi}"),
+        (3 | 4, Seccomp::Filtered) => {
+            format!("{head} state=active abi={abi} gaps=device_ioctl covered_by=seccomp")
+        }
+        (_, Seccomp::Filtered) => format!(
+            "{head} state=active abi={abi} gaps=device_ioctl covered_by=seccomp \
+             uncovered=truncate"
+        ),
+        (3 | 4, Seccomp::Unfiltered) => {
+            format!("{head} state=partial abi={abi} uncovered=device_ioctl")
+        }
+        (_, Seccomp::Unfiltered) => {
+            format!("{head} state=partial abi={abi} uncovered=truncate+device_ioctl")
+        }
+    }
+}
+
+/// A server's files: `www` (the `/` route) and `two` (the `/two`
+/// route) with `inside.txt` each, `outside.txt` next to them, and
+/// symlinks out of the roots.
+struct Site {
+    dir: TempDir,
+    addr: SocketAddr,
+    www: PathBuf,
+    two: PathBuf,
+}
+
+impl Site {
+    fn new() -> Site {
+        let dir = TempDir::new();
+        let www = dir.dir("www");
+        let two = dir.dir("two");
+        dir.file("outside.txt", "outside\n");
+        dir.file("www/inside.txt", "inside\n");
+        dir.file("two/inside.txt", "two\n");
+        std::os::unix::fs::symlink("../outside.txt", www.join("out.txt")).unwrap();
+        std::os::unix::fs::symlink(dir.path(), www.join("up")).unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
+        Site {
+            dir,
+            addr,
+            www,
+            two,
+        }
+    }
+
+    /// A config with `containment` (the inside of the block, or no
+    /// block when empty); returns its path.
+    fn config(&self, containment: &str) -> String {
+        let block = if containment.is_empty() {
+            String::new()
+        } else {
+            format!("containment {{ {containment} }}\n")
+        };
+        let conf = format!(
+            "listen {};\n{block}host example.test {{\n  path /two {{ static {}; }}\n  \
+             path / {{ static {}; }}\n}}\n",
+            self.addr,
+            self.two.display(),
+            self.www.display()
+        );
+        let path = self.dir.file("containment.conf", &conf);
+        path.to_str().unwrap().to_owned()
+    }
+
+    fn start(&self, containment: &str, setup: Setup) -> (Running, Lines) {
+        let mut server = Running::start(&[&self.config(containment)], setup, self.addr);
+        let lines = server.lines();
+        (server, lines)
+    }
+}
+
+/// `key` of every thread's `/proc/<pid>/task/*/status` (the main thread
+/// and the 4 disk workers).
+fn status_of_threads(pid: u32, key: &str) -> Vec<String> {
+    let tasks = threads(pid, 5);
+    assert_eq!(tasks.len(), 5, "{tasks:?}");
+    tasks
+        .iter()
+        .map(|task| {
+            let status = fs::read_to_string(task.join("status")).unwrap();
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap_or_else(|| panic!("no {key} in {status}"))
+                .trim()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn assert_every_thread(pid: u32, key: &str, value: &str) {
+    for got in status_of_threads(pid, key) {
+        assert_eq!(got, value, "{key}");
+    }
+}
+
+/// The defaults: both layers on, the filter in every thread with
+/// `no_new_privs` (TSYNC covers the disk workers started before it).
+#[test]
+fn by_default_both_layers_are_active_in_every_thread() {
+    let site = Site::new();
+    let (server, mut lines) = site.start("", Setup::non_root());
+    lines.wait_for(&landlock_line(Seccomp::Filtered));
+    lines.wait_for(SECCOMP_ACTIVE);
+    assert_every_thread(server.pid(), "Seccomp:", "2");
+    assert_every_thread(server.pid(), "NoNewPrivs:", "1");
+    let response = get(site.addr, "/inside.txt");
+    assert!(response.ends_with("\r\n\r\ninside\n"), "{response}");
+}
+
+#[test]
+fn landlock_off_is_logged_off() {
+    let site = Site::new();
+    let (server, mut lines) = site.start("landlock off;", Setup::non_root());
+    lines.wait_for(LANDLOCK_OFF);
+    lines.wait_for(SECCOMP_ACTIVE);
+    assert_every_thread(server.pid(), "Seccomp:", "2");
+}
+
+/// Without the filter Landlock still applies (it sets `no_new_privs`
+/// itself); before ABI 5 it is partial then (device `ioctl` uncovered).
+#[test]
+fn seccomp_off_is_logged_off_and_installs_no_filter() {
+    let site = Site::new();
+    let (server, mut lines) = site.start("seccomp off;", Setup::non_root());
+    lines.wait_for(&landlock_line(Seccomp::Unfiltered));
+    lines.wait_for(SECCOMP_OFF);
+    assert_every_thread(server.pid(), "Seccomp:", "0");
+    let nnp = match abi() {
+        Abi::Version(_) => "1",
+        Abi::Missing => "0",
+    };
+    assert_every_thread(server.pid(), "NoNewPrivs:", nnp);
+}
+
+/// Both off: nothing is applied, not even `no_new_privs`.
+#[test]
+fn both_off_apply_nothing() {
+    let site = Site::new();
+    let (server, mut lines) = site.start("landlock off; seccomp off;", Setup::non_root());
+    lines.wait_for(LANDLOCK_OFF);
+    lines.wait_for(SECCOMP_OFF);
+    assert_every_thread(server.pid(), "Seccomp:", "0");
+    assert_every_thread(server.pid(), "NoNewPrivs:", "0");
+}
+
+/// FR-PROC-06: device `ioctl` before ABI 5 is covered by the filter
+/// only; without it a required Landlock is exit 2 naming the gap.
+#[test]
+fn seccomp_off_fails_a_required_landlock_before_abi_5() {
+    let abi = match abi() {
+        Abi::Version(abi @ 1..=4) => abi,
+        other @ (Abi::Missing | Abi::Version(_)) => {
+            println!("skipped: the kernel's Landlock is {other:?}, so it has no device_ioctl gap");
+            return;
+        }
+    };
+    let site = Site::new();
+    let output = run(
+        &[&site.config("landlock required; seccomp off;")],
+        Setup::non_root(),
+    );
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "durchlauferhitzer: landlock is required but the kernel's Landlock (ABI {abi}) \
+             cannot restrict device_ioctl, and seccomp, which covers it, is off\n"
+        )
+    );
+}
+
+/// `seccomp(2)` answered `ENOSYS` by a test filter, as on a kernel
+/// without seccomp.
+fn seccomp_hidden() -> Setup {
+    Setup {
+        filter: Filter::SeccompEnosys,
+        ..Setup::non_root()
+    }
+}
+
+#[test]
+fn a_required_seccomp_the_kernel_lacks_is_exit_2() {
+    let site = Site::new();
+    let output = run(&[&site.config("seccomp required;")], seccomp_hidden());
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: seccomp is required but the kernel has none\n"
+    );
+}
+
+#[test]
+fn a_seccomp_the_kernel_lacks_is_logged_missing_under_best_effort() {
+    let site = Site::new();
+    let (_server, mut lines) = site.start("", seccomp_hidden());
+    lines.wait_for(&landlock_line(Seccomp::Unfiltered));
+    lines.wait_for(SECCOMP_MISSING);
+    let response = get(site.addr, "/inside.txt");
+    assert!(response.ends_with("\r\n\r\ninside\n"), "{response}");
+}
+
+/// `landlock_create_ruleset` answered `ENOSYS`, as on a kernel without
+/// Landlock.
+fn landlock_hidden() -> Setup {
+    Setup {
+        filter: Filter::LandlockEnosys,
+        ..Setup::non_root()
+    }
+}
+
+#[test]
+fn a_required_landlock_the_kernel_lacks_is_exit_2() {
+    let site = Site::new();
+    let output = run(&[&site.config("landlock required;")], landlock_hidden());
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: landlock is required but the kernel has none\n"
+    );
+}
+
+#[test]
+fn a_landlock_the_kernel_lacks_is_logged_missing_under_best_effort() {
+    let site = Site::new();
+    let (_server, mut lines) = site.start("", landlock_hidden());
+    lines.wait_for(LANDLOCK_MISSING);
+    lines.wait_for(SECCOMP_ACTIVE);
+    let response = get(site.addr, "/inside.txt");
+    assert!(response.ends_with("\r\n\r\ninside\n"), "{response}");
+}
+
+/// Under Landlock a file beneath each root is served; nothing outside
+/// the roots is, by any path (FR-PROC-06, FR-STATIC).
+#[test]
+fn under_landlock_files_beneath_the_roots_are_served_and_nothing_else() {
+    let site = Site::new();
+    let (_server, mut lines) = site.start("landlock required;", Setup::non_root());
+    lines.wait_for(SECCOMP_ACTIVE);
+    for (path, body) in [("/inside.txt", "inside\n"), ("/two/inside.txt", "two\n")] {
+        let response = get(site.addr, path);
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "{path}: {response}"
+        );
+        assert!(response.ends_with(&format!("\r\n\r\n{body}")), "{response}");
+    }
+    for path in [
+        "/out.txt",
+        "/up/outside.txt",
+        "/two/../outside.txt",
+        "/%2e%2e/outside.txt",
+        "/two/%2e%2e/%2e%2e/outside.txt",
+        "//outside.txt",
+    ] {
+        let response = get(site.addr, path);
+        assert!(!response.contains("outside\n"), "{path}: {response}");
+        assert!(response.starts_with("HTTP/1.1 4"), "{path}: {response}");
+    }
+}
+
+/// `READ_IMPLIES_EXEC` (`setarch -X`) defeats the `PROT_EXEC` check:
+/// exit 2 under `seccomp required`. Only where the kernel keeps the flag
+/// across `exec` (aarch64; x86_64 clears it for a 64-bit binary).
+#[test]
+fn read_implies_exec_fails_a_required_seccomp() {
+    const SETARCH: &str = "/usr/bin/setarch";
+    let arch = std::env::consts::ARCH;
+    if !Path::new(SETARCH).exists() {
+        println!("skipped: no {SETARCH}");
+        return;
+    }
+    let probe = run_program(
+        SETARCH,
+        &[arch, "-X", "cat", "/proc/self/personality"],
+        Setup::non_root(),
+    );
+    let persona = u32::from_str_radix(text(&probe.stdout).trim(), 16).unwrap_or(0);
+    if !probe.status.success() || persona & 0x0040_0000 == 0 {
+        println!("skipped: `setarch {arch} -X` gives no READ_IMPLIES_EXEC across exec here");
+        return;
+    }
+    let site = Site::new();
+    let output = run_program(
+        SETARCH,
+        &[arch, "-X", child::exe(), &site.config("seccomp required;")],
+        Setup::non_root(),
+    );
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: seccomp is required but the personality has \
+         READ_IMPLIES_EXEC, which defeats its PROT_EXEC check\n"
+    );
+}

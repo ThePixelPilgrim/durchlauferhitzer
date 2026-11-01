@@ -283,6 +283,13 @@ impl Driver {
         })
     }
 
+    /// Writes a driver entry of the startup (FR-LOG-07) to the sink the
+    /// driver owns: the containment outcomes, known only once the filter
+    /// is installed after `new` (FR-PROC-04).
+    pub fn write_log(&mut self, entry: DriverLog) {
+        self.log.write(LogEntry::Driver(entry));
+    }
+
     /// A handle that stops [`Driver::run`] from another thread.
     pub fn stop_handle(&self) -> StopHandle {
         StopHandle {

@@ -50,7 +50,7 @@ jobs:
         # yet), so a new server test cannot miss this step.
         run: |
           set -euo pipefail
-          tests=(budget cli privileges shutdown smoke startup systemd)
+          tests=(budget cli containment privileges shutdown smoke startup systemd)
           excluded=()
           found=$(grep -l '"support/child.rs"' driver/tests/*.rs \
             | xargs -n1 basename | sed 's/\.rs$//' | sort)

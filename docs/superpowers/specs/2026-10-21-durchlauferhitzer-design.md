@@ -1105,7 +1105,8 @@ Failures, persistence, timeouts:
       `kind=privileges action reason` (FR-PROC-03: `action=kept
       reason=not_root`, the only values so far), `kind=shutdown phase
       [detached]` (FR-PROC-05: `phase=draining`, `phase=aborting`,
-      `phase=done detached=N`).
+      `phase=done detached=N`), `kind=containment layer state [abi |
+      action log] [gaps covered_by] [uncovered]` (FR-PROC-06, below).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
     `192.0.2.7`); `status` the three-digit code; `backend` the backend's
     address, `Core::backends[id]` as it prints (`127.0.0.1:9000`,
@@ -1126,6 +1127,20 @@ Failures, persistence, timeouts:
     error) is `not_found`, `symlink`, `permission_denied`, `truncated`,
     `changed`, `other`. Each enum variant's name is its snake_case
     spelling (`HttpError::BadHeaderValue` → `bad_header_value`).
+  - *(Stage 5 Task 5, controller ruling R2:)* `containment` values:
+    `layer` is `landlock` or `seccomp`; `state` is `active`, `partial`,
+    `missing` or `off` (FR-PROC-06); an applied Landlock (active or
+    partial) adds `abi` (the kernel's Landlock ABI, decimal), an applied
+    filter adds `action` (`fail` or `kill`) and `log=kernel` (the kernel
+    logs each blocked call). `gaps` lists the rights the seccomp filter
+    covers, followed by `covered_by=seccomp`; `uncovered` lists those
+    nothing covers. A list is the gap names joined by `+`: `truncate`
+    (Landlock before ABI 3), `device_ioctl` (before ABI 5),
+    `read_implies_exec` (seccomp: the personality). Examples:
+    `kind=containment layer=landlock state=active abi=4 gaps=device_ioctl
+    covered_by=seccomp`, `kind=containment layer=landlock state=partial
+    abi=2 uncovered=truncate+device_ioctl`, `kind=containment
+    layer=seccomp state=active action=fail log=kernel`.
   - Example: `kind=rejected conn=3 peer=192.0.2.7
     reason=http.bad_header_value method=GET path="/a\x20b"` (one line).
 - **FR-LOG-06** [done] Logging never blocks: if stderr is backed up,
@@ -1186,7 +1201,10 @@ Failures, persistence, timeouts:
   workers still running after the pool's 1 s grace and left to the
   process exit (one in uninterruptible sleep delays that exit until its
   system call returns). The phase does not say which signal or the deadline
-  caused it.
+  caused it. *(Stage 5 Task 5:)* the other startup kind is
+  `containment`, one line per layer, Landlock first, written once the
+  seccomp filter is installed, right before the loop (FR-PROC-04 step
+  10a, FR-PROC-06).
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
@@ -1282,6 +1300,9 @@ Failures, persistence, timeouts:
   6. the descriptor budget (NFR-RES-05; exit 2 naming the needed and the
      available number);
   7. the privilege drop (FR-PROC-03; exit 2);
+  7a. *(stage 5 Task 5)* Landlock (FR-PROC-06), while the process has
+      one thread and before anything else opens a path (exit 2 for a
+      required layer it cannot apply);
   8. the signal mask: SIGTERM, SIGINT, SIGPIPE and SIGHUP are blocked
      and a `signalfd` opened for them, before any other thread exists, so
      every thread inherits the mask and neither SIGPIPE nor SIGHUP can
@@ -1291,6 +1312,12 @@ Failures, persistence, timeouts:
      driver log entries (`privileges`);
   10. the disk workers (`limits.disk_threads`, started with the driver,
       DRV-08);
+  10a. *(stage 5 Task 5)* the seccomp filter (FR-PROC-06), for every
+       thread at once (`SECCOMP_FILTER_FLAG_TSYNC`, so the disk workers
+       too), then the two `containment` lines (FR-LOG-07); a failure here
+       (a required layer, step 7a's included, that is missing or only
+       partly supported) is printed once the driver and its sink are gone
+       (exit 2);
   11. the event loop.
 
   Every startup error is one line on stderr, `durchlauferhitzer:
@@ -1445,6 +1472,17 @@ Failures, persistence, timeouts:
     `truncate` uncovered, and the README recommends Linux ≥ 6.2 (≥ 6.10 for
     every right natively) and roots the server user cannot write. *Builder call:* network rules
     (Landlock ABI 4) are not part of stage 5.
+  - *(Stage 5 Task 5, builder calls:)* the startup log line of each layer
+    is FR-LOG-05's `containment` kind. A layer the kernel offers but
+    refuses to apply (an error of `landlock_restrict_self` or of
+    installing the filter) is exit 2 whatever the mode: it is no missing
+    layer, and the process may be half restricted. The exit-2 messages
+    are `<layer> is required but the kernel has none`, `seccomp is
+    required but it has no allow-list for this architecture`, `seccomp is
+    required but the personality has READ_IMPLIES_EXEC, which defeats its
+    PROT_EXEC check` and `landlock is required but the kernel's Landlock
+    (ABI N) cannot restrict device_ioctl, and seccomp, which covers it, is
+    off` (or `missing`).
   - seccomp: a per-architecture allow-list (x86_64, aarch64) of exactly the
     system calls the server makes after startup, installed for every thread
     before the loop runs. (owner decision 2026-10-29, stage 5 builder

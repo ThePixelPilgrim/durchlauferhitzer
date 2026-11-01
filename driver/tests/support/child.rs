@@ -182,6 +182,14 @@ pub enum Filter {
     /// other system call passes.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     Openat2Enosys,
+    /// `seccomp` fails with `ENOSYS`, as on a kernel without it (the
+    /// filter is installed with `prctl`).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    SeccompEnosys,
+    /// `landlock_create_ruleset` fails with `ENOSYS`, as on a kernel
+    /// without Landlock.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    LandlockEnosys,
 }
 
 impl Setup {
@@ -272,7 +280,11 @@ fn prepare(mut cmd: Command, program: &Path, setup: Setup) -> (Command, Vec<Owne
     match setup.filter {
         Filter::None => {}
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        Filter::Openat2Enosys => pre_exec::openat2_enosys(&mut cmd),
+        Filter::Openat2Enosys => pre_exec::enosys(&mut cmd, libc::SYS_openat2),
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        Filter::SeccompEnosys => pre_exec::enosys(&mut cmd, libc::SYS_seccomp),
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        Filter::LandlockEnosys => pre_exec::enosys(&mut cmd, libc::SYS_landlock_create_ruleset),
     }
     (cmd, keep)
 }
@@ -797,14 +809,14 @@ mod pre_exec {
     #[cfg(target_arch = "aarch64")]
     const AUDIT_ARCH: u32 = 0xC000_00B7;
 
-    /// Installs a seccomp filter in the child that fails `openat2` with
-    /// `ENOSYS` (owner decision 2026-10-29, O3). It checks the
-    /// architecture first, so only this target's `openat2` number is
-    /// matched; every other system call is allowed. `PR_SET_NO_NEW_PRIVS`
+    /// Installs a seccomp filter in the child that fails system call `nr`
+    /// (`openat2`, owner decision 2026-10-29, O3; `seccomp`, Landlock) with
+    /// `ENOSYS`. It checks the architecture first, so only this target's
+    /// number is matched; every other system call is allowed. `PR_SET_NO_NEW_PRIVS`
     /// comes first, so no privilege is needed. Not in R2's list: `prctl`
     /// is a single system call that takes no lock and allocates nothing.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    pub fn openat2_enosys(cmd: &mut Command) {
+    pub fn enosys(cmd: &mut Command, nr: libc::c_long) {
         let stmt = |code: u32, k: u32| libc::sock_filter {
             code: u16::try_from(code).unwrap(),
             jt: 0,
@@ -819,14 +831,14 @@ mod pre_exec {
         };
         let load = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
         // `seccomp_data`: `nr` at offset 0, `arch` at offset 4.
-        let openat2 = u32::try_from(libc::SYS_openat2).unwrap();
+        let nr = u32::try_from(nr).unwrap();
         let enosys = u32::try_from(libc::ENOSYS).unwrap();
         // Built before the fork; the hook only reads it.
         let program: [libc::sock_filter; 6] = [
             stmt(load, 4),
             jump_eq(AUDIT_ARCH, 0, 3),
             stmt(load, 0),
-            jump_eq(openat2, 0, 1),
+            jump_eq(nr, 0, 1),
             stmt(
                 libc::BPF_RET | libc::BPF_K,
                 libc::SECCOMP_RET_ERRNO | enosys,

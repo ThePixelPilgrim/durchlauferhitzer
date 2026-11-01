@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use durchlauferhitzer_core::Log;
 
 use self::buffer::{CAPACITY, EntryBuffer};
+use crate::containment::Outcome;
 use crate::sys::fd::{
     Blocking, Io, StatusFlags, Writable, set_status_flags, status_flags, wait_writable, write_fd,
 };
@@ -76,6 +77,9 @@ pub enum DriverLog {
     PrivilegesKept { reason: KeptReason },
     /// A step of the shutdown (FR-PROC-05, A9).
     Shutdown { phase: ShutdownPhase },
+    /// A containment layer's outcome (FR-PROC-06), one per layer, logged
+    /// once at startup.
+    Containment(Outcome),
 }
 
 /// The steps of a shutdown the log reports (FR-PROC-05, A9).

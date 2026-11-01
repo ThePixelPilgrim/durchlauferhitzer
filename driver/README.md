@@ -57,7 +57,8 @@ src/
                     queued connect answers), `apply` (every `Action`
                     matched), the clock and `set_date`, `Exit`
                     (`Stopped | Drained | Aborted`), `StopHandle`,
-                    `watch_signals`, the drain and the abort, the
+                    `watch_signals`, `write_log` (a startup entry), the
+                    drain and the abort, the
                     bounded teardown
     accept.rs         the accept pause (DRV-16): `classify` (transient or
                       pause), `AcceptGate` (paused until a descriptor
@@ -95,8 +96,16 @@ src/
     buffer.rs         `EntryBuffer`: 64 KiB of whole entries, drop and
                       count when full, the `dropped` line once there is
                       room, before newer entries
-  containment.rs    containment (FR-PROC-06): for now only the filter
-                    generator (public, so a test can install the real one)
+  containment.rs    containment (FR-PROC-06): `restrict_files` (Landlock,
+                    in startup right after the privilege drop) and
+                    `restrict_calls` (the filter for every thread, right
+                    before the loop; settles which Landlock gaps it
+                    covers); `Outcome` (`LayerName`, `State`: Active /
+                    Partial (`Applied`: Abi / Filter) / Missing / Off,
+                    `Gap`s covered and uncovered), one log line each; the
+                    pure decisions `files_plan`, `calls_plan`, `cover`
+    tests.rs          every mode against every kernel answer (missing,
+                      no table for the arch, READ_IMPLIES_EXEC, each gap)
     filter.rs         the seccomp allow-list: `Arch` (`X86_64 | Aarch64`,
                       `current()`), one table per arch (the calls the
                       server makes after startup, grouped by purpose, from
@@ -179,7 +188,9 @@ src/
                       available, SECCOMP_GET_ACTION_AVAIL), `install`
                       (PR_SET_NO_NEW_PRIVS, then the filter with TSYNC |
                       LOG; a thread that cannot be synchronized is an
-                      error), `AUDIT_ARCH_X86_64`, `AUDIT_ARCH_AARCH64`
+                      error), `personality` (`Personality`:
+                      READ_IMPLIES_EXEC or plain), `AUDIT_ARCH_X86_64`,
+                      `AUDIT_ARCH_AARCH64`
 tests/
   cli.rs            the binary in a subprocess: the usage for bad
                     arguments, `--check` (ok, each kind of error with its
@@ -247,6 +258,16 @@ tests/
                     empty (OA2): as nobody started with an ambient
                     `CAP_NET_BIND_SERVICE`, and as root started with it
                     inheritable
+  containment.rs    containment in the binary, run as non-root: the
+                    `containment` line per layer (exact, for the
+                    kernel's ABI), `Seccomp: 2` and `NoNewPrivs: 1` in
+                    every thread; `off` per layer; `required` with
+                    seccomp or Landlock hidden (`Filter`) is exit 2,
+                    `best_effort` logs it missing and serves; seccomp
+                    `off` with Landlock `required` before ABI 5 is exit 2
+                    (skipped on ABI 5 and later); READ_IMPLIES_EXEC
+                    (`setarch -X`, skipped where exec clears it: x86_64);
+                    under Landlock only files beneath the roots are served
   seccomp_self.rs   `install` in the test's own process (no harness, one
                     test): a filter refusing `getppid` (EPERM) covers the
                     main thread and a thread started before it
@@ -311,7 +332,9 @@ tests/
                     in use" names it), the binary checked to be reachable
                     for `nobody` before it is started as nobody, the
                     child's setup before exec (`pre_exec`: closed fds,
-                    fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`),
+                    fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`:
+                    `openat2`, `seccomp` or `landlock_create_ruleset`
+                    answered ENOSYS),
                     capabilities (`Caps`); the test crate's only
                     `unsafe`),
                     a guard that kills a running server on drop; signals
@@ -333,10 +356,15 @@ loads the config, then: the `openat2` probe beneath the first root (or
 `systemd.rs`, or bound in config order, the first failure named), the
 descriptor budget (`process/budget.rs`), the privilege drop
 and the clearing of every capability (`process/privileges.rs`, while
-the process has one thread), the signal mask and its `signalfd` (before
-any thread, so the disk workers inherit it), the stderr log sink, then
-`Driver::new` with `limits.disk_threads`, `Driver::watch_signals` with
-the signalfd and `limits.shutdown_timeout`, and `Driver::run`. Every
+the process has one thread), Landlock (`containment::restrict_files`,
+still with one thread, before anything else opens a path), the signal
+mask and its `signalfd` (before any thread, so the disk workers inherit
+it), the stderr log sink, then `Driver::new` with `limits.disk_threads`,
+`Driver::watch_signals` with the signalfd and `limits.shutdown_timeout`,
+the seccomp filter (`containment::restrict_calls`, TSYNC: the disk
+workers run by then) and the two `containment` lines
+(`Driver::write_log`), and `Driver::run`. A containment failure (exit 2)
+there is printed after the driver and its sink are dropped. Every
 message (the usage, `--check`'s answer, startup errors) is printed
 before the sink exists or after the driver holding it is gone; nothing
 prints through std while it lives (FR-LOG-06). Exit codes are

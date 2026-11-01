@@ -393,7 +393,7 @@ fn log_lines(kind: Kind, backend: SocketAddr, down: SocketAddr) -> Vec<String> {
 
 /// A line without its ` conn=<digits>` field, which must be there for a
 /// core entry (`response`, `proxied_response`, `backend_failed`, ...)
-/// and absent for a driver one (`privileges`, `shutdown`).
+/// and absent for a driver one (`privileges`, `shutdown`, `containment`).
 fn without_conn(line: &str) -> String {
     let fields: Vec<&str> = line.split(' ').collect();
     let conn = fields
@@ -403,7 +403,9 @@ fn without_conn(line: &str) -> String {
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
         .count();
-    let driver = line.starts_with("kind=privileges ") || line.starts_with("kind=shutdown ");
+    let driver = ["kind=privileges ", "kind=shutdown ", "kind=containment "]
+        .iter()
+        .any(|kind| line.starts_with(kind));
     assert_eq!(conn, usize::from(!driver), "conn field in {line:?}");
     fields
         .into_iter()
@@ -796,6 +798,17 @@ host proxy.test {{
     drop(refused);
 
     let mut got: Vec<String> = lines.all().iter().map(|l| without_conn(l)).collect();
+    // The containment lines come first, one per layer (their values are
+    // pinned in `containment.rs`).
+    let layers: Vec<String> = got.drain(..2).collect();
+    assert!(
+        layers[0].starts_with("kind=containment layer=landlock "),
+        "{layers:?}"
+    );
+    assert!(
+        layers[1].starts_with("kind=containment layer=seccomp "),
+        "{layers:?}"
+    );
     // No `privileges` line: a non-root server without `user` logs none.
     let mut want = vec![DRAINING.to_owned(), DONE.to_owned()];
     want.extend(log_lines(Kind::File, backend_addr, down));

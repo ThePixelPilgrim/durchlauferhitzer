@@ -63,7 +63,8 @@ Startup checks, in this order, and fails with one `durchlauferhitzer:
 a directory), binding every `listen` address in config order, the descriptor
 budget (`RLIMIT_NOFILE`: a low soft limit is raised to what is needed when
 the hard limit allows, else the error names both numbers; raise the limit or
-lower `max_connections`), and the privileges (below).
+lower `max_connections`), the privileges (below), and a containment layer
+set `required` that the kernel cannot apply (below).
 
 ## Privileges
 
@@ -76,6 +77,24 @@ lower `max_connections`), and the privileges (below).
   required: after binding and opening the static roots the server drops to
   that user and group for good, and refuses to run as root otherwise
   (exit 2).
+
+## Containment
+
+After startup the server confines itself (config block `containment`,
+see the example config): Landlock lets it only read beneath its static
+roots, and a seccomp filter allows only the system calls it needs. By
+default each is used where the kernel has it; the startup log says what
+applies (`kind=containment ...`, one line per layer). A blocked call gets
+`EPERM` (or ends the process with `seccomp_action kill`) and is logged by
+the kernel:
+
+```sh
+journalctl -k | grep seccomp    # or, without systemd: dmesg | grep seccomp
+```
+
+Use Linux 6.2 or later (6.10 or later restricts every right with
+Landlock alone; before 6.2 truncation is not restricted), and static
+roots the server's user cannot write.
 
 ## systemd socket activation
 
