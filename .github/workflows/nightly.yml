@@ -4,9 +4,6 @@ name: Nightly
 # NFR-SEC-13, NFR-PORT-01): daily, and by hand with smaller or larger
 # budgets.
 on:
-  # TEMPORARY (stage 5 Task 7 proof run): removed before merge.
-  push:
-    branches: [stage5-task7]
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -26,8 +23,8 @@ permissions:
 
 env:
   # A scheduled run has no inputs: the defaults above.
-  SIM_SEEDS: ${{ inputs.seeds || '0..3000' }}
-  FUZZ_SECONDS: ${{ inputs.fuzz_seconds || 60 }}
+  SIM_SEEDS: ${{ inputs.seeds || '0..200000' }}
+  FUZZ_SECONDS: ${{ inputs.fuzz_seconds || 600 }}
 
 jobs:
   long-runs:
