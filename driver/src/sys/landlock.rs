@@ -1,0 +1,244 @@
+//! Landlock (FR-PROC-06): the ABI probe and restricting the process to
+//! reading beneath its static roots.
+//!
+//! libc has no Landlock types or constants: they are declared here from
+//! `linux/landlock.h`.
+
+use std::io;
+use std::mem::size_of;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+
+use super::fd::cvt;
+
+/// The kernel's Landlock ABI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Abi {
+    /// No Landlock: not built in (`ENOSYS`) or not enabled (`EOPNOTSUPP`).
+    Missing,
+    /// The highest ABI version the kernel supports (1 is Linux 5.14).
+    Version(u32),
+}
+
+/// A right the ABI cannot restrict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gap {
+    /// Truncation (`LANDLOCK_ACCESS_FS_TRUNCATE`, ABI 3).
+    Truncate,
+    /// `ioctl` on devices (`LANDLOCK_ACCESS_FS_IOCTL_DEV`, ABI 5).
+    DeviceIoctl,
+}
+
+/// `LANDLOCK_CREATE_RULESET_VERSION`.
+const CREATE_RULESET_VERSION: u32 = 1 << 0;
+
+/// `LANDLOCK_RULE_PATH_BENEATH`.
+const RULE_PATH_BENEATH: libc::c_int = 1;
+
+/// `LANDLOCK_ACCESS_FS_READ_FILE`.
+const READ_FILE: u64 = 1 << 2;
+
+/// `LANDLOCK_ACCESS_FS_READ_DIR`.
+const READ_DIR: u64 = 1 << 3;
+
+/// ABI 1: `EXECUTE` (bit 0) to `MAKE_SYM` (bit 12).
+const ABI_1_RIGHTS: u64 = (1 << 13) - 1;
+
+/// `LANDLOCK_ACCESS_FS_REFER`, ABI 2.
+const REFER: u64 = 1 << 13;
+
+/// `LANDLOCK_ACCESS_FS_TRUNCATE`, ABI 3.
+const TRUNCATE: u64 = 1 << 14;
+
+/// `LANDLOCK_ACCESS_FS_IOCTL_DEV`, ABI 5.
+const IOCTL_DEV: u64 = 1 << 15;
+
+/// `struct landlock_ruleset_attr` up to `handled_access_fs`, the one
+/// field every ABI knows. The kernel takes a shorter struct (its `size`
+/// argument) and reads the later fields (`handled_access_net`, ABI 4;
+/// `scoped`, ABI 6) as 0: no network rule, no scope.
+#[repr(C)]
+struct RulesetAttr {
+    handled_access_fs: u64,
+}
+
+/// `struct landlock_path_beneath_attr`, which the kernel declares
+/// `__attribute__((packed))`: `allowed_access` (`__u64`) at offset 0,
+/// `parent_fd` (`__s32`) at offset 8, 12 bytes, no trailing padding.
+#[repr(C, packed)]
+struct PathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
+}
+
+/// The kernel's ABI, from `landlock_create_ruleset(NULL, 0,
+/// LANDLOCK_CREATE_RULESET_VERSION)`. `ENOSYS` and `EOPNOTSUPP` are
+/// [`Abi::Missing`]; so is any other error (the probe takes no input that
+/// could be wrong).
+pub fn abi() -> Abi {
+    // SAFETY: with this flag the kernel takes a null attribute pointer and
+    // a size of 0, and reads nothing.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<RulesetAttr>(),
+            0_usize,
+            CREATE_RULESET_VERSION,
+        )
+    };
+    match u32::try_from(ret) {
+        Ok(version) if version > 0 => Abi::Version(version),
+        Ok(_) | Err(_) => Abi::Missing,
+    }
+}
+
+/// Every filesystem right `abi` knows: ABI 1's thirteen, `REFER` from 2,
+/// `TRUNCATE` from 3, `IOCTL_DEV` from 5 (ABI 4 and 6 to 7 add none).
+fn handled_access(abi: u32) -> u64 {
+    let mut rights = ABI_1_RIGHTS;
+    if abi >= 2 {
+        rights |= REFER;
+    }
+    if abi >= 3 {
+        rights |= TRUNCATE;
+    }
+    if abi >= 5 {
+        rights |= IOCTL_DEV;
+    }
+    rights
+}
+
+/// The rights `abi` cannot restrict: truncation before ABI 3, device
+/// `ioctl` before ABI 5 (FR-PROC-06).
+pub fn gaps(abi: u32) -> Vec<Gap> {
+    let mut gaps = Vec::new();
+    if abi < 3 {
+        gaps.push(Gap::Truncate);
+    }
+    if abi < 5 {
+        gaps.push(Gap::DeviceIoctl);
+    }
+    gaps
+}
+
+/// Restricts the calling thread, and every thread it starts afterwards,
+/// to reading files and directories beneath `roots`: a ruleset handling
+/// every filesystem right `abi` knows, one `LANDLOCK_RULE_PATH_BENEATH`
+/// rule per root allowing only `READ_FILE | READ_DIR` (added from the
+/// descriptor, an `O_PATH` one is enough: no path lookup), then
+/// `PR_SET_NO_NEW_PRIVS` and `landlock_restrict_self`. Threads that
+/// already run are not restricted. `abi` must not exceed the kernel's
+/// ([`abi`]), or the ruleset is `EINVAL`. No root: nothing is readable.
+pub fn restrict_to_reading(roots: &[BorrowedFd<'_>], abi: u32) -> io::Result<()> {
+    let attr = RulesetAttr {
+        handled_access_fs: handled_access(abi),
+    };
+    // SAFETY: `attr` is a readable `RulesetAttr` of the size passed that
+    // outlives the call; the kernel only reads it.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &raw const attr,
+            size_of::<RulesetAttr>(),
+            0_u32,
+        )
+    };
+    let ruleset = descriptor(ret)?;
+    for root in roots {
+        let rule = PathBeneathAttr {
+            allowed_access: READ_FILE | READ_DIR,
+            parent_fd: root.as_raw_fd(),
+        };
+        // SAFETY: `rule` is a readable `PathBeneathAttr` that outlives the
+        // call, the kernel only reads it; both descriptors are open.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                ruleset.as_raw_fd(),
+                RULE_PATH_BENEATH,
+                &raw const rule,
+                0_u32,
+            )
+        };
+        check(ret)?;
+    }
+    let zero: libc::c_ulong = 0;
+    // SAFETY: `PR_SET_NO_NEW_PRIVS` takes no pointers; the kernel
+    // requires the three unused arguments to be 0.
+    cvt(unsafe {
+        libc::prctl(
+            libc::PR_SET_NO_NEW_PRIVS,
+            1 as libc::c_ulong,
+            zero,
+            zero,
+            zero,
+        )
+    })?;
+    // SAFETY: `ruleset` is an open Landlock ruleset descriptor; no
+    // pointers are passed.
+    let ret =
+        unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset.as_raw_fd(), 0_u32) };
+    check(ret)
+}
+
+/// `syscall`'s `-1`-and-errno check for a call returning 0.
+fn check(ret: libc::c_long) -> io::Result<()> {
+    match ret {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+/// `syscall`'s `-1`-and-errno check for a call returning a new descriptor.
+fn descriptor(ret: libc::c_long) -> io::Result<OwnedFd> {
+    if ret == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = libc::c_int::try_from(ret)
+        .map_err(|_| io::Error::other("landlock returned a descriptor beyond c_int"))?;
+    // SAFETY: `fd` was just created by `landlock_create_ruleset` and
+    // nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abi_1_and_2_cannot_restrict_truncation_or_device_ioctl() {
+        assert_eq!(gaps(1), [Gap::Truncate, Gap::DeviceIoctl]);
+        assert_eq!(gaps(2), [Gap::Truncate, Gap::DeviceIoctl]);
+    }
+
+    #[test]
+    fn abi_3_and_4_cannot_restrict_device_ioctl() {
+        assert_eq!(gaps(3), [Gap::DeviceIoctl]);
+        assert_eq!(gaps(4), [Gap::DeviceIoctl]);
+    }
+
+    #[test]
+    fn abi_5_and_later_have_no_gap() {
+        for abi in [5, 6, 7, 8] {
+            assert_eq!(gaps(abi), []);
+        }
+    }
+
+    #[test]
+    fn every_filesystem_right_the_abi_knows_is_handled() {
+        assert_eq!(handled_access(1), 0x1fff);
+        assert_eq!(handled_access(2), 0x3fff);
+        assert_eq!(handled_access(3), 0x7fff);
+        assert_eq!(handled_access(4), 0x7fff);
+        assert_eq!(handled_access(5), 0xffff);
+        assert_eq!(handled_access(7), 0xffff);
+    }
+
+    #[test]
+    fn the_attributes_have_the_kernel_layout() {
+        // `landlock_ruleset_attr` up to `handled_access_fs`; the packed
+        // `landlock_path_beneath_attr`: a u64 then an s32, no padding.
+        assert_eq!(size_of::<RulesetAttr>(), 8);
+        assert_eq!(size_of::<PathBeneathAttr>(), 12);
+        assert_eq!(align_of::<PathBeneathAttr>(), 1);
+    }
+}

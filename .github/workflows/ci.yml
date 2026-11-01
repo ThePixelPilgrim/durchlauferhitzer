@@ -35,8 +35,10 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
         env:
-          # The IPv6 tests fail instead of skipping (driver/README.md).
+          # The IPv6 and Landlock tests fail instead of skipping
+          # (driver/README.md).
           DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
+          DURCHLAUFERHITZER_REQUIRE_LANDLOCK: "1"
       - name: Root tests (as root; a root skip is a failure)
         # The test binaries that run the server are built as the runner
         # user (cargo never runs as root) and run with sudo: the privilege
@@ -69,7 +71,8 @@ jobs:
           for bin in $bins; do
             echo "== $bin"
             sudo env DURCHLAUFERHITZER_REQUIRE_ROOT=1 \
-              DURCHLAUFERHITZER_REQUIRE_IPV6=1 TMPDIR=/tmp "$bin"
+              DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
+              DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 TMPDIR=/tmp "$bin"
           done
       - name: Product dependency check
         run: scripts/check-product-deps.sh

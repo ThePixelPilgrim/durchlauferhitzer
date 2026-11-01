@@ -156,6 +156,11 @@ src/
                       (the system call itself, never `newfstatat`),
                       `readahead`, `sendfile`, `file_error` (the contract's
                       errno → `FileError` table)
+    landlock.rs       `abi` (`Abi`: Missing / Version), `restrict_to_reading`
+                      (every fs right the ABI knows handled; one rule per
+                      root fd: READ_FILE | READ_DIR; NO_NEW_PRIVS, then
+                      restrict_self), `gaps` (`Gap`: Truncate before ABI
+                      3, DeviceIoctl before 5)
     eventfd.rs        `EventFd`: workers wake the loop (`notify`, `drain`,
                       `try_clone` for the pool's duplicate)
     signal.rs         `SignalFd` for `Signal::HANDLED`: SIGTERM / SIGINT /
@@ -246,6 +251,12 @@ tests/
                     main thread and a thread started before it
                     (`/proc/self/task/*/status`: `Seccomp: 2`); an empty
                     or too long program is `InvalidInput`
+  landlock_self.rs  `restrict_to_reading` in a re-run of the test binary
+                    (no harness), with the kernel's ABI and ABI 1: a file
+                    and directories beneath the root open (also by path,
+                    after the root moved); outside, the old root path and
+                    /etc/passwd are EACCES; no write, create, mkdir,
+                    unlink, rmdir or exec
   seccomp_program.rs the real allow-list (`fail`) in a re-run of the test
                     binary (no harness): an abort dies by SIGABRT, `fstat`
                     works
@@ -509,6 +520,9 @@ Notes on the wrappers:
   CI sets it, so CI cannot pass by skipping. The rule lives in one helper,
   `tests/support/ipv6.rs`, which `src/sys/socket.rs` and `tests/sys.rs`
   both include with `#[path]`.
+- Tests: `tests/landlock_self.rs` skips, with a printed reason, without
+  Landlock; with `DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1` (CI) that is a
+  failure instead.
 - Tests: the signalfd test is a unit test in `src/sys/signal.rs`, because it
   raises a thread-directed signal (`pthread_kill` on its own thread) — a
   process-directed one could reach another test thread and kill the run.

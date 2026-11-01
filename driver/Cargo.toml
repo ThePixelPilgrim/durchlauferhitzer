@@ -33,6 +33,12 @@ harness = false
 name = "seccomp_self"
 harness = false
 
+# `sys::landlock::restrict_to_reading` restricts the whole process: a
+# child (this binary again) restricts itself, the parent cleans up.
+[[test]]
+name = "landlock_self"
+harness = false
+
 # The real allow-list in a child process (this binary again): an abort
 # still dies by SIGABRT, `fstat` works.
 [[test]]
