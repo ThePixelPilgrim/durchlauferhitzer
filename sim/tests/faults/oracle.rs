@@ -552,6 +552,11 @@ pub(crate) fn check_client(
                     let Some((template, last)) = templates.next() else {
                         fail(format!("{log:?} answers no request sent"));
                     };
+                    let joined = if *last > consumed {
+                        Joined::Joined
+                    } else {
+                        Joined::Single
+                    };
                     consumed = last + 1;
                     if let Log::Rejected {
                         reason: RejectReason::Http { error, request },
@@ -562,14 +567,14 @@ pub(crate) fn check_client(
                         fail(e);
                     }
                     if phase == Phase::Draining {
-                        let k = consumed - 1;
                         let judged = Drained {
                             log,
                             refusable,
-                            k,
+                            head: template,
+                            joined,
                             limits,
                         };
-                        if let Err(e) = judged.check(&client.templates, &mut coverage.shutdown) {
+                        if let Err(e) = judged.check(&mut coverage.shutdown) {
                             fail(e);
                         }
                     }

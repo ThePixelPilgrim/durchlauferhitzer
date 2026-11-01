@@ -89,36 +89,32 @@ pub(crate) fn heads(templates: &[Vec<u8>], limits: HeadLimits) -> Vec<(Vec<u8>, 
     out
 }
 
-/// A log the drain wrote for the `k`th template of a connection.
+/// Whether a head is one template, or several joined (`heads`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Joined {
+    Single,
+    Joined,
+}
+
+/// A log the drain wrote for one of a connection's heads (`heads`).
 pub(crate) struct Drained<'l> {
     pub(crate) log: &'l Log,
     pub(crate) refusable: Refusable,
-    pub(crate) k: usize,
+    pub(crate) head: &'l [u8],
+    pub(crate) joined: Joined,
     pub(crate) limits: HeadLimits,
 }
 
 impl Drained<'_> {
     /// A drain's `503` (a [`Log::Response`]) for a head the model says
     /// the parser rejects is an error; such a head answered with its own
-    /// error is counted. Once an open head was started at or before the
-    /// template, the pairing of logs to templates is no longer certain
-    /// (two templates may have formed one head), so nothing is judged.
-    pub(crate) fn check(
-        &self,
-        templates: &[Vec<u8>],
-        coverage: &mut ShutdownCoverage,
-    ) -> Result<(), String> {
-        let Some(upto) = templates.get(..=self.k) else {
-            return Ok(());
-        };
-        if upto
-            .iter()
-            .any(|t| template_parse(t, self.limits) == HeadVerdict::Open)
-        {
-            return Ok(());
-        }
-        let Some(template) = upto.last() else {
-            return Ok(());
+    /// error is counted. `heads` makes the pairing of logs to heads
+    /// certain; a joined head is not judged, as the model has no verdict
+    /// for one (its lines decide).
+    pub(crate) fn check(&self, coverage: &mut ShutdownCoverage) -> Result<(), String> {
+        let template = match self.joined {
+            Joined::Single => self.head,
+            Joined::Joined => return Ok(()),
         };
         let rejected = template_parse(template, self.limits) == HeadVerdict::Rejected;
         match self.log {
