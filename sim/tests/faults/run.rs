@@ -116,7 +116,8 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     }
     sim.run_until_idle();
     collect(&mut sim, &mut clients);
-    wind_down_clock(&mut sim, timer_order(seed));
+    let requests = clients.iter().map(|c| c.templates.len()).sum();
+    wind_down_clock(&mut sim, timer_order(seed), requests);
     collect(&mut sim, &mut clients);
     for id in sim.conn_ids() {
         assert_eq!(
@@ -270,11 +271,18 @@ fn drain_witnesses(
 /// on time; with late timers again while anything is still due
 /// (`Sim::next_due`), at most 8 wakes, one per deadline of a chain (an
 /// open answered late, its response, the next head's timeout, a
-/// lingering close). Either way the clock must have nothing left to do.
-pub(crate) fn wind_down_clock(sim: &mut Sim, order: TimerOrder) {
+/// lingering close), plus the disk steps of the `requests` the clients
+/// sent: each wake answers one open or readahead per connection, and the
+/// next one is queued after it, so a pipelined file request may take an
+/// open and a chunk per `FILE_CHUNK` (256 KiB, FR-STATIC-17) of a file of
+/// at most 1 MiB, plus one for a file that grew. Either way the clock
+/// must have nothing left to do.
+pub(crate) fn wind_down_clock(sim: &mut Sim, order: TimerOrder, requests: usize) {
+    const FILE_CHUNK: u64 = 256 * 1024;
+    let per_request = usize::try_from(2 + MIB / FILE_CHUNK).unwrap_or(usize::MAX);
     let rounds = match order {
         TimerOrder::OnTime => 1,
-        TimerOrder::Late => 8,
+        TimerOrder::Late => requests.saturating_mul(per_request).saturating_add(8),
     };
     for _ in 0..rounds {
         sim.advance(Duration::from_secs(300));
