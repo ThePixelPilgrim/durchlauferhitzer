@@ -18,14 +18,13 @@ use std::process::ExitCode;
 use std::sync::mpsc;
 use std::thread;
 
+#[cfg(target_arch = "aarch64")]
+use durchlauferhitzer::sys::seccomp::AUDIT_ARCH_AARCH64 as AUDIT_ARCH;
+#[cfg(target_arch = "x86_64")]
+use durchlauferhitzer::sys::seccomp::AUDIT_ARCH_X86_64 as AUDIT_ARCH;
 use durchlauferhitzer::sys::seccomp::{Support, install, supported};
 
 const NAME: &str = "install_filters_every_thread";
-
-#[cfg(target_arch = "x86_64")]
-const AUDIT_ARCH: u32 = 0xC000_003E;
-#[cfg(target_arch = "aarch64")]
-const AUDIT_ARCH: u32 = 0xC000_00B7;
 
 fn stmt(code: u32, k: u32) -> libc::sock_filter {
     libc::sock_filter {

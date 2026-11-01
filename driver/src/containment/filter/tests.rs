@@ -1,7 +1,7 @@
 //! The generator, run on synthetic calls by a small classic-BPF
 //! interpreter (the subset the program uses), on both tables.
 
-use super::{Arch, Entry, FCNTL_COMMANDS, PRCTL_OPTIONS, Rule, program};
+use super::{Arch, Entry, FCNTL_COMMANDS, PRCTL_OPTIONS, Rule, body, program};
 use durchlauferhitzer_core::config::SeccompAction;
 
 const ARCHES: [Arch; 2] = [Arch::X86_64, Arch::Aarch64];
@@ -101,11 +101,12 @@ fn each(mut f: impl FnMut(Arch, SeccompAction, &[libc::sock_filter])) {
 }
 
 /// Numbers that are in neither table: `ftruncate`, `truncate`, `ioctl`,
-/// `execve`, `getppid`, `openat`, `statx`, `ptrace`, `seccomp`.
-fn unlisted(arch: Arch) -> [u32; 9] {
+/// `execve`, `getppid`, `openat`, `statx`, `ptrace`, `seccomp`,
+/// `newfstatat`, `kill`, `tkill`.
+fn unlisted(arch: Arch) -> [u32; 12] {
     match arch {
-        Arch::X86_64 => [77, 76, 16, 59, 110, 257, 332, 101, 317],
-        Arch::Aarch64 => [46, 45, 29, 221, 173, 56, 291, 117, 277],
+        Arch::X86_64 => [77, 76, 16, 59, 110, 257, 332, 101, 317, 262, 62, 200],
+        Arch::Aarch64 => [46, 45, 29, 221, 173, 56, 291, 117, 277, 79, 129, 130],
     }
 }
 
@@ -145,7 +146,17 @@ fn truncation_and_ioctl_are_never_allowed() {
                 assert_eq!(run(prog, &call(arch, nr, args)), expected(action));
             }
         }
-        for name in ["truncate", "ftruncate", "ioctl", "execve", "execveat"] {
+        // A stat by path reads any file's metadata; `fstat` is the
+        // system call itself (`sys::file::fstat`).
+        for name in [
+            "truncate",
+            "ftruncate",
+            "ioctl",
+            "execve",
+            "execveat",
+            "newfstatat",
+            "statx",
+        ] {
             assert!(table(arch).iter().all(|e| e.name != name), "{name}");
         }
     });
@@ -198,8 +209,10 @@ fn socket_only_for_inet_streams() {
     let (inet, inet6) = (libc::AF_INET as u64, libc::AF_INET6 as u64);
     each(|arch, action, prog| {
         let socket = nr(arch, "socket");
-        let run =
-            |domain: u64, kind: u64| run(prog, &call(arch, socket, [domain, kind, 0, 0, 0, 0]));
+        let run_with = |domain: u64, kind: u64, protocol: u64| {
+            run(prog, &call(arch, socket, [domain, kind, protocol, 0, 0, 0]))
+        };
+        let run = |domain: u64, kind: u64| run_with(domain, kind, 0);
         for domain in [inet, inet6] {
             assert_eq!(run(domain, stream), ALLOW);
             assert_eq!(run(domain, stream | flags), ALLOW);
@@ -209,6 +222,12 @@ fn socket_only_for_inet_streams() {
             );
             assert_eq!(run(domain, libc::SOCK_RAW as u64), expected(action));
             assert_eq!(run(domain, libc::SOCK_SEQPACKET as u64), expected(action));
+            // The protocol must be 0 (the server's): not SCTP, not even an
+            // explicit TCP.
+            for protocol in [libc::IPPROTO_SCTP, libc::IPPROTO_TCP, libc::IPPROTO_MPTCP] {
+                let got = run_with(domain, stream | flags, protocol as u64);
+                assert_eq!(got, expected(action), "{protocol}");
+            }
         }
         for domain in [
             libc::AF_UNIX,
@@ -312,6 +331,45 @@ fn fcntl_only_for_its_commands() {
             assert_eq!(run(cmd), expected(action), "{cmd}");
         }
     });
+}
+
+#[test]
+fn the_fatal_paths_are_allowed_and_tgkill_only_for_sigabrt() {
+    each(|arch, action, prog| {
+        for name in ["rt_sigreturn", "rt_sigaction", "getpid"] {
+            let got = run(prog, &call(arch, nr(arch, name), [u64::MAX; 6]));
+            assert_eq!(got, ALLOW, "{arch:?} {name}");
+        }
+        let tgkill = nr(arch, "tgkill");
+        let run = |sig: i32| run(prog, &call(arch, tgkill, [7, 8, sig as u64, 0, 0, 0]));
+        assert_eq!(run(libc::SIGABRT), ALLOW);
+        for sig in [0, libc::SIGKILL, libc::SIGTERM, libc::SIGSYS, libc::SIGSEGV] {
+            assert_eq!(run(sig), expected(action), "{sig}");
+        }
+    });
+}
+
+/// A jump offset is a `u8`: a body longer than 255 instructions could not
+/// be skipped (`offset` would saturate and land inside it).
+#[test]
+fn every_body_fits_under_a_jump() {
+    for arch in ARCHES {
+        for entry in table(arch) {
+            let len = body(entry.rule, EPERM).len();
+            assert!(len <= usize::from(u8::MAX), "{} body: {len}", entry.name);
+        }
+    }
+}
+
+/// `AUDIT_ARCH_*` (`linux/audit.h`): the ELF machine with
+/// `__AUDIT_ARCH_64BIT` and `__AUDIT_ARCH_LE`.
+#[test]
+fn the_audit_arch_values_are_derived_from_the_elf_machine() {
+    assert_eq!((libc::EM_X86_64, libc::EM_AARCH64), (62, 183));
+    assert_eq!(Arch::X86_64.audit(), 0x8000_0000 | 0x4000_0000 | 62);
+    assert_eq!(Arch::Aarch64.audit(), 0x8000_0000 | 0x4000_0000 | 183);
+    assert_eq!(Arch::X86_64.audit(), 0xC000_003E);
+    assert_eq!(Arch::Aarch64.audit(), 0xC000_00B7);
 }
 
 #[test]
@@ -421,7 +479,6 @@ fn common_number(name: &str) -> i64 {
         "fcntl" => libc::SYS_fcntl,
         "openat2" => libc::SYS_openat2,
         "fstat" => libc::SYS_fstat,
-        "newfstatat" => libc::SYS_newfstatat,
         "readahead" => libc::SYS_readahead,
         "brk" => libc::SYS_brk,
         "mmap" => libc::SYS_mmap,
@@ -444,6 +501,10 @@ fn common_number(name: &str) -> i64 {
         "clone" => libc::SYS_clone,
         "clone3" => libc::SYS_clone3,
         "exit_group" => libc::SYS_exit_group,
+        "rt_sigreturn" => libc::SYS_rt_sigreturn,
+        "rt_sigaction" => libc::SYS_rt_sigaction,
+        "getpid" => libc::SYS_getpid,
+        "tgkill" => libc::SYS_tgkill,
         other => panic!("no libc number for {other}"),
     }
 }

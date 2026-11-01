@@ -118,12 +118,17 @@ pub fn open_dir_path(path: &Path) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// `fstat` of an open descriptor.
+/// `fstat` of an open descriptor: the `fstat` system call itself, never
+/// glibc's `fstat` (before 2.39 that is `newfstatat`, which the seccomp
+/// allow-list leaves out: it takes a path).
 pub fn fstat(fd: BorrowedFd<'_>) -> io::Result<Stat> {
     // SAFETY: an all-zero `stat` is a valid value.
     let mut st: libc::stat = unsafe { zeroed() };
-    // SAFETY: `st` is a writable `stat`.
-    cvt_retry(|| unsafe { libc::fstat(fd.as_raw_fd(), &mut st) })?;
+    cvt_retry_ssize(|| {
+        // SAFETY: `st` is a writable `stat`; on x86_64 and aarch64 libc's
+        // `stat` is the kernel's `struct stat` that `fstat` writes.
+        unsafe { libc::syscall(libc::SYS_fstat, fd.as_raw_fd(), &raw mut st) }
+    })?;
     let kind = match st.st_mode & libc::S_IFMT {
         libc::S_IFREG => FileKind::Regular,
         libc::S_IFDIR => FileKind::Directory,

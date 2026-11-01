@@ -32,3 +32,9 @@ harness = false
 [[test]]
 name = "seccomp_self"
 harness = false
+
+# The real allow-list in a child process (this binary again): an abort
+# still dies by SIGABRT, `fstat` works.
+[[test]]
+name = "seccomp_program"
+harness = false

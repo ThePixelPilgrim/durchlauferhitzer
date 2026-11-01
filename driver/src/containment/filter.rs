@@ -11,13 +11,16 @@
 //! installed (right before the loop runs): derived with `strace -f` over
 //! the driver tests, plus the rare paths named per group. Calls made only
 //! during startup are not listed. Never listed: `truncate`, `ftruncate`
-//! and `ioctl` (they cover Landlock's gaps before ABI 3 and 5), `execve`.
+//! and `ioctl` (they cover Landlock's gaps before ABI 3 and 5), `execve`,
+//! and stats by path (`newfstatat`, `statx`).
 
 use durchlauferhitzer_core::config::SeccompAction;
 
+use crate::sys::seccomp::{AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64};
+
 /// The architectures the filter has a table for (NFR-PORT-01).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Arch {
+pub enum Arch {
     X86_64,
     Aarch64,
 }
@@ -26,7 +29,7 @@ impl Arch {
     /// The architecture this binary runs on; `None` on any other (and on
     /// big-endian aarch64: the argument checks read the low word of each
     /// argument at its little-endian offset).
-    pub(crate) const fn current() -> Option<Self> {
+    pub const fn current() -> Option<Self> {
         if cfg!(target_endian = "big") {
             None
         } else if cfg!(target_arch = "x86_64") {
@@ -41,8 +44,8 @@ impl Arch {
     /// The `AUDIT_ARCH_*` value the kernel puts in `seccomp_data.arch`.
     const fn audit(self) -> u32 {
         match self {
-            Self::X86_64 => 0xC000_003E,
-            Self::Aarch64 => 0xC000_00B7,
+            Self::X86_64 => AUDIT_ARCH_X86_64,
+            Self::Aarch64 => AUDIT_ARCH_AARCH64,
         }
     }
 
@@ -60,7 +63,7 @@ enum Rule {
     /// Allowed with any arguments.
     Allow,
     /// `socket`: domain `AF_INET` or `AF_INET6`, type `SOCK_STREAM`
-    /// (`SOCK_NONBLOCK` and `SOCK_CLOEXEC` masked off).
+    /// (`SOCK_NONBLOCK` and `SOCK_CLOEXEC` masked off), protocol 0.
     Socket,
     /// `mmap`, `mprotect`: `prot` (argument 2) without `PROT_EXEC`.
     NoExec,
@@ -70,6 +73,8 @@ enum Rule {
     Prctl,
     /// `fcntl`: only the commands in [`FCNTL_COMMANDS`].
     Fcntl,
+    /// `tgkill`: only `SIGABRT` (glibc's `abort`).
+    Abort,
     /// `clone3`: `ENOSYS` whatever the action, so glibc falls back to
     /// `clone`, whose flags can be checked (`clone3` passes them in
     /// memory, out of the filter's reach).
@@ -79,6 +84,7 @@ enum Rule {
 /// One call of a table: its name (for tests and readers), number, rule.
 #[derive(Clone, Copy, Debug)]
 struct Entry {
+    #[cfg_attr(not(test), expect(dead_code, reason = "for readers and the tests"))]
     name: &'static str,
     nr: u32,
     rule: Rule,
@@ -112,11 +118,10 @@ const X86_64: &[Entry] = &[
     // close in debug builds (`F_GETFD`).
     e("poll", 7, Rule::Allow),
     e("fcntl", 72, Rule::Fcntl),
-    // Disk workers: open beneath a root, `fstat` (glibc before 2.39 makes
-    // it `newfstatat` with `AT_EMPTY_PATH`), `readahead`.
+    // Disk workers: open beneath a root, `fstat` (called directly, so
+    // never glibc's `newfstatat`, which takes a path), `readahead`.
     e("openat2", 437, Rule::Allow),
     e("fstat", 5, Rule::Allow),
-    e("newfstatat", 262, Rule::Allow),
     e("readahead", 187, Rule::Allow),
     // Memory: the allocator (`brk`, `mmap`, `munmap`, `mremap` for a
     // large realloc, `madvise`), thread stacks and their guard pages.
@@ -146,6 +151,14 @@ const X86_64: &[Entry] = &[
     // a thread.
     e("clone", 56, Rule::Thread),
     e("clone3", 435, Rule::Enosys),
+    // Fatal paths, so they end the process as meant, not in stray code:
+    // std's fault handlers (stack overflow) reset themselves and return;
+    // `abort` (also on OOM) is glibc's `tgkill(getpid(), gettid(),
+    // SIGABRT)`.
+    e("rt_sigreturn", 15, Rule::Allow),
+    e("rt_sigaction", 13, Rule::Allow),
+    e("getpid", 39, Rule::Allow),
+    e("tgkill", 234, Rule::Abort),
     // The end of the process.
     e("exit_group", 231, Rule::Allow),
 ];
@@ -174,7 +187,6 @@ const AARCH64: &[Entry] = &[
     // Disk workers.
     e("openat2", 437, Rule::Allow),
     e("fstat", 80, Rule::Allow),
-    e("newfstatat", 79, Rule::Allow),
     e("readahead", 213, Rule::Allow),
     // Memory.
     e("brk", 214, Rule::Allow),
@@ -200,6 +212,11 @@ const AARCH64: &[Entry] = &[
     // New threads.
     e("clone", 220, Rule::Thread),
     e("clone3", 435, Rule::Enosys),
+    // Fatal paths.
+    e("rt_sigreturn", 139, Rule::Allow),
+    e("rt_sigaction", 134, Rule::Allow),
+    e("getpid", 172, Rule::Allow),
+    e("tgkill", 131, Rule::Abort),
     // The end of the process.
     e("exit_group", 94, Rule::Allow),
 ];
@@ -219,7 +236,7 @@ const FCNTL_COMMANDS: &[u32] = &[
 
 /// The program for `arch`: every listed call allowed (with its argument
 /// checks), everything else answered by `action`.
-pub(crate) fn program(arch: Arch, action: SeccompAction) -> Vec<libc::sock_filter> {
+pub fn program(arch: Arch, action: SeccompAction) -> Vec<libc::sock_filter> {
     let deny = match action {
         SeccompAction::Fail => libc::SECCOMP_RET_ERRNO | errno(libc::EPERM),
         SeccompAction::Kill => libc::SECCOMP_RET_KILL_PROCESS,
@@ -274,10 +291,12 @@ fn body(rule: Rule, deny: u32) -> Vec<libc::sock_filter> {
         Rule::Socket => vec![
             load(arg(0)),
             jump(JEQ, libc::AF_INET as u32, 1, 0),
-            jump(JEQ, libc::AF_INET6 as u32, 0, 4),
+            jump(JEQ, libc::AF_INET6 as u32, 0, 6),
             load(arg(1)),
             alu_and(!((libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) as u32)),
-            jump(JEQ, libc::SOCK_STREAM as u32, 0, 1),
+            jump(JEQ, libc::SOCK_STREAM as u32, 0, 3),
+            load(arg(2)),
+            jump(JEQ, 0, 0, 1),
             ret(libc::SECCOMP_RET_ALLOW),
             ret(deny),
         ],
@@ -295,6 +314,7 @@ fn body(rule: Rule, deny: u32) -> Vec<libc::sock_filter> {
         ],
         Rule::Prctl => one_of(arg(0), PRCTL_OPTIONS, deny),
         Rule::Fcntl => one_of(arg(1), FCNTL_COMMANDS, deny),
+        Rule::Abort => one_of(arg(2), &[libc::SIGABRT as u32], deny),
     }
 }
 
@@ -315,8 +335,9 @@ const fn errno(code: i32) -> u32 {
     code as u32 & libc::SECCOMP_RET_DATA
 }
 
-/// A jump offset; the bodies above stay far below the 255 limit (the tests
-/// check every jump lands inside the program).
+/// A jump offset. Every body is at most 255 instructions (the test
+/// `every_body_fits_under_a_jump` fails otherwise), so the conversion
+/// never saturates.
 fn offset(n: usize) -> u8 {
     u8::try_from(n).unwrap_or(u8::MAX)
 }

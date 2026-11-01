@@ -5,6 +5,15 @@ use std::io;
 
 use super::fd::cvt;
 
+/// `__AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE` (`linux/audit.h`).
+const AUDIT_64BIT_LE: u32 = 0x8000_0000 | 0x4000_0000;
+
+/// `seccomp_data.arch` on x86_64: `AUDIT_ARCH_X86_64`.
+pub const AUDIT_ARCH_X86_64: u32 = AUDIT_64BIT_LE | libc::EM_X86_64 as u32;
+
+/// `seccomp_data.arch` on aarch64: `AUDIT_ARCH_AARCH64`.
+pub const AUDIT_ARCH_AARCH64: u32 = AUDIT_64BIT_LE | libc::EM_AARCH64 as u32;
+
 /// Whether the kernel can run the server's filter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Support {

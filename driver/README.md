@@ -95,19 +95,23 @@ src/
     buffer.rs         `EntryBuffer`: 64 KiB of whole entries, drop and
                       count when full, the `dropped` line once there is
                       room, before newer entries
-  containment.rs    containment (FR-PROC-06, crate-private): for now only
-                    the filter generator
+  containment.rs    containment (FR-PROC-06): for now only the filter
+                    generator (public, so a test can install the real one)
     filter.rs         the seccomp allow-list: `Arch` (`X86_64 | Aarch64`,
                       `current()`), one table per arch (the calls the
                       server makes after startup, grouped by purpose, from
                       `strace -f` over the driver tests), `program(arch,
                       action)`: the arch check, then each call with its
                       argument checks (`socket` AF_INET/AF_INET6 streams,
-                      `mmap`/`mprotect` without PROT_EXEC, `clone` with
-                      glibc's thread flags, `prctl` PR_SET_NAME, `fcntl`
-                      F_GETFD/F_GETFL/F_SETFL; `clone3` ENOSYS), the
-                      action for the rest (`fail`: EPERM, `kill`); never
-                      `truncate`, `ftruncate`, `ioctl` or `execve`
+                      protocol 0, `mmap`/`mprotect` without PROT_EXEC,
+                      `clone` with glibc's thread flags, `prctl`
+                      PR_SET_NAME, `fcntl` F_GETFD/F_GETFL/F_SETFL,
+                      `tgkill` SIGABRT; `clone3` ENOSYS), the action for
+                      the rest (`fail`: EPERM, `kill`); never `truncate`,
+                      `ftruncate`, `ioctl`, `newfstatat` or `execve`.
+                      A panic with `RUST_BACKTRACE` set opens
+                      `/proc/self/maps` (`openat`), which `kill` answers
+                      with the end of the process
       tests.rs          a classic-BPF interpreter runs the program on
                         synthetic calls, both tables, both actions
   systemd.rs        socket activation (A7, crate-private): `take_sockets`
@@ -148,7 +152,8 @@ src/
                       (`BufferSizes`: SO_SNDBUF / SO_RCVBUF, read only)
     file.rs           `openat2_beneath` (RESOLVE_BENEATH |
                       RESOLVE_NO_SYMLINKS, `OPEN_FLAGS`), `openat2_supported`,
-                      `open_dir_path` (O_PATH roots), `fstat` → `Stat`,
+                      `open_dir_path` (O_PATH roots), `fstat` → `Stat`
+                      (the system call itself, never `newfstatat`),
                       `readahead`, `sendfile`, `file_error` (the contract's
                       errno → `FileError` table)
     eventfd.rs        `EventFd`: workers wake the loop (`notify`, `drain`,
@@ -168,7 +173,7 @@ src/
                       available, SECCOMP_GET_ACTION_AVAIL), `install`
                       (PR_SET_NO_NEW_PRIVS, then the filter with TSYNC |
                       LOG; a thread that cannot be synchronized is an
-                      error)
+                      error), `AUDIT_ARCH_X86_64`, `AUDIT_ARCH_AARCH64`
 tests/
   cli.rs            the binary in a subprocess: the usage for bad
                     arguments, `--check` (ok, each kind of error with its
@@ -241,6 +246,9 @@ tests/
                     main thread and a thread started before it
                     (`/proc/self/task/*/status`: `Seccomp: 2`); an empty
                     or too long program is `InvalidInput`
+  seccomp_program.rs the real allow-list (`fail`) in a re-run of the test
+                    binary (no harness): an abort dies by SIGABRT, `fstat`
+                    works
   stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
                     the test binary: non-blocking while it lives, a second
                     one refused (`AlreadyExists`), the mode back after it
