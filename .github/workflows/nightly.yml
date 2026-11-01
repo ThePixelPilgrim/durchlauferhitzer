@@ -51,11 +51,12 @@ jobs:
         # the per-push gate. Each seed's timer order and drain plan follow
         # from the seed, as there; a failure panics with the line that
         # replays it (`SIM_SEED=<seed> failed (timer order .., shutdown ..)`).
+        # The coverage lines show how many cases the range reached.
         run: |
           set -euo pipefail
           echo "SIM_SEEDS=$SIM_SEEDS"
           cargo test --release --locked -p durchlauferhitzer-sim --test faults \
-            -- random_ 2>&1 | tee long-runs.log
+            -- random_ --nocapture 2>&1 | tee long-runs.log
         env:
           CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
           CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
@@ -129,6 +130,10 @@ jobs:
     name: older glibc (debian 12)
     runs-on: ubuntu-latest
     container: debian:12
+    defaults:
+      run:
+        # The container's default shell is sh.
+        shell: bash
     env:
       # As root in the container, so `nobody` must reach the binaries and
       # the temp dirs (driver/README.md).
