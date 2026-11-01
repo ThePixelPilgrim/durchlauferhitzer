@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-29, after stage 5 Task 6 landed on `main`.
+Last updated 2026-10-29, after stage 5 Task 7 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -11,7 +11,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 2 Static files | done (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
 | 3 Reverse proxy | done (`576a77c..b583d96`) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
-| 5 Containment | **in progress** — plan `docs/superpowers/plans/2026-10-29-stage-5-containment.md` (owner-approved `bc2f7d3`; decisions of 2026-10-29 in the spec: FR-CFG-25, FR-CONN-13, FR-PROC-06/07, NFR-SEC-13, NFR-PORT-04/07, NFR-TEST-08). Task 1 ✅ (`containment` block, `ipv6_prefix`; `NoEffect` config error); Task 2 ✅ (FR-CONN-13: IPv6 peers grouped by prefix, refused connections capped per group; the static net checks admission against a spec-written model); Task 3 ✅ (seccomp allow-list generator, `sys::seccomp::install` with TSYNC|LOG, fatal-path group, direct `fstat`; aarch64 table unproven until Task 6); Task 4 ✅ (Landlock wrapper `sys::landlock`: ABI probe, read-only rules from the root fds, gaps; CI requires it via `DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1`, runners at ABI 8); Task 5 ✅ (containment at startup: Landlock at step 7a, seccomp at 10a with TSYNC, one `kind=containment` line per layer, `tgkill` limited to the own pid, an apply failure exits 2 in every mode — owner 2026-11-01); Task 6 ✅ (the server tests run under `seccomp_action kill` on both arches and in the root step, via `DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1`; rare paths — stalled log, signals while draining, EMFILE after startup — run through the binary; no allow-list change needed); **next: Task 7** (nightly workflow: long runs, fuzzing, glibc 2.36) |
+| 5 Containment | **in progress** — plan `docs/superpowers/plans/2026-10-29-stage-5-containment.md` (owner-approved `bc2f7d3`; decisions of 2026-10-29 in the spec: FR-CFG-25, FR-CONN-13, FR-PROC-06/07, NFR-SEC-13, NFR-PORT-04/07, NFR-TEST-08). Task 1 ✅ (`containment` block, `ipv6_prefix`; `NoEffect` config error); Task 2 ✅ (FR-CONN-13: IPv6 peers grouped by prefix, refused connections capped per group; the static net checks admission against a spec-written model); Task 3 ✅ (seccomp allow-list generator, `sys::seccomp::install` with TSYNC|LOG, fatal-path group, direct `fstat`; aarch64 table unproven until Task 6); Task 4 ✅ (Landlock wrapper `sys::landlock`: ABI probe, read-only rules from the root fds, gaps; CI requires it via `DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1`, runners at ABI 8); Task 5 ✅ (containment at startup: Landlock at step 7a, seccomp at 10a with TSYNC, one `kind=containment` line per layer, `tgkill` limited to the own pid, an apply failure exits 2 in every mode — owner 2026-11-01); Task 6 ✅ (the server tests run under `seccomp_action kill` on both arches and in the root step, via `DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1`; rare paths — stalled log, signals while draining, EMFILE after startup — run through the binary; no allow-list change needed); Task 7 ✅ (`.github/workflows/nightly.yml`, daily 03:17 UTC and by hand: long sim runs via `SIM_SEEDS`, four fuzz targets in the excluded `fuzz/` crate with a dated nightly, the driver suite under seccomp kill in a Debian 12 container; actions pinned to Node 24 releases; the fuzz crate is compiled on every push); **next: Task 8** (net gaps, docs, spec status), then the stage 5 whole-branch review |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -32,7 +32,7 @@ The stage 4 review record lists every owner decision and ruling of stage 4, the 
 - Stage 6: the restart target of FR-PROC-05; SIGHUP restart (FR-PROC-07).
 - Stage 7: double buffering vs fill-drain-refill measured with `tc netem`; per-request buffer allocation; `next_deadline` O(n); parse/route allocation nits; `sendfile` blocking on evicted pages (DRV-09).
 - Open: the driver-bug-close log kind is added with its first producer (FR-LOG-07); an NSS descriptor opened by the user lookup after the budget check is not counted (NFR-RES-05).
-- Known test race: `free_port()` (bind, read, release) can collide with a parallel test; documented in `driver/tests/support/child.rs`.
+- Maintenance: the fuzz job's nightly toolchain is pinned to a date (`nightly.yml`) and needs a bump by hand now and then; the first full-budget scheduled nightly on `main` is the real check of its durations (estimate: long runs ~5 min per arch, fuzz ~45 min).
 
 ## Branches
 
