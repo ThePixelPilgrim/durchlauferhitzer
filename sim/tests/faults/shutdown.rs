@@ -229,6 +229,9 @@ pub(crate) fn shutdown_at(
 /// progress during the check may stay open until `send_idle` after its
 /// last progress (plus one clock step), when that is later. The clock
 /// moves in 1 s steps, so late timers fire near their deadlines too.
+/// Past `MAX_DRAIN_TAIL` after `within` the check panics whatever the
+/// progress, so a send that never ends fails with its seed line
+/// (`run_reporting`) instead of running until the job's timeout.
 pub(crate) fn check_drain_finishes(
     sim: &mut Sim,
     plan: ShutdownPlan,
@@ -253,8 +256,16 @@ pub(crate) fn check_drain_finishes(
         .iter()
         .map(|&conn| (conn, (sim.accepted_by_client(conn), start)))
         .collect();
+    let cap = base.saturating_add(MAX_DRAIN_TAIL);
     loop {
         let now = sim.now();
+        assert!(
+            now < cap,
+            "the drain check still sees send progress {:?} after its {within:?} (cap \
+             {MAX_DRAIN_TAIL:?}): a send that never ends\ntrace:\n{}",
+            since(base, now),
+            sim.trace()
+        );
         let mut waiting = now < base;
         for (&conn, &(_, last)) in &progress {
             if sim.state(conn) != SimConnState::Open {
@@ -285,6 +296,15 @@ pub(crate) fn check_drain_finishes(
         }
     }
 }
+
+/// How long the drain check may run past its `within` while connections
+/// still make send progress. No window changes during the check, so a
+/// client takes all it is sent in one step (an unlimited or byte window)
+/// or stops for good (a spent budget, a stalled window); what is left is
+/// waiting on the disk: the largest response, a 1 MiB file, is at most 5
+/// chunks (`FILE_CHUNK`, FR-STATIC-17) behind an open, each up to 45 s
+/// late (`random_disk_delay`), about 4.5 min. Twice that, rounded up.
+const MAX_DRAIN_TAIL: Duration = Duration::from_secs(600);
 
 /// The time from `from` to `to` (zero if `to` is earlier).
 fn since(from: Instant, to: Instant) -> Duration {
