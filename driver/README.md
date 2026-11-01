@@ -266,7 +266,7 @@ tests/
                     `best_effort` logs it missing and serves; seccomp
                     `off` with Landlock `required` before ABI 5 is exit 2
                     (skipped on ABI 5 and later); READ_IMPLIES_EXEC
-                    (`setarch -X`, skipped where exec clears it: x86_64);
+                    (`setarch -X`, skipped where exec clears it: CI);
                     with Landlock required, files beneath the roots are
                     served and paths out are still 404 (or 400)
   seccomp_self.rs   `install` in the test's own process (no harness, one
@@ -554,9 +554,10 @@ Notes on the wrappers:
   Landlock; with `DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1` (CI) that is a
   failure instead.
 - Tests: the `READ_IMPLIES_EXEC` test of `tests/containment.rs` skips
-  where `setarch -X` gives no such personality across exec (x86_64);
-  with `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1` (the arm64 CI
-  job) that is a failure instead.
+  where `setarch -X` gives no such personality across exec (x86_64 and
+  aarch64 clear it for a 64-bit binary, so on the CI runners); with
+  `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1` that is a failure
+  instead. CI does not set it.
 - Tests: the signalfd test is a unit test in `src/sys/signal.rs`, because it
   raises a thread-directed signal (`pthread_kill` on its own thread) — a
   process-directed one could reach another test thread and kill the run.

@@ -15,15 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # `read_implies_exec`: arm64 keeps READ_IMPLIES_EXEC across exec
-          # (`setarch -X`), so the test that needs it must run there;
-          # x86_64 clears it for a 64-bit binary, so it skips there.
           - arch: x86_64
             runner: ubuntu-latest
-            read_implies_exec: "0"
           - arch: arm64
             runner: ubuntu-24.04-arm
-            read_implies_exec: "1"
     name: check (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     steps:
@@ -44,7 +39,6 @@ jobs:
           # (driver/README.md).
           DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
           DURCHLAUFERHITZER_REQUIRE_LANDLOCK: "1"
-          DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC: ${{ matrix.read_implies_exec }}
       - name: Root tests (as root; a root skip is a failure)
         # The test binaries that run the server are built as the runner
         # user (cargo never runs as root) and run with sudo: the privilege
@@ -78,9 +72,7 @@ jobs:
             echo "== $bin"
             sudo env DURCHLAUFERHITZER_REQUIRE_ROOT=1 \
               DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
-              DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 \
-              DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=${{ matrix.read_implies_exec }} \
-              TMPDIR=/tmp "$bin"
+              DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 TMPDIR=/tmp "$bin"
           done
       - name: Product dependency check
         run: scripts/check-product-deps.sh

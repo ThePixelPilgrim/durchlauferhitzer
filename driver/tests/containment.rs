@@ -328,7 +328,8 @@ fn with_landlock_files_beneath_the_roots_are_served_and_paths_out_are_404() {
 }
 
 /// Skips the test with `reason`, or fails it when
-/// `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1` (the arm64 CI job).
+/// `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1` (for a host known to
+/// keep the flag; CI sets it nowhere, see below).
 fn skip_read_implies_exec(reason: &str) {
     const REQUIRE: &str = "DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC";
     assert!(
@@ -340,8 +341,10 @@ fn skip_read_implies_exec(reason: &str) {
 
 /// `READ_IMPLIES_EXEC` (`setarch -X`) defeats the `PROT_EXEC` check:
 /// exit 2 under `seccomp required`. Only where the kernel keeps the flag
-/// across `exec` (aarch64; x86_64 clears it for a 64-bit binary); a skip
-/// is a failure with `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1`.
+/// across `exec`: both x86_64 and aarch64 clear it for a 64-bit binary
+/// (seen on the CI runners, 2026-11-01), so this skips there and the
+/// decision is pinned by the unit tests of `calls_plan`; a skip is a
+/// failure with `DURCHLAUFERHITZER_REQUIRE_READ_IMPLIES_EXEC=1`.
 #[test]
 fn read_implies_exec_fails_a_required_seccomp() {
     const SETARCH: &str = "/usr/bin/setarch";
