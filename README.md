@@ -150,7 +150,7 @@ Locally:
 
 ```sh
 SIM_SEEDS=0..20000 cargo test --release -p durchlauferhitzer-sim --test faults -- random_
-cd fuzz && cargo +nightly fuzz run --debug-assertions request_head -- -max_total_time=60
+cd fuzz && cargo +nightly fuzz run --debug-assertions request_head -- -max_total_time=60 -dict=http.dict
 ```
 
 A failing seed prints its `SIM_SEED=<seed>` replay line; the targets and

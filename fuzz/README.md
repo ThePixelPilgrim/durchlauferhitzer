@@ -22,12 +22,14 @@ fuzz_targets/
   config.rs         config::load: no panic on any text
   head_input.rs     how the head targets read an input: 8 bytes choose limits
                     the config could set, a cut point and the request kind
+http.dict           libFuzzer dictionary of HTTP tokens for the head targets
+                    (without it they rarely get past the first line)
 ```
 
 ```sh
 cd fuzz
 cargo +nightly fuzz run --debug-assertions request_head -- \
-  -max_total_time=60 -rss_limit_mb=2048 -timeout=10
+  -max_total_time=60 -rss_limit_mb=2048 -timeout=10 -dict=http.dict
 ```
 
 A crash input lands in `fuzz/artifacts/<target>/`; replay it with

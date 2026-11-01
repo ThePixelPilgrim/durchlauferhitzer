@@ -106,9 +106,12 @@ jobs:
           status=0
           for t in $TARGETS; do
             echo "== $t ($FUZZ_SECONDS s)"
+            # The head targets get HTTP tokens (fuzz/http.dict).
+            dict=()
+            case "$t" in *_head) dict=(-dict=http.dict) ;; esac
             cargo +"$NIGHTLY" fuzz run --debug-assertions "$t" -- \
               -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -timeout=10 \
-              || status=1
+              "${dict[@]}" || status=1
           done
           exit "$status"
       - name: Save the corpus
