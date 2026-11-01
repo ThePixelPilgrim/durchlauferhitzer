@@ -10,7 +10,7 @@ Status: approved — **single source of truth** for what the product must do.
   *withdrawn*. Plans, reviews, ledgers and commit messages cite IDs instead
   of restating requirements. A new owner decision is written here first
   (new ID or edited text), then cited.
-- Status tags: **[done]** implemented and tested (stages 1–4);
+- Status tags: **[done]** implemented and tested (stages 1–5);
   **[done in core; driver stage 4]** the core's half is done and the
   epoll driver's is due (none left after stage 4); **[done; X stage N]**
   done, with the follow-up X due in stage N (e.g. NFR-MAINT-04's CI
@@ -221,7 +221,7 @@ Structure and values:
 - **FR-CFG-10** [done] Top level allows only `listen` (required; one or
   more IP socket addresses; no duplicates; no port 0), `user` (optional),
   at most one `limits` block, at most one `containment` block (FR-CFG-25,
-  [stage 5]) and one or more `host` blocks.
+  [done in stage 5]) and one or more `host` blocks.
   Overlapping binds such as `0.0.0.0:80` + `127.0.0.1:80` are only detected
   at bind time [done in stage 4]: the addresses are bound in config order
   (`SO_REUSEADDR`, not `SO_REUSEPORT`), and the first failure
@@ -290,7 +290,7 @@ Structure and values:
   | `disk_threads` | 4 (disk worker pool size) | [done] |
   | `shutdown_timeout` | 30s (FR-PROC-05) | [done] |
   | `memory_limit` | 1GiB (budget for per-connection buffers, FR-CFG-21) | [done] |
-  | `ipv6_prefix` | 64 (per-IP grouping of IPv6 peers, FR-CONN-13; (owner decision 2026-10-29, stage 5 brainstorm)) | [stage 5] |
+  | `ipv6_prefix` | 64 (per-IP grouping of IPv6 peers, FR-CONN-13; (owner decision 2026-10-29, stage 5 brainstorm)) | [done] |
 
 - **FR-CFG-21** [done] Counts and sizes in `limits` are ≥ 1, durations are
   non-zero, `max_request_line` ≤ `max_head`, and `max_head` ≤ 1 MiB.
@@ -302,7 +302,7 @@ Structure and values:
     `shutdown_timeout`) 1 ms – 24 h (written `1440m`); `disk_threads` 1–64; `memory_limit`
     1 MiB – 1 TiB (written `1024GiB`); `ipv6_prefix` 32–128 (a plain
     number of bits; *builder call, stage 5 brainstorm:* below /32 one group
-    would span whole providers, so it is refused) [stage 5].
+    would span whole providers, so it is refused) [done in stage 5].
   - The config is rejected when `max_connections` × worst case per
     connection > `memory_limit`. The worst case is NFR-RES-01's buffer sum
     (`worst_case_per_connection` in `core/src/config/model.rs`); the proxy
@@ -314,7 +314,7 @@ Structure and values:
     refused (503) connections, the shared 4 KiB lingering scratch buffer,
     and driver-side buffers (disk readahead, the log buffer).
   - Arithmetic saturates; nothing wraps.
-- **FR-CFG-25** [stage 5] (owner decision 2026-10-29, stage 5 brainstorm) The optional top-level
+- **FR-CFG-25** [done] (owner decision 2026-10-29, stage 5 brainstorm) The optional top-level
   `containment` block sets how strictly the containment layers of
   FR-PROC-06 apply:
 
@@ -1027,7 +1027,7 @@ Failures, persistence, timeouts:
   a client EOF outside the lingering close closes it silently, except in
   the middle of a proxied request body, where it is logged
   (FR-PROXY-26, owner decision 2026-10-27).
-- **FR-CONN-13** [stage 5] Per-IP grouping of IPv6 peers by prefix, and
+- **FR-CONN-13** [done] Per-IP grouping of IPv6 peers by prefix, and
   fairness of the refused-connection pool; both before internet exposure.
   (owner decision 2026-10-29, stage 5 brainstorm) IPv6 peers are counted for `max_connections_per_ip`
   (FR-CONN-09) and orphans (FR-CONN-11) by their first `ipv6_prefix` bits
@@ -1451,7 +1451,7 @@ Failures, persistence, timeouts:
   valid config), 1 invalid config, 2 startup failure (e.g. a port in use,
   a missing static root). *(Stage 4 Task 8, builder call recorded per the
   plan:)* bad arguments exit 1, with the usage (FR-PROC-01).
-- **FR-PROC-06** [stage 5] Containment: Landlock restricts file access to
+- **FR-PROC-06** [done] Containment: Landlock restricts file access to
   the static roots; seccomp allow-lists the system calls. (owner decision 2026-10-29, stage 5 brainstorm)
   - Each layer is `off`, `best_effort` (the default) or `required` per
     FR-CFG-25. Best effort: used where the kernel supports it; where it is
@@ -1587,10 +1587,10 @@ Failures, persistence, timeouts:
   or slow backend never stalls other connections: the core never blocks,
   disk work runs on driver workers, and every waiting state has a
   deadline.
-- **NFR-SEC-12** [done; Landlock and seccomp stage 5] Least privilege:
+- **NFR-SEC-12** [done] Least privilege:
   never root after binding (FR-PROC-03, done in stage 4); Landlock and
   seccomp (FR-PROC-06).
-- **NFR-SEC-13** [stage 5] Parsers and the config language are fuzzed:
+- **NFR-SEC-13** [done] Parsers and the config language are fuzzed:
   the request-head parser, the chunked-body validator, the response-head
   parser and the config parser and validator, each a fuzz target that must
   never panic, hang or exceed its memory bound. *Builder call, stage 5
@@ -1738,7 +1738,7 @@ Failures, persistence, timeouts:
   (`PR_SET_NO_NEW_PRIVS`, then a filter that checks the architecture and
   fails only `openat2` with `ENOSYS`) and must exit 2 with the probe's
   message (`startup.rs` `without_openat2_startup_is_exit_2`).
-- **NFR-PORT-04** [stage 5] Landlock and seccomp are used when available,
+- **NFR-PORT-04** [done] Landlock and seccomp are used when available,
   best effort unless the config requires them (FR-PROC-06, FR-CFG-25).
 - **NFR-PORT-05** [done] systemd is optional (FR-PROC-02/03): without
   `LISTEN_PID`/`LISTEN_FDS` the process binds itself (stage 4 Task 8).
@@ -1866,7 +1866,7 @@ Targets are set in stage 7 from measurements; none are invented here.
   every queued I/O and every disk completion due by then before the
   overdue `TimerFired`, as a real loop that overslept does. The randomized
   nets run one seed in four (`seed % 4 == 0`) in it.
-- **NFR-TEST-08** [stage 5] Long randomized runs and fuzzing. (owner decision 2026-10-29, stage 5 brainstorm)
+- **NFR-TEST-08** [done] Long randomized runs and fuzzing. (owner decision 2026-10-29, stage 5 brainstorm)
   A scheduled GitHub workflow runs them nightly, and it can be started by
   hand (`workflow_dispatch`). Long runs are the randomized sim nets with
   many more seeds than the per-push gate (the seed range set by an
@@ -2045,7 +2045,7 @@ project working and tested.
    `sendfile`, `openat2`, logging output, CLI, privilege drop, systemd
    socket activation, SIGTERM drain, a few smoke tests over real loopback
    sockets. First runnable release.
-5. **Containment** — Landlock (restrict file access to static roots),
+5. **Containment** [done] — Landlock (restrict file access to static roots),
    seccomp (allow-list of syscalls), both best effort unless required by
    the config (FR-PROC-06, FR-CFG-25); long randomized simulation runs and
    fuzzing, nightly and on demand (NFR-TEST-08, NFR-SEC-13); IPv6 per-IP
