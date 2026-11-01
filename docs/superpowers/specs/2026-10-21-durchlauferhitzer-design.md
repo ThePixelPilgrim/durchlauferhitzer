@@ -1878,6 +1878,24 @@ Targets are set in stage 7 from measurements; none are invented here.
   target, default 600) and `older glibc` (Debian 12, glibc 2.36: the
   driver tests under the seccomp kill switch, NFR-PORT-01).
 
+  *(Owner decision 2026-11-02:)* a failing nightly job files or updates a
+  GitHub issue, keyed by a stable fingerprint of the failure, not of the
+  seed or input: for randomized runs the panic's location and message
+  with run-varying numbers stripped; for fuzzing the target plus the
+  crash's panic location and message (or the kind: OOM, timeout); for the
+  older-glibc job the failing test's name. A short hash of it
+  (`fp-xxxxxxxx`) ends the title, e.g. `nightly: fuzz request_head —
+  panic at core/src/http/request.rs:312 [fp-3f9a1c2e]`, and every such
+  issue carries the label `nightly`. An open issue with the same
+  fingerprint gets a comment (date, run link, the new seed or input); a
+  closed one is reopened with a "regressed" comment; otherwise a new
+  issue gives the job and architecture, the panic text, the exact replay
+  command and the run link. At most three new issues per night. Only a
+  separate reporting job, run when another job failed, may write issues
+  (`issues: write`, the built-in token, no other secret); it reads the
+  failing jobs' artifacts and never runs code under test. The
+  fingerprint and the comment/reopen/create decision are a small tested
+  script.
 ---
 
 ## Driver requirements (DRV)
