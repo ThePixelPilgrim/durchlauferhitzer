@@ -219,7 +219,11 @@ tests/
                     completes, the response is relayed), a second
                     SIGTERM and SIGINT (cut, exit 0 within 1 s),
                     `shutdown_timeout 500ms` with a stalled client, SIGHUP
-                    and SIGPIPE ignored; each waits for the server's
+                    and SIGPIPE ignored; SIGHUP, SIGPIPE, SIGSTOP and
+                    SIGCONT while draining change nothing; a stalled
+                    stderr reader (EAGAIN on the log) holds neither the
+                    serving nor the exit past the 1 s final flush, with
+                    SIGSTOP/SIGCONT during it; each waits for the server's
                     `phase=draining` line, so the order is deterministic
   smoke.rs          the end-to-end smoke run (NFR-TEST-07): one binary
                     serving a static and a proxy host to a test backend,
@@ -243,7 +247,11 @@ tests/
                     is raised (three configs: proxy, static, both); a stray
                     inherited fd raises the need by one; the expected
                     numbers add what the test process itself passes on
-                    (`child::inheritable_fds`, e.g. a CI runner's fds)
+                    (`child::inheritable_fds`, e.g. a CI runner's fds);
+                    after startup the soft limit lowered by `prlimit
+                    --pid` (as the server's user; `setpriv` as root):
+                    EMFILE on accept pauses and the 1 s retry serves,
+                    on open and on the upstream socket it is logged
   privileges.rs     A8 in the binary: as non-root `user` is kept and
                     logged, a refused bind below 1024 is exit 2 naming it; as root (else
                     skipped with a printed reason, or a failure with
@@ -577,7 +585,9 @@ Notes on the wrappers:
   SIGSYS and fails the test (FR-PROC-06). `containment.rs` keeps its own
   blocks, and invalid configs (exit 1 at load) get none. The loop tests
   run the driver in the test process, without a filter. CI runs the
-  driver tests and the root step both ways.
+  server tests and the root step both ways. Rare paths the binary tests
+  cannot reach (a disk timeout and a detached worker need a hung file
+  system; a channel's `sched_yield`) rest on the filter's reasoning.
 - Tests: the signalfd test is a unit test in `src/sys/signal.rs`, because it
   raises a thread-directed signal (`pthread_kill` on its own thread) — a
   process-directed one could reach another test thread and kill the run.

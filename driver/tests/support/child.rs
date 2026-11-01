@@ -431,9 +431,7 @@ impl Running {
 
     /// Kills the server and returns its stderr.
     pub fn kill(mut self) -> String {
-        self.assert_not_sigsys();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.end();
         let mut stderr = Vec::new();
         if let Some(mut err) = self.child.stderr.take() {
             err.read_to_end(&mut stderr).unwrap();
@@ -443,28 +441,32 @@ impl Running {
 }
 
 impl Running {
-    /// Fails the test if the server has already been ended by `SIGSYS`
-    /// (the seccomp `kill` action): a call missing from the allow-list.
-    fn assert_not_sigsys(&mut self) {
+    /// Kills (SIGKILL) and reaps the server, then fails the test if it had
+    /// already been ended by `SIGSYS` (the seccomp `kill` action: a call
+    /// missing from the allow-list); a reaped status keeps that signal
+    /// whatever came after. While the test already panics, only says so.
+    fn end(&mut self) {
         use std::os::unix::process::ExitStatusExt;
-        if let Ok(Some(status)) = self.child.try_wait() {
-            assert_ne!(
-                status.signal(),
-                Some(libc::SIGSYS),
-                "the server was killed by SIGSYS: a system call missing from the seccomp \
-                 allow-list (driver/src/containment/filter.rs)"
-            );
+        let _ = self.child.kill();
+        let Ok(status) = self.child.wait() else {
+            return;
+        };
+        if status.signal() != Some(libc::SIGSYS) {
+            return;
+        }
+        let message = "the server was killed by SIGSYS: a system call missing from the \
+                       seccomp allow-list (driver/src/containment/filter.rs)";
+        if thread::panicking() {
+            eprintln!("{message}");
+        } else {
+            panic!("{message}");
         }
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        if !thread::panicking() {
-            self.assert_not_sigsys();
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.end();
     }
 }
 

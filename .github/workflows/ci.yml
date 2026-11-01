@@ -21,6 +21,10 @@ jobs:
             runner: ubuntu-24.04-arm
     name: check (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    env:
+      # The test files that run the server (the root step checks the
+      # list against the files that include `support/child.rs`).
+      SERVER_TESTS: budget cli containment privileges shutdown smoke startup systemd
     steps:
       # Pinned by commit: the v4 tag (= v4.4.0) as of 2026-10-29.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -43,7 +47,11 @@ jobs:
         # Every server the tests start has both layers required and
         # `seccomp_action kill` (driver/README.md): a call missing from
         # the allow-list ends the server and fails its test.
-        run: cargo test -p durchlauferhitzer --locked
+        run: |
+          set -euo pipefail
+          args=()
+          for t in $SERVER_TESTS; do args+=(--test "$t"); done
+          cargo test -p durchlauferhitzer --locked "${args[@]}"
         env:
           DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
           DURCHLAUFERHITZER_REQUIRE_LANDLOCK: "1"
@@ -53,15 +61,16 @@ jobs:
         # user (cargo never runs as root) and run with sudo: the privilege
         # drop's root-only cases run, and the others run the server as
         # `nobody`. The temp dirs are under /tmp and the binary must be
-        # reachable for `nobody`. The list must name every test file
-        # that runs the server (those that include the child helper,
+        # reachable for `nobody`. The list (SERVER_TESTS) must name
+        # every test file that runs the server (those that include the
+        # child helper,
         # `support/child.rs`), but the ones excluded with a reason, so a
         # new server test cannot miss this step. Excluded: free_port (it
         # checks the port helper and starts no server). Each binary runs
         # twice: as configured, then under seccomp kill.
         run: |
           set -euo pipefail
-          tests=(budget cli containment privileges shutdown smoke startup systemd)
+          read -ra tests <<< "$SERVER_TESTS"
           excluded=(free_port)
           found=$(grep -l '"support/child.rs"' driver/tests/*.rs \
             | xargs -n1 basename | sed 's/\.rs$//' | sort)

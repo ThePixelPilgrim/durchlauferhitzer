@@ -445,3 +445,86 @@ fn sighup_and_sigpipe_are_ignored_and_an_idle_server_exits_on_sigterm() {
     let tail: Vec<&str> = all.iter().rev().take(2).rev().map(String::as_str).collect();
     assert_eq!(tail, [DRAINING, DONE], "{all:?}");
 }
+
+/// Signals while draining (Review Focus 1: the seccomp allow-list's rare
+/// paths): SIGHUP and SIGPIPE are read and ignored, SIGSTOP and SIGCONT
+/// pause the server; the download still finishes byte-exact and the
+/// drain ends as usual, exit 0.
+#[test]
+fn signals_while_draining_change_nothing() {
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big,
+    } = static_server("shutdown_timeout 20s; send_idle_timeout 20s;");
+    let mut lines = server.lines();
+    let mut download = start_download(addr);
+    server.signal("TERM");
+    lines.wait_for(DRAINING);
+    server.signal("HUP");
+    server.signal("PIPE");
+    server.signal("STOP");
+    thread::sleep(Duration::from_millis(100));
+    server.signal("CONT");
+    assert!(read_body(&mut download, BIG) == big, "the download differs");
+    assert_eq!(read_rest(&mut download), b"");
+    drop(download);
+    let status = server.wait_exit(PATIENCE);
+    assert_eq!(status.code(), Some(0), "{status}");
+    let all = lines.all();
+    assert_eq!(all.last().map(String::as_str), Some(DONE), "{all:?}");
+    assert!(!all.iter().any(|l| l == ABORTING), "{all:?}");
+}
+
+/// How long the final log flush waits for a stalled stderr (R3,
+/// `LOG_GRACE` in `src/event_loop.rs`).
+const LOG_GRACE: Duration = Duration::from_secs(1);
+
+/// A log reader that stalls (Review Focus 1): nobody reads the server's
+/// stderr, and 2000 responses log far more than a pipe holds (64 KiB),
+/// so the log write gets `EAGAIN`; every pipelined request is still
+/// answered. After SIGTERM the final flush waits for the full pipe, at
+/// most [`LOG_GRACE`] (`poll`, aarch64 `ppoll`), paused by SIGSTOP and
+/// SIGCONT on the way (the restarted wait), then gives up: exit 0.
+#[test]
+fn a_stalled_log_reader_neither_stops_serving_nor_holds_the_exit() {
+    const N: usize = 2000;
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big: _,
+    } = static_server("shutdown_timeout 20s;");
+    let mut conn = connect(addr);
+    let mut writer = conn.try_clone().unwrap();
+    let sender = thread::spawn(move || {
+        let request = b"GET /small.txt HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        writer.write_all(&request.repeat(N)).unwrap();
+    });
+    let mut got = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    let answer = b"\r\n\r\nsmall\n";
+    while got.windows(answer.len()).filter(|w| w == answer).count() < N {
+        let n = conn.read(&mut buf).unwrap();
+        assert!(n > 0, "the connection ended after {} bytes", got.len());
+        got.extend_from_slice(&buf[..n]);
+    }
+    sender.join().unwrap();
+    let ok = text(&got).matches("HTTP/1.1 200 OK\r\n").count();
+    assert_eq!(ok, N);
+    drop(conn);
+    let sent = Instant::now();
+    server.signal("TERM");
+    thread::sleep(Duration::from_millis(300));
+    server.signal("STOP");
+    thread::sleep(Duration::from_millis(100));
+    server.signal("CONT");
+    let status = server.wait_exit(PATIENCE);
+    let elapsed = sent.elapsed();
+    assert_eq!(status.code(), Some(0), "{status}");
+    assert!(
+        elapsed >= LOG_GRACE && elapsed < LOG_GRACE + FAST_EXIT,
+        "{elapsed:?}"
+    );
+}

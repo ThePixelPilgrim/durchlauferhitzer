@@ -71,8 +71,13 @@ impl TempDir {
         match containment {
             Containment::AsWritten | Containment::Invalid => self.write(name, text),
             Containment::Switch => {
+                let own_block = text.lines().any(|line| {
+                    line.trim_start()
+                        .strip_prefix("containment")
+                        .is_some_and(|rest| rest.trim_start().starts_with('{'))
+                });
                 assert!(
-                    !text.contains("containment"),
+                    !own_block,
                     "a config with its own containment block is Containment::AsWritten"
                 );
                 if seccomp_kill() {
