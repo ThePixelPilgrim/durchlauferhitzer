@@ -4,6 +4,10 @@ name: Nightly
 # NFR-SEC-13, NFR-PORT-01): daily, and by hand with smaller or larger
 # budgets.
 on:
+  # TEMPORARY (Task 8b end-to-end proof of the issue reporting): pushes
+  # to this branch run a deliberately failing long run.
+  push:
+    branches: [stage5-task8-report]
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -23,7 +27,7 @@ permissions:
 
 env:
   # A scheduled run has no inputs: the defaults above.
-  SIM_SEEDS: ${{ inputs.seeds || '0..200000' }}
+  SIM_SEEDS: ${{ inputs.seeds || (github.event_name == 'push' && '0..2') || '0..200000' }}
   FUZZ_SECONDS: ${{ inputs.fuzz_seconds || 600 }}
   # The failure records link the run.
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -57,7 +61,7 @@ jobs:
           set -euo pipefail
           echo "SIM_SEEDS=$SIM_SEEDS"
           cargo test --release --locked -p durchlauferhitzer-sim --test faults \
-            -- random_ --nocapture 2>&1 | tee long-runs.log
+            -- run::random_fault_schedules --nocapture 2>&1 | tee long-runs.log
         env:
           CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
           CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
@@ -91,6 +95,7 @@ jobs:
 
   fuzz:
     name: fuzz
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     # Full budget: 4 x 600 s plus install and build, about 45 min.
     timeout-minutes: 90
@@ -166,6 +171,7 @@ jobs:
     # Debian 12 (glibc 2.36): the seccomp allow-list holds for an older
     # glibc than the runners' (Task 6 runs every server under kill).
     name: older glibc (debian 12)
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     # About 1 min.
     timeout-minutes: 30
