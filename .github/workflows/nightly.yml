@@ -1,0 +1,168 @@
+name: Nightly
+
+# Long randomized runs, fuzzing and an older glibc (NFR-TEST-08,
+# NFR-SEC-13, NFR-PORT-01): daily, and by hand with smaller or larger
+# budgets.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Seed range of both randomized sim nets (SIM_SEEDS)"
+        type: string
+        default: "0..200000"
+      fuzz_seconds:
+        description: "Seconds of fuzzing per target"
+        type: number
+        default: 600
+
+# The jobs only read the repository.
+permissions:
+  contents: read
+
+env:
+  # A scheduled run has no inputs: the defaults above.
+  SIM_SEEDS: ${{ inputs.seeds || '0..200000' }}
+  FUZZ_SECONDS: ${{ inputs.fuzz_seconds || 600 }}
+
+jobs:
+  long-runs:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    name: long runs (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      # Pinned by commit: the v4 tag (= v4.4.0) as of 2026-10-29.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+      - name: Randomized nets over SIM_SEEDS
+        # Optimized, but with debug assertions and overflow checks as in
+        # the per-push gate. Each seed's timer order and drain plan follow
+        # from the seed, as there; a failure panics with the line that
+        # replays it (`SIM_SEED=<seed> failed (timer order .., shutdown ..)`).
+        run: |
+          set -euo pipefail
+          echo "SIM_SEEDS=$SIM_SEEDS"
+          cargo test --release --locked -p durchlauferhitzer-sim --test faults \
+            -- random_ 2>&1 | tee long-runs.log
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
+          CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
+      - name: Failing seed
+        if: failure()
+        run: grep -E '^SIM_SEED=[0-9]+ failed' long-runs.log | cut -c1-4000 > failing-seed.txt || true
+      - name: Upload the failing seed
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failing-seed-${{ matrix.arch }}
+          path: |
+            failing-seed.txt
+            long-runs.log
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    env:
+      # The nightly is installed in this job only; the product builds with
+      # the pinned stable toolchain (NFR-PORT-06).
+      NIGHTLY: nightly-2026-10-31
+      TARGETS: request_head chunked response_head config
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal
+          cargo +"$NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
+      - name: Restore the corpus
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Build the targets
+        working-directory: fuzz
+        run: cargo +"$NIGHTLY" fuzz build --debug-assertions
+      - name: Fuzz each target for FUZZ_SECONDS
+        # Every target runs even after one fails. Bounded memory and time:
+        # -rss_limit_mb (also the largest single allocation) and -timeout
+        # per input; a crash, leak, OOM or timeout input lands in
+        # fuzz/artifacts/<target>/.
+        working-directory: fuzz
+        run: |
+          set -uo pipefail
+          status=0
+          for t in $TARGETS; do
+            echo "== $t ($FUZZ_SECONDS s)"
+            cargo +"$NIGHTLY" fuzz run --debug-assertions "$t" -- \
+              -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -timeout=10 \
+              || status=1
+          done
+          exit "$status"
+      - name: Save the corpus
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
+  older-glibc:
+    # Debian 12 (glibc 2.36): the seccomp allow-list holds for an older
+    # glibc than the runners' (Task 6 runs every server under kill).
+    name: older glibc (debian 12)
+    runs-on: ubuntu-latest
+    container: debian:12
+    env:
+      # As root in the container, so `nobody` must reach the binaries and
+      # the temp dirs (driver/README.md).
+      CARGO_TARGET_DIR: /tmp/target
+      TMPDIR: /tmp
+    steps:
+      - name: Install build tools
+        # gcc is only the linker against the system glibc.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev git util-linux
+          command -v setpriv || apt-get install -y --no-install-recommends setpriv
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install rustup and the pinned toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Versions
+        # A current rustup installs rust-toolchain.toml's toolchain only
+        # on request.
+        run: |
+          rustup toolchain install
+          ldd --version | head -n1
+          rustup show
+          uname -r
+      - name: Driver tests under seccomp kill
+        # Root-only tests run (root in the container); Landlock is
+        # required. IPv6 is not: a container may have none. Every skip
+        # prints a `skipped:` line, listed by the next step.
+        run: |
+          set -euo pipefail
+          cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee driver-tests.log
+        env:
+          DURCHLAUFERHITZER_REQUIRE_ROOT: "1"
+          DURCHLAUFERHITZER_REQUIRE_LANDLOCK: "1"
+          DURCHLAUFERHITZER_TEST_SECCOMP_KILL: "1"
+      - name: Skips
+        if: always()
+        run: grep 'skipped:' driver-tests.log || echo "no skips"

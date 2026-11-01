@@ -142,6 +142,20 @@ exit 2.
   failure or a failure of the event loop itself (printed as
   `durchlauferhitzer: event loop: <reason>`).
 
+## Fuzzing and long runs
+
+The nightly workflow (`.github/workflows/nightly.yml`, also started by
+hand) runs the randomized sim nets over many seeds and fuzzes the parsers.
+Locally:
+
+```sh
+SIM_SEEDS=0..20000 cargo test --release -p durchlauferhitzer-sim --test faults -- random_
+cd fuzz && cargo +nightly fuzz run --debug-assertions request_head -- -max_total_time=60
+```
+
+A failing seed prints its `SIM_SEED=<seed>` replay line; the targets and
+crash replay are in [`fuzz/README.md`](fuzz/README.md).
+
 ## Repository layout
 
 - [`core/`](core) — the product: a sans-IO HTTP core with zero dependencies (config, parsing, routing, static files, proxying).

@@ -1872,7 +1872,11 @@ Targets are set in stage 7 from measurements; none are invented here.
   also closes two gaps in the nets: backends that send some bytes and then
   reset are drawn in the randomized proxy net, and the static net's drain
   oracle gets a parser model, so it no longer accepts a 503 for a head the
-  parser rejects (FR-PROC-05b).
+  parser rejects (FR-PROC-05b). The workflow is
+  `.github/workflows/nightly.yml` ("Nightly"): jobs `long runs` (x86_64,
+  arm64; `SIM_SEEDS`, default `0..200000`), `fuzz` (x86_64; seconds per
+  target, default 600) and `older glibc` (Debian 12, glibc 2.36: the
+  driver tests under the seccomp kill switch, NFR-PORT-01).
 
 ---
 
