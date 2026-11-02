@@ -9,6 +9,9 @@
 //!   listed but not exercised here.
 //! - `fstat`: `sys::file::fstat` works under the filter (it calls the
 //!   `fstat` system call itself, never `newfstatat`).
+//! - `threads` (under `kill`): std's thread start, a join that waits for
+//!   a thread still running (glibc's shared `futex` wait on its id), a
+//!   timed condition-variable wait and a channel pass the `futex` check.
 
 #![allow(
     clippy::unwrap_used,
@@ -23,6 +26,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitCode, ExitStatus};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,6 +43,7 @@ const CHILD: &str = "DURCHLAUFERHITZER_SECCOMP_CHILD";
 enum Mode {
     Abort,
     Fstat,
+    Threads,
 }
 
 impl Mode {
@@ -46,13 +51,18 @@ impl Mode {
         match self {
             Self::Abort => "abort",
             Self::Fstat => "fstat",
+            Self::Threads => "threads",
         }
     }
 }
 
 fn filter() {
+    filter_with(SeccompAction::Fail);
+}
+
+fn filter_with(action: SeccompAction) {
     let arch = Arch::current().expect("a filtered architecture");
-    install(&program(arch, SeccompAction::Fail, std::process::id())).expect("install");
+    install(&program(arch, action, std::process::id())).expect("install");
 }
 
 /// The child: installs the filter, then runs `mode`.
@@ -61,6 +71,32 @@ fn child(mode: Mode) -> ExitCode {
         Mode::Abort => {
             filter();
             std::process::abort();
+        }
+        Mode::Threads => {
+            filter_with(SeccompAction::Kill);
+            // Joined while it still sleeps: `pthread_join` waits on the
+            // thread id.
+            let sleeper = thread::spawn(|| thread::sleep(Duration::from_millis(100)));
+            sleeper.join().unwrap();
+            let pair = Arc::new((Mutex::new(false), Condvar::new()));
+            let (lock, ready) = &*pair;
+            let guard = lock.lock().unwrap();
+            let (guard, timeout) = ready
+                .wait_timeout(guard, Duration::from_millis(10))
+                .unwrap();
+            drop(guard);
+            let (send, recv) = mpsc::channel();
+            let sender = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(20));
+                send.send(7_u8).unwrap();
+            });
+            let got = recv.recv().unwrap();
+            sender.join().unwrap();
+            if timeout.timed_out() && got == 7 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
         Mode::Fstat => {
             // Opened and measured by std before the filter (`openat`,
@@ -110,7 +146,7 @@ fn check(mode: Mode) -> Result<(), String> {
     let status = spawn(mode);
     let ok = match mode {
         Mode::Abort => status.signal() == Some(libc::SIGABRT),
-        Mode::Fstat => status.success(),
+        Mode::Fstat | Mode::Threads => status.success(),
     };
     if ok {
         Ok(())
@@ -123,6 +159,7 @@ fn main() -> ExitCode {
     match env::var(CHILD).as_deref() {
         Ok("abort") => return child(Mode::Abort),
         Ok("fstat") => return child(Mode::Fstat),
+        Ok("threads") => return child(Mode::Threads),
         Ok(other) => panic!("unknown child mode {other}"),
         Err(_) => {}
     }
@@ -134,6 +171,7 @@ fn main() -> ExitCode {
     for (name, mode) in [
         ("an_abort_dies_by_sigabrt_under_the_filter", Mode::Abort),
         ("fstat_works_under_the_filter", Mode::Fstat),
+        ("threads_join_wait_and_wake_under_kill", Mode::Threads),
     ] {
         match check(mode) {
             Ok(()) => println!("test {name} ... ok"),
