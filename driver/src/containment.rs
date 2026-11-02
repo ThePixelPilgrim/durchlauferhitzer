@@ -180,7 +180,7 @@ pub(crate) fn restrict_calls(
     config: &Containment,
     landlock: Files,
 ) -> Result<[Outcome; 2], Failure> {
-    let persona = seccomp::personality().map_err(|err| Failure(format!("personality: {err}")))?;
+    let persona = || seccomp::personality().map_err(|err| Failure(format!("personality: {err}")));
     let plan = calls_plan(
         config.seccomp,
         Arch::current(),
@@ -221,12 +221,13 @@ fn files_plan(layer: Layer, abi: Abi) -> Result<FilesPlan, Failure> {
 }
 
 /// seccomp's decision: `layer` against the architecture's table, the
-/// kernel's support and the personality.
+/// kernel's support and the personality, which is read (`persona`) only
+/// when the filter is to be installed.
 fn calls_plan(
     layer: Layer,
     arch: Option<Arch>,
     support: Support,
-    persona: Personality,
+    persona: impl FnOnce() -> Result<Personality, Failure>,
 ) -> Result<CallsPlan, Failure> {
     let lacking = |why: &str| match layer {
         Layer::Required => Err(Failure(format!("seccomp is required but {why}"))),
@@ -243,7 +244,7 @@ fn calls_plan(
         Support::Supported => {}
         Support::Missing => return lacking("the kernel has none"),
     }
-    match (persona, layer) {
+    match (persona()?, layer) {
         (Personality::Plain, _) => Ok(CallsPlan::Apply(arch, Fit::Whole)),
         (Personality::ReadImpliesExec, Layer::Required) => Err(Failure(
             "seccomp is required but the personality has READ_IMPLIES_EXEC, \
