@@ -103,7 +103,10 @@ src/
                     covers); `Outcome` (`LayerName`, `State`: Active /
                     Partial (`Applied`: Abi / Filter) / Missing / Off,
                     `Gap`s covered and uncovered), one log line each; the
-                    pure decisions `files_plan`, `calls_plan`, `cover`
+                    pure decisions `files_plan`, `calls_plan`, `cover`;
+                    its own `Error`, which `process` maps to exit 2
+    line.rs           `Outcome::write_line`: the `kind=containment` line's
+                      tokens (the log format calls it)
     tests.rs          every mode against every kernel answer (missing,
                       no table for the arch, READ_IMPLIES_EXEC, each gap)
     filter.rs         the seccomp allow-list: `Arch` (`X86_64 | Aarch64`,

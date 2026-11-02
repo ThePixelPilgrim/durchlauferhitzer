@@ -133,7 +133,13 @@ fn serve(path: &Path) -> ExitStatus {
 /// A startup failure (exit 2): the message printed after
 /// `durchlauferhitzer: `.
 #[derive(Debug)]
-pub(crate) struct Failure(pub(crate) String);
+struct Failure(String);
+
+impl From<containment::Error> for Failure {
+    fn from(err: containment::Error) -> Self {
+        Failure(err.to_string())
+    }
+}
 
 /// Everything the loop needs, once startup has passed its checks.
 #[derive(Debug)]
@@ -304,10 +310,10 @@ fn run_loop(ready: Ready) -> ExitStatus {
                 driver.write_log(DriverLog::Containment(outcome));
             }
         }
-        Err(Failure(message)) => {
+        Err(err) => {
             // The sink goes first (FR-LOG-06).
             drop(driver);
-            report(message);
+            report(err);
             return ExitStatus::Startup;
         }
     }

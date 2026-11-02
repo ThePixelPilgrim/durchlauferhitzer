@@ -36,10 +36,7 @@ use durchlauferhitzer_core::{
     RequestLine, RequestSummary, TimeoutKind,
 };
 
-use durchlauferhitzer_core::config::SeccompAction;
-
 use super::{DriverLog, KeptReason, ShutdownPhase};
-use crate::containment::{Applied, Gap, LayerName, Outcome, State};
 
 /// Appends the line of a core entry to `out`, its `\n` included.
 ///
@@ -147,7 +144,7 @@ pub fn format_driver(entry: &DriverLog, out: &mut Vec<u8>) {
             return;
         }
         DriverLog::Containment(outcome) => {
-            containment(out, outcome);
+            outcome.write_line(out);
             out.push(b'\n');
             return;
         }
@@ -156,58 +153,6 @@ pub fn format_driver(entry: &DriverLog, out: &mut Vec<u8>) {
     out.extend_from_slice(kind.as_bytes());
     number(out, key, value);
     out.push(b'\n');
-}
-
-/// `kind=containment layer state [abi | action log] [gaps covered_by]
-/// [uncovered]` (FR-LOG-05): a list of gaps is joined by `+`.
-fn containment(out: &mut Vec<u8>, outcome: &Outcome) {
-    out.extend_from_slice(b"kind=containment layer=");
-    out.extend_from_slice(match outcome.layer {
-        LayerName::Landlock => b"landlock",
-        LayerName::Seccomp => b"seccomp",
-    });
-    let (state, applied): (&[u8], _) = match outcome.state {
-        State::Active(applied) => (b"active", Some(applied)),
-        State::Partial(applied) => (b"partial", Some(applied)),
-        State::Missing => (b"missing", None),
-        State::Off => (b"off", None),
-    };
-    out.extend_from_slice(b" state=");
-    out.extend_from_slice(state);
-    match applied {
-        Some(Applied::Abi(abi)) => number(out, "abi", abi),
-        Some(Applied::Filter(action)) => {
-            out.extend_from_slice(match action {
-                SeccompAction::Fail => b" action=fail",
-                SeccompAction::Kill => b" action=kill",
-            });
-            // Every blocked call is logged by the kernel (FR-PROC-06).
-            out.extend_from_slice(b" log=kernel");
-        }
-        None => {}
-    }
-    if !outcome.covered.is_empty() {
-        gaps(out, "gaps", &outcome.covered);
-        out.extend_from_slice(b" covered_by=seccomp");
-    }
-    if !outcome.uncovered.is_empty() {
-        gaps(out, "uncovered", &outcome.uncovered);
-    }
-}
-
-/// ` <key>=<gap>+<gap>...`.
-fn gaps(out: &mut Vec<u8>, key: &str, gaps: &[Gap]) {
-    let _ = write!(out, " {key}=");
-    for (i, gap) in gaps.iter().enumerate() {
-        if i > 0 {
-            out.push(b'+');
-        }
-        out.extend_from_slice(match gap {
-            Gap::Truncate => b"truncate",
-            Gap::DeviceIoctl => b"device_ioctl",
-            Gap::ReadImpliesExec => b"read_implies_exec",
-        });
-    }
 }
 
 /// `kind=<kind> conn=<id> peer=<ip>`.
