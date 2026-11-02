@@ -170,7 +170,8 @@ src/
                       `readahead`, `sendfile`, `file_error` (the contract's
                       errno → `FileError` table)
     landlock.rs       `abi` (`Abi`: Missing / Version), `restrict_to_reading`
-                      (every fs right the ABI knows handled; one rule per
+                      (every fs right the ABI knows handled; from ABI 6
+                      signals and abstract unix sockets scoped; one rule per
                       root fd: READ_FILE | READ_DIR; NO_NEW_PRIVS, then
                       restrict_self), `gaps` (`Gap`: Truncate before ABI
                       3, DeviceIoctl before 5)
@@ -294,7 +295,9 @@ tests/
                     and directories beneath the root open (also by path,
                     after the root moved); outside, the old root path and
                     /etc/passwd are EACCES; no write, create, mkdir,
-                    unlink, rmdir or exec
+                    unlink, rmdir or exec; from ABI 6 no signal to a
+                    process outside the domain and no connect to an
+                    abstract socket outside it (ABI 1 can: the control)
   seccomp_program.rs the real allow-list (`fail`) in a re-run of the test
                     binary (no harness): an abort dies by SIGABRT, `fstat`
                     works; under `kill`, threads start, join a running

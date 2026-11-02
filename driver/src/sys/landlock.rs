@@ -54,13 +54,43 @@ const TRUNCATE: u64 = 1 << 14;
 /// `LANDLOCK_ACCESS_FS_IOCTL_DEV`, ABI 5.
 const IOCTL_DEV: u64 = 1 << 15;
 
-/// `struct landlock_ruleset_attr` up to `handled_access_fs`, the one
-/// field every ABI knows. The kernel takes a shorter struct (its `size`
-/// argument) and reads the later fields (`handled_access_net`, ABI 4;
-/// `scoped`, ABI 6) as 0: no network rule, no scope.
+/// `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`, ABI 6.
+const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
+
+/// `LANDLOCK_SCOPE_SIGNAL`, ABI 6.
+const SCOPE_SIGNAL: u64 = 1 << 1;
+
+/// `struct landlock_ruleset_attr`. Before ABI 6 only `handled_access_fs`
+/// is passed (the `size` argument stops there): the kernel reads the
+/// later fields as 0. From ABI 6 the whole struct is passed, with no
+/// network rule (`handled_access_net` 0, network rules are not part of
+/// stage 5) and both scopes.
 #[repr(C)]
 struct RulesetAttr {
     handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
+}
+
+/// The size of `struct landlock_ruleset_attr` that `abi` knows, up to
+/// the last field the server sets: `handled_access_fs` alone before ABI
+/// 6, all three from 6.
+fn attr_size(abi: u32) -> usize {
+    if abi >= 6 {
+        size_of::<RulesetAttr>()
+    } else {
+        size_of::<u64>()
+    }
+}
+
+/// The scopes `abi` knows: signals and abstract unix sockets limited to
+/// the domain from ABI 6, none before.
+fn scoped(abi: u32) -> u64 {
+    if abi >= 6 {
+        SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL
+    } else {
+        0
+    }
 }
 
 /// `struct landlock_path_beneath_attr`, which the kernel declares
@@ -124,7 +154,8 @@ pub fn gaps(abi: u32) -> Vec<Gap> {
 
 /// Restricts the calling thread, and every thread it starts afterwards,
 /// to reading files and directories beneath `roots`: a ruleset handling
-/// every filesystem right `abi` knows, one `LANDLOCK_RULE_PATH_BENEATH`
+/// every filesystem right `abi` knows (and, from ABI 6, scoping signals
+/// and abstract unix sockets to the domain), one `LANDLOCK_RULE_PATH_BENEATH`
 /// rule per root allowing only `READ_FILE | READ_DIR` (added from the
 /// descriptor, an `O_PATH` one is enough: no path lookup), then
 /// `PR_SET_NO_NEW_PRIVS` and `landlock_restrict_self`. Threads that
@@ -137,14 +168,16 @@ pub fn gaps(abi: u32) -> Vec<Gap> {
 pub fn restrict_to_reading(roots: &[BorrowedFd<'_>], abi: u32) -> io::Result<()> {
     let attr = RulesetAttr {
         handled_access_fs: handled_access(abi),
+        handled_access_net: 0,
+        scoped: scoped(abi),
     };
-    // SAFETY: `attr` is a readable `RulesetAttr` of the size passed that
-    // outlives the call; the kernel only reads it.
+    // SAFETY: `attr` is a readable `RulesetAttr` of at least the size
+    // passed that outlives the call; the kernel only reads it.
     let ret = unsafe {
         libc::syscall(
             libc::SYS_landlock_create_ruleset,
             &raw const attr,
-            size_of::<RulesetAttr>(),
+            attr_size(abi),
             0_u32,
         )
     };
@@ -234,10 +267,22 @@ mod tests {
     }
 
     #[test]
+    fn abi_6_and_later_scope_signals_and_abstract_unix_sockets() {
+        for abi in [1, 2, 3, 4, 5] {
+            assert_eq!(scoped(abi), 0);
+            assert_eq!(attr_size(abi), 8);
+        }
+        for abi in [6, 7, 8] {
+            assert_eq!(scoped(abi), 0b11);
+            assert_eq!(attr_size(abi), 24);
+        }
+    }
+
+    #[test]
     fn the_attributes_have_the_kernel_layout() {
-        // `landlock_ruleset_attr` up to `handled_access_fs`; the packed
+        // `landlock_ruleset_attr`: three u64s; the packed
         // `landlock_path_beneath_attr`: a u64 then an s32, no padding.
-        assert_eq!(size_of::<RulesetAttr>(), 8);
+        assert_eq!(size_of::<RulesetAttr>(), 24);
         assert_eq!(size_of::<PathBeneathAttr>(), 12);
         assert_eq!(align_of::<PathBeneathAttr>(), 1);
     }
