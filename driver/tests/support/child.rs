@@ -153,6 +153,15 @@ pub enum Filter {
     /// without Landlock.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     LandlockEnosys,
+    /// `landlock_restrict_self` fails with `EPERM`: the kernel offers
+    /// Landlock but refuses to apply it.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    LandlockRestrictEperm,
+    /// `seccomp(SECCOMP_SET_MODE_FILTER, ...)` fails with `EINVAL`, while
+    /// `SECCOMP_GET_ACTION_AVAIL` passes: the kernel offers seccomp but
+    /// refuses the filter.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    SeccompInstallEinval,
 }
 
 impl Setup {
@@ -249,6 +258,20 @@ fn prepare(mut cmd: Command, program: &Path, setup: Setup) -> (Command, Vec<Owne
         Filter::SeccompEnosys => pre_exec::enosys(&mut cmd, libc::SYS_seccomp),
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         Filter::LandlockEnosys => pre_exec::enosys(&mut cmd, libc::SYS_landlock_create_ruleset),
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        Filter::LandlockRestrictEperm => pre_exec::refuse(
+            &mut cmd,
+            libc::SYS_landlock_restrict_self,
+            None,
+            libc::EPERM,
+        ),
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        Filter::SeccompInstallEinval => pre_exec::refuse(
+            &mut cmd,
+            libc::SYS_seccomp,
+            Some(libc::SECCOMP_SET_MODE_FILTER),
+            libc::EINVAL,
+        ),
     }
     (cmd, keep)
 }
@@ -797,12 +820,21 @@ mod pre_exec {
 
     /// Installs a seccomp filter in the child that fails system call `nr`
     /// (`openat2`, owner decision 2026-10-29, O3; `seccomp`, Landlock) with
-    /// `ENOSYS`. It checks the architecture first, so only this target's
-    /// number is matched; every other system call is allowed. `PR_SET_NO_NEW_PRIVS`
-    /// comes first, so no privilege is needed. Not in R2's list: `prctl`
-    /// is a single system call that takes no lock and allocates nothing.
+    /// `ENOSYS`.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub fn enosys(cmd: &mut Command, nr: libc::c_long) {
+        refuse(cmd, nr, None, libc::ENOSYS);
+    }
+
+    /// Installs a seccomp filter in the child that fails system call `nr`
+    /// with `errno`; with `arg0`, only when its first argument (low word)
+    /// is that value. It checks the architecture first, so only this
+    /// target's number is matched; every other call is allowed.
+    /// `PR_SET_NO_NEW_PRIVS` comes first, so no privilege is needed. Not
+    /// in R2's list: `prctl` is a single system call that takes no lock
+    /// and allocates nothing.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub fn refuse(cmd: &mut Command, nr: libc::c_long, arg0: Option<u32>, errno: libc::c_int) {
         let stmt = |code: u32, k: u32| libc::sock_filter {
             code: u16::try_from(code).unwrap(),
             jt: 0,
@@ -816,21 +848,29 @@ mod pre_exec {
             k,
         };
         let load = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
-        // `seccomp_data`: `nr` at offset 0, `arch` at offset 4.
+        let ret = libc::BPF_RET | libc::BPF_K;
+        // `seccomp_data`: `nr` at offset 0, `arch` at offset 4, the low
+        // word of argument 0 at offset 16 (little-endian).
         let nr = u32::try_from(nr).unwrap();
-        let enosys = u32::try_from(libc::ENOSYS).unwrap();
+        let errno = u32::try_from(errno).unwrap();
         // Built before the fork; the hook only reads it.
-        let program: [libc::sock_filter; 6] = [
-            stmt(load, 4),
-            jump_eq(AUDIT_ARCH, 0, 3),
-            stmt(load, 0),
-            jump_eq(nr, 0, 1),
-            stmt(
-                libc::BPF_RET | libc::BPF_K,
-                libc::SECCOMP_RET_ERRNO | enosys,
-            ),
-            stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW),
-        ];
+        let mut program = vec![stmt(load, 4), jump_eq(AUDIT_ARCH, 0, 0), stmt(load, 0)];
+        let checks = match arg0 {
+            None => vec![jump_eq(nr, 0, 0)],
+            Some(value) => vec![jump_eq(nr, 0, 0), stmt(load, 16), jump_eq(value, 0, 0)],
+        };
+        program.extend(checks);
+        program.push(stmt(ret, libc::SECCOMP_RET_ERRNO | errno));
+        program.push(stmt(ret, libc::SECCOMP_RET_ALLOW));
+        // Every failed compare jumps to the final allow.
+        let allow = program.len() - 1;
+        let jeq = u16::try_from(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K).unwrap();
+        for (at, ins) in program.iter_mut().enumerate() {
+            if ins.code == jeq {
+                ins.jf = u8::try_from(allow - at - 1).unwrap();
+            }
+        }
+        let len = u16::try_from(program.len()).unwrap();
         let hook = move || {
             // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS)` takes no pointers.
             if unsafe {
@@ -846,12 +886,12 @@ mod pre_exec {
                 return Err(io::Error::last_os_error());
             }
             let fprog = libc::sock_fprog {
-                len: 6,
+                len,
                 filter: program.as_ptr().cast_mut(),
             };
-            // SAFETY: `fprog` points to `program`, six valid instructions
-            // that live in this closure for the whole call; the kernel
-            // only reads them (it copies the filter).
+            // SAFETY: `fprog` points to `program`, `len` valid
+            // instructions that live in this closure for the whole call;
+            // the kernel only reads them (it copies the filter).
             let ret = unsafe {
                 libc::prctl(
                     libc::PR_SET_SECCOMP,
