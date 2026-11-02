@@ -72,7 +72,7 @@ jobs:
           set -euo pipefail
           read -ra tests <<< "$SERVER_TESTS"
           excluded=(free_port)
-          found=$(grep -l '"support/child.rs"' driver/tests/*.rs \
+          found=$(grep -l '^#\[path = "support/child.rs"\]' driver/tests/*.rs \
             | xargs -n1 basename | sed 's/\.rs$//' | sort)
           listed=$(printf '%s\n' "${tests[@]}" "${excluded[@]}" | sed '/^$/d' | sort)
           if [ "$found" != "$listed" ]; then
