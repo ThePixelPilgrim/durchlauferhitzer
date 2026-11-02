@@ -347,11 +347,9 @@ tests/
                     file, a sparse file over 4 GiB
   static_fd_leak.rs a client reset mid-`sendfile` closes the file and leaks
                     no descriptor; alone in its binary
-  free_port.rs      `free_port` against the race (CI, 2026-11-01): with
-                    every ephemeral loopback port held by `bind(0)`, the
-                    old pick (bind 0, read, release) comes up, `free_port`'s
-                    never; skipped, with a reason, where the descriptor
-                    limit cannot hold the whole range; alone in its binary
+  free_port.rs      `free_port` against the race (CI, 2026-11-01): a
+                    sample of ports the kernel hands out (bind 0, connect)
+                    lies in the ephemeral range, `free_port`'s lie outside it
   unsafe_confined.rs  NFR-MAINT-05: `allow(unsafe_code)` (or `expect`) appears
                     in `core/src` and `driver/src` (every file, unit
                     tests included) only on `pub mod sys;` in `src/lib.rs`

@@ -96,7 +96,13 @@ journalctl -k | grep seccomp    # or, without systemd: dmesg | grep seccomp
 
 Use Linux 6.2 or later (6.10 or later restricts every right with
 Landlock alone; before 6.2 truncation is not restricted), and static
-roots the server's user cannot write.
+roots the server's user cannot write. Landlock never restricts `O_PATH`
+opens: the existence and metadata (size, owner, times) of paths outside
+the roots stay visible, not their contents.
+
+Under containment a panic's backtrace (`RUST_BACKTRACE`) is not
+symbolized; with `seccomp_action kill` the attempt ends the process by
+SIGSYS.
 
 ## systemd socket activation
 
