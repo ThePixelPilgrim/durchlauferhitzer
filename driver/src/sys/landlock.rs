@@ -8,7 +8,7 @@ use std::io;
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
-use super::fd::set_no_new_privs;
+use super::fd::{cvt_long, set_no_new_privs};
 
 /// The kernel's Landlock ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,7 +114,7 @@ pub fn abi() -> Abi {
             libc::SYS_landlock_create_ruleset,
             std::ptr::null::<RulesetAttr>(),
             0_usize,
-            CREATE_RULESET_VERSION,
+            libc::c_long::from(CREATE_RULESET_VERSION),
         )
     };
     match u32::try_from(ret) {
@@ -178,7 +178,7 @@ pub fn restrict_to_reading(roots: &[BorrowedFd<'_>], abi: u32) -> io::Result<()>
             libc::SYS_landlock_create_ruleset,
             &raw const attr,
             attr_size(abi),
-            0_u32,
+            0 as libc::c_long,
         )
     };
     let ruleset = descriptor(ret).map_err(step("landlock_create_ruleset"))?;
@@ -192,20 +192,26 @@ pub fn restrict_to_reading(roots: &[BorrowedFd<'_>], abi: u32) -> io::Result<()>
         let ret = unsafe {
             libc::syscall(
                 libc::SYS_landlock_add_rule,
-                ruleset.as_raw_fd(),
-                RULE_PATH_BENEATH,
+                libc::c_long::from(ruleset.as_raw_fd()),
+                libc::c_long::from(RULE_PATH_BENEATH),
                 &raw const rule,
-                0_u32,
+                0 as libc::c_long,
             )
         };
-        check(ret).map_err(step(&format!("landlock_add_rule (root {i})")))?;
+        cvt_long(ret).map_err(step(&format!("landlock_add_rule (root {i})")))?;
     }
     set_no_new_privs().map_err(step("PR_SET_NO_NEW_PRIVS"))?;
     // SAFETY: `ruleset` is an open Landlock ruleset descriptor; no
     // pointers are passed.
-    let ret =
-        unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset.as_raw_fd(), 0_u32) };
-    check(ret).map_err(step("landlock_restrict_self"))
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_restrict_self,
+            libc::c_long::from(ruleset.as_raw_fd()),
+            0 as libc::c_long,
+        )
+    };
+    cvt_long(ret).map_err(step("landlock_restrict_self"))?;
+    Ok(())
 }
 
 /// Prefixes an error with the step that failed, keeping its kind.
@@ -213,20 +219,9 @@ fn step(what: &str) -> impl FnOnce(io::Error) -> io::Error + '_ {
     move |err| io::Error::new(err.kind(), format!("{what}: {err}"))
 }
 
-/// `syscall`'s `-1`-and-errno check for a call returning 0.
-fn check(ret: libc::c_long) -> io::Result<()> {
-    match ret {
-        0 => Ok(()),
-        _ => Err(io::Error::last_os_error()),
-    }
-}
-
 /// `syscall`'s `-1`-and-errno check for a call returning a new descriptor.
 fn descriptor(ret: libc::c_long) -> io::Result<OwnedFd> {
-    if ret == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = libc::c_int::try_from(ret)
+    let fd = libc::c_int::try_from(cvt_long(ret)?)
         .map_err(|_| io::Error::other("landlock returned a descriptor beyond c_int"))?;
     // SAFETY: `fd` was just created by `landlock_create_ruleset` and
     // nothing else owns it.

@@ -4,7 +4,7 @@
 
 use std::io;
 
-use super::fd::set_no_new_privs;
+use super::fd::{cvt_long, set_no_new_privs};
 
 /// `__AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE` (`linux/audit.h`).
 const AUDIT_64BIT_LE: u32 = 0x8000_0000 | 0x4000_0000;
@@ -34,8 +34,8 @@ pub fn supported() -> Support {
         let ret = unsafe {
             libc::syscall(
                 libc::SYS_seccomp,
-                libc::SECCOMP_GET_ACTION_AVAIL,
-                0 as libc::c_uint,
+                libc::c_long::from(libc::SECCOMP_GET_ACTION_AVAIL),
+                0 as libc::c_long,
                 &raw const action,
             )
         };
@@ -108,14 +108,13 @@ pub fn install(program: &[libc::sock_filter]) -> io::Result<()> {
     let ret = unsafe {
         libc::syscall(
             libc::SYS_seccomp,
-            libc::SECCOMP_SET_MODE_FILTER,
+            libc::c_long::from(libc::SECCOMP_SET_MODE_FILTER),
             libc::SECCOMP_FILTER_FLAG_TSYNC | libc::SECCOMP_FILTER_FLAG_LOG,
             &raw const prog,
         )
     };
-    match ret {
+    match cvt_long(ret)? {
         0 => Ok(()),
-        -1 => Err(io::Error::last_os_error()),
         // TSYNC: the id of the thread that could not be synchronized.
         tid => Err(io::Error::other(format!(
             "thread {tid} cannot be synchronized"

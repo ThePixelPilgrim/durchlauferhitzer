@@ -143,7 +143,7 @@ src/
     mod.rs            module rules
     fd.rs             `Io` (Done / WouldBlock / Closed / Err), the -1/errno
                       checks and EINTR retries the others share (`cvt`,
-                      `cvt_retry`, `cvt_retry_ssize` for ssize_t and
+                      `cvt_long` for `syscall`, `cvt_retry`, `cvt_retry_ssize` for ssize_t and
                       c_long returns, `transfer`); for the
                       log sink: `write_fd` (write(2)), `status_flags` /
                       `set_status_flags` (`StatusFlags`, `Blocking`:
