@@ -460,19 +460,21 @@ fn clock_syscall_library(dir: &TempDir) -> String {
 
 /// The vDSO falls back to the `clock_gettime` system call on hosts whose
 /// clocksource has no vDSO mode (hpet, acpi_pm, Xen, arm64 errata): the
-/// server forced onto that path still serves and shuts down cleanly
-/// under `seccomp_action kill` (an unlisted call would end it by
-/// SIGSYS before it listens).
+/// server forced onto that path (the shim is in its maps) still serves
+/// and shuts down cleanly under `seccomp_action kill` (an unlisted call
+/// would end it by SIGSYS before it listens).
 #[test]
 fn the_clock_system_call_passes_the_filter_under_kill() {
     let site = Site::new();
     let library = clock_syscall_library(&site.dir);
     let setup = Setup {
-        env: vec![("LD_PRELOAD", library)],
+        env: vec![("LD_PRELOAD", library.clone())],
         ..Setup::non_root()
     };
     let (mut server, mut lines) = site.start("seccomp required; seccomp_action kill;", setup);
     lines.wait_for("kind=containment layer=seccomp state=active action=kill log=kernel");
+    let maps = fs::read_to_string(format!("/proc/{}/maps", server.pid())).unwrap();
+    assert!(maps.contains(&library), "the shim is not loaded:\n{maps}");
     let response = get(site.addr, "/inside.txt");
     assert!(response.ends_with("\r\n\r\ninside\n"), "{response}");
     server.signal("TERM");
