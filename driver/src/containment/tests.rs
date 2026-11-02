@@ -57,8 +57,45 @@ fn any_landlock_abi_is_applied_at_its_version() {
 
 const ARCH: Option<Arch> = Arch::current();
 
+/// `calls_plan` with a personality that reads as `persona`.
+fn calls(
+    layer: Layer,
+    arch: Option<Arch>,
+    support: Support,
+    persona: Personality,
+) -> Result<CallsPlan, Failure> {
+    calls_plan(layer, arch, support, || Ok(persona))
+}
+
 fn plan(layer: Layer, arch: Option<Arch>, support: Support, persona: Personality) -> CallsPlan {
-    calls_plan(layer, arch, support, persona).unwrap()
+    calls(layer, arch, support, persona).unwrap()
+}
+
+/// A-3: the personality is read only on the way to installing the
+/// filter, so a read that fails cannot fail a skipped layer.
+#[test]
+fn the_personality_is_read_only_when_the_filter_is_applied() {
+    let unreadable = || Err(Failure("personality: EPERM".to_owned()));
+    for support in [Support::Supported, Support::Missing] {
+        assert_eq!(
+            calls_plan(Layer::Off, ARCH, support, unreadable).unwrap(),
+            CallsPlan::Skip(State::Off)
+        );
+        assert_eq!(
+            calls_plan(Layer::BestEffort, None, support, unreadable).unwrap(),
+            CallsPlan::Skip(State::Missing)
+        );
+    }
+    assert_eq!(
+        calls_plan(Layer::BestEffort, ARCH, Support::Missing, unreadable).unwrap(),
+        CallsPlan::Skip(State::Missing)
+    );
+    for layer in [Layer::BestEffort, Layer::Required] {
+        assert_eq!(
+            message(calls_plan(layer, ARCH, Support::Supported, unreadable)),
+            "personality: EPERM"
+        );
+    }
 }
 
 #[test]
@@ -98,7 +135,7 @@ fn seccomp_missing_in_the_kernel() {
         CallsPlan::Skip(State::Missing)
     );
     assert_eq!(
-        message(calls_plan(
+        message(calls(
             Layer::Required,
             ARCH,
             Support::Missing,
@@ -116,12 +153,7 @@ fn seccomp_missing_for_the_architecture() {
             CallsPlan::Skip(State::Missing)
         );
         assert_eq!(
-            message(calls_plan(
-                Layer::Required,
-                None,
-                support,
-                Personality::Plain
-            )),
+            message(calls(Layer::Required, None, support, Personality::Plain)),
             "seccomp is required but it has no allow-list for this architecture"
         );
     }
@@ -140,7 +172,7 @@ fn read_implies_exec_makes_seccomp_partial() {
         CallsPlan::Apply(arch, Fit::Partial)
     );
     assert_eq!(
-        message(calls_plan(
+        message(calls(
             Layer::Required,
             ARCH,
             Support::Supported,
