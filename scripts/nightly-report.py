@@ -34,9 +34,10 @@ without RUST_BACKTRACE, so the panic text carries no backtrace frames
 (and the record keeps only the message lines). Such panics with the same
 message from different callers share one issue.
 Log text is untrusted, and so are the records (written by jobs that run
-code under test): their fields land in issues only fenced, in code spans
-or reduced to plain characters, never in a command line other than as
-one argv item; the run link is the reporting run's own.
+code under test): their fields land in issue bodies only fenced or in
+code spans, in titles only reduced to plain characters, each capped;
+never in a command line other than as one argv item. The run link is
+the reporting run's own.
 """
 
 import argparse
@@ -53,6 +54,9 @@ LABEL_COLOR = "B60205"
 LABEL_DESCRIPTION = "A failing nightly job (NFR-TEST-08)"
 MAX_NEW_ISSUES = 3
 MAX_TEXT = 4000
+# The occurrences in one issue body: GitHub refuses a body over 65536
+# characters, and a failed `gh` would end the run.
+MAX_BLOCKS = 40000
 MAX_REASON = 150
 
 JOBS = {"long-runs": "long runs", "fuzz": "fuzz", "older-glibc": "older glibc"}
@@ -129,9 +133,14 @@ def _clean(text, limit):
 
 
 def _plain(text, limit):
-    """`_clean`, keeping only word characters, spaces and `.:/()+,=-`: no
-    mention, link or markup survives (record fields are untrusted)."""
-    return _clean(re.sub(r"[^\w .:/()+,=-]", " ", text), limit)
+    """`_clean` for titles, keeping only word characters, spaces and
+    `.:/()+,=-`, without URL schemes, a `www.` prefix or underscores at a
+    word's edge: no mention, link or markup survives (record fields are
+    untrusted)."""
+    text = re.sub(r"[^\w .:/()+,=-]", " ", text)
+    text = re.sub(r"(?i)\b[a-z][a-z0-9+.-]*://|\bwww\.", " ", text)
+    text = re.sub(r"(?<!\w)_+|_+(?!\w)", " ", text)
+    return _clean(text, limit)
 
 
 def _code(text, limit):
@@ -485,23 +494,33 @@ def _occurrence(o, run_url):
     if o["job"] == "fuzz" and f.get("test"):
         name = f"fuzz {f['test']}"
     head = f"{name} ({o['arch']})" if o["arch"] else name
-    lines = [f"#### {_plain(head, 200)}", "", f"Run: {run_url}"]
+    lines = [f"#### {_code(head, 200)}", "", f"Run: {run_url}"]
     if f.get("seed"):
         lines.append(f"Seed: {_code(f['seed'], 40)}")
     if f.get("input"):
         lines.append(f"Input: {_code(f['input'], 200)} (in the run's artifacts)")
     if f.get("replay"):
-        lines += ["", "Replay:", "", fenced(f["replay"])]
+        lines += ["", "Replay:", "", fenced(_cap(f["replay"]))]
     return "\n".join(lines)
 
 
 def _blocks(g, run_url):
-    return "\n\n".join(_occurrence(o, run_url) for o in g["occurrences"])
+    """The occurrences, as many as fit in MAX_BLOCKS (at least one)."""
+    blocks, size = [], 0
+    for o in g["occurrences"]:
+        block = _occurrence(o, run_url)
+        if blocks and size + len(block) > MAX_BLOCKS:
+            more = len(g["occurrences"]) - len(blocks)
+            blocks.append(f"… and {more} more (see the run).")
+            break
+        blocks.append(block)
+        size += len(block) + 2
+    return "\n\n".join(blocks)
 
 
 def new_issue_body(g, run_url):
     first = g["occurrences"][0]["failure"]
-    text = first.get("panic_text") or "(no panic text)"
+    text = _cap(first.get("panic_text") or "(no panic text)")
     return (
         f"A nightly job failed (NFR-TEST-08). Fingerprint `{g['fp']}`: later failures with it "
         "are added here as comments.\n\n"

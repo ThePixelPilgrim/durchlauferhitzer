@@ -416,13 +416,23 @@ class Apply(unittest.TestCase):
         self.assertIn("containment::case_d", summary)
 
 
-EVIL = "@evil [x](https://evil.example/p) **b** <img src=x>"
+EVIL = "@evil [x](https://evil.example/p) www.evil.example **b** __u__ _it_ <img src=x>"
 
 
 def _outside_code(body):
     """`body` without its fenced blocks and inline code spans."""
     body = re.sub(r"(?ms)^(`{3,})\n.*?\n\1$", "", body)
     return re.sub(r"`[^`\n]*`", "", body)
+
+
+def assert_inert(case, text):
+    """No mention, link or markup from a record outside code: the only
+    link is the reporting run's."""
+    case.assertNotIn("evil.example/runs", text)
+    outside = _outside_code(text).replace(RUN, "")
+    for bad in ("@evil", "](", "<img", "http", "www.", "__", "**"):
+        case.assertNotIn(bad, outside)
+    case.assertNotRegex(outside, r"(?<!\w)_\w+_(?!\w)")
 
 
 class Untrusted(unittest.TestCase):
@@ -453,14 +463,9 @@ class Untrusted(unittest.TestCase):
         calls, summary = self.run_report(self.records(), [])
         (create,) = [c for c in calls if c[0][:2] == ["issue", "create"]]
         title = create[0][create[0].index("--title") + 1]
-        for text in [title] + self.bodies(calls):
-            self.assertNotIn("evil.example/runs", text)
-            outside = _outside_code(text)
-            self.assertNotIn("@evil", outside)
-            self.assertNotIn("](", outside)
-            self.assertNotIn("<img", outside)
+        for text in [title, summary] + self.bodies(calls):
+            assert_inert(self, text)
         self.assertIn(RUN, create[1])
-        self.assertNotIn("evil.example/runs", summary)
 
     def test_comment_and_reopen(self):
         fp = nr.describe("fuzz", self.records()[0]["failures"][0])[0]
@@ -470,10 +475,7 @@ class Untrusted(unittest.TestCase):
             self.assertTrue(bodies)
             for body in bodies:
                 self.assertIn(RUN, body)
-                self.assertNotIn("evil.example/runs", body)
-                outside = _outside_code(body)
-                self.assertNotIn("@evil", outside)
-                self.assertNotIn("](", outside)
+                assert_inert(self, body)
 
     def test_skipped_summary_links_the_reporting_run(self):
         (rec,) = self.records()
@@ -481,7 +483,25 @@ class Untrusted(unittest.TestCase):
         _, summary = self.run_report(recs, [])
         self.assertIn("not filed", summary)
         self.assertIn(RUN, summary)
-        self.assertNotIn("evil.example/runs", summary)
+        assert_inert(self, summary)
+
+    def test_bodies_fit_github_and_later_actions_run(self):
+        # GitHub refuses a body over 65536 characters; a failed `gh`
+        # would end the run before the later actions.
+        huge = "x" * 200_000
+        big = nr._failure(kind="crash", test="request_head", detail="big",
+                          panic_text=huge, replay=huge, seed="1" * 1000, input=huge)
+        small = nr._failure(kind="crash", test="request_head", detail="small")
+        rec = {"version": 1, "job": "fuzz", "arch": "x86_64", "run_url": RUN,
+               "failures": [big] * 100 + [small]}
+        for issues in ([], [{"number": 5, "state": "OPEN",
+                             "title": "t [%s]" % nr.describe("fuzz", big)[0]}]):
+            calls, _ = self.run_report([rec], issues)
+            bodies = [b for _, b in calls if b is not None]
+            self.assertEqual(len(bodies), 2)
+            for body in bodies:
+                self.assertLessEqual(len(body), 65536)
+                self.assertIn(RUN, body)
 
 
 class GhRunner(unittest.TestCase):
