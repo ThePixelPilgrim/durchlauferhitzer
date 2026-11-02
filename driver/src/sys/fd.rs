@@ -32,6 +32,15 @@ pub(crate) fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
+/// [`cvt`] for `syscall`'s `c_long` return value.
+pub(crate) fn cvt_long(ret: libc::c_long) -> io::Result<libc::c_long> {
+    if ret == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret)
+    }
+}
+
 /// `prctl(PR_SET_NO_NEW_PRIVS, 1)`: no later `execve` can gain
 /// privileges, so seccomp and Landlock need none. It cannot be undone.
 pub(crate) fn set_no_new_privs() -> io::Result<()> {

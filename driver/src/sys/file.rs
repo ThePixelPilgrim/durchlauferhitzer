@@ -78,7 +78,7 @@ fn openat2(
         unsafe {
             libc::syscall(
                 libc::SYS_openat2,
-                dir.as_raw_fd(),
+                libc::c_long::from(dir.as_raw_fd()),
                 path.as_ptr(),
                 &raw const how,
                 size_of::<libc::open_how>(),
@@ -127,7 +127,13 @@ pub fn fstat(fd: BorrowedFd<'_>) -> io::Result<Stat> {
     cvt_retry_ssize(|| {
         // SAFETY: `st` is a writable `stat`; on x86_64 and aarch64 libc's
         // `stat` is the kernel's `struct stat` that `fstat` writes.
-        unsafe { libc::syscall(libc::SYS_fstat, fd.as_raw_fd(), &raw mut st) }
+        unsafe {
+            libc::syscall(
+                libc::SYS_fstat,
+                libc::c_long::from(fd.as_raw_fd()),
+                &raw mut st,
+            )
+        }
     })?;
     let kind = match st.st_mode & libc::S_IFMT {
         libc::S_IFREG => FileKind::Regular,
