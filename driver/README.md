@@ -115,7 +115,8 @@ src/
                       protocol 0, `mmap`/`mprotect` without PROT_EXEC,
                       `clone` with glibc's thread flags, `prctl`
                       PR_SET_NAME, `fcntl` F_GETFD/F_GETFL/F_SETFL,
-                      `tgkill` SIGABRT to `pid`; `clone3` ENOSYS), the action for
+                      `tgkill` SIGABRT to `pid`; `clone3` ENOSYS;
+                      `clock_gettime`, the vDSO fallback), the action for
                       the rest (`fail`: EPERM, `kill`); never `truncate`,
                       `ftruncate`, `ioctl`, `newfstatat` or `execve`.
                       A panic with `RUST_BACKTRACE` set opens
@@ -277,7 +278,10 @@ tests/
                     (skipped on ABI 5 and later); READ_IMPLIES_EXEC
                     (`setarch -X`, skipped where exec clears it: CI);
                     with Landlock required, files beneath the roots are
-                    served and paths out are still 404 (or 400)
+                    served and paths out are still 404 (or 400); with
+                    the clock forced onto its system call (the vDSO
+                    fallback, `support/clock_syscall.rs`) the server
+                    serves and exits 0 under `kill`
   seccomp_self.rs   `install` in the test's own process (no harness, one
                     test): a filter refusing `getppid` (EPERM) covers the
                     main thread and a thread started before it
@@ -358,6 +362,11 @@ tests/
                     by the shell's `kill`, stderr read line by line while
                     the server runs (`Lines`), a bounded wait for the exit;
                     a server ended by SIGSYS fails its test
+  support/clock_syscall.rs  a test-only `LD_PRELOAD` cdylib whose
+                    `clock_gettime` always makes the system call; built
+                    by `containment.rs` with the toolchain's `rustc`, no
+                    cargo target (so outside the test crate and the
+                    product's tree; its own `unsafe`)
   support/conf.rs   temp dirs and config files (`TempDir::config`, with
                     `Containment`: the seccomp kill switch's block, the
                     text's own, or none for an invalid config)

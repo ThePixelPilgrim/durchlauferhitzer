@@ -358,6 +358,20 @@ fn the_fatal_paths_are_allowed_and_tgkill_only_for_sigabrt_to_itself() {
     });
 }
 
+/// The vDSO falls back to the `clock_gettime` system call where the
+/// clocksource has no vDSO mode (hpet, acpi_pm, Xen, arm64 errata): std's
+/// `Instant` and `SystemTime` must still work there.
+#[test]
+fn clock_gettime_is_allowed_for_the_vdso_fallback() {
+    each(|arch, _, prog| {
+        let clock = nr(arch, "clock_gettime");
+        for clk in [libc::CLOCK_REALTIME, libc::CLOCK_MONOTONIC] {
+            let got = run(prog, &call(arch, clock, [clk as u64, 0, 0, 0, 0, 0]));
+            assert_eq!(got, ALLOW, "{arch:?} clock {clk}");
+        }
+    });
+}
+
 /// A jump offset is a `u8`: a body longer than 255 instructions could not
 /// be skipped (`offset` would saturate and land inside it).
 #[test]
@@ -498,6 +512,7 @@ fn common_number(name: &str) -> i64 {
         "futex" => libc::SYS_futex,
         "sched_yield" => libc::SYS_sched_yield,
         "clock_nanosleep" => libc::SYS_clock_nanosleep,
+        "clock_gettime" => libc::SYS_clock_gettime,
         "restart_syscall" => libc::SYS_restart_syscall,
         "set_robust_list" => libc::SYS_set_robust_list,
         "rseq" => libc::SYS_rseq,
