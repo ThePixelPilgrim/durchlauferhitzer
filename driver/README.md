@@ -115,6 +115,8 @@ src/
                       protocol 0, `mmap`/`mprotect` without PROT_EXEC,
                       `clone` with glibc's thread flags, `prctl`
                       PR_SET_NAME, `fcntl` F_GETFD/F_GETFL/F_SETFL,
+                      `setsockopt` TCP_NODELAY, `getsockopt` SO_ERROR,
+                      `futex` private wait/wake and `pthread_join`'s wait,
                       `tgkill` SIGABRT to `pid`; `clone3` ENOSYS;
                       `clock_gettime`, the vDSO fallback), the action for
                       the rest (`fail`: EPERM, `kill`); never `truncate`,
@@ -295,7 +297,8 @@ tests/
                     unlink, rmdir or exec
   seccomp_program.rs the real allow-list (`fail`) in a re-run of the test
                     binary (no harness): an abort dies by SIGABRT, `fstat`
-                    works
+                    works; under `kill`, threads start, join a running
+                    thread, wait with a timeout and pass a channel
   stderr_sink.rs    `LogSink::stderr()` on the real fd 2, in a re-run of
                     the test binary: non-blocking while it lives, a second
                     one refused (`AlreadyExists`), the mode back after it

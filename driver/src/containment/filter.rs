@@ -75,6 +75,14 @@ enum Rule {
     Prctl,
     /// `fcntl`: only the commands in [`FCNTL_COMMANDS`].
     Fcntl,
+    /// `setsockopt`: only `IPPROTO_TCP`/`TCP_NODELAY` (the options set
+    /// on listeners, `SO_REUSEADDR` and `IPV6_V6ONLY`, come before the
+    /// filter).
+    NoDelay,
+    /// `getsockopt`: only `SOL_SOCKET`/`SO_ERROR` (a connect's outcome).
+    SoError,
+    /// `futex`: only the operations in [`FUTEX_OPERATIONS`].
+    Futex,
     /// `tgkill`: only `SIGABRT` (glibc's `abort`) to the server's own
     /// process.
     Abort,
@@ -111,8 +119,8 @@ const X86_64: &[Entry] = &[
     e("accept4", 288, Rule::Allow),
     e("socket", 41, Rule::Socket),
     e("connect", 42, Rule::Allow),
-    e("getsockopt", 55, Rule::Allow),
-    e("setsockopt", 54, Rule::Allow),
+    e("getsockopt", 55, Rule::SoError),
+    e("setsockopt", 54, Rule::NoDelay),
     e("sendto", 44, Rule::Allow),
     e("shutdown", 48, Rule::Allow),
     e("sendfile", 40, Rule::Allow),
@@ -136,7 +144,7 @@ const X86_64: &[Entry] = &[
     e("madvise", 28, Rule::Allow),
     // Locks and channels (`futex`; a channel's back-off yields), the
     // pool join's 1 ms sleeps; a sleep restarted after SIGSTOP/SIGCONT.
-    e("futex", 202, Rule::Allow),
+    e("futex", 202, Rule::Futex),
     e("sched_yield", 24, Rule::Allow),
     e("clock_nanosleep", 230, Rule::Allow),
     e("restart_syscall", 219, Rule::Allow),
@@ -182,8 +190,8 @@ const AARCH64: &[Entry] = &[
     e("accept4", 242, Rule::Allow),
     e("socket", 198, Rule::Socket),
     e("connect", 203, Rule::Allow),
-    e("getsockopt", 209, Rule::Allow),
-    e("setsockopt", 208, Rule::Allow),
+    e("getsockopt", 209, Rule::SoError),
+    e("setsockopt", 208, Rule::NoDelay),
     e("sendto", 206, Rule::Allow),
     e("shutdown", 210, Rule::Allow),
     e("sendfile", 71, Rule::Allow),
@@ -202,7 +210,7 @@ const AARCH64: &[Entry] = &[
     e("mremap", 216, Rule::Allow),
     e("madvise", 233, Rule::Allow),
     // Locks, channels, sleeps.
-    e("futex", 98, Rule::Allow),
+    e("futex", 98, Rule::Futex),
     e("sched_yield", 124, Rule::Allow),
     e("clock_nanosleep", 115, Rule::Allow),
     e("restart_syscall", 128, Rule::Allow),
@@ -232,6 +240,22 @@ const AARCH64: &[Entry] = &[
 /// The `prctl` options the server uses after startup: a disk worker
 /// naming itself (std's `Builder::name`, glibc's `pthread_setname_np`).
 const PRCTL_OPTIONS: &[u32] = &[libc::PR_SET_NAME as u32];
+
+/// The `futex` operations the server uses after startup: std's locks,
+/// channels and condition variables (`FUTEX_WAIT_BITSET` with a
+/// monotonic deadline, `FUTEX_WAKE`, both private), glibc's internal
+/// locks under contention (malloc arenas, `pthread_once`:
+/// `FUTEX_WAIT`, private) and `pthread_join` on a worker that is still
+/// exiting (a shared `FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME` on its
+/// thread id, which the kernel clears). Seen with `strace -f` on glibc
+/// 2.39; the same code in 2.36. No priority-inheritance, requeue or
+/// wake-op operation.
+const FUTEX_OPERATIONS: &[u32] = &[
+    (libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG) as u32,
+    (libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG) as u32,
+    (libc::FUTEX_WAIT_BITSET | libc::FUTEX_PRIVATE_FLAG) as u32,
+    (libc::FUTEX_WAIT_BITSET | libc::FUTEX_CLOCK_REALTIME) as u32,
+];
 
 /// The `fcntl` commands the server uses after startup (see the table).
 /// These values, like every constant the argument checks use, are the
@@ -324,6 +348,9 @@ fn body(rule: Rule, deny: u32, pid: u32) -> Vec<libc::sock_filter> {
         ],
         Rule::Prctl => one_of(arg(0), PRCTL_OPTIONS, deny),
         Rule::Fcntl => one_of(arg(1), FCNTL_COMMANDS, deny),
+        Rule::Futex => one_of(arg(1), FUTEX_OPERATIONS, deny),
+        Rule::NoDelay => level_and_name(libc::IPPROTO_TCP, libc::TCP_NODELAY, deny),
+        Rule::SoError => level_and_name(libc::SOL_SOCKET, libc::SO_ERROR, deny),
         Rule::Abort => {
             // `tgkill(tgid, tid, sig)`: `tgid` must be the server, then
             // `sig` SIGABRT.
@@ -332,6 +359,19 @@ fn body(rule: Rule, deny: u32, pid: u32) -> Vec<libc::sock_filter> {
             out
         }
     }
+}
+
+/// `setsockopt`/`getsockopt(fd, level, name, ...)`: allows exactly this
+/// `level` (argument 1) and `name` (argument 2).
+fn level_and_name(level: i32, name: i32, deny: u32) -> Vec<libc::sock_filter> {
+    vec![
+        load(arg(1)),
+        jump(JEQ, level as u32, 0, 3),
+        load(arg(2)),
+        jump(JEQ, name as u32, 0, 1),
+        ret(libc::SECCOMP_RET_ALLOW),
+        ret(deny),
+    ]
 }
 
 /// Allows the call when the word at `at` is one of `values`.

@@ -1,7 +1,7 @@
 //! The generator, run on synthetic calls by a small classic-BPF
 //! interpreter (the subset the program uses), on both tables.
 
-use super::{Arch, Entry, FCNTL_COMMANDS, PRCTL_OPTIONS, Rule, body, program};
+use super::{Arch, Entry, FCNTL_COMMANDS, FUTEX_OPERATIONS, PRCTL_OPTIONS, Rule, body, program};
 use durchlauferhitzer_core::config::SeccompAction;
 
 const ARCHES: [Arch; 2] = [Arch::X86_64, Arch::Aarch64];
@@ -354,6 +354,92 @@ fn the_fatal_paths_are_allowed_and_tgkill_only_for_sigabrt_to_itself() {
         // Another process, even with SIGABRT.
         for pid in [0, 1, own + 1, own - 1, u64::from(u32::MAX)] {
             assert_eq!(run(pid, libc::SIGABRT), expected(action), "pid {pid}");
+        }
+    });
+}
+
+#[test]
+fn setsockopt_only_for_tcp_nodelay() {
+    each(|arch, action, prog| {
+        let setsockopt = nr(arch, "setsockopt");
+        let run = |level: i32, name: i32| {
+            let args = [5, level as u64, name as u64, 0x1000, 4, 0];
+            run(prog, &call(arch, setsockopt, args))
+        };
+        assert_eq!(run(libc::IPPROTO_TCP, libc::TCP_NODELAY), ALLOW);
+        for (level, name) in [
+            (libc::SOL_SOCKET, libc::SO_REUSEADDR),
+            (libc::SOL_SOCKET, libc::SO_REUSEPORT),
+            (libc::SOL_SOCKET, libc::SO_SNDBUF),
+            (libc::SOL_SOCKET, libc::SO_BINDTODEVICE),
+            (libc::SOL_SOCKET, libc::TCP_NODELAY),
+            (libc::IPPROTO_IPV6, libc::IPV6_V6ONLY),
+            (libc::IPPROTO_IP, libc::IP_TOS),
+            (libc::IPPROTO_TCP, libc::TCP_CONGESTION),
+            (libc::IPPROTO_TCP, libc::TCP_ULP),
+            (libc::IPPROTO_TCP, libc::TCP_REPAIR),
+        ] {
+            assert_eq!(run(level, name), expected(action), "{level} {name}");
+        }
+    });
+}
+
+#[test]
+fn getsockopt_only_for_so_error() {
+    each(|arch, action, prog| {
+        let getsockopt = nr(arch, "getsockopt");
+        let run = |level: i32, name: i32| {
+            let args = [5, level as u64, name as u64, 0x1000, 0x2000, 0];
+            run(prog, &call(arch, getsockopt, args))
+        };
+        assert_eq!(run(libc::SOL_SOCKET, libc::SO_ERROR), ALLOW);
+        for (level, name) in [
+            (libc::SOL_SOCKET, libc::SO_PEERCRED),
+            (libc::SOL_SOCKET, libc::SO_TYPE),
+            (libc::IPPROTO_TCP, libc::SO_ERROR),
+            (libc::IPPROTO_TCP, libc::TCP_INFO),
+            (libc::IPPROTO_IP, libc::SO_ERROR),
+        ] {
+            assert_eq!(run(level, name), expected(action), "{level} {name}");
+        }
+    });
+}
+
+#[test]
+fn futex_only_for_the_private_waits_and_wakes_and_the_join() {
+    let private = libc::FUTEX_PRIVATE_FLAG;
+    let realtime = libc::FUTEX_CLOCK_REALTIME;
+    each(|arch, action, prog| {
+        let futex = nr(arch, "futex");
+        let run = |op: i32| run(prog, &call(arch, futex, [0x1000, op as u64, 1, 0, 0, !0]));
+        assert_eq!(FUTEX_OPERATIONS.len(), 4);
+        for op in [
+            libc::FUTEX_WAIT | private,
+            libc::FUTEX_WAKE | private,
+            libc::FUTEX_WAIT_BITSET | private,
+            // pthread_join: a shared wait on the thread id.
+            libc::FUTEX_WAIT_BITSET | realtime,
+        ] {
+            assert_eq!(run(op), ALLOW, "{op:#x}");
+        }
+        for op in [
+            libc::FUTEX_WAIT,
+            libc::FUTEX_WAKE,
+            libc::FUTEX_WAIT_BITSET,
+            libc::FUTEX_WAKE_BITSET | private,
+            libc::FUTEX_WAIT_BITSET | private | realtime,
+            libc::FUTEX_REQUEUE | private,
+            libc::FUTEX_CMP_REQUEUE | private,
+            libc::FUTEX_WAKE_OP | private,
+            libc::FUTEX_FD,
+            libc::FUTEX_LOCK_PI | private,
+            libc::FUTEX_UNLOCK_PI | private,
+            libc::FUTEX_TRYLOCK_PI | private,
+            libc::FUTEX_WAIT_REQUEUE_PI | private,
+            libc::FUTEX_CMP_REQUEUE_PI | private,
+            libc::FUTEX_LOCK_PI2 | private,
+        ] {
+            assert_eq!(run(op), expected(action), "{op:#x}");
         }
     });
 }
