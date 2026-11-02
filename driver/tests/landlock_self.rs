@@ -3,6 +3,10 @@
 //! `O_PATH`, restricts itself and checks what it can still reach; the
 //! parent builds the tree and removes it afterwards (the child no longer
 //! can). Run twice: with a ruleset of the kernel's ABI and of ABI 1.
+//! From ABI 6 the ruleset also scopes signals and abstract unix sockets:
+//! the child cannot signal a process it started before restricting
+//! itself, nor connect to the parent's abstract socket; with ABI 1 it
+//! can (the control).
 //!
 //! Without Landlock (`abi()` is `Missing`) the test skips with a printed
 //! reason, unless `DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1` is set (CI sets
@@ -19,8 +23,10 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Child, Command, ExitCode, Stdio};
 
 use durchlauferhitzer::sys::file::{open_dir_path, openat2_beneath};
 use durchlauferhitzer::sys::landlock::{Abi, abi, restrict_to_reading};
@@ -30,6 +36,12 @@ const CHILD: &str = "DURCHLAUFERHITZER_LANDLOCK_CHILD";
 
 /// Set in the child: the ABI of the ruleset it restricts itself with.
 const RULESET: &str = "DURCHLAUFERHITZER_LANDLOCK_RULESET_ABI";
+
+/// Set in the child: the parent's abstract unix socket name.
+const SOCKET: &str = "DURCHLAUFERHITZER_LANDLOCK_SOCKET";
+
+/// The first ABI that scopes signals and abstract unix sockets.
+const SCOPES: u32 = 6;
 
 /// Turns a skip into a failure.
 const REQUIRE: &str = "DURCHLAUFERHITZER_REQUIRE_LANDLOCK";
@@ -65,7 +77,34 @@ fn ok<T>(what: &str, result: io::Result<T>) -> Result<T, String> {
 /// The child's checks, after the restriction, by name.
 type Check<'a> = (&'static str, Box<dyn Fn() -> Result<(), String> + 'a>);
 
-fn checks<'a>(dir: &'a Path, root: &'a OwnedFd, kernel: u32) -> Vec<Check<'a>> {
+/// `Ok` if `result` is refused (`EPERM`) when `scoped`, and succeeds
+/// otherwise.
+fn scoped<T: std::fmt::Debug>(
+    what: &str,
+    scoped: bool,
+    result: io::Result<T>,
+) -> Result<(), String> {
+    match (scoped, result) {
+        (true, Err(err)) if err.raw_os_error() == Some(libc::EPERM) => Ok(()),
+        (false, Ok(_)) => Ok(()),
+        (_, other) => Err(format!("{what} (scoped: {scoped}): {other:?}")),
+    }
+}
+
+/// What the scope checks reach: a process started before the
+/// restriction, and the parent's abstract socket.
+struct Outside {
+    process: std::cell::RefCell<Child>,
+    socket: String,
+}
+
+fn checks<'a>(
+    dir: &'a Path,
+    root: &'a OwnedFd,
+    kernel: u32,
+    ruleset: u32,
+    outside: &'a Outside,
+) -> Vec<Check<'a>> {
     let moved = dir.join("moved");
     let moved2 = moved.clone();
     let moved3 = moved.clone();
@@ -135,6 +174,27 @@ fn checks<'a>(dir: &'a Path, root: &'a OwnedFd, kernel: u32) -> Vec<Check<'a>> {
             Box::new(move || eacces("exec /bin/true", Command::new("/bin/true").status())),
         ),
         (
+            "signals_out_of_the_domain_are_scoped_from_abi_6",
+            Box::new(move || {
+                let kill = outside.process.borrow_mut().kill();
+                scoped("kill", ruleset >= SCOPES, kill)
+            }),
+        ),
+        (
+            "abstract_unix_sockets_out_of_the_domain_are_scoped_from_abi_6",
+            Box::new(move || {
+                let addr = ok(
+                    "address",
+                    SocketAddr::from_abstract_name(outside.socket.as_bytes()),
+                )?;
+                scoped(
+                    "connect",
+                    ruleset >= SCOPES,
+                    UnixStream::connect_addr(&addr),
+                )
+            }),
+        ),
+        (
             "the_version_is_still_there",
             Box::new(move || match abi() {
                 Abi::Version(now) if now == kernel => Ok(()),
@@ -148,7 +208,7 @@ fn checks<'a>(dir: &'a Path, root: &'a OwnedFd, kernel: u32) -> Vec<Check<'a>> {
 
 /// The child: opens the root, moves it, restricts itself with a ruleset
 /// of ABI `ruleset`, runs the checks.
-fn child(dir: &Path, ruleset: u32) -> ExitCode {
+fn child(dir: &Path, ruleset: u32, socket: String) -> ExitCode {
     let Abi::Version(kernel) = abi() else {
         println!("test landlock_self ... FAILED: no Landlock in the child");
         return ExitCode::FAILURE;
@@ -157,13 +217,24 @@ fn child(dir: &Path, ruleset: u32) -> ExitCode {
     fs::rename(dir.join("root"), dir.join("moved")).unwrap();
     fs::create_dir(dir.join("root")).unwrap();
     fs::write(dir.join("root/decoy.txt"), "decoy").unwrap();
+    // Started before the restriction, so outside its domain; it ends
+    // with its stdin when this process exits.
+    let process = Command::new("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let outside = Outside {
+        process: std::cell::RefCell::new(process),
+        socket,
+    };
     if let Err(err) = restrict_to_reading(&[root.as_fd()], ruleset) {
         println!("test restrict_to_reading ... FAILED: {err}");
         return ExitCode::FAILURE;
     }
     println!("kernel landlock ABI {kernel}, ruleset ABI {ruleset}");
     let mut failed = false;
-    for (name, check) in checks(dir, &root, kernel) {
+    for (name, check) in checks(dir, &root, kernel, ruleset, &outside) {
         match check() {
             Ok(()) => println!("test {name} ... ok"),
             Err(err) => {
@@ -185,8 +256,12 @@ fn run(ruleset: u32) -> bool {
         env::temp_dir().join(format!("dlh-landlock-{}-{ruleset}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     build(&dir);
+    let socket = format!("dlh-landlock-{}-{ruleset}", std::process::id());
+    let addr = SocketAddr::from_abstract_name(socket.as_bytes()).unwrap();
+    let _listener = UnixListener::bind_addr(&addr).unwrap();
     let status = Command::new(env::current_exe().unwrap())
         .env(CHILD, &dir)
+        .env(SOCKET, &socket)
         .env(RULESET, ruleset.to_string())
         .status()
         .unwrap();
@@ -200,7 +275,7 @@ fn run(ruleset: u32) -> bool {
 fn main() -> ExitCode {
     if let Some(dir) = env::var_os(CHILD) {
         let ruleset = env::var(RULESET).unwrap().parse().unwrap();
-        return child(Path::new(&dir), ruleset);
+        return child(Path::new(&dir), ruleset, env::var(SOCKET).unwrap());
     }
     let kernel = match abi() {
         Abi::Version(kernel) => kernel,
