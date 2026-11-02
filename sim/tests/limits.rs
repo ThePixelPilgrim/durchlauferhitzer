@@ -443,6 +443,21 @@ fn ipv4_mapped_peer_shares_the_ipv4_slot() {
     assert_refused(&mut sim, c, mapped, LimitKind::ConnectionsPerIp);
 }
 
+/// FR-CONN-13 (owner decision 2026-11-02): a NAT64 peer
+/// (`64:ff9b::/96`) shares the slot of its embedded IPv4 address.
+#[test]
+fn nat64_peer_shares_the_ipv4_slot() {
+    let mut sim = Sim::new(CONFIG);
+    let v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let nat64 = IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0x0a00, 0x0001));
+    let a = sim.connect(nat64);
+    let b = sim.connect(v4);
+    assert_served(&mut sim, a);
+    assert_served(&mut sim, b);
+    let c = sim.connect(nat64);
+    assert_refused(&mut sim, c, nat64, LimitKind::ConnectionsPerIp);
+}
+
 /// Two connections per peer group, ten in all: only the per-IP limit
 /// binds.
 const GROUPED: &str = "listen 127.0.0.1:8080;

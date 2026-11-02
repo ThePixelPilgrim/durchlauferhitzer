@@ -18,8 +18,9 @@ const MAX_PER_GROUP: usize = 3;
 /// configures (FR-CONN-13). One seed in three draws plain IPv4 peers, one
 /// IPv6 peers (two in one /64, one in another; the prefix 64 by default,
 /// or set to 48, which joins the two /64s, or 128, which parts every
-/// address), one IPv4 peers and the IPv4-mapped form of one of them. The
-/// pool follows from the seed alone, so the schedules stay as they were.
+/// address), one IPv4 peers and the IPv4-mapped form of one of them, or
+/// (every other such seed) its NAT64 form (`64:ff9b::/96`). The pool
+/// follows from the seed alone, so the schedules stay as they were.
 pub(crate) fn peer_pool(seed: u64) -> ([IpAddr; 3], Prefix) {
     let v4 = |last| IpAddr::V4(Ipv4Addr::new(192, 0, 2, last));
     let v6 = |net, host| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, net, 0, 0, 0, host));
@@ -34,8 +35,12 @@ pub(crate) fn peer_pool(seed: u64) -> ([IpAddr; 3], Prefix) {
             ([v6(1, 1), v6(1, 0xffff), v6(2, 1)], prefix)
         }
         _ => {
-            let mapped = IpAddr::V6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped());
-            ([v4(1), mapped, v4(3)], Prefix::Default)
+            let embedded = if (seed / 3) % 2 == 0 {
+                Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped()
+            } else {
+                Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0xc000, 0x0201)
+            };
+            ([v4(1), IpAddr::V6(embedded), v4(3)], Prefix::Default)
         }
     }
 }
@@ -69,15 +74,20 @@ impl Prefix {
     }
 }
 
-/// The group a peer is counted in, by the spec's rule: an IPv4 peer, and
-/// an IPv4-mapped IPv6 peer, by its IPv4 address; an IPv6 peer by its
-/// first `prefix` bits.
+/// The group a peer is counted in, by the spec's rule: an IPv4 peer, an
+/// IPv4-mapped IPv6 peer and a NAT64 peer (`64:ff9b::/96`) by its IPv4
+/// address; an IPv6 peer by its first `prefix` bits.
 fn group_of(peer: IpAddr, prefix: u8) -> IpAddr {
     match peer {
         IpAddr::V4(v4) => IpAddr::V4(v4),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => {
+        IpAddr::V6(v6) => match (v6.to_ipv4_mapped(), v6.segments()) {
+            (Some(v4), _) => IpAddr::V4(v4),
+            (None, [0x64, 0xff9b, 0, 0, 0, 0, high, low]) => {
+                let [a, b] = high.to_be_bytes();
+                let [c, d] = low.to_be_bytes();
+                IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+            }
+            (None, _) => {
                 let mut octets = v6.octets();
                 for (i, octet) in octets.iter_mut().enumerate() {
                     let kept = usize::from(prefix).saturating_sub(i * 8).min(8);
