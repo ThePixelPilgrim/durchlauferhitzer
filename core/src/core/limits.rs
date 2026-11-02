@@ -3,7 +3,7 @@
 //! keep.
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::proxy::close_upstream;
 use super::{Action, ConnId, Core, Mode};
@@ -15,12 +15,20 @@ use crate::http::status::Status;
 use crate::log::{LimitKind, Log, RejectReason};
 use crate::time::Instant;
 
+/// The NAT64 well-known prefix `64:ff9b::/96` (RFC 6052).
+const NAT64: u128 = 0x0064_ff9b_u128 << 96;
+
 /// The group `peer` is counted in for the per-IP limits (FR-CONN-13): an
-/// IPv4 (or IPv4-mapped) peer is its own IPv4 address, an IPv6 peer its
+/// IPv4 (or IPv4-mapped) peer is its own IPv4 address, and so is a NAT64
+/// peer (`64:ff9b::/96`, the embedded IPv4 address); an IPv6 peer is its
 /// first `ipv6_prefix` bits with the rest zeroed.
 pub(crate) fn peer_group(peer: IpAddr, ipv6_prefix: u8) -> IpAddr {
     match peer.to_canonical() {
         IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) if u128::from(v6) >> 32 == NAT64 >> 32 => {
+            // The low 32 bits are the IPv4 address.
+            IpAddr::V4(Ipv4Addr::from(u128::from(v6) as u32))
+        }
         IpAddr::V6(v6) => {
             let host_bits = 128u32.saturating_sub(u32::from(ipv6_prefix));
             let mask = u128::MAX.checked_shl(host_bits).unwrap_or(0);
@@ -405,17 +413,42 @@ mod tests {
         assert_eq!(peer_group(v4, 64), v4);
         assert_eq!(peer_group(mapped, 32), v4);
         assert_eq!(peer_group(mapped, 128), v4);
-        // IPv4-compatible and NAT64 addresses are plain IPv6.
+        // IPv4-compatible addresses are plain IPv6.
         let compatible = IpAddr::V6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_compatible());
         assert_eq!(
             peer_group(compatible, 64),
             IpAddr::V6(Ipv6Addr::UNSPECIFIED)
         );
+    }
+
+    /// FR-CONN-13 (owner decision 2026-11-02): a peer in the NAT64
+    /// well-known prefix `64:ff9b::/96` is grouped by its embedded IPv4
+    /// address, whatever the prefix; just outside the /96 it is IPv6.
+    #[test]
+    fn peer_group_takes_the_ipv4_address_of_a_nat64_peer() {
+        let v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
         let nat64 = IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0xc000, 0x0201));
+        for prefix in [0, 32, 64, 96, 128] {
+            assert_eq!(peer_group(nat64, prefix), v4, "/{prefix}");
+        }
+        let other = IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0xc000, 0x0202));
         assert_eq!(
-            peer_group(nat64, 64),
+            peer_group(other, 64),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))
+        );
+        // Outside the /96: the local-use prefix 64:ff9b:1::/48 (RFC
+        // 8215), and a set bit between 64 and 95.
+        let local = IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0xc000, 0x0201));
+        assert_eq!(
+            peer_group(local, 64),
+            IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0))
+        );
+        let near = IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 1, 0xc000, 0x0201));
+        assert_eq!(
+            peer_group(near, 64),
             IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0))
         );
+        assert_eq!(peer_group(near, 128), near);
     }
 
     /// Two counted connections per group, at most four in all.

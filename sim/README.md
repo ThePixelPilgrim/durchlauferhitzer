@@ -153,7 +153,7 @@ a model of the connection limits written from the spec
 when the refused pool is full in all or for the peer's group
 (FR-CONN-09 to -13). One seed in three draws IPv4 peers, one IPv6 peers
 (two in one /64, one in another; `ipv6_prefix` default, 48 or 128), one
-an IPv4 peer and its IPv4-mapped form.
+an IPv4 peer and its IPv4-mapped (or, every other such seed, NAT64) form.
 
 One seed in four of either net (`seed % 4 == 0`) runs with late timers
 (`TimerOrder::Late`); the order follows from the seed alone, and a failure
