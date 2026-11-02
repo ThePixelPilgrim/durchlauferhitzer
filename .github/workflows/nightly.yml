@@ -40,7 +40,7 @@ jobs:
             runner: ubuntu-24.04-arm
     name: long runs (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    # Full budget: about 5 min.
+    # Full budget: about 8 min on 4 cores, plus the build.
     timeout-minutes: 60
     steps:
       # Pinned by commit: the v7.0.1 tag (Node 24) as of 2026-11-01.

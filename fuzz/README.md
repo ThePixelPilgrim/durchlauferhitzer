@@ -4,8 +4,9 @@ Fuzz targets for the parsers and the config language (NFR-SEC-13), run by
 [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) (libFuzzer, nightly
 Rust). Test-only tooling (NFR-MAINT-02): this crate is excluded from the
 workspace, has its own `Cargo.lock`, and nothing of it reaches the binary;
-the gate never builds it. The nightly workflow (`.github/workflows/nightly.yml`)
-runs each target for a fixed time.
+the local gate never builds it; CI compiles it (`cargo check`) on every push,
+and the nightly workflow (`.github/workflows/nightly.yml`) runs each target for
+a fixed time.
 
 ```
 fuzz_targets/

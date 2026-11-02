@@ -33,7 +33,7 @@ The stage 4 review record lists every owner decision and ruling of stage 4, the 
 - Stage 7: double buffering vs fill-drain-refill measured with `tc netem`; per-request buffer allocation; `next_deadline` O(n); parse/route allocation nits; `sendfile` blocking on evicted pages (DRV-09).
 - Open: the driver-bug-close log kind is added with its first producer (FR-LOG-07); an NSS descriptor opened by the user lookup after the budget check is not counted (NFR-RES-05).
 - Nightly issue reporting (NFR-TEST-08, owner 2026-11-02): `scripts/nightly-report.py` (Python stdlib, tested in CI) files/updates issues labelled `nightly` keyed `[fp-xxxxxxxx]`. Known limits: a panic located in std/`registry` keys on that location alone (no backtraces in the nightly); if one arch's long-run job fails with a record while the other times out, only the recorded failure is filed. Issue #1 was the deliberate end-to-end test (closed, not planned).
-- Maintenance: the fuzz job's nightly toolchain is pinned to a date (`nightly.yml`) and needs a bump by hand now and then; the first full-budget scheduled nightly on `main` is the real check of its durations (estimate: long runs ~5 min per arch, fuzz ~45 min).
+- Maintenance: the fuzz job's nightly toolchain is pinned to a date (`nightly.yml`) and needs a bump by hand now and then; the first full-budget scheduled nightly on `main` is the real check of its durations (estimate: long runs ~8 min, both arches in parallel on 4 cores, plus the build, fuzz ~45 min).
 
 ## Branches
 
