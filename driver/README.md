@@ -276,7 +276,9 @@ tests/
                     kernel's ABI), `Seccomp: 2` and `NoNewPrivs: 1` in
                     every thread; `off` per layer; `required` with
                     seccomp or Landlock hidden (`Filter`) is exit 2,
-                    `best_effort` logs it missing and serves; seccomp
+                    `best_effort` logs it missing and serves; a layer
+                    the kernel offers but refuses to apply is exit 2
+                    under `best_effort`; seccomp
                     `off` with Landlock `required` before ABI 5 is exit 2
                     (skipped on ABI 5 and later); READ_IMPLIES_EXEC
                     (`setarch -X`, skipped where exec clears it: CI);
@@ -361,7 +363,8 @@ tests/
                     child's setup before exec (`pre_exec`: closed fds,
                     fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`:
                     `openat2`, `seccomp` or `landlock_create_ruleset`
-                    answered ENOSYS),
+                    answered ENOSYS, `landlock_restrict_self` EPERM,
+                    `seccomp(SECCOMP_SET_MODE_FILTER)` EINVAL),
                     capabilities (`Caps`); the test crate's only
                     `unsafe`),
                     a guard that kills a running server on drop; signals

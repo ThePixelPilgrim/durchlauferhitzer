@@ -286,6 +286,46 @@ fn a_landlock_the_kernel_lacks_is_logged_missing_under_best_effort() {
     assert!(response.ends_with("\r\n\r\ninside\n"), "{response}");
 }
 
+/// Owner decision 2026-11-01 (FR-PROC-06): a layer the kernel offers
+/// but refuses to apply is exit 2 in every mode, also under the default
+/// `best_effort`: `landlock_restrict_self` refused with `EPERM`.
+#[test]
+fn a_landlock_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
+    if abi() == Abi::Missing {
+        println!("skipped: no Landlock here, so nothing to refuse");
+        return;
+    }
+    let site = Site::new();
+    let setup = Setup {
+        filter: Filter::LandlockRestrictEperm,
+        ..Setup::non_root()
+    };
+    let output = run(&[&site.config("")], setup);
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: landlock: landlock_restrict_self: Operation not permitted \
+         (os error 1)\n"
+    );
+}
+
+/// The same for seccomp: `SECCOMP_GET_ACTION_AVAIL` answers, then
+/// `SECCOMP_SET_MODE_FILTER` is refused with `EINVAL`.
+#[test]
+fn a_seccomp_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
+    let site = Site::new();
+    let setup = Setup {
+        filter: Filter::SeccompInstallEinval,
+        ..Setup::non_root()
+    };
+    let output = run(&[&site.config("")], setup);
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: seccomp: Invalid argument (os error 22)\n"
+    );
+}
+
 /// Landlock does not get in the way: with it required, a file beneath
 /// each root is served, every path out of the roots through the file
 /// system is still 404 (dot and empty segments are 400, refused before
