@@ -1027,12 +1027,15 @@ Failures, persistence, timeouts:
   a client EOF outside the lingering close closes it silently, except in
   the middle of a proxied request body, where it is logged
   (FR-PROXY-26, owner decision 2026-10-27).
-- **FR-CONN-13** [done] Per-IP grouping of IPv6 peers by prefix, and
+- **FR-CONN-13** [done; NAT64 grouping stage 5 final review] Per-IP grouping of IPv6 peers by prefix, and
   fairness of the refused-connection pool; both before internet exposure.
   (owner decision 2026-10-29, stage 5 brainstorm) IPv6 peers are counted for `max_connections_per_ip`
   (FR-CONN-09) and orphans (FR-CONN-11) by their first `ipv6_prefix` bits
   (FR-CFG-20, default /64, settable); IPv4 peers and IPv4-mapped IPv6 peers
-  stay per address. *Builder call, stage 5 brainstorm:* the refused pool
+  stay per address. *(Owner decision 2026-11-02, stage 5 final review:)*
+  peers in the NAT64 well-known prefix `64:ff9b::/96` (RFC 6052) are
+  grouped by their embedded IPv4 address, like IPv4 peers. *Builder call,
+  stage 5 brainstorm:* the refused pool
   (FR-CONN-10) is shared fairly by holding at most `max_connections_per_ip`
   refused connections per peer group at once; a further connection from a
   group already at that count is logged as rejected and closed at once
@@ -1451,7 +1454,7 @@ Failures, persistence, timeouts:
   valid config), 1 invalid config, 2 startup failure (e.g. a port in use,
   a missing static root). *(Stage 4 Task 8, builder call recorded per the
   plan:)* bad arguments exit 1, with the usage (FR-PROC-01).
-- **FR-PROC-06** [done] Containment: Landlock restricts file access to
+- **FR-PROC-06** [done; final-review hardening stage 5] Containment: Landlock restricts file access to
   the static roots; seccomp allow-lists the system calls. (owner decision 2026-10-29, stage 5 brainstorm)
   - Each layer is `off`, `best_effort` (the default) or `required` per
     FR-CFG-25. Best effort: used where the kernel supports it; where it is
@@ -1475,7 +1478,14 @@ Failures, persistence, timeouts:
     < 6.2) cannot be covered: `openat2` passes `O_TRUNC` in a struct the
     filter cannot read. It stays a documented gap, not "partial": logged as
     `truncate` uncovered, and the README recommends Linux ≥ 6.2 (≥ 6.10 for
-    every right natively) and roots the server user cannot write. *Builder call:* network rules
+    every right natively) and roots the server user cannot write.
+    Landlock never restricts `O_PATH` opens, so the existence and metadata
+    (size, owner, times) of paths outside the roots stay visible, not their
+    contents: a documented gap (kernel behaviour). *(Owner decision
+    2026-11-02, stage 5 final review:)* where the ABI is ≥ 6 (Linux 6.12),
+    the ruleset also scopes signals and abstract unix sockets to the
+    process, so both stay blocked with seccomp `off` or missing; older ABIs
+    leave that to seccomp and log no gap for it. *Builder call:* network rules
     (Landlock ABI 4) are not part of stage 5.
   - *(Owner decision 2026-11-01, stage 5 Task 5 review:)* a layer the
     kernel offers but refuses to apply (an error of
@@ -1497,10 +1507,16 @@ Failures, persistence, timeouts:
     protocol 0, `mmap`/`mprotect` never with `PROT_EXEC`, `clone` only with
     thread flags, `prctl` and `fcntl` only for the operations the server
     uses, `tgkill` only with `SIGABRT` to the server's own process (the
-    abort path; the pid check, stage 5 Task 5); `ioctl` is not
+    abort path; the pid check, stage 5 Task 5); *(owner decision
+    2026-11-02, stage 5 final review:)* `setsockopt` only
+    `IPPROTO_TCP`/`TCP_NODELAY`, `getsockopt` only `SOL_SOCKET`/`SO_ERROR`,
+    `futex` only the private wait and wake operations the server uses
+    (no priority-inheritance futexes); `ioctl` is not
     allowed at all. The fatal paths (signal return and handler setup,
     `getpid`, `tgkill`) are listed, so a crash still ends the process the
-    normal way (stage 5 Task 3 review). *(Owner decision
+    normal way (stage 5 Task 3 review); with `RUST_BACKTRACE` set, a
+    panic's backtrace cannot be symbolized (it needs an open by path), and
+    under `kill` that open ends the process by `SIGSYS`. *(Owner decision
     2026-11-01, stage 5 Task 3 review:)* a process whose personality has
     `READ_IMPLIES_EXEC` set defeats the `PROT_EXEC` check, so startup
     checks it (defence in depth: a 64-bit exec clears the flag on both
@@ -1895,11 +1911,14 @@ Targets are set in stage 7 from measurements; none are invented here.
   closed one is reopened with a "regressed" comment; otherwise a new
   issue gives the job and architecture, the panic text, the exact replay
   command and the run link. At most three new issues per night. Only a
-  separate reporting job, run when another job failed, may write issues
+  separate reporting job, run when another job failed, timed out or was
+  cancelled, may write issues
   (`issues: write`, the built-in token, no other secret); it reads the
   failing jobs' artifacts and never runs code under test. The
   fingerprint and the comment/reopen/create decision are a small tested
-  script.
+  script. *(Controller ruling 2026-11-02:)* a job that timed out or was
+  cancelled leaves no record and files as `<job>|timeout-or-cancelled`; a
+  run cancelled by hand files too.
 
 ---
 
