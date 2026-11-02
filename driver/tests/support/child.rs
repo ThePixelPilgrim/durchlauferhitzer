@@ -112,6 +112,8 @@ pub struct Setup {
     pub filter: Filter,
     /// Capabilities the child gets before `exec` (only possible as root).
     pub caps: Caps,
+    /// Environment variables set for the child (e.g. `LD_PRELOAD`).
+    pub env: Vec<(&'static str, String)>,
 }
 
 /// Capabilities for the child (OA2: the server clears them all).
@@ -199,6 +201,7 @@ fn prepare(mut cmd: Command, program: &Path, setup: Setup) -> (Command, Vec<Owne
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    cmd.envs(setup.env.iter().map(|(key, value)| (key, value)));
     if setup.as_nobody || setup.effective_uid.is_some() {
         assert_reachable_by_others(program);
     }

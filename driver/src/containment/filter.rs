@@ -140,6 +140,9 @@ const X86_64: &[Entry] = &[
     e("sched_yield", 24, Rule::Allow),
     e("clock_nanosleep", 230, Rule::Allow),
     e("restart_syscall", 219, Rule::Allow),
+    // The clock (`Instant`, `SystemTime`): the vDSO fallback, on hosts
+    // whose clocksource has no vDSO mode (hpet, acpi_pm, Xen).
+    e("clock_gettime", 228, Rule::Allow),
     // A disk worker's start and end: it may still be starting when the
     // filter lands (TSYNC covers it); thread name (`PR_SET_NAME`).
     e("set_robust_list", 273, Rule::Allow),
@@ -203,6 +206,8 @@ const AARCH64: &[Entry] = &[
     e("sched_yield", 124, Rule::Allow),
     e("clock_nanosleep", 115, Rule::Allow),
     e("restart_syscall", 128, Rule::Allow),
+    // The clock: the vDSO fallback (also arm64 timer errata).
+    e("clock_gettime", 113, Rule::Allow),
     // A disk worker's start and end.
     e("set_robust_list", 99, Rule::Allow),
     e("rseq", 293, Rule::Allow),

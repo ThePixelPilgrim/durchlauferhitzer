@@ -19,6 +19,7 @@ mod child;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use child::{
     Containment, Filter, Lines, Running, Setup, TempDir, assert_exit, free_port, get, run,
@@ -379,4 +380,62 @@ fn read_implies_exec_fails_a_required_seccomp() {
         "durchlauferhitzer: seccomp is required but the personality has \
          READ_IMPLIES_EXEC, which defeats its PROT_EXEC check\n"
     );
+}
+
+/// Builds `support/clock_syscall.rs`, the test-only `LD_PRELOAD` library
+/// whose `clock_gettime` always makes the system call, into `dir` with
+/// the toolchain's `rustc` (it is no cargo target, so it never reaches
+/// the product's dependency tree); returns its path.
+fn clock_syscall_library(dir: &TempDir) -> String {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/clock_syscall.rs");
+    let toolchain = Path::new(env!("CARGO")).with_file_name("rustc");
+    let rustc = if toolchain.exists() {
+        toolchain
+    } else {
+        PathBuf::from("rustc")
+    };
+    let out = dir.path().join("libclock_syscall.so");
+    let output = Command::new(&rustc)
+        .args([
+            "--edition",
+            "2024",
+            "--crate-type",
+            "cdylib",
+            "-C",
+            "panic=abort",
+            "-o",
+        ])
+        .arg(&out)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} failed: {}",
+        rustc.display(),
+        text(&output.stderr)
+    );
+    out.to_str().unwrap().to_owned()
+}
+
+/// The vDSO falls back to the `clock_gettime` system call on hosts whose
+/// clocksource has no vDSO mode (hpet, acpi_pm, Xen, arm64 errata): the
+/// server forced onto that path still serves and shuts down cleanly
+/// under `seccomp_action kill` (an unlisted call would end it by
+/// SIGSYS before it listens).
+#[test]
+fn the_clock_system_call_passes_the_filter_under_kill() {
+    let site = Site::new();
+    let library = clock_syscall_library(&site.dir);
+    let setup = Setup {
+        env: vec![("LD_PRELOAD", library)],
+        ..Setup::non_root()
+    };
+    let (mut server, mut lines) = site.start("seccomp required; seccomp_action kill;", setup);
+    lines.wait_for("kind=containment layer=seccomp state=active action=kill log=kernel");
+    let response = get(site.addr, "/inside.txt");
+    assert!(response.ends_with("\r\n\r\ninside\n"), "{response}");
+    server.signal("TERM");
+    let status = server.wait_exit(child::PATIENCE);
+    assert_eq!(status.code(), Some(0), "{status}");
 }
