@@ -142,9 +142,10 @@ src/
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules
     fd.rs             `Io` (Done / WouldBlock / Closed / Err), the -1/errno
-                      checks and EINTR retries the others share (`cvt`,
-                      `cvt_long` for `syscall`, `cvt_retry`, `cvt_retry_ssize` for ssize_t and
-                      c_long returns, `transfer`); for the
+                      checks the others share: `cvt` (c_int), `cvt_long`
+                      (`syscall`'s c_long) and, retrying on EINTR,
+                      `cvt_retry` (c_int), `cvt_retry_ssize` (ssize_t or
+                      c_long); `transfer`; for the
                       log sink: `write_fd` (write(2)), `status_flags` /
                       `set_status_flags` (`StatusFlags`, `Blocking`:
                       O_NONBLOCK), `wait_writable` (poll(2), the final
@@ -288,8 +289,9 @@ tests/
                     with Landlock required, files beneath the roots are
                     served and paths out are still 404 (or 400); with
                     the clock forced onto its system call (the vDSO
-                    fallback, `support/clock_syscall.rs`) the server
-                    serves and exits 0 under `kill`
+                    fallback, `support/clock_syscall.rs`, checked in
+                    the server's maps) the server serves and exits 0
+                    under `kill`
   seccomp_self.rs   `install` in the test's own process (no harness, one
                     test): a filter refusing `getppid` (EPERM) covers the
                     main thread and a thread started before it
@@ -350,9 +352,12 @@ tests/
   free_port.rs      `free_port` against the race (CI, 2026-11-01): a
                     sample of ports the kernel hands out (bind 0, connect)
                     lies in the ephemeral range, `free_port`'s lie outside it
-  unsafe_confined.rs  NFR-MAINT-05: `allow(unsafe_code)` (or `expect`) appears
-                    in `core/src` and `driver/src` (every file, unit
-                    tests included) only on `pub mod sys;` in `src/lib.rs`
+  unsafe_confined.rs  NFR-MAINT-05: `allow(unsafe_code)` (or `expect`)
+                    appears in `core/src` and `driver/src` (every file,
+                    unit tests included) only on `pub mod sys;` in
+                    `src/lib.rs`; in `tests/` the `unsafe` keyword
+                    appears only in `child.rs`'s `pre_exec` and in
+                    `clock_syscall.rs`
   support/child.rs  running the binary: temp configs (conf.rs), a free port (below
                     the kernel's ephemeral range, so no other socket is
                     given it before the server binds; a new one per pick

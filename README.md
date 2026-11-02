@@ -98,7 +98,9 @@ Use Linux 6.2 or later (6.10 or later restricts every right with
 Landlock alone; before 6.2 truncation is not restricted), and static
 roots the server's user cannot write. Landlock never restricts `O_PATH`
 opens: the existence and metadata (size, owner, times) of paths outside
-the roots stay visible, not their contents.
+the roots stay visible to the server process itself, not their contents.
+Clients cannot see them: requests resolve beneath the roots (`openat2`
+`RESOLVE_BENEATH`).
 
 Under containment a panic's backtrace (`RUST_BACKTRACE`) is not
 symbolized; with `seccomp_action kill` the attempt ends the process by
