@@ -3,11 +3,11 @@
 //! between the pick and the server's bind (CI, 2026-11-01: a server
 //! test lost its port to another socket). The kernel hands out ports on
 //! its own (`bind` to port 0, `connect`) only from the ephemeral range,
-//! `net.ipv4.ip_local_port_range`, so the check holds the rest of that
-//! range and asks the kernel for a port: the old pick comes up, the new
-//! one cannot. One test, alone in its binary: it holds every ephemeral
-//! loopback port for a moment and raises the process's descriptor limit
-//! for that (skipped, with a reason, where the hard limit is too low).
+//! `net.ipv4.ip_local_port_range`: a sample of the ports it hands out
+//! (the old pick, bind 0, read, release, is one of them) lies in that
+//! range, and `free_port`'s lie outside it. A sample, not the whole range: holding every
+//! ephemeral port (some 28k listeners) could starve other sockets on
+//! the runner.
 
 #![allow(
     clippy::unwrap_used,
@@ -21,9 +21,11 @@
 mod child;
 
 use std::fs;
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 
-use durchlauferhitzer::sys::rlimit::{nofile, raise_nofile};
+/// Ports the kernel hands out in the sample: listeners bound to 0 and
+/// the client end of a connection to each, all held at once.
+const SAMPLE: usize = 128;
 
 /// `net.ipv4.ip_local_port_range`: the ephemeral ports, inclusive.
 fn ephemeral() -> (u16, u16) {
@@ -32,56 +34,33 @@ fn ephemeral() -> (u16, u16) {
     (ends.next().unwrap(), ends.next().unwrap())
 }
 
-/// Holds every ephemeral loopback port but `port` (each bound by number;
-/// one another socket holds already is skipped), then asks the kernel for
-/// a port (`bind` to 0): whether it hands out `port`. With `port` outside
-/// the range nothing is left to hand out.
-fn kernel_hands_out(port: u16) -> bool {
-    let (low, high) = ephemeral();
-    let held: Vec<TcpListener> = (low..=high)
-        .filter(|&p| p != port)
-        .filter_map(|p| TcpListener::bind(("127.0.0.1", p)).ok())
-        .collect();
-    // Nearly the whole range (a few ports are held elsewhere).
-    let range = usize::from(high - low) + 1;
-    assert!(held.len() + 1024 >= range, "{} of {range}", held.len());
-    match TcpListener::bind("127.0.0.1:0") {
-        Ok(socket) => socket.local_addr().unwrap().port() == port,
-        Err(_) => false,
-    }
-}
-
 #[test]
 fn no_other_socket_can_get_a_free_port() {
     let (low, high) = ephemeral();
-    let need = u64::from(high - low) + 1 + 256;
-    let (_, hard) = nofile().unwrap();
-    if hard < need {
-        println!(
-            "skipped: exhausting the ephemeral range needs {need} descriptors, \
-             the hard limit is {hard}"
+    let ephemeral = low..=high;
+    let listeners: Vec<TcpListener> = (0..SAMPLE)
+        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let clients: Vec<TcpStream> = listeners
+        .iter()
+        .map(|l| TcpStream::connect(l.local_addr().unwrap()).unwrap())
+        .collect();
+    let handed_out = listeners
+        .iter()
+        .map(|l| l.local_addr().unwrap().port())
+        .chain(clients.iter().map(|c| c.local_addr().unwrap().port()));
+    for port in handed_out {
+        assert!(
+            ephemeral.contains(&port),
+            "the kernel handed out {port}, outside {low}-{high}"
         );
-        return;
     }
-    raise_nofile(need).unwrap();
-    // The old way (bind port 0, read, release) gives an ephemeral port,
-    // which the kernel hands to the next socket that asks: the control.
-    let old = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    assert!(
-        kernel_hands_out(old),
-        "the old way's port {old} never came up"
-    );
     for _ in 0..3 {
         let port = child::free_port();
         assert!(
-            !(low..=high).contains(&port),
+            !ephemeral.contains(&port),
             "{port} is in the ephemeral range {low}-{high}"
         );
-        assert!(!kernel_hands_out(port), "the kernel handed out {port}");
         // And it is still free for the server.
         TcpListener::bind(("127.0.0.1", port)).unwrap();
     }
