@@ -15,15 +15,26 @@
 //! every branch is tested without a special kernel.
 
 pub mod filter;
+mod line;
 
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use durchlauferhitzer_core::config::{Containment, Layer, SeccompAction};
 
 use self::filter::{Arch, program};
-use crate::process::Failure;
 use crate::sys::landlock::{self, Abi};
 use crate::sys::seccomp::{self, Personality, Support};
+
+/// Why containment cannot start (exit 2): the message printed after
+/// `durchlauferhitzer: `.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Error(String);
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// A containment layer (FR-PROC-06).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +161,7 @@ enum Fit {
 /// `roots`, at the kernel's ABI. Call it while the process has one
 /// thread: threads already running are not restricted. The outcome's
 /// gaps are all uncovered until [`restrict_calls`] settles them.
-pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<Files, Failure> {
+pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<Files, Error> {
     match files_plan(config.landlock, landlock::abi())? {
         FilesPlan::Skip(state) => Ok(Files {
             outcome: Outcome::skipped(LayerName::Landlock, state),
@@ -159,7 +170,7 @@ pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<
         FilesPlan::Apply(abi) => {
             let roots: Vec<BorrowedFd<'_>> = roots.iter().map(AsFd::as_fd).collect();
             landlock::restrict_to_reading(&roots, abi)
-                .map_err(|err| Failure(format!("landlock: {err}")))?;
+                .map_err(|err| Error(format!("landlock: {err}")))?;
             let gaps = landlock::gaps(abi).into_iter().map(Gap::from).collect();
             Ok(Files {
                 outcome: Outcome::applied(
@@ -176,11 +187,8 @@ pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<
 /// seccomp (FR-PROC-06): installs the allow-list for every thread, then
 /// settles which of `landlock`'s gaps the filter covers. Returns both
 /// outcomes, Landlock's first, in the order they are logged.
-pub(crate) fn restrict_calls(
-    config: &Containment,
-    landlock: Files,
-) -> Result<[Outcome; 2], Failure> {
-    let persona = || seccomp::personality().map_err(|err| Failure(format!("personality: {err}")));
+pub(crate) fn restrict_calls(config: &Containment, landlock: Files) -> Result<[Outcome; 2], Error> {
+    let persona = || seccomp::personality().map_err(|err| Error(format!("personality: {err}")));
     let plan = calls_plan(
         config.seccomp,
         Arch::current(),
@@ -192,7 +200,7 @@ pub(crate) fn restrict_calls(
         CallsPlan::Apply(arch, fit) => {
             let action = config.seccomp_action;
             seccomp::install(&program(arch, action, std::process::id()))
-                .map_err(|err| Failure(format!("seccomp: {err}")))?;
+                .map_err(|err| Error(format!("seccomp: {err}")))?;
             let applied = Applied::Filter(action);
             match fit {
                 Fit::Whole => Outcome::applied(LayerName::Seccomp, State::Active(applied), vec![]),
@@ -209,11 +217,11 @@ pub(crate) fn restrict_calls(
 }
 
 /// Landlock's decision: `layer` against the kernel's `abi`.
-fn files_plan(layer: Layer, abi: Abi) -> Result<FilesPlan, Failure> {
+fn files_plan(layer: Layer, abi: Abi) -> Result<FilesPlan, Error> {
     match (layer, abi) {
         (Layer::Off, _) => Ok(FilesPlan::Skip(State::Off)),
         (Layer::BestEffort, Abi::Missing) => Ok(FilesPlan::Skip(State::Missing)),
-        (Layer::Required, Abi::Missing) => Err(Failure(
+        (Layer::Required, Abi::Missing) => Err(Error(
             "landlock is required but the kernel has none".to_owned(),
         )),
         (Layer::BestEffort | Layer::Required, Abi::Version(abi)) => Ok(FilesPlan::Apply(abi)),
@@ -227,10 +235,10 @@ fn calls_plan(
     layer: Layer,
     arch: Option<Arch>,
     support: Support,
-    persona: impl FnOnce() -> Result<Personality, Failure>,
-) -> Result<CallsPlan, Failure> {
+    persona: impl FnOnce() -> Result<Personality, Error>,
+) -> Result<CallsPlan, Error> {
     let lacking = |why: &str| match layer {
-        Layer::Required => Err(Failure(format!("seccomp is required but {why}"))),
+        Layer::Required => Err(Error(format!("seccomp is required but {why}"))),
         Layer::Off | Layer::BestEffort => Ok(CallsPlan::Skip(State::Missing)),
     };
     match layer {
@@ -246,7 +254,7 @@ fn calls_plan(
     }
     match (persona()?, layer) {
         (Personality::Plain, _) => Ok(CallsPlan::Apply(arch, Fit::Whole)),
-        (Personality::ReadImpliesExec, Layer::Required) => Err(Failure(
+        (Personality::ReadImpliesExec, Layer::Required) => Err(Error(
             "seccomp is required but the personality has READ_IMPLIES_EXEC, \
              which defeats its PROT_EXEC check"
                 .to_owned(),
@@ -261,7 +269,7 @@ fn calls_plan(
 /// installed (`seccomp` active or partial); otherwise it makes Landlock
 /// partial, a failure under `required`. Truncation stays uncovered and
 /// changes nothing (owner decision 2026-11-01).
-fn cover(layer: Layer, files: Files, seccomp: State) -> Result<Outcome, Failure> {
+fn cover(layer: Layer, files: Files, seccomp: State) -> Result<Outcome, Error> {
     let Files {
         outcome: mut landlock,
         abi,
@@ -287,7 +295,7 @@ fn cover(layer: Layer, files: Files, seccomp: State) -> Result<Outcome, Failure>
         State::Missing => "missing",
     };
     match layer {
-        Layer::Required => Err(Failure(format!(
+        Layer::Required => Err(Error(format!(
             "landlock is required but the kernel's Landlock (ABI {abi}) cannot \
              restrict device_ioctl, and seccomp, which covers it, is {seccomp}"
         ))),

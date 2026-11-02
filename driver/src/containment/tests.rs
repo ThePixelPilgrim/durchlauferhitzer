@@ -5,18 +5,17 @@ use durchlauferhitzer_core::config::{Layer, SeccompAction};
 
 use super::filter::Arch;
 use super::{
-    Applied, CallsPlan, Files, FilesPlan, Fit, Gap, LayerName, Outcome, State, calls_plan, cover,
-    files_plan,
+    Applied, CallsPlan, Error, Files, FilesPlan, Fit, Gap, LayerName, Outcome, State, calls_plan,
+    cover, files_plan,
 };
-use crate::process::Failure;
 use crate::sys::landlock::Abi;
 use crate::sys::seccomp::{Personality, Support};
 
 const MODES: [Layer; 3] = [Layer::Off, Layer::BestEffort, Layer::Required];
 
-fn message<T: std::fmt::Debug>(result: Result<T, Failure>) -> String {
+fn message<T: std::fmt::Debug>(result: Result<T, Error>) -> String {
     match result {
-        Err(Failure(message)) => message,
+        Err(Error(message)) => message,
         Ok(plan) => panic!("no failure: {plan:?}"),
     }
 }
@@ -63,7 +62,7 @@ fn calls(
     arch: Option<Arch>,
     support: Support,
     persona: Personality,
-) -> Result<CallsPlan, Failure> {
+) -> Result<CallsPlan, Error> {
     calls_plan(layer, arch, support, || Ok(persona))
 }
 
@@ -75,7 +74,7 @@ fn plan(layer: Layer, arch: Option<Arch>, support: Support, persona: Personality
 /// filter, so a read that fails cannot fail a skipped layer.
 #[test]
 fn the_personality_is_read_only_when_the_filter_is_applied() {
-    let unreadable = || Err(Failure("personality: EPERM".to_owned()));
+    let unreadable = || Err(Error("personality: EPERM".to_owned()));
     for support in [Support::Supported, Support::Missing] {
         assert_eq!(
             calls_plan(Layer::Off, ARCH, support, unreadable).unwrap(),
