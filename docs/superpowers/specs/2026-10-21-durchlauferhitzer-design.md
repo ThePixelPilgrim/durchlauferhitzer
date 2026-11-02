@@ -1510,8 +1510,10 @@ Failures, persistence, timeouts:
     abort path; the pid check, stage 5 Task 5); *(owner decision
     2026-11-02, stage 5 final review:)* `setsockopt` only
     `IPPROTO_TCP`/`TCP_NODELAY`, `getsockopt` only `SOL_SOCKET`/`SO_ERROR`,
-    `futex` only the private wait and wake operations the server uses
-    (no priority-inheritance futexes); `ioctl` is not
+    `futex` only the private wait and wake operations the server uses,
+    plus `pthread_join`'s shared `FUTEX_WAIT_BITSET|FUTEX_CLOCK_REALTIME`
+    wait on a thread id (glibc ≥ 2.34; owner decision 2026-11-02) — no
+    priority-inheritance or requeue futexes; `ioctl` is not
     allowed at all. The fatal paths (signal return and handler setup,
     `getpid`, `tgkill`) are listed, so a crash still ends the process the
     normal way (stage 5 Task 3 review); with `RUST_BACKTRACE` set, a
@@ -1794,7 +1796,10 @@ Failures, persistence, timeouts:
   wrapper module. The workspace lint denies `unsafe_code`, and
   `driver/tests/unsafe_confined.rs` checks that the product's sources
   allow it only on the `sys` module in `driver/src/lib.rs` (every source
-  file scanned, unit tests included).
+  file scanned, unit tests included). Test code may use it in two
+  documented places only: the `pre_exec` helper and the `LD_PRELOAD`
+  clock shim `driver/tests/support/clock_syscall.rs` (owner decision
+  2026-11-02).
 - **NFR-MAINT-06** [done] Exhaustive enum handling: no `_ =>` arm on an
   enum anywhere (tests' helpers included);
   `clippy::wildcard_enum_match_arm` is denied.
