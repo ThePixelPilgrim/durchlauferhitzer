@@ -1027,7 +1027,7 @@ Failures, persistence, timeouts:
   a client EOF outside the lingering close closes it silently, except in
   the middle of a proxied request body, where it is logged
   (FR-PROXY-26, owner decision 2026-10-27).
-- **FR-CONN-13** [done; NAT64 grouping stage 5 final review] Per-IP grouping of IPv6 peers by prefix, and
+- **FR-CONN-13** [done] Per-IP grouping of IPv6 peers by prefix, and
   fairness of the refused-connection pool; both before internet exposure.
   (owner decision 2026-10-29, stage 5 brainstorm) IPv6 peers are counted for `max_connections_per_ip`
   (FR-CONN-09) and orphans (FR-CONN-11) by their first `ipv6_prefix` bits
@@ -1454,7 +1454,7 @@ Failures, persistence, timeouts:
   valid config), 1 invalid config, 2 startup failure (e.g. a port in use,
   a missing static root). *(Stage 4 Task 8, builder call recorded per the
   plan:)* bad arguments exit 1, with the usage (FR-PROC-01).
-- **FR-PROC-06** [done; final-review hardening stage 5] Containment: Landlock restricts file access to
+- **FR-PROC-06** [done] Containment: Landlock restricts file access to
   the static roots; seccomp allow-lists the system calls. (owner decision 2026-10-29, stage 5 brainstorm)
   - Each layer is `off`, `best_effort` (the default) or `required` per
     FR-CFG-25. Best effort: used where the kernel supports it; where it is
