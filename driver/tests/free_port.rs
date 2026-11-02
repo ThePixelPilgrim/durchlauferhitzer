@@ -3,11 +3,8 @@
 //! between the pick and the server's bind (CI, 2026-11-01: a server
 //! test lost its port to another socket). The kernel hands out ports on
 //! its own (`bind` to port 0, `connect`) only from the ephemeral range,
-//! `net.ipv4.ip_local_port_range`: a sample of the ports it hands out
-//! (the old pick, bind 0, read, release, is one of them) lies in that
-//! range, and `free_port`'s lie outside it. A sample, not the whole range: holding every
-//! ephemeral port (some 28k listeners) could starve other sockets on
-//! the runner.
+//! `net.ipv4.ip_local_port_range`. A sample of the ports it hands out
+//! lies in that range; `free_port`'s lie outside it.
 
 #![allow(
     clippy::unwrap_used,
