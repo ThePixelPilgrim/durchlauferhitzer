@@ -33,8 +33,10 @@ alone, not on the workspace frame that called it: the nightly runs
 without RUST_BACKTRACE, so the panic text carries no backtrace frames
 (and the record keeps only the message lines). Such panics with the same
 message from different callers share one issue.
-Log text is untrusted: it only ever lands in record fields and issue
-bodies (fenced), never in a command line other than as one argv item.
+Log text is untrusted, and so are the records (written by jobs that run
+code under test): their fields land in issues only fenced, in code spans
+or reduced to plain characters, never in a command line other than as
+one argv item; the run link is the reporting run's own.
 """
 
 import argparse
@@ -126,6 +128,17 @@ def _clean(text, limit):
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _plain(text, limit):
+    """`_clean`, keeping only word characters, spaces and `.:/()+,=-`: no
+    mention, link or markup survives (record fields are untrusted)."""
+    return _clean(re.sub(r"[^\w .:/()+,=-]", " ", text), limit)
+
+
+def _code(text, limit):
+    """`_clean` in an inline code span: shown verbatim, never rendered."""
+    return "`" + _clean(text, limit).replace("`", "'") + "`"
+
+
 def _cap(text):
     return text if len(text) <= MAX_TEXT else text[: MAX_TEXT - 2] + "\n…"
 
@@ -161,7 +174,7 @@ def describe(job, f):
         key = f"{job}|{test}|failed"
         reason = f"{test} failed"
     fp = fingerprint(key)
-    title = f"nightly: {_clean(label, MAX_REASON)} — {_clean(reason, MAX_REASON)} [{fp}]"
+    title = f"nightly: {_plain(label, MAX_REASON)} — {_plain(reason, MAX_REASON)} [{fp}]"
     return fp, title
 
 
@@ -430,7 +443,7 @@ def group(records):
                 by_fp[fp] = {"fp": fp, "title": title, "occurrences": []}
                 groups.append(by_fp[fp])
             by_fp[fp]["occurrences"].append(
-                {"job": rec["job"], "arch": rec["arch"], "run_url": rec["run_url"], "failure": f}
+                {"job": rec["job"], "arch": rec["arch"], "failure": f}
             )
     return groups
 
@@ -466,50 +479,51 @@ def fenced(text):
     return f"{fence}\n{text}\n{fence}"
 
 
-def _occurrence(o):
+def _occurrence(o, run_url):
     f = o["failure"]
     name = JOBS.get(o["job"], o["job"])
     if o["job"] == "fuzz" and f.get("test"):
         name = f"fuzz {f['test']}"
     head = f"{name} ({o['arch']})" if o["arch"] else name
-    lines = [f"#### {_clean(head, 200)}", "", f"Run: {o['run_url']}"]
+    lines = [f"#### {_plain(head, 200)}", "", f"Run: {run_url}"]
     if f.get("seed"):
-        lines.append(f"Seed: {_clean(f['seed'], 40)}")
+        lines.append(f"Seed: {_code(f['seed'], 40)}")
     if f.get("input"):
-        lines.append(f"Input: `{_clean(f['input'], 200).replace('`', '')}` (in the run's artifacts)")
+        lines.append(f"Input: {_code(f['input'], 200)} (in the run's artifacts)")
     if f.get("replay"):
         lines += ["", "Replay:", "", fenced(f["replay"])]
     return "\n".join(lines)
 
 
-def _blocks(g):
-    return "\n\n".join(_occurrence(o) for o in g["occurrences"])
+def _blocks(g, run_url):
+    return "\n\n".join(_occurrence(o, run_url) for o in g["occurrences"])
 
 
-def new_issue_body(g):
+def new_issue_body(g, run_url):
     first = g["occurrences"][0]["failure"]
     text = first.get("panic_text") or "(no panic text)"
     return (
         f"A nightly job failed (NFR-TEST-08). Fingerprint `{g['fp']}`: later failures with it "
         "are added here as comments.\n\n"
-        f"{_blocks(g)}\n\n#### Panic text\n\n{fenced(text)}\n"
+        f"{_blocks(g, run_url)}\n\n#### Panic text\n\n{fenced(text)}\n"
     )
 
 
-def comment_body(g, date):
-    return f"Failed again on {date}.\n\n{_blocks(g)}\n"
+def comment_body(g, date, run_url):
+    return f"Failed again on {date}.\n\n{_blocks(g, run_url)}\n"
 
 
-def regressed_body(g, date):
-    return f"Regressed on {date}: this failure is back.\n\n{_blocks(g)}\n"
+def regressed_body(g, date, run_url):
+    return f"Regressed on {date}: this failure is back.\n\n{_blocks(g, run_url)}\n"
 
 
 # --- report --------------------------------------------------------------
 
 
-def report(records, gh, date):
+def report(records, gh, date, run_url):
     """Apply the decision with `gh(argv, body=None) -> stdout`; return a
-    Markdown summary for the job summary."""
+    Markdown summary for the job summary. The run link is `run_url`, the
+    reporting run's own (the same run): a record's is ignored."""
     issues = json.loads(
         gh(["issue", "list", "--label", LABEL, "--state", "all", "--limit", "1000",
             "--json", "number,title,state"]) or "[]"
@@ -524,19 +538,18 @@ def report(records, gh, date):
         g, n = a["group"], a["number"]
         if a["op"] == "create":
             url = gh(["issue", "create", "--title", g["title"], "--label", LABEL, "--body-file", "-"],
-                     body=new_issue_body(g)).strip()
+                     body=new_issue_body(g, run_url)).strip()
             lines.append(f"- created {url}: {g['title']}")
         elif a["op"] == "comment":
-            gh(["issue", "comment", str(n), "--body-file", "-"], body=comment_body(g, date))
+            gh(["issue", "comment", str(n), "--body-file", "-"], body=comment_body(g, date, run_url))
             lines.append(f"- commented on #{n}: {g['title']}")
         elif a["op"] == "reopen":
             gh(["issue", "reopen", str(n)])
-            gh(["issue", "comment", str(n), "--body-file", "-"], body=regressed_body(g, date))
+            gh(["issue", "comment", str(n), "--body-file", "-"], body=regressed_body(g, date, run_url))
             lines.append(f"- reopened #{n} (regressed): {g['title']}")
         else:
-            runs = ", ".join(sorted({o["run_url"] for o in g["occurrences"]}))
             lines.append(
-                f"- not filed (at most {MAX_NEW_ISSUES} new issues per run): {g['title']} ({runs})"
+                f"- not filed (at most {MAX_NEW_ISSUES} new issues per run): {g['title']} ({run_url})"
             )
     if not actions:
         lines.append("- no failure records")
@@ -605,7 +618,7 @@ def main(argv=None):
         with open(args.needs, encoding="utf-8") as fh:
             records = add_missing(records, json.load(fh), args.run_url)
     date = datetime.now(timezone.utc).date().isoformat()
-    summary = report(records, _gh, date)
+    summary = report(records, _gh, date, args.run_url)
     print(summary)
     if args.summary:
         with open(args.summary, "a", encoding="utf-8") as fh:

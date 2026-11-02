@@ -259,7 +259,9 @@ jobs:
           sparse-checkout: scripts/nightly-report.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
-      # Pinned by commit: the v8.0.2 tag as of 2026-11-01.
+      # Pinned by commit: the v8.0.2 tag as of 2026-11-01. A pattern that
+      # matches nothing (only cancelled jobs) downloads nothing and
+      # succeeds; the script reads a missing `failures` as no records.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: nightly-failure-*

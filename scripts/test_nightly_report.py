@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 
@@ -360,7 +361,7 @@ class Apply(unittest.TestCase):
                 return json.dumps(issues)
             return ""
 
-        summary = nr.report(records, gh, "2026-11-02")
+        summary = nr.report(records, gh, "2026-11-02", RUN)
         return calls, summary
 
     def test_create_makes_the_label_and_the_issue(self):
@@ -413,6 +414,74 @@ class Apply(unittest.TestCase):
         self.assertEqual(len([c for c in calls if c[0][:2] == ["issue", "create"]]), 3)
         self.assertIn("not filed", summary)
         self.assertIn("containment::case_d", summary)
+
+
+EVIL = "@evil [x](https://evil.example/p) **b** <img src=x>"
+
+
+def _outside_code(body):
+    """`body` without its fenced blocks and inline code spans."""
+    body = re.sub(r"(?ms)^(`{3,})\n.*?\n\1$", "", body)
+    return re.sub(r"`[^`\n]*`", "", body)
+
+
+class Untrusted(unittest.TestCase):
+    """Records come from jobs that run code under test: no field of one
+    may put a mention, link or markup into an issue, and the run link is
+    the reporting run's own."""
+
+    run_report = Apply.run_report
+
+    def records(self):
+        failure = nr._failure(
+            kind="crash",
+            test="request_head" + EVIL,
+            detail=EVIL,
+            panic_text=EVIL,
+            seed="7" + EVIL,
+            input="crash-1" + EVIL,
+            replay=EVIL,
+        )
+        rec = {"version": 1, "job": "fuzz", "arch": "x86_64" + EVIL,
+               "run_url": "https://evil.example/runs/1", "failures": [failure]}
+        return [rec]
+
+    def bodies(self, calls):
+        return [b for _, b in calls if b is not None]
+
+    def test_create(self):
+        calls, summary = self.run_report(self.records(), [])
+        (create,) = [c for c in calls if c[0][:2] == ["issue", "create"]]
+        title = create[0][create[0].index("--title") + 1]
+        for text in [title] + self.bodies(calls):
+            self.assertNotIn("evil.example/runs", text)
+            outside = _outside_code(text)
+            self.assertNotIn("@evil", outside)
+            self.assertNotIn("](", outside)
+            self.assertNotIn("<img", outside)
+        self.assertIn(RUN, create[1])
+        self.assertNotIn("evil.example/runs", summary)
+
+    def test_comment_and_reopen(self):
+        fp = nr.describe("fuzz", self.records()[0]["failures"][0])[0]
+        for state in ("OPEN", "CLOSED"):
+            calls, _ = self.run_report(self.records(), [{"number": 5, "state": state, "title": "t [%s]" % fp}])
+            bodies = self.bodies(calls)
+            self.assertTrue(bodies)
+            for body in bodies:
+                self.assertIn(RUN, body)
+                self.assertNotIn("evil.example/runs", body)
+                outside = _outside_code(body)
+                self.assertNotIn("@evil", outside)
+                self.assertNotIn("](", outside)
+
+    def test_skipped_summary_links_the_reporting_run(self):
+        (rec,) = self.records()
+        recs = [dict(rec, failures=[dict(rec["failures"][0], detail=str(i))]) for i in range(4)]
+        _, summary = self.run_report(recs, [])
+        self.assertIn("not filed", summary)
+        self.assertIn(RUN, summary)
+        self.assertNotIn("evil.example/runs", summary)
 
 
 class GhRunner(unittest.TestCase):
@@ -508,6 +577,28 @@ class Cli(unittest.TestCase):
         )
         groups = nr.group(records)
         self.assertEqual(len(groups), 2)
+
+    def test_only_cancelled_jobs_and_no_records_still_file(self):
+        # download-artifact found nothing: the records directory is
+        # missing or empty; `needs` alone files the issues.
+        needs = {
+            "long-runs": {"result": "cancelled"},
+            "fuzz": {"result": "cancelled"},
+            "older-glibc": {"result": "success"},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            for directory in (os.path.join(d, "missing"), d):
+                records = nr.add_missing(nr.load_records(directory), needs, RUN)
+                calls, _ = Apply.run_report(self, records, [])
+                creates = [c for c in calls if c[0][:2] == ["issue", "create"]]
+                titles = [args[args.index("--title") + 1] for args, _ in creates]
+                self.assertEqual(
+                    [t.rsplit(" ", 1)[1] for t in titles],
+                    ["[%s]" % nr.fingerprint("long-runs|timeout-or-cancelled"),
+                     "[%s]" % nr.fingerprint("fuzz|timeout-or-cancelled")],
+                )
+                for _, body in creates:
+                    self.assertIn(RUN, body)
 
     def test_a_missing_log_is_unrecognized(self):
         self.assertEqual(nr.record_older_glibc(None, WS)[0]["kind"], "unrecognized")
