@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-10-29, after stage 5 Task 8 landed on `main`.
+Last updated 2026-11-02, after stage 5 closed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -11,35 +11,38 @@ A new session should start from the latest `main`, read this file first, then `C
 | 2 Static files | done (`576a77c`) — record: `docs/superpowers/reviews/2026-10-26-stage-2-review.md` |
 | 3 Reverse proxy | done (`576a77c..b583d96`) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
-| 5 Containment | **in progress** — plan `docs/superpowers/plans/2026-10-29-stage-5-containment.md` (owner-approved `bc2f7d3`; decisions of 2026-10-29 in the spec: FR-CFG-25, FR-CONN-13, FR-PROC-06/07, NFR-SEC-13, NFR-PORT-04/07, NFR-TEST-08). Task 1 ✅ (`containment` block, `ipv6_prefix`; `NoEffect` config error); Task 2 ✅ (FR-CONN-13: IPv6 peers grouped by prefix, refused connections capped per group; the static net checks admission against a spec-written model); Task 3 ✅ (seccomp allow-list generator, `sys::seccomp::install` with TSYNC|LOG, fatal-path group, direct `fstat`; aarch64 table unproven until Task 6); Task 4 ✅ (Landlock wrapper `sys::landlock`: ABI probe, read-only rules from the root fds, gaps; CI requires it via `DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1`, runners at ABI 8); Task 5 ✅ (containment at startup: Landlock at step 7a, seccomp at 10a with TSYNC, one `kind=containment` line per layer, `tgkill` limited to the own pid, an apply failure exits 2 in every mode — owner 2026-11-01); Task 6 ✅ (the server tests run under `seccomp_action kill` on both arches and in the root step, via `DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1`; rare paths — stalled log, signals while draining, EMFILE after startup — run through the binary; no allow-list change needed); Task 7 ✅ (`.github/workflows/nightly.yml`, daily 03:17 UTC and by hand: long sim runs via `SIM_SEEDS`, four fuzz targets in the excluded `fuzz/` crate with a dated nightly, the driver suite under seccomp kill in a Debian 12 container; actions pinned to Node 24 releases; the fuzz crate is compiled on every push); Task 8 ✅ (proxy net draws bytes-then-reset backends; static net's drain oracle has a parser model; nightly failures file or update `nightly` issues by fingerprint — owner 2026-11-02; three harness fixes found by a full 0..200000 sweep; spec statuses done); **next: the stage 5 whole-branch review** over `bc2f7d3..main`, then its review record |
+| 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
+| 6 Restart | **next**: write the stage 6 plan (FR-PROC-07 zero-downtime restart and SIGHUP, working inside the strict stage 5 sandbox: no `execve`, no reads outside the roots), have it approved, then Task 1 |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
 Key documents: spec `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md` (binding), the driver contract in `core/src/core/contract.rs` (module docs), `README.md` (build, `--check`, running, systemd, signals), crate READMEs `core/README.md`, `sim/README.md`, `driver/README.md`, example config `examples/durchlauferhitzer.conf` (runs on 127.0.0.1:8080 without root; a test keeps it loadable and checks every key is documented).
 
-The stage 4 review record lists every owner decision and ruling of stage 4, the final review, its fix wave and the accepted gaps.
+Each stage's review record lists its owner decisions, rulings, final review, fix wave and accepted gaps.
 
-## Where things stand after stage 4 (details in the spec and the stage 4 record)
+## Where things stand after stage 5 (details in the spec and the stage records)
 
 - The binary `durchlauferhitzer` (crate `driver`, `libc` its only dependency; `unsafe` only in `driver/src/sys/`, pinned by `driver/tests/unsafe_confined.rs`) serves static files and proxies over epoll, follows the contract (DRV-01…16), logs one `key=value` line per entry on a non-blocking stderr (FR-LOG-05/06), starts up in the A11 order with systemd sockets or its own binds, drops to `user` and clears every capability (FR-PROC-03), checks the descriptor budget (NFR-RES-05), and drains on SIGTERM / aborts on a second SIGTERM, SIGINT or `shutdown_timeout` (FR-PROC-05).
 - CI: x86_64 and arm64 run the same gate (fmt, clippy, tests with IPv6 required, deps check and self-test, docs with `-D warnings`); a root step runs the 7 server-starting test binaries under `sudo` with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`; a list check keeps that step complete; the workflow token is read-only and `actions/checkout` is pinned by commit.
 - Tests: an end-to-end smoke suite on the real binary; randomized sim nets that also drain and abort (`seed % 5 == 0`) and run late timers (`seed % 4 == 0`); the unanswered-request check runs on every static seed.
+- Containment (stage 5): Landlock (read-only beneath the roots; ABI ≥ 6 also scopes signals and abstract unix sockets) and a seccomp allow-list for x86_64 and aarch64 (`driver/src/containment/filter.rs`), each `off | best_effort | required` (FR-CFG-25, FR-PROC-06). The whole driver suite also runs under `seccomp_action kill` (`DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1`) in CI on both arches and in the root step. IPv6 peers are grouped by `ipv6_prefix`, NAT64 peers by their IPv4 (FR-CONN-13).
+- Nightly (`.github/workflows/nightly.yml`, 03:17 UTC and by hand): long sim runs, four fuzz targets, the suite under kill on Debian 12; failures file `nightly` issues by fingerprint.
 - This container boots with IPv6 disabled: IPv6 tests skip here and are required in CI. It runs as root, so root tests run here.
 
 ## Carry-forwards to later stages
 
-- Stage 5: "bytes, then reset" backends in the randomized proxy net (`backend_reset_after` is used by directed tests only); IPv6 per-IP grouping by prefix; refused-slot pool fairness; long randomized runs; Landlock and seccomp (NFR-SEC-12); a parser model for the static net's drain oracle (today it accepts a 503 for a head the parser would reject).
-- Stage 6: the restart target of FR-PROC-05; SIGHUP restart (FR-PROC-07).
-- Stage 7: double buffering vs fill-drain-refill measured with `tc netem`; per-request buffer allocation; `next_deadline` O(n); parse/route allocation nits; `sendfile` blocking on evicted pages (DRV-09).
+- Stage 6: restart under the sandbox — every new system call needs a table entry on both arches and a binary test under the kill switch; the restart target of FR-PROC-05; SIGHUP restart (FR-PROC-07).
+- Later: Landlock network rules (ABI 4: `CONNECT_TCP` to the backend ports, no `BIND_TCP`).- Stage 7: double buffering vs fill-drain-refill measured with `tc netem`; per-request buffer allocation; `next_deadline` O(n); parse/route allocation nits; `sendfile` blocking on evicted pages (DRV-09).
 - Open: the driver-bug-close log kind is added with its first producer (FR-LOG-07); an NSS descriptor opened by the user lookup after the budget check is not counted (NFR-RES-05).
 - Nightly issue reporting (NFR-TEST-08, owner 2026-11-02): `scripts/nightly-report.py` (Python stdlib, tested in CI) files/updates issues labelled `nightly` keyed `[fp-xxxxxxxx]`. Known limits: a panic located in std/`registry` keys on that location alone (no backtraces in the nightly); if one arch's long-run job fails with a record while the other times out, only the recorded failure is filed. Issue #1 was the deliberate end-to-end test (closed, not planned).
+- Accepted gaps (stage 5 record): CI runners have Landlock ABI 4, so the ABI ≥ 6 scopes are proven only on newer kernels; Debian 12 under kill is x86_64 only; the disk timeout and a detached worker are not run under kill.
 - Maintenance: the fuzz job's nightly toolchain is pinned to a date (`nightly.yml`) and needs a bump by hand now and then; the first full-budget scheduled nightly on `main` is the real check of its durations (estimate: long runs ~8 min, both arches in parallel on 4 cores, plus the build, fuzz ~45 min).
 
 ## Branches
 
-- `main` holds all verified work. Each stage 5 task is cut as `stage5-taskN` from `main` and fast-forwarded after review.
+- `main` holds all verified work. Each task is cut as a short-lived branch from `main` and fast-forwarded after review.
 - Branch deletion is refused for this session (HTTP 403 from the git proxy): the owner deletes merged branches from their own clone.
-- Fully contained in `main`, safe to delete when the owner says so: `claude/magical-dijkstra-2eoh4y`, `unify`, `stage3-task4` … `stage3-task9`, `stage3-final`, `stage4-plan`, `stage4-task1` … `stage4-task10`, `gate-docs`, `stage4-final`, `stage4-final-a`, `stage4-final-b`, `stage4-final-r2a`, `stage4-final-r2b` (the last four were rebased into `stage4-final`; their own commits are superseded, not lost).
+- Fully contained in `main`, safe to delete when the owner says so: `claude/magical-dijkstra-2eoh4y`, `unify`, `stage3-task4` … `stage3-task9`, `stage3-final`, `stage4-plan`, `stage4-task1` … `stage4-task10`, `gate-docs`, `stage4-final`, `stage4-final-a`, `stage4-final-b`, `stage4-final-r2a`, `stage4-final-r2b` (the last four were rebased into `stage4-final`; their own commits are superseded, not lost), `stage5-task1` … `stage5-task8`, `stage5-final`, `stage5-final-a`, `stage5-final-b`, `stage5-task8-report` (the last three were rebased into `stage5-task8` / `stage5-final`; `git cherry` shows their commits on `main`).
 - `ccr-716d91b0-bff174`: **abandoned, do not build on it.** A session that missed `claude/magical-dijkstra-2eoh4y` redid stage 3 Tasks 1–4 there; everything worth keeping was ported (stage 3 record, "Unification"); it has 12 commits not on `main` by design. The owner decides on deletion.
 
 ## Owner's way of working (mandatory, see CLAUDE.md)
