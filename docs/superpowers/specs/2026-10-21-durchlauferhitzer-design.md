@@ -1588,8 +1588,12 @@ Failures, persistence, timeouts:
     connection the old process holds, already in flight or arriving
     during the drain, is served normally and answered with
     `Connection: close`; the client's next request reaches the new
-    process. Idle keep-alive connections are closed as in the SIGTERM
-    drain. The drain is bounded by `limits { restart_timeout 10m; }`
+    process. *(Builder call, stage 6 plan:)* idle keep-alive connections
+    are not closed at once, unlike the SIGTERM drain (closing them races a
+    request the client may be sending); each ends with its next request,
+    answered with `Connection: close`, or at its keep-alive timeout as
+    usual. A connection accepted after the listeners closed is served
+    the same way, not refused. The drain is bounded by `limits { restart_timeout 10m; }`
     (FR-CFG-20), not `shutdown_timeout`, so long transfers finish;
     whatever still runs then is cut (FR-PROC-05c) and logged. A second
     SIGHUP is ignored; SIGTERM or SIGINT during it takes the fast path;
