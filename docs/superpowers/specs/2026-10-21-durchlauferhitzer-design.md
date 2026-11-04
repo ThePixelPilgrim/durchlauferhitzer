@@ -67,8 +67,8 @@ way that matters.
 
 These would make the project a failure even if everything "works":
 
-- Any C code in the repo or the product's dependency tree (glibc is the sole
-  exception) — NFR-MAINT-01.
+- Any C code in the repo or the product's dependency tree (the system libc,
+  glibc or musl, is the sole exception) — NFR-MAINT-01.
 - A dependency tree that grows for convenience — NFR-MAINT-03.
 - Being usable as an open proxy: the destination of a proxied request is
   only ever a backend named in the config — NFR-SEC-08.
@@ -81,7 +81,7 @@ These would make the project a failure even if everything "works":
 
 ## Hard constraints (from the owner)
 
-Each is a requirement below: Rust only, glibc the only C (NFR-MAINT-01/02);
+Each is a requirement below: Rust only, the system libc the only C (NFR-MAINT-01/02);
 minimal crates, `libc` the only planned product dependency (NFR-MAINT-03/04);
 strict red/green TDD (NFR-MAINT-09); everything tested on a simulated
 network/clock/file system/backends with fault injection (NFR-TEST-01);
@@ -224,7 +224,8 @@ Structure and values:
   [done in stage 5]) and one or more `host` blocks.
   Overlapping binds such as `0.0.0.0:80` + `127.0.0.1:80` are only detected
   at bind time [done in stage 4]: the addresses are bound in config order
-  (`SO_REUSEADDR`, not `SO_REUSEPORT`), and the first failure
+  (`SO_REUSEADDR`; from stage 6 also `SO_REUSEPORT` after a probe,
+  FR-PROC-07), and the first failure
   (`EADDRINUSE`, `EACCES`, ...) is a startup error naming its address
   (exit 2; stage 4 amendment A6, Task 8). An IPv6 `listen` address accepts IPv6 only (the
   listener sets `IPV6_V6ONLY`, whatever the host's `bindv6only`); IPv4
@@ -289,6 +290,7 @@ Structure and values:
   | `body_idle_timeout` | 30s | [done] |
   | `disk_threads` | 4 (disk worker pool size) | [done] |
   | `shutdown_timeout` | 30s (FR-PROC-05) | [done] |
+  | `restart_timeout` | 10m (the restart drain, FR-PROC-07; owner decision 2026-11-04) | [stage 6] |
   | `memory_limit` | 1GiB (budget for per-connection buffers, FR-CFG-21) | [done] |
   | `ipv6_prefix` | 64 (per-IP grouping of IPv6 peers, FR-CONN-13; (owner decision 2026-10-29, stage 5 brainstorm)) | [done] |
 
@@ -299,7 +301,7 @@ Structure and values:
     (an explicit per-IP value above `max_connections` is an error at the
     per-IP setting; when the key is not written its default is
     `min(64, max_connections)`, owner decision 2026-10-27); `max_headers` 1–1000; every duration (including
-    `shutdown_timeout`) 1 ms – 24 h (written `1440m`); `disk_threads` 1–64; `memory_limit`
+    `shutdown_timeout` and `restart_timeout`) 1 ms – 24 h (written `1440m`); `disk_threads` 1–64; `memory_limit`
     1 MiB – 1 TiB (written `1024GiB`); `ipv6_prefix` 32–128 (a plain
     number of bits; *builder call, stage 5 brainstorm:* below /32 one group
     would span whole providers, so it is refused) [done in stage 5].
@@ -1229,6 +1231,9 @@ Failures, persistence, timeouts:
   usage: durchlauferhitzer <config-path>
          durchlauferhitzer --check <config-path>
   ```
+  *[stage 6]* `durchlauferhitzer --ready-fd <n> <config-path>` runs the
+  server and reports readiness on descriptor `n` (FR-PROC-07); the usage
+  gains that line.
 - **FR-PROC-02** [done] If systemd passes listening sockets (socket
   activation, `LISTEN_FDS`), they are used and the process never needs
   root. *(Stage 4 amendment A7, Task 8:)* `LISTEN_PID` must be the
@@ -1352,11 +1357,11 @@ Failures, persistence, timeouts:
   - *Target shutdown*: work arriving during the drain is rejected — the
     listening sockets are closed, and a request that arrives on an
     already-open connection gets 503 with `Connection: close`.
-  - *Target restart* (the restart signal of FR-PROC-07): work arriving
-    during the drain is queued — the listening sockets are handed to the
-    new process, so new connections wait in the kernel's accept queue
-    until it accepts them; the old process only drains what it already
-    holds.
+  - *Target restart* (SIGHUP, FR-PROC-07; reworded 2026-11-04): new
+    connections go to the new process (the kernel migrates the old
+    listeners' queues to it); the old process serves what it already
+    holds, answering requests with `Connection: close` instead of 503,
+    bounded by `restart_timeout`.
   - *Core half* (stage 4 amendment A4, owner-approved 2026-10-27, which
     covers the three calls, the closing of idle and fresh connections,
     the 503 for requests completed during the drain and the closing after
@@ -1541,18 +1546,86 @@ Failures, persistence, timeouts:
   - All containment code lives in one small driver module behind one
     interface, so a build without it (a future unikernel port, NFR-PORT-07)
     can leave it out without touching the core.
-- **FR-PROC-07** [stage 6] Zero-downtime restart. With systemd: socket
-  activation; the old process drains while new connections wait in the
-  accept queue. Without systemd: on a signal, exec the new binary with the
-  listening sockets inherited; the new process validates its config (on
-  error it exits and the old keeps serving), then accepts; the old stops
-  accepting, drains and exits. Such a restart may change hosts, routes,
-  backends and limits only; a new `listen`, `user` or static root is
-  rejected with a clear error (never half-applied) and needs a full
-  restart. *(Owner decision 2026-10-29, stage 5 builder check:)* the stage
-  5 sandbox (FR-PROC-06) forbids `execve` and reads outside the roots, so
-  the non-systemd path cannot exec from inside it; stage 6 designs a path
-  that works with the sandbox.
+- **FR-PROC-07** [stage 6] Zero-downtime restart: no connection is lost.
+  *(Owner decisions 2026-11-04, stage 6 brainstorm:)* a restart must not
+  drop or reset a single connection, accepted or still queued; that is
+  the stage's focus. The stage 5 sandbox stays strict (FR-PROC-06): the
+  running server never execs, signals no other process and gains no new
+  system calls for restarts.
+  - *With systemd* (FR-PROC-02): systemd holds the listening sockets;
+    `systemctl restart` sends SIGTERM, the old process drains
+    (FR-PROC-05), and new connections wait in systemd's queue until the
+    new process accepts them. Nothing is lost; new connections wait at
+    most the drain.
+  - *Without systemd* (the HAProxy model, `-sf`), driven from outside the
+    server by the init script:
+    1. the script checks the new config (`--check`); on an error it stops
+       and the old process keeps serving;
+    2. it starts a new process, which starts up as usual and binds the
+       same `listen` addresses: every listener the server binds itself
+       sets `SO_REUSEPORT` (and `SO_REUSEADDR`), so old and new share
+       each port;
+    3. once its startup is complete up to the event loop (after the
+       seccomp filter, FR-PROC-04 step 10a), the new process reports
+       that it is ready on a descriptor the script passed it
+       (`--ready-fd <n>`: it writes `ready\n` and closes it; s6's
+       notification-fd and OpenRC `supervise-daemon`'s `notify=fd:<n>`
+       use the same convention). A process that fails before that exits
+       2 and closes the descriptor unwritten, and the old process is
+       left untouched;
+    4. on readiness the script sends SIGHUP to the old process, which
+       closes its listeners and drains what it holds (the restart
+       drain, below), then exits 0.
+  - *No queued connection is lost:* when the old process closes a
+    listener, the kernel moves the connections waiting in its queue
+    (established and half-open) to the new process's listener on the same
+    port (`net.ipv4.tcp_migrate_req = 1`, Linux ≥ 5.14). The script sets
+    it before a restart and refuses the restart if it cannot. It is per
+    network namespace and changes nothing for sockets that do not share
+    ports.
+  - *The restart drain* (FR-PROC-05, target restart): SIGHUP closes the
+    listeners and logs `kind=shutdown phase=restarting`. A request on a
+    connection the old process holds, already in flight or arriving
+    during the drain, is served normally and answered with
+    `Connection: close`; the client's next request reaches the new
+    process. Idle keep-alive connections are closed as in the SIGTERM
+    drain. The drain is bounded by `limits { restart_timeout 10m; }`
+    (FR-CFG-20), not `shutdown_timeout`, so long transfers finish;
+    whatever still runs then is cut (FR-PROC-05c) and logged. A second
+    SIGHUP is ignored; SIGTERM or SIGINT during it takes the fast path;
+    SIGHUP during a SIGTERM drain is ignored. A server whose listeners
+    came from systemd treats SIGHUP the same way.
+  - *What a restart may change:* anything — hosts, routes, backends,
+    limits, roots, `user`, `listen`: the new process binds and opens its
+    own. A `listen` address the new config drops is closed by the old
+    process as on a stop: connections queued on it are reset (documented).
+  - *Init script:* the repository ships an OpenRC script (Alpine's init
+    system, the most used Linux without systemd; also Gentoo's and
+    Artix's) with `start`, `stop`, `checkconfig` and `reload` (the
+    restart above), modelled on Alpine's HAProxy script.
+  - *Builder calls (stage 6 brainstorm, after the builder check):*
+    - Readiness, not signalling, comes from the new process: after step
+      7a Landlock (ABI ≥ 6) scopes signals and after 10a seccomp forbids
+      them, and signalling earlier would let a later startup failure
+      leave nobody accepting.
+    - The script, not the server, manages processes: it starts the
+      server in the background with its pid file and stderr log
+      (`start-stop-daemon`), and on `reload` starts the new process,
+      waits for readiness (bounded), signals the old pid, and moves the
+      pid file. The server stays a foreground process with no pid file
+      and no daemon mode. Stale pids are the script's to check
+      (`start-stop-daemon --exec`).
+    - `SO_REUSEPORT` is set on every self-bound listener, not only
+      during a restart (the old process must already have it). An
+      accidental second start then shares the port instead of failing
+      with `EADDRINUSE`; a normal start (no `--ready-fd`) therefore
+      first probes each address with a plain `SO_REUSEADDR` bind and
+      fails as before when it is taken. Only a process of the same
+      effective uid can join a port group: listeners bound as root admit
+      only root, so the README recommends binding as root and dropping
+      to `user`.
+    - Upgrading from a stage 5 binary, whose listeners lack
+      `SO_REUSEPORT`, needs one full stop and start (README).
 
 ---
 
@@ -1747,7 +1820,12 @@ Failures, persistence, timeouts:
   IPv6 required and the root step, the dependency check and its
   self-test, the docs) on x86_64 (`ubuntu-latest`) and on aarch64
   (`ubuntu-24.04-arm`).
-- **NFR-PORT-02** [done] Links against the system glibc; no other C.
+- **NFR-PORT-02** [done; musl stage 6] Links against the system libc; no
+  other C. *(Owner decision 2026-11-04, stage 6 brainstorm:)* glibc or
+  musl (Alpine, where OpenRC users are, FR-PROC-07): the musl build is
+  built and tested in CI on Alpine, the driver suite under the seccomp
+  kill switch included; the seccomp allow-list has a table per libc where
+  their system calls differ (FR-PROC-06).
 - **NFR-PORT-03** [done] `openat2` is required (startup error without
   it; the probe is FR-PROC-04 step 3). Every file open uses `openat2` and
   every startup runs the probe (each test of the binary passes it).
@@ -1772,7 +1850,8 @@ Failures, persistence, timeouts:
 ### NFR-MAINT — Maintainability and supply chain
 
 - **NFR-MAINT-01** [done] Pure Rust: no C in the repo or in the product's
-  dependency tree; glibc is the only exception. No `cc`/`cmake` build
+  dependency tree; the system libc (glibc or musl, NFR-PORT-02) is the
+  only exception. No `cc`/`cmake` build
   scripts, no `*-sys` crates except `libc`, no OpenSSL, `ring` or
   `aws-lc-rs`; TLS, if ever, uses a pure-Rust provider.
 - **NFR-MAINT-02** [done] Test-only tooling (e.g. `cargo-fuzz`) may contain
@@ -2074,7 +2153,9 @@ project working and tested.
    the config (FR-PROC-06, FR-CFG-25); long randomized simulation runs and
    fuzzing, nightly and on demand (NFR-TEST-08, NFR-SEC-13); IPv6 per-IP
    grouping by a settable prefix and a fair refused pool (FR-CONN-13).
-6. **Zero-downtime restart** — FR-PROC-07.
+6. **Zero-downtime restart** — FR-PROC-07 (no connection lost; SIGHUP
+   restart drain, `restart_timeout`, `--ready-fd`, `SO_REUSEPORT`, an
+   OpenRC script), musl builds on Alpine (NFR-PORT-02).
 7. **Scaling and efficiency** — N driver threads with `SO_REUSEPORT`,
    backend connection pooling, conditional requests (ETag /
    Last-Modified), `MSG_MORE`, `splice` for proxied bodies with a known
