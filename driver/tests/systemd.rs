@@ -4,8 +4,9 @@
 //! The server serves on it; a socket whose address is not configured, a
 //! configured address without a socket, a `LISTEN_PID` that is not the
 //! server's and a descriptor that is not a listening socket are exit 2.
-//! Run as non-root (as `nobody` when the tests run as root): socket
-//! activation never needs root.
+//! SIGHUP starts the same restart drain as on self-bound listeners
+//! (FR-PROC-07). Run as non-root (as `nobody` when the tests run as
+//! root): socket activation never needs root.
 
 #![allow(
     clippy::unwrap_used,
@@ -18,13 +19,15 @@
 #[path = "support/child.rs"]
 mod child;
 
-use std::fs::File;
-use std::net::{SocketAddr, TcpListener};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::PermissionsExt;
 
 use child::{
-    Containment, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, free_port, get, run,
-    text,
+    Containment, PATIENCE, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, free_port,
+    get, run, text,
 };
 
 fn listener() -> (OwnedFd, SocketAddr) {
@@ -223,5 +226,60 @@ fn a_tcp_listener_is_a_listening_stream() {
     assert_eq!(
         durchlauferhitzer::sys::socket::is_listening_stream(std::os::fd::AsFd::as_fd(&fd)).unwrap(),
         durchlauferhitzer::sys::socket::Listening::Yes
+    );
+}
+
+/// SIGHUP with systemd's listener (FR-PROC-07): the server closes its
+/// copy (the only one here, so a new connect is refused), logs
+/// `phase=restarting`, keeps the idle connection and answers its next
+/// request with `Connection: close`, then exits 0.
+#[test]
+fn sighup_with_systemd_sockets_drains_the_same() {
+    const REQUEST: &[u8] = b"GET /a.txt HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    const ANSWER: &str = "\r\n\r\na\n";
+    let (fd, addr) = listener();
+    let dir = TempDir::new();
+    let www = dir.dir("www");
+    let file = www.join("a.txt");
+    fs::write(&file, b"a\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    let conf = config(&addr.to_string(), "", &format!("static {};", www.display()));
+    let path = dir.config("restart.conf", &conf, Containment::Switch);
+    let mut server = Running::start(&[path.to_str().unwrap()], activated(fd), addr);
+    let mut lines = server.lines();
+    let mut idle = TcpStream::connect(addr).unwrap();
+    idle.set_read_timeout(Some(PATIENCE)).unwrap();
+    idle.write_all(REQUEST).unwrap();
+    let mut first = Vec::new();
+    while !text(&first).ends_with(ANSWER) {
+        let mut buf = [0u8; 1024];
+        let n = idle.read(&mut buf).unwrap();
+        assert!(n > 0, "the connection ended: {:?}", text(&first));
+        first.extend_from_slice(&buf[..n]);
+    }
+    let first = text(&first);
+    assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "{first}");
+    assert!(!first.contains("Connection: close"), "{first}");
+    server.signal("HUP");
+    lines.wait_for("kind=shutdown phase=restarting");
+    match TcpStream::connect(addr) {
+        Ok(_) => panic!("a connect after SIGHUP was accepted"),
+        Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused, "{err}"),
+    }
+    idle.write_all(REQUEST).unwrap();
+    let mut rest = Vec::new();
+    idle.read_to_end(&mut rest).unwrap();
+    let rest = text(&rest);
+    assert!(rest.starts_with("HTTP/1.1 200 OK\r\n"), "{rest}");
+    assert!(rest.contains("\r\nConnection: close\r\n"), "{rest}");
+    assert!(rest.ends_with(ANSWER), "{rest}");
+    drop(idle);
+    let status = server.wait_exit(PATIENCE);
+    assert_eq!(status.code(), Some(0), "{status}");
+    let lines = lines.all();
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("kind=shutdown phase=done detached=0"),
+        "{lines:?}"
     );
 }

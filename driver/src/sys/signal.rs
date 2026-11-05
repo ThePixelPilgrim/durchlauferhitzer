@@ -18,8 +18,9 @@ pub enum Signal {
     /// `SIGPIPE`: blocked so it cannot kill the process (`sendfile` has no
     /// `MSG_NOSIGNAL`); read and ignored.
     Pipe,
-    /// `SIGHUP`: ignored in stage 4 (A9; the restart signal is stage 6),
-    /// blocked and read so its default action cannot end the server.
+    /// `SIGHUP`: the restart drain (FR-PROC-07), or ignored during a
+    /// drain; blocked and read so its default action cannot end the
+    /// server.
     Hup,
 }
 

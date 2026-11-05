@@ -246,6 +246,12 @@ fn driver_kinds() {
         ),
         (
             DriverLog::Shutdown {
+                phase: ShutdownPhase::Restarting,
+            },
+            "kind=shutdown phase=restarting\n",
+        ),
+        (
+            DriverLog::Shutdown {
                 phase: ShutdownPhase::Aborting,
             },
             "kind=shutdown phase=aborting\n",

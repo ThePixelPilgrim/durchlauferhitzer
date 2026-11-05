@@ -1114,7 +1114,8 @@ Failures, persistence, timeouts:
       `kind=privileges action reason` (FR-PROC-03: `action=kept
       reason=not_root`, the only values so far), `kind=shutdown phase
       [detached]` (FR-PROC-05: `phase=draining`, `phase=aborting`,
-      `phase=done detached=N`), `kind=containment layer state [abi |
+      `phase=done detached=N`; FR-PROC-07: `phase=restarting`),
+      `kind=containment layer state [abi |
       action log] [gaps covered_by] [uncovered]` (FR-PROC-06, below).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
     `192.0.2.7`); `status` the three-digit code; `backend` the backend's

@@ -75,20 +75,22 @@ pub enum DriverLog {
     /// `user` is set but the privileges were kept (FR-PROC-03, A8),
     /// logged once at startup.
     PrivilegesKept { reason: KeptReason },
-    /// A step of the shutdown (FR-PROC-05, A9).
+    /// A step of the shutdown or restart (FR-PROC-05, FR-PROC-07, A9).
     Shutdown { phase: ShutdownPhase },
     /// A containment layer's outcome (FR-PROC-06), one per layer, logged
     /// once at startup.
     Containment(Outcome),
 }
 
-/// The steps of a shutdown the log reports (FR-PROC-05, A9).
+/// The steps of a shutdown the log reports (FR-PROC-05, FR-PROC-07, A9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownPhase {
     /// The first SIGTERM: the listeners are closed and the drain begins.
     Draining,
-    /// A second SIGTERM, a SIGINT or the end of `shutdown_timeout`: every
-    /// connection is cut (`abort_all`).
+    /// SIGHUP: the listeners are closed and the restart drain begins.
+    Restarting,
+    /// A SIGTERM or SIGINT during a drain, a SIGINT, or the end of the
+    /// drain's timeout: every connection is cut (`abort_all`).
     Aborting,
     /// The loop has ended and the disk pool is shut down: `detached`
     /// workers were still running after the 1 s grace and are left to

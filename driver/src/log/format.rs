@@ -134,6 +134,7 @@ pub fn format_driver(entry: &DriverLog, out: &mut Vec<u8>) {
             out.extend_from_slice(b"kind=shutdown phase=");
             match phase {
                 ShutdownPhase::Draining => out.extend_from_slice(b"draining"),
+                ShutdownPhase::Restarting => out.extend_from_slice(b"restarting"),
                 ShutdownPhase::Aborting => out.extend_from_slice(b"aborting"),
                 ShutdownPhase::Done { detached } => {
                     out.extend_from_slice(b"done");

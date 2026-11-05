@@ -151,6 +151,9 @@ struct Ready {
     disk_threads: u32,
     /// `limits.shutdown_timeout`: how long the drain may take (FR-PROC-05).
     shutdown_timeout: Duration,
+    /// `limits.restart_timeout`: how long the restart drain may take
+    /// (FR-PROC-07).
+    restart_timeout: Duration,
     /// Driver log entries of startup, written once the sink exists.
     notes: Vec<DriverLog>,
     /// The `containment` block (FR-CFG-25).
@@ -171,6 +174,7 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
     let max_connections = config.limits.max_connections;
     let disk_threads = config.limits.disk_threads;
     let shutdown_timeout = config.limits.shutdown_timeout;
+    let restart_timeout = config.limits.restart_timeout;
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
     let listeners = match take_sockets(&listen).map_err(Failure)? {
@@ -194,6 +198,7 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
         roots,
         disk_threads,
         shutdown_timeout,
+        restart_timeout,
         notes,
         containment,
         landlock,
@@ -265,12 +270,13 @@ fn run_loop(ready: Ready) -> ExitStatus {
         roots,
         disk_threads,
         shutdown_timeout,
+        restart_timeout,
         notes,
         containment,
         landlock,
     } = ready;
     // SIGTERM, SIGINT, SIGPIPE and SIGHUP: blocked in every thread, read
-    // by the loop (SIGPIPE and SIGHUP ignored there).
+    // by the loop (SIGPIPE ignored there).
     let signals = match SignalFd::new(&Signal::HANDLED) {
         Ok(signals) => signals,
         Err(err) => {
@@ -299,7 +305,7 @@ fn run_loop(ready: Ready) -> ExitStatus {
             return ExitStatus::Startup;
         }
     };
-    if let Err(err) = driver.watch_signals(signals, shutdown_timeout) {
+    if let Err(err) = driver.watch_signals(signals, shutdown_timeout, restart_timeout) {
         drop(driver);
         report(format_args!("event loop: {err}"));
         return ExitStatus::Startup;

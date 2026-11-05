@@ -56,10 +56,11 @@ pub enum Exit {
     /// A [`StopHandle`] asked the loop to stop. The connections still
     /// open are closed when the driver is dropped.
     Stopped,
-    /// The drain after a SIGTERM finished: the core held nothing any more
-    /// (`is_drained`, DRV-14).
+    /// The drain after a SIGTERM or a SIGHUP finished: the core held
+    /// nothing any more (`is_drained`, DRV-14).
     Drained,
-    /// A second SIGTERM, a SIGINT or the end of `shutdown_timeout` cut
+    /// A SIGTERM or SIGINT during a drain, a SIGINT, or the end of the
+    /// drain's timeout (`shutdown_timeout` or `restart_timeout`) cut
     /// every connection (`abort_all`); the loop left without waiting for
     /// orphaned opens (DRV-14).
     Aborted,
@@ -298,17 +299,24 @@ impl Driver {
     }
 
     /// Reads `signals` (blocked by [`SignalFd::new`] before
-    /// [`Driver::new`]) from the loop from now on (A9), with
-    /// `shutdown_timeout` (`limits.shutdown_timeout`) as the drain's
-    /// bound: the first SIGTERM drains, a second SIGTERM, a SIGINT or the
-    /// timeout abort, SIGPIPE and SIGHUP are ignored (FR-PROC-05,
-    /// DRV-14). A failed registration is the loop's own failure.
-    pub fn watch_signals(&mut self, fd: SignalFd, shutdown_timeout: Duration) -> io::Result<()> {
+    /// [`Driver::new`]) from the loop from now on (A9). The first SIGTERM
+    /// starts the shutdown drain, bounded by `shutdown_timeout`
+    /// (FR-PROC-05); SIGHUP the restart drain, bounded by
+    /// `restart_timeout` (FR-PROC-07). During either, SIGTERM, SIGINT or
+    /// the timeout abort and SIGHUP is ignored; SIGINT while running
+    /// aborts; SIGPIPE is ignored (DRV-14). A failed registration is the
+    /// loop's own failure.
+    pub fn watch_signals(
+        &mut self,
+        fd: SignalFd,
+        shutdown_timeout: Duration,
+        restart_timeout: Duration,
+    ) -> io::Result<()> {
         self.epoll
             .add(fd.as_fd(), token(Token::Signal)?, Readiness::Read)?;
         self.signals = Some(Signals {
             fd,
-            gate: ShutdownGate::new(shutdown_timeout),
+            gate: ShutdownGate::new(shutdown_timeout, restart_timeout),
         });
         Ok(())
     }
@@ -390,7 +398,7 @@ impl Driver {
             };
             let now = self.clock.now();
             match signals.gate.signal(signal, now) {
-                Step::Drain => self.begin_drain()?,
+                Step::Drain(target) => self.begin_drain(target)?,
                 Step::Abort => return self.abort(),
                 Step::Ignore => {}
             }
@@ -405,18 +413,23 @@ impl Driver {
         };
         match signals.gate.tick(now) {
             Step::Abort => self.abort(),
-            Step::Drain | Step::Ignore => Ok(()),
+            Step::Drain(_) | Step::Ignore => Ok(()),
         }
     }
 
-    /// The first SIGTERM (DRV-14): the listeners are closed (a new
-    /// connect is refused from now on), the line is logged, then
-    /// `begin_drain` and its actions.
-    fn begin_drain(&mut self) -> io::Result<()> {
+    /// The first SIGTERM or SIGHUP (DRV-14, FR-PROC-07): the listeners
+    /// are closed (this process's copies, systemd's included: a new
+    /// connect is refused from now on, or goes to the process sharing
+    /// the port), the line is logged (`draining` or `restarting`), then
+    /// `begin_drain` with `target` and its actions.
+    fn begin_drain(&mut self, target: DrainTarget) -> io::Result<()> {
         self.listeners.clear();
-        self.log_shutdown(ShutdownPhase::Draining);
+        self.log_shutdown(match target {
+            DrainTarget::Shutdown => ShutdownPhase::Draining,
+            DrainTarget::Restart => ShutdownPhase::Restarting,
+        });
         let now = self.clock.now();
-        self.run_core(|core, actions| core.begin_drain(now, DrainTarget::Shutdown, actions))?;
+        self.run_core(|core, actions| core.begin_drain(now, target, actions))?;
         self.flush_queued()
     }
 

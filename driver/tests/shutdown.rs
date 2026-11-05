@@ -1,16 +1,21 @@
-//! Signals and shutdown (FR-PROC-05, A9, DRV-14; Review Focus 4) in the
-//! built binary, run as non-root (as `nobody` when the tests run as
-//! root): the first SIGTERM closes the listeners and drains (in-flight
-//! downloads and uploads finish, a request sent after it gets 503 with
-//! `Connection: close`), then the server exits 0; a second SIGTERM, a
-//! SIGINT or `shutdown_timeout` cut every connection and exit 0 at once;
-//! SIGHUP and SIGPIPE are ignored.
+//! Signals and shutdown (FR-PROC-05, FR-PROC-07, A9, DRV-14; Review
+//! Focus 4) in the built binary, run as non-root (as `nobody` when the
+//! tests run as root): the first SIGTERM closes the listeners and drains
+//! (in-flight downloads and uploads finish, a request sent after it gets
+//! 503 with `Connection: close`), then the server exits 0; a second
+//! SIGTERM, a SIGINT or `shutdown_timeout` cut every connection and exit
+//! 0 at once; SIGPIPE is ignored. SIGHUP starts the restart drain
+//! (FR-PROC-07): the listeners close, every request the server still
+//! gets is served with `Connection: close`, idle connections stay until
+//! their next request, `restart_timeout` bounds it, and SIGTERM or
+//! SIGINT during it takes the fast path.
 //!
 //! Every test first gets a response, so startup has passed the signal
 //! mask (A11 step 8) before a signal is sent; each waits for the server's
-//! `kind=shutdown phase=draining` line, written once the listeners are
-//! closed, so what follows the SIGTERM is deterministic. Exit bounds have
-//! 500 ms of margin for CI over what the server promises.
+//! `kind=shutdown phase=draining` (or `phase=restarting`) line, written
+//! once the listeners are closed, so what follows the signal is
+//! deterministic. Exit bounds have 500 ms of margin for CI over what the
+//! server promises.
 
 #![allow(
     clippy::unwrap_used,
@@ -39,6 +44,7 @@ use child::{Containment, PATIENCE, Running, Setup, TempDir, config, free_port, g
 const BIG: usize = 50 * 1024 * 1024;
 
 const DRAINING: &str = "kind=shutdown phase=draining";
+const RESTARTING: &str = "kind=shutdown phase=restarting";
 const ABORTING: &str = "kind=shutdown phase=aborting";
 const DONE: &str = "kind=shutdown phase=done detached=0";
 
@@ -162,7 +168,7 @@ fn read_rest(stream: &mut TcpStream) -> Vec<u8> {
 
 fn assert_refused(addr: SocketAddr) {
     match TcpStream::connect(addr) {
-        Ok(_) => panic!("a connect after SIGTERM was accepted"),
+        Ok(_) => panic!("a connect after the listeners closed was accepted"),
         Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused, "{err}"),
     }
 }
@@ -419,10 +425,10 @@ fn sigint_exits_at_once() {
     assert_aborted(&all);
 }
 
-/// SIGHUP (stage 4: ignored, A9) and SIGPIPE are read and ignored: the
-/// server keeps serving. An idle server then drains at once on SIGTERM.
+/// SIGPIPE is read and ignored: the server keeps serving. An idle server
+/// then drains at once on SIGTERM.
 #[test]
-fn sighup_and_sigpipe_are_ignored_and_an_idle_server_exits_on_sigterm() {
+fn sigpipe_is_ignored_and_an_idle_server_exits_on_sigterm() {
     let StaticServer {
         _dir,
         addr,
@@ -432,7 +438,6 @@ fn sighup_and_sigpipe_are_ignored_and_an_idle_server_exits_on_sigterm() {
     let lines = server.lines();
     let response = get(addr, "/small.txt");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
-    server.signal("HUP");
     server.signal("PIPE");
     let response = get(addr, "/small.txt");
     assert!(response.ends_with("\r\n\r\nsmall\n"), "{response}");
@@ -447,7 +452,8 @@ fn sighup_and_sigpipe_are_ignored_and_an_idle_server_exits_on_sigterm() {
 }
 
 /// Signals while draining (Review Focus 1: the seccomp allow-list's rare
-/// paths): SIGHUP and SIGPIPE are read and ignored, SIGSTOP and SIGCONT
+/// paths): SIGHUP (a shutdown's drain is final, FR-PROC-07) and SIGPIPE
+/// are read and ignored, SIGSTOP and SIGCONT
 /// pause the server; the download still finishes byte-exact and the
 /// drain ends as usual, exit 0.
 #[test]
@@ -535,4 +541,208 @@ fn a_stalled_log_reader_neither_stops_serving_nor_holds_the_exit() {
         elapsed >= LOG_GRACE && elapsed < LOG_GRACE + FAST_EXIT,
         "{elapsed:?}"
     );
+}
+
+const SMALL: &[u8] = b"GET /small.txt HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+/// A keep-alive connection that got one `/small.txt` and is idle now.
+fn idle_connection(addr: SocketAddr) -> TcpStream {
+    let mut idle = connect(addr);
+    idle.write_all(SMALL).unwrap();
+    let head = read_head(&mut idle);
+    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+    assert!(!head.contains("Connection: close"), "{head}");
+    assert_eq!(read_body(&mut idle, 6), b"small\n");
+    idle
+}
+
+/// The rest of a connection is exactly one `/small.txt` answered 200
+/// with `Connection: close`, then the end of stream (FR-PROC-07).
+fn assert_small_with_close(rest: &[u8]) {
+    let rest = text(rest);
+    assert!(rest.starts_with("HTTP/1.1 200 OK\r\n"), "{rest}");
+    assert!(rest.contains("\r\nConnection: close\r\n"), "{rest}");
+    assert!(rest.ends_with("\r\n\r\nsmall\n"), "{rest}");
+    assert_eq!(rest.matches("HTTP/1.1 ").count(), 1, "{rest}");
+}
+
+/// Review Focus 1 (FR-PROC-07, the restart drain): SIGHUP during three
+/// slow 50 MiB downloads. Every download finishes byte-exact; behind
+/// the second a head half received at the signal and completed after
+/// it, behind the third a complete pipelined request, each answered
+/// 200 with `Connection: close`, never 503; the first connection, with
+/// nothing pipelined, stays open once its response (queued keep-alive
+/// before the drain) is written, and its next request gets the same
+/// answer (FR-PROC-07). Then the server exits 0 without aborting.
+#[test]
+fn sighup_serves_in_flight_and_pipelined_requests_with_close_then_exits_0() {
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big,
+    } = static_server("restart_timeout 20s; send_idle_timeout 20s; header_timeout 20s;");
+    let mut lines = server.lines();
+    let mut first = start_download(addr);
+    let (pipelined_start, pipelined_rest) = SMALL.split_at(20);
+    let mut second = start_download_with(addr, pipelined_start);
+    let mut third = start_download_with(addr, SMALL);
+    server.signal("HUP");
+    lines.wait_for(RESTARTING);
+    second.write_all(pipelined_rest).unwrap();
+    assert!(read_body(&mut first, BIG) == big, "first download differs");
+    first.write_all(SMALL).unwrap();
+    assert_small_with_close(&read_rest(&mut first));
+    assert!(read_body(&mut third, BIG) == big, "third download differs");
+    assert_small_with_close(&read_rest(&mut third));
+    assert!(
+        read_body(&mut second, BIG) == big,
+        "second download differs"
+    );
+    assert_small_with_close(&read_rest(&mut second));
+    drop((first, second, third));
+    let status = server.wait_exit(PATIENCE);
+    assert_eq!(status.code(), Some(0), "{status}");
+    let lines = lines.all();
+    assert_eq!(lines.last().map(String::as_str), Some(DONE), "{lines:?}");
+    assert!(!lines.iter().any(|l| l == ABORTING), "{lines:?}");
+    assert!(!lines.iter().any(|l| l == DRAINING), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains(" status=503 ")),
+        "{lines:?}"
+    );
+}
+
+/// SIGHUP closes the listeners (FR-PROC-07): with no other process on
+/// the port, a new connect is refused while the server still holds a
+/// connection.
+#[test]
+fn sighup_closes_the_listeners() {
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big: _,
+    } = static_server("restart_timeout 20s;");
+    let mut lines = server.lines();
+    let idle = idle_connection(addr);
+    server.signal("HUP");
+    lines.wait_for(RESTARTING);
+    assert_refused(addr);
+    drop(idle);
+    let status = server.wait_exit(PATIENCE);
+    assert_eq!(status.code(), Some(0), "{status}");
+}
+
+/// The builder call of FR-PROC-07: the restart drain keeps an idle
+/// keep-alive connection (closing it races a request the client may be
+/// sending); its next request gets a 200 with `Connection: close`.
+#[test]
+fn sighup_keeps_an_idle_connection_until_its_next_request() {
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big: _,
+    } = static_server("restart_timeout 20s;");
+    let mut lines = server.lines();
+    let mut idle = idle_connection(addr);
+    server.signal("HUP");
+    lines.wait_for(RESTARTING);
+    // The drain began before this; a closed connection would answer the
+    // request with nothing or a reset.
+    thread::sleep(Duration::from_millis(50));
+    idle.write_all(SMALL).unwrap();
+    assert_small_with_close(&read_rest(&mut idle));
+    drop(idle);
+    let status = server.wait_exit(PATIENCE);
+    assert_eq!(status.code(), Some(0), "{status}");
+    let lines = lines.all();
+    assert_eq!(lines.last().map(String::as_str), Some(DONE), "{lines:?}");
+    assert!(!lines.iter().any(|l| l == ABORTING), "{lines:?}");
+}
+
+/// SIGTERM during the restart drain takes the fast path: the download is
+/// cut and the server exits 0 at once (FR-PROC-07).
+#[test]
+fn sighup_then_sigterm_aborts() {
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big: _,
+    } = static_server("restart_timeout 20s; send_idle_timeout 20s;");
+    let mut lines = server.lines();
+    let mut download = start_download(addr);
+    server.signal("HUP");
+    lines.wait_for(RESTARTING);
+    server.signal("TERM");
+    let sent = Instant::now();
+    let status = server.wait_exit(FAST_EXIT);
+    assert_eq!(status.code(), Some(0), "{status}");
+    let elapsed = sent.elapsed();
+    assert!(elapsed < FAST_EXIT, "{elapsed:?}");
+    let got = read_rest(&mut download).len();
+    assert!(got < BIG, "the download was not cut: {got} bytes");
+    let all = lines.all();
+    assert!(!all.iter().any(|l| l == DRAINING), "{all:?}");
+    assert_aborted(&all);
+}
+
+/// `restart_timeout 1s` with a client that stopped reading: the restart
+/// drain is cut when it expires (not at `shutdown_timeout`), and the
+/// server exits 0.
+#[test]
+fn restart_timeout_cuts_a_stalled_download() {
+    const RESTART_TIMEOUT: Duration = Duration::from_secs(1);
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big: _,
+    } = static_server("restart_timeout 1s; shutdown_timeout 20s; send_idle_timeout 20s;");
+    let mut lines = server.lines();
+    let mut download = start_download(addr);
+    let sent = Instant::now();
+    server.signal("HUP");
+    let status = server.wait_exit(PATIENCE);
+    let elapsed = sent.elapsed();
+    assert_eq!(status.code(), Some(0), "{status}");
+    assert!(
+        elapsed >= RESTART_TIMEOUT && elapsed < RESTART_TIMEOUT + FAST_EXIT,
+        "{elapsed:?}"
+    );
+    let got = read_rest(&mut download).len();
+    assert!(got < BIG, "the download was not cut: {got} bytes");
+    let all = {
+        lines.wait_for(RESTARTING);
+        lines.all()
+    };
+    assert_aborted(&all);
+    let restarting = all.iter().position(|l| l == RESTARTING).unwrap();
+    let aborting = all.iter().position(|l| l == ABORTING).unwrap();
+    assert!(restarting < aborting, "{all:?}");
+}
+
+/// SIGHUP logs `kind=shutdown phase=restarting` (FR-LOG-05); an idle
+/// server has nothing to drain and exits 0 at once.
+#[test]
+fn sighup_logs_phase_restarting() {
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big: _,
+    } = static_server("restart_timeout 20s;");
+    let lines = server.lines();
+    let response = get(addr, "/small.txt");
+    assert!(response.ends_with("\r\n\r\nsmall\n"), "{response}");
+    let sent = Instant::now();
+    server.signal("HUP");
+    let status = server.wait_exit(FAST_EXIT);
+    assert_eq!(status.code(), Some(0), "{status}");
+    assert!(sent.elapsed() < FAST_EXIT, "{:?}", sent.elapsed());
+    let all = lines.all();
+    let tail: Vec<&str> = all.iter().rev().take(2).rev().map(String::as_str).collect();
+    assert_eq!(tail, [RESTARTING, DONE], "{all:?}");
 }

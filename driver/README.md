@@ -73,10 +73,11 @@ src/
                       worker runs its readahead, a queued one is
                       cancelled), file actions to the pool,
                       pool results to events, `sendfile` of the segment
-    shutdown.rs       the shutdown state machine (FR-PROC-05, DRV-14):
-                      `ShutdownGate` (`Running | Draining { deadline } |
-                      Aborted`; each signal and the deadline to a `Step`:
-                      drain, abort or ignore)
+    shutdown.rs       the shutdown state machine (FR-PROC-05, FR-PROC-07,
+                      DRV-14): `ShutdownGate` (`Running | Draining {
+                      deadline, target } | Aborted`; each signal and the
+                      deadline to a `Step`: drain for a target, abort or
+                      ignore)
     tests.rs          unit tests of the loop's decisions on a driver that
                       is built but not run
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
@@ -217,7 +218,9 @@ tests/
                     address not configured, a configured address without a
                     socket, a foreign `LISTEN_PID`, a file, a connected
                     socket and a dual-stack IPv6 socket are exit 2; an
-                    IPv6-only one is served (IPv6 cases: CI)
+                    IPv6-only one is served (IPv6 cases: CI); SIGHUP
+                    drains it like a self-bound listener (closed, the
+                    idle connection's next request answered with close)
   shutdown.rs       signals in the binary (Review Focus 4): SIGTERM
                     during three slow 50 MiB downloads (byte-exact, a
                     new connect refused, an idle keep-alive closed; a
@@ -226,13 +229,22 @@ tests/
                     exit 0), during a proxied upload (it
                     completes, the response is relayed), a second
                     SIGTERM and SIGINT (cut, exit 0 within 1 s),
-                    `shutdown_timeout 500ms` with a stalled client, SIGHUP
-                    and SIGPIPE ignored; SIGHUP, SIGPIPE, SIGSTOP and
+                    `shutdown_timeout 500ms` with a stalled client,
+                    SIGPIPE ignored; SIGHUP, SIGPIPE, SIGSTOP and
                     SIGCONT while draining change nothing; a stalled
                     stderr reader (EAGAIN on the log) holds neither the
                     serving nor the exit past the 1 s final flush, with
-                    SIGSTOP/SIGCONT during it; each waits for the server's
-                    `phase=draining` line, so the order is deterministic
+                    SIGSTOP/SIGCONT during it. SIGHUP (FR-PROC-07): the
+                    downloads finish, a pipelined and a half-received
+                    request and the next request on a connection whose
+                    download was queued keep-alive get 200 + close
+                    (never 503), the listener is
+                    closed, an idle keep-alive is kept and its next
+                    request gets 200 + close, SIGTERM during it cuts,
+                    `restart_timeout 1s` cuts a stalled download, an idle
+                    server logs `restarting` then `done`. Each waits for
+                    the server's `phase=draining` or `phase=restarting`
+                    line, so the order is deterministic
   smoke.rs          the end-to-end smoke run (NFR-TEST-07): one binary
                     serving a static and a proxy host to a test backend,
                     200 requests over 32 parallel keep-alive connections
@@ -548,20 +560,25 @@ leaves a choice, this is what the loop does:
   `Log`) and flushes on readiness. The log never ends the loop: a
   failed registration leaves the bytes for the next entry's write and
   is retried next turn.
-- **Shutdown** (FR-PROC-05, DRV-14, A9). `watch_signals` puts the
-  signalfd into the epoll set (token `Signal`); every pending signal is
-  read when it is readable and goes to `ShutdownGate`. The first SIGTERM
-  closes the listeners (dropping them: a connect is refused from then
-  on), logs `kind=shutdown phase=draining`, calls `begin_drain` and
-  performs its actions; the drain's deadline (now plus
-  `shutdown_timeout`) joins the wait's timeout. Each turn, before the
-  wait, a drained core (`is_drained`) ends the loop (`Drained`). A
-  second SIGTERM, a SIGINT or the deadline logs `phase=aborting`, closes
-  the listeners if still open, calls `abort_all`, performs its actions
-  and ends the loop right after that descriptor (`Aborted`), without
-  waiting for orphaned opens. SIGPIPE and SIGHUP are read and ignored
-  (SIGHUP: stage 4). Two SIGTERMs sent before the loop reads the first
-  coalesce into one drain (standard signals are not queued). After the loop: the pool is shut down (≤ 1 s, the
+- **Shutdown and restart** (FR-PROC-05, FR-PROC-07, DRV-14, A9).
+  `watch_signals` puts the signalfd into the epoll set (token
+  `Signal`); every pending signal is read when it is readable and goes
+  to `ShutdownGate`. The first SIGTERM closes the listeners (dropping
+  them: a connect is refused from then on), logs `kind=shutdown
+  phase=draining`, calls `begin_drain(Shutdown)` and performs its
+  actions; the drain's deadline (now plus `shutdown_timeout`) joins the
+  wait's timeout. SIGHUP does the same with `phase=restarting`,
+  `begin_drain(Restart)` and `restart_timeout`; systemd's listeners are
+  closed too (only this process's copies; a process sharing the port
+  takes the new connections, FR-PROC-07). Each turn,
+  before the wait, a drained core (`is_drained`) ends the loop
+  (`Drained`). A SIGTERM or SIGINT during either drain, a SIGINT while
+  running, or the deadline logs `phase=aborting`, closes the listeners
+  if still open, calls `abort_all`, performs its actions and ends the
+  loop right after that descriptor (`Aborted`), without waiting for
+  orphaned opens. SIGHUP during a drain and SIGPIPE are read and
+  ignored. Two SIGTERMs (or SIGHUPs) sent before the loop reads the
+  first coalesce into one drain (standard signals are not queued). After the loop: the pool is shut down (≤ 1 s, the
   rest detached), `phase=done detached=N` is logged (signal-driven
   endings only; a `StopHandle` stop logs nothing), and the log gets
   `flush_within(1 s)`: it waits for stderr with `poll` while bytes
