@@ -4,17 +4,21 @@
 #
 # usage: durchlauferhitzer-reload <binary> <config> <pidfile> <logfile> [ready-timeout-seconds]
 #
+#  0. Take the lock <pidfile>.lock (a directory): one reload at a time.
 #  1. <binary> --check <config>; on an error, print it and stop.
 #  2. net.ipv4.tcp_migrate_req must be 1 (written if 0, never restored):
 #     the old process's queued connections then move to the new one.
-#  3. The pid in <pidfile> must run <binary> (" (deleted)" allowed, for an
-#     upgraded binary).
+#  3. The pid in <pidfile> must run <binary> (" (deleted)" allowed: the
+#     binary may be replaced in place, not re-pointed by a symlink).
 #  4. Start "<binary> --ready-fd 3 <config>" in its own session, output
-#     appended to <logfile>, fd 3 a FIFO in a fresh private directory.
-#  5. Wait for "ready" (default 30 s). On EOF or timeout, stop the new
-#     process and leave the old one untouched.
-#  6. Point <pidfile> at the new process (temp file, then rename), send
-#     SIGHUP to the old one: it closes its listeners and drains.
+#     appended to <logfile>, fd 3 a FIFO in a fresh private directory,
+#     fds 4-9 closed.
+#  5. Wait for "ready" (default 30 s). Otherwise stop the new process and
+#     leave the old one untouched.
+#  6. Signals ignored from here: point <pidfile> at the new process (temp
+#     file, then rename), add the old pid to <pidfile>.draining (the
+#     OpenRC script's stop ends those still running), send it SIGHUP: it
+#     closes its listeners and drains.
 #
 # Exit 0 on success; 1 with a one-line reason on stderr otherwise.
 
@@ -54,9 +58,9 @@ exe_of() {
 	printf '%s\n' "${e% (deleted)}"
 }
 
-dir='' new='' reader='' watchdog='' handed_over=''
+lock=$pidfile.lock locked='' dir='' new='' reader='' handed_over=''
 
-# Stops a new process that never became ready: SIGTERM, then SIGKILL
+# Stops a new process that was not handed over: SIGTERM, then SIGKILL
 # after 5 s; then reaps it.
 stop_new() {
 	kill -TERM "$new" 2>/dev/null
@@ -70,13 +74,18 @@ stop_new() {
 }
 
 cleanup() {
-	[ -n "$watchdog" ] && kill "$watchdog" 2>/dev/null
 	[ -n "$reader" ] && kill "$reader" 2>/dev/null
 	[ -n "$new" ] && [ -z "$handed_over" ] && stop_new
 	[ -n "$dir" ] && rm -rf "$dir"
+	[ -n "$locked" ] && rmdir "$lock" 2>/dev/null
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+
+# 0. One reload at a time.
+mkdir "$lock" 2>/dev/null ||
+	fail "another reload is running ($lock exists; remove it if none is)"
+locked=yes
 
 # 1. The config.
 if ! out=$("$binary" --check "$config" 2>&1); then
@@ -100,47 +109,77 @@ case $old in
 esac
 [ "$(exe_of "$old")" = "$real" ] || fail "pid $old (from $pidfile) is not running $real"
 
-# 4. The new process, with fd 3 the write end of the FIFO.
+# 4. The new process, with fd 3 the write end of the FIFO and none of
+# this shell's other descriptors below 10 (POSIX can name no higher ones).
 { printf '' >>"$logfile"; } 2>/dev/null || fail "cannot append to $logfile"
 dir=$(mktemp -d) || fail "mktemp -d failed"
 fifo=$dir/ready
 mkfifo -m 600 "$fifo" || fail "mkfifo failed"
-setsid "$binary" --ready-fd 3 "$config" </dev/null >>"$logfile" 2>&1 3>"$fifo" &
+setsid "$binary" --ready-fd 3 "$config" </dev/null >>"$logfile" 2>&1 3>"$fifo" \
+	4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
 new=$!
 
-# 5. Readiness: a reader, and a watchdog that kills it after the timeout.
-(IFS= read -r line <"$fifo" && [ "$line" = ready ]) &
-reader=$!
+# 5. Readiness: a reader (0 ready, 1 EOF, 2 another line, which it keeps),
+# polled until the timeout (in tenths of a second where `sleep` takes
+# them), then killed.
 (
-	s=
-	trap '[ -n "$s" ] && kill "$s" 2>/dev/null; exit 0' TERM
-	sleep "$timeout" >/dev/null 2>&1 &
-	s=$!
-	wait "$s"
-	kill "$reader" 2>/dev/null
+	if IFS= read -r line <"$fifo" && [ "$line" = ready ]; then
+		exit 0
+	fi
+	[ -n "$line" ] || exit 1
+	printf '%s\n' "$line" >"$dir/line"
+	exit 2
 ) &
-watchdog=$!
+reader=$!
+tick=0.1 per=10
+sleep "$tick" 2>/dev/null || tick=1 per=1
+n=0
+while running "$reader"; do
+	if [ "$n" -ge $((timeout * per)) ]; then
+		kill "$reader" 2>/dev/null
+		break
+	fi
+	sleep "$tick"
+	n=$((n + 1))
+done
 wait "$reader" 2>/dev/null
 ready=$?
 reader=
-kill "$watchdog" 2>/dev/null
-wait "$watchdog" 2>/dev/null
-watchdog=
 case $ready in
 0) ;;
 1) fail "the new process exited before it was ready (see $logfile)" ;;
+2) fail "the new process reported '$(tr -d '\000-\037\177' <"$dir/line" | cut -c1-80)' instead of ready" ;;
 *) fail "the new process was not ready within $timeout s (see $logfile)" ;;
 esac
 [ "$(exe_of "$new")" = "$real" ] || fail "the new process (pid $new) is not running $real"
 
-# 6. The pid file, then the old process's SIGHUP.
+# 6. The handover, not to be interrupted halfway.
+trap '' HUP INT TERM
 tmp=$(mktemp "$pidfile.XXXXXX") || fail "cannot write next to $pidfile"
 if ! { printf '%s\n' "$new" >"$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$pidfile"; }; then
 	rm -f "$tmp"
 	fail "cannot write $pidfile"
 fi
 handed_over=yes
+# The draining list: the old pid, after those listed that still run.
+draining=$pidfile.draining
+if tmp=$(mktemp "$draining.XXXXXX"); then
+	if ! {
+		if [ -f "$draining" ]; then
+			while read -r pid; do
+				case $pid in
+				'' | *[!0-9]* | "$old") continue ;;
+				esac
+				[ "$(exe_of "$pid")" = "$real" ] && printf '%s\n' "$pid"
+			done <"$draining"
+		fi
+		printf '%s\n' "$old"
+	} >"$tmp" || ! mv -f "$tmp" "$draining"; then
+		rm -f "$tmp"
+	fi
+fi
 if [ "$(exe_of "$old")" = "$real" ]; then
-	kill -HUP "$old" || fail "cannot send SIGHUP to pid $old"
+	kill -HUP "$old" 2>/dev/null ||
+		fail "cannot send SIGHUP to pid $old ($pidfile already names the new pid $new)"
 fi
 exit 0

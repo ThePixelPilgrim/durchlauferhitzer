@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # Settings of the durchlauferhitzer OpenRC script (/etc/conf.d/durchlauferhitzer).
 
 # The server binary.

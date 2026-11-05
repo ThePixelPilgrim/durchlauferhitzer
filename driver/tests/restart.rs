@@ -14,7 +14,7 @@
 //! - Control: with `tcp_migrate_req` 0 the connections queued in the old
 //!   process at its SIGHUP are reset. The old process accepts at most 64
 //!   connections per wakeup (`ACCEPT_BATCH`) before it reads the signal,
-//!   so a batch of 200 leaves some queued when it closes the listener.
+//!   so a batch of 400 leaves some queued when it closes the listener.
 //!
 //! These run as root (the helper writes `net.ipv4.tcp_migrate_req`, and
 //! the server binds as root, then drops to `nobody`); otherwise they skip
@@ -34,19 +34,21 @@
 #[path = "support/child.rs"]
 mod child;
 
-use std::collections::BTreeMap;
+#[path = "support/load.rs"]
+mod load;
+
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::{self, JoinHandle};
+use std::sync::{Mutex, MutexGuard};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use child::{Containment, Running, TempDir, config, exe, free_port, is_root, signal_pid, text};
+use load::{Load, Tally, collect, connect, fresh_request, queue, read_response, warm_up};
 
 const REQUIRE_ROOT: &str = "DURCHLAUFERHITZER_REQUIRE_ROOT";
 const REQUIRE_MIGRATE: &str = "DURCHLAUFERHITZER_REQUIRE_MIGRATE";
@@ -69,9 +71,6 @@ const OPENRC: [&str; 2] = [
         "/../contrib/openrc/durchlauferhitzer.confd"
     ),
 ];
-
-/// How long a read may block: longer than any stop of the old process.
-const READ_PATIENCE: Duration = Duration::from_secs(15);
 
 /// How long the old process may take to drain and exit.
 const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
@@ -244,6 +243,48 @@ impl Site {
         ])
     }
 
+    /// Runs the helper as [`Site::reload`] does, with `file` open on fds 5
+    /// and 9 (as a caller such as `openrc-run` may leave descriptors open).
+    fn reload_inheriting(&self, conf: &Path, file: &Path) -> Output {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(r#"exec 5<"$1" 9<"$1"; shift; exec sh "$@""#)
+            .arg("sh")
+            .arg(file)
+            .arg(HELPER)
+            .args([&self.bin, conf, &self.pidfile, &self.log])
+            .arg("10");
+        bounded(cmd)
+    }
+
+    /// Runs the OpenRC script's `stop_post` (sourced by `sh`, with stub
+    /// `ebegin`/`eend`) for this site, with `retry`.
+    fn stop_post(&self, retry: &str) -> Output {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(
+                r#"ebegin() { :; }; eend() { :; }; . "$1"; command=$2 pidfile=$3 retry=$4; stop_post"#,
+            )
+            .arg("sh")
+            .arg(OPENRC[0])
+            .args([&self.bin, &self.pidfile])
+            .arg(retry);
+        bounded(cmd)
+    }
+
+    /// The pids `<pidfile>.draining` lists (none without the file).
+    fn draining(&self) -> Vec<u32> {
+        fs::read_to_string(self.draining_file())
+            .unwrap_or_default()
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect()
+    }
+
+    fn draining_file(&self) -> PathBuf {
+        self.dir.path().join("durchlauferhitzer.pid.draining")
+    }
+
     /// The pid the pid file names.
     fn pid(&self) -> u32 {
         fs::read_to_string(&self.pidfile)
@@ -313,9 +354,14 @@ fn install(path: &Path) {
 
 /// Runs the helper with `args`, at most 20 s.
 fn reload_with<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Output {
-    let mut child = Command::new("sh")
-        .arg(HELPER)
-        .args(args)
+    let mut cmd = Command::new("sh");
+    cmd.arg(HELPER).args(args);
+    bounded(cmd)
+}
+
+/// Runs `cmd` to its end, at most 20 s.
+fn bounded(mut cmd: Command) -> Output {
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -325,7 +371,7 @@ fn reload_with<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Output {
     while child.try_wait().unwrap().is_none() {
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("the reload helper did not finish within 20 s");
+            panic!("{cmd:?} did not finish within 20 s");
         }
         thread::sleep(Duration::from_millis(5));
     }
@@ -351,220 +397,6 @@ fn wait_gone(pid: u32, limit: Duration) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-}
-
-/// A complete response: its status line, whether it said
-/// `Connection: close`, and its body.
-#[derive(Debug)]
-struct Response {
-    status: String,
-    close: bool,
-    body: String,
-}
-
-/// Reads one response (with `Content-Length`) from `stream`; an error,
-/// EOF or garbage before it is complete is an `Err` naming it.
-fn read_response(stream: &mut TcpStream) -> Result<Response, String> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let head_end = loop {
-        if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break at + 4;
-        }
-        match stream.read(&mut chunk) {
-            Ok(0) => return Err(format!("EOF in the head after {} bytes", buf.len())),
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(err) => return Err(format!("reading the head: {err}")),
-        }
-    };
-    let head = text(&buf[..head_end]);
-    let mut lines = head.split("\r\n");
-    let status = lines.next().unwrap_or_default().to_owned();
-    let mut length = None;
-    let mut close = false;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        if name.eq_ignore_ascii_case("content-length") {
-            length = value.parse::<usize>().ok();
-        } else if name.eq_ignore_ascii_case("connection") && value.eq_ignore_ascii_case("close") {
-            close = true;
-        }
-    }
-    let length = length.ok_or_else(|| format!("no Content-Length: {head:?}"))?;
-    let mut body = buf[head_end..].to_vec();
-    while body.len() < length {
-        match stream.read(&mut chunk) {
-            Ok(0) => return Err(format!("EOF in the body after {} bytes", body.len())),
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
-            Err(err) => return Err(format!("reading the body: {err}")),
-        }
-    }
-    if body.len() != length {
-        return Err(format!("{} bytes after the body", body.len() - length));
-    }
-    Ok(Response {
-        status,
-        close,
-        body: text(&body),
-    })
-}
-
-const REQUEST: &[u8] = b"GET /a.txt HTTP/1.1\r\nHost: example.test\r\n\r\n";
-const REQUEST_CLOSE: &[u8] =
-    b"GET /a.txt HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n";
-
-fn connect(addr: SocketAddr) -> io::Result<TcpStream> {
-    let stream = TcpStream::connect(addr)?;
-    stream.set_read_timeout(Some(READ_PATIENCE))?;
-    Ok(stream)
-}
-
-/// The answer a response gives, or why it is not one of `answers`.
-fn answer(response: Result<Response, String>, answers: &[&str]) -> Result<String, String> {
-    let response = response?;
-    let answer = response.body.trim_end().to_owned();
-    if response.status != "HTTP/1.1 200 OK" || !answers.contains(&answer.as_str()) {
-        return Err(format!("unexpected response {response:?}"));
-    }
-    Ok(answer)
-}
-
-/// One request on a fresh connection that asks for `Connection: close`;
-/// the connection must end after the response.
-fn fresh_request(addr: SocketAddr, answers: &[&str]) -> Result<String, String> {
-    let mut stream = connect(addr).map_err(|err| format!("connect: {err}"))?;
-    stream
-        .write_all(REQUEST_CLOSE)
-        .map_err(|err| format!("write: {err}"))?;
-    let got = answer(read_response(&mut stream), answers)?;
-    match stream.read(&mut [0u8; 1]) {
-        Ok(0) => Ok(got),
-        other => Err(format!("no EOF after a close response: {other:?}")),
-    }
-}
-
-/// What a load client saw: how many times each answer came, and every
-/// failure.
-#[derive(Debug, Default)]
-struct Tally {
-    answers: BTreeMap<String, usize>,
-    failures: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Pattern {
-    /// One connection reused until the server says `Connection: close`.
-    KeepAlive,
-    /// A new connection per request.
-    Fresh,
-}
-
-/// Clients that issue requests in a loop until stopped.
-struct Load {
-    stop: Arc<AtomicBool>,
-    clients: Vec<JoinHandle<Tally>>,
-}
-
-impl Load {
-    fn start(addr: SocketAddr, answers: &'static [&'static str]) -> Load {
-        let stop = Arc::new(AtomicBool::new(false));
-        let patterns = [
-            Pattern::KeepAlive,
-            Pattern::KeepAlive,
-            Pattern::Fresh,
-            Pattern::Fresh,
-        ];
-        let clients = patterns
-            .into_iter()
-            .map(|pattern| {
-                let stop = Arc::clone(&stop);
-                thread::spawn(move || run_client(addr, pattern, &stop, answers))
-            })
-            .collect();
-        Load { stop, clients }
-    }
-
-    fn finish(self) -> Tally {
-        self.stop.store(true, Ordering::Relaxed);
-        let mut total = Tally::default();
-        for client in self.clients {
-            let tally = client.join().unwrap();
-            for (answer, n) in tally.answers {
-                *total.answers.entry(answer).or_default() += n;
-            }
-            total.failures.extend(tally.failures);
-        }
-        total
-    }
-}
-
-fn run_client(addr: SocketAddr, pattern: Pattern, stop: &AtomicBool, answers: &[&str]) -> Tally {
-    let mut tally = Tally::default();
-    let mut held: Option<TcpStream> = None;
-    while !stop.load(Ordering::Relaxed) {
-        let result = match pattern {
-            Pattern::Fresh => fresh_request(addr, answers),
-            Pattern::KeepAlive => keep_alive_request(addr, &mut held, answers),
-        };
-        match result {
-            Ok(answer) => *tally.answers.entry(answer).or_default() += 1,
-            Err(failure) => tally.failures.push(format!("{pattern:?}: {failure}")),
-        }
-    }
-    tally
-}
-
-fn keep_alive_request(
-    addr: SocketAddr,
-    held: &mut Option<TcpStream>,
-    answers: &[&str],
-) -> Result<String, String> {
-    let mut stream = match held.take() {
-        Some(stream) => stream,
-        None => connect(addr).map_err(|err| format!("connect: {err}"))?,
-    };
-    stream
-        .write_all(REQUEST)
-        .map_err(|err| format!("write: {err}"))?;
-    let response = read_response(&mut stream)?;
-    let close = response.close;
-    let got = answer(Ok(response), answers)?;
-    if !close {
-        *held = Some(stream);
-    }
-    Ok(got)
-}
-
-/// Waits until the load has made progress (each client a few requests).
-fn warm_up() {
-    thread::sleep(Duration::from_millis(200));
-}
-
-/// Connections with a complete request each, queued in the backlog of
-/// the (stopped) server at `addr`.
-fn queue(addr: SocketAddr, n: usize) -> Vec<TcpStream> {
-    (0..n)
-        .map(|_| {
-            let mut stream = connect(addr).unwrap();
-            stream.write_all(REQUEST_CLOSE).unwrap();
-            stream
-        })
-        .collect()
-}
-
-/// The answers the queued connections got, and their failures.
-fn collect(queued: Vec<TcpStream>, answers: &[&str]) -> Tally {
-    let mut tally = Tally::default();
-    for mut stream in queued {
-        match answer(read_response(&mut stream), answers) {
-            Ok(answer) => *tally.answers.entry(answer).or_default() += 1,
-            Err(failure) => tally.failures.push(failure),
-        }
-    }
-    tally
 }
 
 /// The handover under load, with the old process stopped across the
@@ -675,6 +507,8 @@ fn two_reloads_back_to_back_lose_nothing() {
     let second = site.pid();
     site.assert_reload_ok(&site.reload(&third_conf));
     let third = site.pid();
+    // Both earlier processes still ran at the second handover.
+    assert_eq!(site.draining(), vec![first.pid(), second]);
     assert!(
         first.child.try_wait().unwrap().is_none(),
         "the first old process ended early"
@@ -866,4 +700,100 @@ fn the_scripts_parse() {
     }
     let mode = fs::metadata(HELPER).unwrap().permissions().mode();
     assert_eq!(mode & 0o111, 0o111, "the helper is executable");
+}
+
+/// A second helper while one runs (its lock exists) is refused; the lock
+/// is only removed by the run that took it.
+#[test]
+fn a_concurrent_reload_is_refused() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let mut old = site.start(&old_conf);
+    let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
+    fs::create_dir(&lock).unwrap();
+    let output = site.reload(&new_conf);
+    assert_refused(&site, &mut old, &output, "another reload is running");
+    assert!(lock.is_dir(), "the refused run removed the lock");
+    fs::remove_dir(&lock).unwrap();
+    site.assert_reload_ok(&site.reload(&new_conf));
+    assert!(!lock.exists(), "the lock was left behind");
+}
+
+/// The helper lists each old process in `<pidfile>.draining`; the OpenRC
+/// script's `stop_post` ends those still running the binary (SIGTERM,
+/// then SIGKILL per `retry`) and removes the list; another program's pid
+/// in it is left alone.
+#[test]
+fn stop_post_ends_the_draining_processes() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let mut old = site.start(&old_conf);
+    // A half-received request keeps the old process draining.
+    let mut half = connect(addr).unwrap();
+    half.write_all(b"GET /a.txt HTTP/1.1\r\nHost: exam")
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    site.assert_reload_ok(&site.reload(&new_conf));
+    let new = site.pid();
+    assert_eq!(site.draining(), vec![old.pid()]);
+    let mut sleeper = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut list = fs::read_to_string(site.draining_file()).unwrap();
+    list.push_str(&format!("{}\n", sleeper.id()));
+    fs::write(site.draining_file(), list).unwrap();
+    assert!(
+        old.child.try_wait().unwrap().is_none(),
+        "the old process ended early"
+    );
+    let output = site.stop_post("TERM/1/KILL/2");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    old.wait_exit(Duration::from_secs(1));
+    assert!(
+        sleeper.try_wait().unwrap().is_none(),
+        "another program was signalled"
+    );
+    assert!(!site.draining_file().exists());
+    assert!(alive(new), "stop_post ended the current process");
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// The new process inherits none of the helper's descriptors but fd 3
+/// (closed by the server after `ready`): neither the caller's extra ones
+/// (fds 4-9) nor the FIFO's read side.
+#[test]
+fn the_new_process_inherits_no_helper_descriptors() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let _old = site.start(&old_conf);
+    let marker = site.dir.file("inherited", "");
+    site.assert_reload_ok(&site.reload_inheriting(&new_conf, &marker));
+    let new = site.pid();
+    let fds: Vec<String> = fs::read_dir(format!("/proc/{new}/fd"))
+        .unwrap()
+        .filter_map(|entry| fs::read_link(entry.unwrap().path()).ok())
+        .map(|target| target.display().to_string())
+        .collect();
+    let marker = marker.display().to_string();
+    assert!(
+        !fds.iter().any(|fd| *fd == marker || fd.contains("ready")),
+        "{fds:?}"
+    );
 }

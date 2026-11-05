@@ -39,6 +39,57 @@ start_pre() {
 	checkconfig
 }
 
+# The processes a reload left draining (the helper lists them in
+# $pidfile.draining): those still running $command get the signals of
+# $retry, like the server itself, then the list goes.
+stop_post() {
+	dl_list="$pidfile.draining"
+	[ -f "$dl_list" ] || return 0
+	dl_real=$(readlink -f "$command")
+	dl_pids=
+	while read -r dl_pid; do
+		case $dl_pid in
+		'' | *[!0-9]*) continue ;;
+		esac
+		dl_exe=$(readlink "/proc/$dl_pid/exe" 2>/dev/null) || continue
+		[ "${dl_exe% (deleted)}" = "$dl_real" ] && dl_pids="$dl_pids $dl_pid"
+	done <"$dl_list"
+	if [ -z "$dl_pids" ]; then
+		rm -f "$dl_list"
+		return 0
+	fi
+	ebegin "Stopping draining $RC_SVCNAME processes:$dl_pids"
+	case $retry in
+	*/*) dl_schedule=$retry ;;
+	*) dl_schedule="TERM/${retry:-5}/KILL/5" ;;
+	esac
+	dl_ifs=$IFS
+	IFS=/
+	# shellcheck disable=SC2086 # split on /
+	set -- $dl_schedule
+	IFS=$dl_ifs
+	while [ $# -ge 2 ] && [ -n "$dl_pids" ]; do
+		# shellcheck disable=SC2086 # one argument per pid
+		kill -s "${1#SIG}" $dl_pids 2>/dev/null
+		dl_n=0
+		while :; do
+			dl_left=
+			for dl_pid in $dl_pids; do
+				dl_state=$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$dl_pid/stat" 2>/dev/null)
+				[ -n "$dl_state" ] && [ "$dl_state" != Z ] && dl_left="$dl_left $dl_pid"
+			done
+			dl_pids=$dl_left
+			[ -z "$dl_pids" ] || [ "$dl_n" -ge "$2" ] && break
+			sleep 1
+			dl_n=$((dl_n + 1))
+		done
+		shift 2
+	done
+	[ -z "$dl_pids" ] && rm -f "$dl_list"
+	[ -z "$dl_pids" ]
+	eend $? "still running:$dl_pids"
+}
+
 reload() {
 	ebegin "Reloading $RC_SVCNAME"
 	"$reload_helper" "$command" "$cfgfile" "$pidfile" "$logfile" "$ready_timeout"

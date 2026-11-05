@@ -273,7 +273,11 @@ tests/
                     meanwhile); a bad config, a new process failing before
                     or after binding, a stale pid file: exit 1, the old
                     serves on, no stray process; a dropped `listen`
-                    address is refused afterwards. Control: with
+                    address is refused afterwards; a second helper while
+                    the lock is held is refused; the old pids are listed
+                    in `<pidfile>.draining` and the OpenRC script's
+                    `stop_post` ends them (not another program's pid);
+                    the new process inherits no fd 4-9. Control: with
                     `tcp_migrate_req` 0 the queued connections are reset.
                     Root only (skipped with a reason, or failed with
                     DURCHLAUFERHITZER_REQUIRE_ROOT=1), `tcp_migrate_req`
@@ -429,6 +433,9 @@ tests/
   support/conf.rs   temp dirs and config files (`TempDir::config`, with
                     `Containment`: the seccomp kill switch's block, the
                     text's own, or none for an invalid config)
+  support/load.rs   `restart.rs`'s HTTP clients: a response read by its
+                    `Content-Length`, a fresh request, keep-alive and
+                    fresh clients in a loop (`Load`), queued connections
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
   support/running.rs `Running`: a guard that kills a running server on
                     drop (a server ended by SIGSYS fails its test);

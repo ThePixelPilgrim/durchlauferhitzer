@@ -8,7 +8,8 @@ binary.
   [`../README.md`](../README.md#restart-without-systemd). It sets
   `net.ipv4.tcp_migrate_req` to 1 and does not restore it.
 - `openrc/durchlauferhitzer` — the OpenRC script (`start`, `stop`,
-  `checkconfig`, `reload`), modelled on Alpine's haproxy script. Install
+  `checkconfig`, `reload`), modelled on Alpine's haproxy script; `stop`
+  also ends the processes a reload left draining (`<pidfile>.draining`). Install
   it as `/etc/init.d/durchlauferhitzer`, the helper as
   `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`.
 - `openrc/durchlauferhitzer.confd` — its settings, as

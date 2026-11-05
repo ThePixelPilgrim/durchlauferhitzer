@@ -156,18 +156,21 @@ exit 2.
 losing a connection; the OpenRC script's `reload` calls it
 ([`contrib/`](contrib)). In order, it
 
-1. checks the config (`--check`) and stops on an error;
+1. takes the lock `<pidfile>.lock` (a second reload meanwhile is refused),
+   checks the config (`--check`) and stops on an error;
 2. sets `net.ipv4.tcp_migrate_req` to 1 (Linux 5.14 or later; left set),
    so connections queued on the old process move to the new one when it
    closes its listeners;
-3. checks that the pid in `<pidfile>` runs `<binary>` (a replaced binary
-   counts);
+3. checks that the pid in `<pidfile>` runs `<binary>`: replace the binary
+   in place to upgrade (a symlink re-pointed to another version is
+   refused);
 4. starts `<binary> --ready-fd 3 <config>` beside it, in its own session,
    output appended to `<logfile>`;
 5. waits for `ready` (default 30 s); if it does not come, it stops the new
    process and leaves the old one alone;
-6. writes the new pid to `<pidfile>` and sends the old process `SIGHUP`
-   (it drains, then exits 0).
+6. writes the new pid to `<pidfile>`, adds the old one to
+   `<pidfile>.draining`, and sends it `SIGHUP` (it drains, then exits 0).
+   The OpenRC script's `stop` also stops the processes still draining.
 
 It exits 0, or 1 with the reason. Notes:
 
