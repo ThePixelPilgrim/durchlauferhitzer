@@ -216,13 +216,6 @@ jobs:
             DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1 \
             cargo test -p durchlauferhitzer --locked --no-fail-fast -- --nocapture 2>&1 \
             | tee kill-tests.log
-      - name: Diagnose (temporary)
-        if: failure()
-        run: |
-          apk add --no-cache strace
-          bin=$(ls /tmp/target/debug/deps/seccomp_program-* | grep -v '\.d$' | head -n1)
-          DURCHLAUFERHITZER_SECCOMP_CHILD=threads strace -f -o /tmp/st.txt "$bin" || true
-          sed -n '/SECCOMP_SET_MODE_FILTER/,$p' /tmp/st.txt | tail -n 60
       - name: Skips
         if: always()
         run: cat tests.log kill-tests.log 2>/dev/null | grep 'skipped:' || echo "no skips"

@@ -10,7 +10,8 @@
 //!   listed but not exercised here.
 //! - `fstat`: `sys::file::fstat` works under the filter (it calls the
 //!   `fstat` system call itself, never `newfstatat`).
-//! - `threads` (under `kill`): std's thread start, a join that waits for
+//! - `threads` (under `kill`, after a first thread started before the
+//!   filter, as in the server): std's thread start, a join that waits for
 //!   a thread still running (glibc's shared `futex` wait on its id;
 //!   musl's shared wait and wake of its thread list lock), a
 //!   timed condition-variable wait and a channel pass the `futex` check.
@@ -75,6 +76,11 @@ fn child(mode: Mode) -> ExitCode {
             std::process::abort();
         }
         Mode::Threads => {
+            // As in the server, whose disk workers start before the
+            // filter: the process's first thread (musl's first
+            // `pthread_create` registers `membarrier`, which is not
+            // listed; the server never starts its first thread later).
+            thread::spawn(|| {}).join().unwrap();
             filter_with(SeccompAction::Kill);
             // Joined while it still sleeps: `pthread_join` waits on the
             // thread id.
