@@ -1592,8 +1592,10 @@ Failures, persistence, timeouts:
     are not closed at once, unlike the SIGTERM drain (closing them races a
     request the client may be sending); each ends with its next request,
     answered with `Connection: close`, or at its keep-alive timeout as
-    usual. A connection accepted after the listeners closed is served
-    the same way, not refused. The drain is bounded by `limits { restart_timeout 10m; }`
+    usual; so does a connection whose response was queued keep-alive
+    before the drain, once it is written. A connection accepted after the
+    listeners closed is served the same way, not refused. A shutdown's
+    drain is final: a SIGHUP during it changes nothing. The drain is bounded by `limits { restart_timeout 10m; }`
     (FR-CFG-20), not `shutdown_timeout`, so long transfers finish;
     whatever still runs then is cut (FR-PROC-05c) and logged. A second
     SIGHUP is ignored; SIGTERM or SIGINT during it takes the fast path;
