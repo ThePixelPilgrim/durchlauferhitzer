@@ -250,7 +250,7 @@ fn connect_to_a_closed_port_fails_via_so_error() {
     // A port below the ephemeral range that nothing listens on: refused.
     // Not an ephemeral one: a connect to it could get it as its own
     // source port and connect to itself.
-    let addr = SocketAddr::from(([127, 0, 0, 1], port::free_port()));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port::refused_port()));
     let connecting = connect_nonblocking(addr).unwrap();
     match connecting.immediate {
         Ok(ConnectStart::InProgress) => {

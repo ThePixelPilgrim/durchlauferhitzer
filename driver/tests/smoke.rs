@@ -60,7 +60,9 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use child::{Containment, PATIENCE, Running, Setup, TempDir, free_port, seccomp_kill, text};
+use child::{
+    Containment, PATIENCE, Running, Setup, TempDir, free_port, refused_port, seccomp_kill, text,
+};
 use durchlauferhitzer_core::http::request::Persistence;
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
@@ -708,7 +710,7 @@ fn smoke_static_and_proxy_in_parallel_then_sigterm() {
     // ephemeral range: a connect to an ephemeral port nothing listens on
     // can get that port as its own source and connect to itself (seen in
     // CI: it read its own request as the response, `bad_version`).
-    let down = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let down = SocketAddr::from(([127, 0, 0, 1], refused_port()));
     let probe = TcpStream::connect(down).map(|_| ()).map_err(|e| e.kind());
     assert_eq!(probe, Err(io::ErrorKind::ConnectionRefused), "{down}");
 

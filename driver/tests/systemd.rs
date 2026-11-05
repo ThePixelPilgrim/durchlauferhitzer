@@ -21,20 +21,21 @@ mod child;
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 
 use child::{
-    Containment, PATIENCE, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, free_port,
-    get, run, text,
+    Containment, PATIENCE, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config,
+    free_listener, free_port, get, run, text,
 };
 
 /// A listener as systemd would pass it, on a port below the ephemeral
 /// range: once the server closes the only copy, a connect to it must be
-/// refused, and one to an ephemeral port could connect to itself.
+/// refused, and one to an ephemeral port could connect to itself. Bound
+/// at the pick, not after it (`support/port.rs`).
 fn listener() -> (OwnedFd, SocketAddr) {
-    let listener = TcpListener::bind(("127.0.0.1", free_port())).unwrap();
+    let listener = free_listener();
     let addr = listener.local_addr().unwrap();
     (OwnedFd::from(listener), addr)
 }

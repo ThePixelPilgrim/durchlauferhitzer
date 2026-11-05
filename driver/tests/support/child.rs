@@ -50,7 +50,7 @@ pub use conf::{Containment, PROXY_ROUTE, TempDir, config, seccomp_kill};
 mod port;
 
 #[allow(unused_imports, reason = "each test binary uses part")]
-pub use port::free_port;
+pub use port::{free_listener, free_port, refused_port};
 
 #[path = "running.rs"]
 mod running;

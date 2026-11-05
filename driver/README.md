@@ -473,11 +473,13 @@ tests/
                     against it; a `--ready-fd` start beside it), `/proc`
                     helpers (start time, liveness, a pending SIGHUP)
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
-  support/port.rs   `free_port`, shared by `child.rs` and `sys.rs`: below
-                    the ephemeral range, so neither a bind to 0 nor a
-                    connect's source port can get it; also the tests'
-                    refused ports (a connect to an ephemeral port nothing
-                    listens on can connect to itself)
+  support/port.rs   ports below the ephemeral range, shared by `child.rs`
+                    and `sys.rs` (neither a bind to 0 nor a connect's
+                    source port can get one): `free_port`, `free_listener`
+                    (bound at the pick: a child forked meanwhile keeps the
+                    closed probe listening until its exec), `refused_port`
+                    (waits until a connect is refused; an ephemeral port
+                    nothing listens on can connect to itself)
   support/running.rs `Running`: a guard that kills a running server on
                     drop (a server ended by SIGSYS fails its test);
                     signals by the shell's `kill` (`signal_pid`), stderr
