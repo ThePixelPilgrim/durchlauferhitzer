@@ -84,8 +84,8 @@ pub struct Limits {
     /// How long a graceful shutdown may take before connections are
     /// aborted (FR-PROC-05).
     pub shutdown_timeout: Duration,
-    /// How long a restart may wait for the new process to report ready
-    /// before it is abandoned (FR-PROC-07).
+    /// How long the old process's restart drain may take before its
+    /// remaining connections are cut (FR-PROC-07).
     pub restart_timeout: Duration,
     /// The memory budget in bytes: `max_connections` times
     /// [`worst_case_per_connection`] must fit in it (FR-CFG-21). It budgets
