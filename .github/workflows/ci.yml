@@ -154,9 +154,8 @@ jobs:
         # tests and the reload helper write net.ipv4.tcp_migrate_req, in
         # the container's own network namespace; AppArmor unconfined, as
         # Docker's profile denies writes to /proc/sys. Its loopback gets
-        # IPv6, and the host defaults the containers change are set back
-        # (dual-stack IPv6 sockets, privileged ports below 1024), so no
-        # test skips for them.
+        # IPv6, and ports below 1024 are privileged again (Docker opens
+        # them to every user), so the privileges test runs.
         # --init: a reaping pid 1, so the servers the tests and OpenRC
         # stop leave no zombies.
         shell: bash
@@ -169,7 +168,6 @@ jobs:
             --sysctl net.ipv6.conf.all.disable_ipv6=0 \
             --sysctl net.ipv6.conf.lo.disable_ipv6=0 \
             --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
-            --sysctl net.ipv6.bindv6only=0 \
             -v /home/runner/work:/home/runner/work \
             -w "$GITHUB_WORKSPACE" \
             -e PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -194,7 +192,6 @@ jobs:
           rustup show
           ldd --version 2>&1 | head -n2 || true
           uname -rm
-          cat /proc/sys/net/ipv6/bindv6only /proc/sys/net/ipv4/ip_unprivileged_port_start
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: The binary links the system musl
