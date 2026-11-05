@@ -203,6 +203,7 @@ fn an_ipv6_only_socket_is_served() {
     let Some(fd) = ipv6::or_skip(durchlauferhitzer::sys::socket::tcp_listen(
         "[::1]:0".parse().unwrap(),
         16,
+        durchlauferhitzer::sys::socket::Probe::First,
     )) else {
         return;
     };

@@ -231,6 +231,10 @@ fn driver_kinds() {
             DriverLog::RegisterFailed { errno: libc::EPERM },
             "kind=register_failed errno=1\n",
         ),
+        (
+            DriverLog::ReadyFailed { errno: libc::EPIPE },
+            "kind=ready_failed errno=32\n",
+        ),
         (DriverLog::Dropped { count: 17 }, "kind=dropped count=17\n"),
         (
             DriverLog::PrivilegesKept {

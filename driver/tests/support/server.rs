@@ -21,7 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use durchlauferhitzer::sys::file::open_dir_path;
-use durchlauferhitzer::sys::socket::{local_addr, tcp_listen};
+use durchlauferhitzer::sys::socket::{Probe, local_addr, tcp_listen};
 use durchlauferhitzer::{Driver, Exit, LogEntry, LogSink, StopHandle};
 use durchlauferhitzer_core::Core;
 use durchlauferhitzer_core::config::load;
@@ -65,7 +65,7 @@ impl Server {
             .iter()
             .map(|root| open_dir_path(root).unwrap())
             .collect();
-        let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 128).unwrap();
+        let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 128, Probe::First).unwrap();
         let addr = local_addr(std::os::fd::AsFd::as_fd(&listener)).unwrap();
         let (log, logs) = LogSink::channel();
         let mut driver = Driver::new(core, vec![listener], roots, disk_threads, log).unwrap();

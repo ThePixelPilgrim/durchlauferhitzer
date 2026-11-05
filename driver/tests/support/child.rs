@@ -39,8 +39,7 @@ use std::time::{Duration, Instant};
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
 /// The usage text the binary prints for bad arguments.
-pub const USAGE: &str =
-    "usage: durchlauferhitzer <config-path>\n       durchlauferhitzer --check <config-path>\n";
+pub const USAGE: &str = "usage: durchlauferhitzer <config-path>\n       durchlauferhitzer --check <config-path>\n       durchlauferhitzer --ready-fd <n> <config-path>\n";
 
 /// The uid and gid the tests run the server as when they themselves run
 /// as root and the case needs a non-root server (`nobody`).
@@ -97,7 +96,7 @@ pub struct Setup {
     /// `LISTEN_FDS=1` set through `sh -c '... exec'`.
     pub listen_fd: Option<OwnedFd>,
     /// A descriptor that becomes the child's fd 3, inheritable, without
-    /// any systemd variable: a stray descriptor the server inherits.
+    /// any systemd variable: a stray descriptor, or a `--ready-fd` pipe.
     pub stray_fd: Option<OwnedFd>,
     /// The `LISTEN_PID` value instead of the child's pid.
     pub listen_pid: Option<String>,

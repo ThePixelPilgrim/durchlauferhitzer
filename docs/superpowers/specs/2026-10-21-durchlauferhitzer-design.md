@@ -1115,6 +1115,9 @@ Failures, persistence, timeouts:
       reason=not_root`, the only values so far), `kind=shutdown phase
       [detached]` (FR-PROC-05: `phase=draining`, `phase=aborting`,
       `phase=done detached=N`; FR-PROC-07: `phase=restarting`),
+      `kind=ready_failed errno` (FR-PROC-07: writing `ready\n` to the
+      `--ready-fd` descriptor failed; errno 0 for a write of 0 bytes;
+      the server serves on),
       `kind=containment layer state [abi |
       action log] [gaps covered_by] [uncovered]` (FR-PROC-06, below).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,

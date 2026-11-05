@@ -240,7 +240,8 @@ static CLAIMS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// whose own descriptors all come from std and this crate. Code outside
 /// the crate may open one without the flag (`libc::open`, a C library),
 /// which this would then take from its owner; inside the crate only the
-/// systemd sockets (`systemd.rs`) are claimed, at startup.
+/// systemd sockets (`systemd.rs`) and the `--ready-fd` descriptor
+/// (`process/ready.rs`) are claimed, at startup.
 pub(crate) fn claim_inherited(raw: RawFd) -> io::Result<OwnedFd> {
     if raw < 3 {
         return Err(io::Error::new(

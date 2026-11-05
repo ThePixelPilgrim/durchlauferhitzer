@@ -11,9 +11,12 @@
 //!   address must have one (so there are never more sockets than
 //!   addresses).
 //! - The three variables are removed from the environment once read.
+//! - [`announced_fds`] reads them earlier without removing them, so
+//!   `--ready-fd` can refuse one of the sockets (FR-PROC-07).
 
 use std::ffi::OsStr;
 use std::net::SocketAddr;
+use std::ops::Range;
 use std::os::fd::{AsFd, OwnedFd, RawFd};
 
 use crate::sys::env::remove_vars;
@@ -74,6 +77,31 @@ pub(crate) fn take_sockets(listen: &[SocketAddr]) -> Result<Activation, String> 
     }
     check_coverage(&bound, listen)?;
     Ok(Activation::Sockets(sockets))
+}
+
+/// The descriptors systemd announces to this process (`LISTEN_PID` this
+/// pid, `LISTEN_FDS` a number), read without removing anything: what
+/// `--ready-fd` must not name (FR-PROC-07). Empty when they are unset,
+/// not for this process, or malformed (then [`take_sockets`] fails
+/// later).
+pub(crate) fn announced_fds() -> Range<RawFd> {
+    announced(
+        std::env::var_os(LISTEN_PID).as_deref(),
+        std::env::var_os(LISTEN_FDS).as_deref(),
+        std::process::id(),
+    )
+}
+
+/// [`announced_fds`] for these values; `me` is this process's pid.
+fn announced(pid: Option<&OsStr>, fds: Option<&OsStr>, me: u32) -> Range<RawFd> {
+    let number = |value: Option<&OsStr>| value?.to_str()?.parse::<u32>().ok();
+    match (number(pid), number(fds)) {
+        (Some(pid), Some(count)) if pid == me => {
+            let count = RawFd::try_from(count).unwrap_or(RawFd::MAX);
+            FIRST_FD..FIRST_FD.saturating_add(count)
+        }
+        _ => FIRST_FD..FIRST_FD,
+    }
 }
 
 /// The strict reading of the activation variables (A7; owner decision
@@ -172,8 +200,9 @@ fn take_one(fd: RawFd, listen: &[SocketAddr]) -> Result<(OwnedFd, SocketAddr), S
 mod tests {
     use std::ffi::OsStr;
     use std::net::SocketAddr;
+    use std::os::fd::RawFd;
 
-    use super::{Announced, check_coverage, dual_stack, parse_env};
+    use super::{Announced, announced, check_coverage, dual_stack, parse_env};
     use crate::sys::socket::V6Only;
 
     fn parse(pid: Option<&str>, fds: Option<&str>) -> Result<Announced, String> {
@@ -214,6 +243,19 @@ mod tests {
         for (pid, fds, message) in cases {
             assert_eq!(parse(pid, fds), Err(message.to_owned()), "{pid:?} {fds:?}");
         }
+    }
+
+    #[test]
+    fn the_announced_descriptors() {
+        let os = |value: &'static str| Some(OsStr::new(value));
+        assert_eq!(announced(os("42"), os("2"), 42), 3..5);
+        assert_eq!(announced(os("42"), os("0"), 42), 3..3);
+        assert_eq!(announced(os("7"), os("2"), 42), 3..3);
+        assert_eq!(announced(None, os("2"), 42), 3..3);
+        assert_eq!(announced(os("42"), None, 42), 3..3);
+        assert_eq!(announced(os("42"), os("x"), 42), 3..3);
+        assert_eq!(announced(None, None, 42), 3..3);
+        assert_eq!(announced(os("42"), os("4294967295"), 42), 3..RawFd::MAX);
     }
 
     #[test]

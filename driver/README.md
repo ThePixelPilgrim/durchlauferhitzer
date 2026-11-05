@@ -39,14 +39,18 @@ src/
                     `StopHandle`, `LogSink`, `Buffered`, `LogEntry`,
                     `DriverLog`, `KeptReason`, `ShutdownPhase`)
   main.rs           the binary: `process::run` with the arguments
-  process.rs        the command line (FR-PROC-01: serve, `--check`, the
-                    usage), the exit codes (`ExitStatus`, FR-PROC-05a),
+  process.rs        the command line (FR-PROC-01: serve, `--check`,
+                    `--ready-fd`, the usage), the exit codes
+                    (`ExitStatus`, FR-PROC-05a),
                     the startup sequence (A11), the signalfd handed to
                     the driver with `shutdown_timeout`
     budget.rs         NFR-RES-05: `open_now` (`/proc/self/fd`, O5),
                       `needed` (the formula in its docs and the spec),
                       `ensure` (raise the soft limit, or fail naming both
                       numbers)
+    ready.rs          FR-PROC-07 step 3: `ReadyFd` (`parse`; `claim`:
+                      not 0-2, not systemd's, inherited, not listening),
+                      `Readiness::report` (`ready\n`, then closed)
     privileges.rs     A8: `drop_privileges` (root, any uid 0 (O6), needs
                       `user`, not of primary gid 0 (OA3), and drops to it; non-root keeps, logged); no
                       port check (O7); then, root or not, every
@@ -134,7 +138,8 @@ src/
                     reads and removes `LISTEN_PID`/`LISTEN_FDS`
                     (`parse_env`, pure), claims fds 3.., checks each (TCP,
                     listening, IPv6-only for IPv6: `dual_stack`, O4) and
-                    all against `listen` (`check_coverage`, pure)
+                    all against `listen` (`check_coverage`, pure);
+                    `announced_fds` (read only, for `--ready-fd`)
   pool.rs           `Pool` (crate-private): the disk workers (A10):
                     `start`, `submit` (`Job::Open` / `Job::Readahead`),
                     `cancel_readahead` (`Cancel`: a queued readahead
@@ -160,8 +165,9 @@ src/
                       core's `Interest`; `has_read`, `has_write`,
                       `combine`), `EpollEvent`, `Trouble`
                       (EPOLLERR / EPOLLHUP)
-    socket.rs         non-blocking TCP: `tcp_listen` (SO_REUSEADDR; IPv6
-                      listeners IPV6_V6ONLY),
+    socket.rs         non-blocking TCP: `tcp_listen` (`Probe`: a plain
+                      SO_REUSEADDR bind first, or skipped; then
+                      SO_REUSEADDR + SO_REUSEPORT; IPv6 IPV6_V6ONLY),
                       `accept_nonblocking`, `connect_nonblocking`
                       (`ConnectStart`), `take_error`, `set_nodelay`, `read`,
                       `write` (MSG_NOSIGNAL), `shutdown_write`, `local_addr`,
@@ -202,8 +208,11 @@ src/
                       `AUDIT_ARCH_AARCH64`
 tests/
   cli.rs            the binary in a subprocess: the usage for bad
-                    arguments, `--check` (ok, each kind of error with its
-                    line:column, a missing file; no root or port touched)
+                    arguments (`--ready-fd` without a plain number
+                    included), `--check` (ok, each kind of error with its
+                    line:column, a missing file; no root or port touched),
+                    an unusable `--ready-fd` (0-2, closed, listening,
+                    systemd's) exit 2 before the config is read
   startup.rs        the startup sequence of the binary, run as non-root
                     (as `nobody` when the tests run as root): it serves; a
                     missing or non-directory root, a port in use and
@@ -212,7 +221,12 @@ tests/
                     `disk_threads` workers; fds 0-2 closed at exec are
                     `/dev/null` (the Rust runtime), so no socket lands there;
                     under a seccomp filter that fails `openat2` with
-                    ENOSYS (NFR-PORT-03) the probe is exit 2 with its message
+                    ENOSYS (NFR-PORT-03) the probe is exit 2 with its message;
+                    `--ready-fd` (a pipe as fd 3) gets `ready\n` then EOF,
+                    or EOF alone when startup fails before or after
+                    binding; a failed write (EPIPE) is logged and the
+                    server serves on; a second normal start is `EADDRINUSE`, a
+                    `--ready-fd` start shares the port (both serve)
   systemd.rs        socket activation of the binary: a listener passed as
                     fd 3 (`sh -c` sets `LISTEN_PID=$$`) is served; an
                     address not configured, a configured address without a
@@ -408,9 +422,12 @@ tests/
 ## Startup
 
 `process::run` (FR-PROC-01, FR-PROC-04, A11) parses the arguments,
-loads the config, then: the `openat2` probe beneath the first root (or
-`/`), the roots (`O_PATH | O_DIRECTORY`), the listeners (systemd's,
-`systemd.rs`, or bound in config order, the first failure named), the
+claims the `--ready-fd` descriptor (`process/ready.rs`, exit 2 before
+the config is read), loads the config, then: the `openat2` probe beneath
+the first root (or `/`), the roots (`O_PATH | O_DIRECTORY`), the
+listeners (systemd's, `systemd.rs`, untouched; or bound in config order
+with `SO_REUSEPORT`, after a plain probe bind unless `--ready-fd` is
+given, the first failure named), the
 descriptor budget (`process/budget.rs`), the privilege drop
 and the clearing of every capability (`process/privileges.rs`, while
 the process has one thread), Landlock (`containment::restrict_files`,
@@ -420,7 +437,10 @@ it), the stderr log sink, then `Driver::new` with `limits.disk_threads`,
 `Driver::watch_signals` with the signalfd and `limits.shutdown_timeout`,
 the seccomp filter (`containment::restrict_calls`, TSYNC: the disk
 workers run by then) and the two `containment` lines
-(`Driver::write_log`), and `Driver::run`. A containment failure (exit 2)
+(`Driver::write_log`), `ready\n` on the `--ready-fd` descriptor, which
+is then closed (a failed write is logged, `kind=ready_failed errno=N`;
+the server serves on), and `Driver::run`. Any failure before that
+exits with the descriptor unwritten. A containment failure (exit 2)
 there is printed after the driver and its sink are dropped. Every
 message (the usage, `--check`'s answer, startup errors) is printed
 before the sink exists or after the driver holding it is gone; nothing
@@ -568,9 +588,11 @@ leaves a choice, this is what the loop does:
   phase=draining`, calls `begin_drain(Shutdown)` and performs its
   actions; the drain's deadline (now plus `shutdown_timeout`) joins the
   wait's timeout. SIGHUP does the same with `phase=restarting`,
-  `begin_drain(Restart)` and `restart_timeout`; systemd's listeners are
-  closed too (only this process's copies; a process sharing the port
-  takes the new connections, FR-PROC-07). Each turn,
+  `begin_drain(Restart)` and `restart_timeout`. A self-bound listener
+  has `SO_REUSEPORT`, so a process sharing its port (a `--ready-fd`
+  start) takes the new connections, and with `tcp_migrate_req` the
+  queued ones (FR-PROC-07); systemd's listeners are closed too (only
+  this process's copies: systemd keeps the socket for the next process). Each turn,
   before the wait, a drained core (`is_drained`) ends the loop
   (`Drained`). A SIGTERM or SIGINT during either drain, a SIGINT while
   running, or the deadline logs `phase=aborting`, closes the listeners

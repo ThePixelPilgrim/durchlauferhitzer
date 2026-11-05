@@ -2,7 +2,10 @@
 //! in a subprocess run as non-root (as `nobody` when the tests run as
 //! root): it serves, a missing static root or a port in use is exit 2
 //! naming it (Review Focus 5), the signals are blocked in every thread
-//! (A9), and no socket lands on fds 0–2.
+//! (A9), and no socket lands on fds 0–2. Shared ports and readiness
+//! (FR-PROC-07): `--ready-fd` gets `ready\n` then EOF, or EOF alone when
+//! startup fails; a second normal start fails with `EADDRINUSE`, a
+//! `--ready-fd` start shares the port.
 
 #![allow(
     clippy::unwrap_used,
@@ -16,12 +19,16 @@
 mod child;
 
 use std::fs;
+use std::io::Read as _;
 use std::net::{SocketAddr, TcpListener};
+use std::os::fd::OwnedFd;
+use std::sync::mpsc;
 
 use child::{
-    Containment, Filter, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config, fd_target,
-    free_port, get, run, text, threads,
+    Containment, Filter, PATIENCE, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, command,
+    config, fd_target, free_port, get, run, text, threads,
 };
+use durchlauferhitzer::sys::fd::pipe;
 
 /// A config serving `dir/www` on `listen`, written to `dir`.
 fn static_config(dir: &TempDir, listen: &str) -> String {
@@ -232,4 +239,151 @@ fn no_socket_lands_on_a_standard_descriptor() {
     }
     let response = get(addr, "/index.html");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+}
+
+/// Everything written to `read` until EOF (every write end closed), read
+/// in a thread; at most [`PATIENCE`].
+fn read_to_eof(read: OwnedFd) -> Vec<u8> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = fs::File::from(read).read_to_end(&mut bytes);
+        let _ = sender.send(result.map(|_| bytes));
+    });
+    receiver
+        .recv_timeout(PATIENCE)
+        .expect("no EOF on the ready pipe")
+        .unwrap()
+}
+
+/// A setup passing `write` as the child's fd 3 (no systemd variable).
+fn ready_setup(write: OwnedFd) -> Setup {
+    Setup {
+        stray_fd: Some(write),
+        ..Setup::non_root()
+    }
+}
+
+/// Starts `--ready-fd 3 <path>` with a pipe's write end as fd 3 and
+/// waits for EOF on it; returns the server and what it wrote.
+fn start_with_ready_fd(path: &str) -> (Running, Vec<u8>) {
+    let (read, write) = pipe().unwrap();
+    let (mut cmd, keep) = command(&["--ready-fd", "3", path], ready_setup(write));
+    let server = Running {
+        child: cmd.spawn().unwrap(),
+    };
+    // The parent's copies of the write end go: EOF comes from the server.
+    drop(keep);
+    let written = read_to_eof(read);
+    (server, written)
+}
+
+/// FR-PROC-07 step 3: `ready\n` then EOF once startup is complete, and
+/// the server serves from then on (no connect probe first).
+#[test]
+fn ready_fd_gets_ready_then_eof() {
+    let dir = TempDir::new();
+    let addr = loopback(free_port());
+    let path = static_config(&dir, &addr.to_string());
+    let (server, written) = start_with_ready_fd(&path);
+    assert_eq!(text(&written), "ready\n");
+    let response = get(addr, "/index.html");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    let stderr = server.kill();
+    assert!(
+        stderr.contains("kind=response conn=1 peer=127.0.0.1 status=200"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("ready_failed"), "{stderr}");
+}
+
+/// A start that fails closes the descriptor unwritten (Review Focus 2):
+/// before binding (a missing static root) and after it (too few
+/// descriptors, NFR-RES-05).
+#[test]
+fn ready_fd_is_closed_unwritten_when_startup_fails() {
+    let dir = TempDir::new();
+    let missing = dir.path().join("no-such-root");
+    let conf = config(
+        &loopback(free_port()).to_string(),
+        "",
+        &format!("static {};", missing.display()),
+    );
+    let missing_root = dir.config("missing.conf", &conf, Containment::Switch);
+    let too_few = static_config(&dir, &loopback(free_port()).to_string());
+    let cases = [
+        (missing_root.to_str().unwrap(), None, "static root "),
+        (too_few.as_str(), Some((64, 64)), "too few file descriptors"),
+    ];
+    for (path, nofile, message) in cases {
+        let (read, write) = pipe().unwrap();
+        let setup = Setup {
+            nofile,
+            ..ready_setup(write)
+        };
+        let output = run(&["--ready-fd", "3", path], setup);
+        assert_exit(&output, 2);
+        let stderr = text(&output.stderr);
+        assert!(
+            stderr.starts_with(&format!("durchlauferhitzer: {message}")),
+            "{stderr}"
+        );
+        assert_eq!(read_to_eof(read), b"", "{path}");
+    }
+}
+
+/// FR-CFG-10, Review Focus 4: the listeners share their ports
+/// (`SO_REUSEPORT`), but a normal start probes first, so a second one
+/// still fails with `EADDRINUSE`, naming the address.
+#[test]
+fn a_second_normal_start_fails_with_eaddrinuse() {
+    let dir = TempDir::new();
+    let addr = loopback(free_port());
+    let path = static_config(&dir, &addr.to_string());
+    let _first = Running::start(&[&path], Setup::non_root(), addr);
+    let output = run(&[&path], Setup::non_root());
+    assert_exit(&output, 2);
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.starts_with(&format!("durchlauferhitzer: cannot listen on {addr}: ")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("in use"), "{stderr}");
+}
+
+/// FR-PROC-07 step 2: a `--ready-fd` start skips the probe and joins the
+/// running server's port; the kernel spreads new connections over both
+/// (by a hash of the peer address), so 64 connections reach both but
+/// with a chance of 2^-63.
+#[test]
+fn a_ready_fd_start_shares_the_port_with_a_running_server() {
+    let dir = TempDir::new();
+    let addr = loopback(free_port());
+    let path = static_config(&dir, &addr.to_string());
+    let old = Running::start(&[&path], Setup::non_root(), addr);
+    let (new, written) = start_with_ready_fd(&path);
+    assert_eq!(text(&written), "ready\n");
+    for _ in 0..64 {
+        let response = get(addr, "/index.html");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    }
+    for (name, stderr) in [("old", old.kill()), ("new", new.kill())] {
+        assert!(stderr.contains(" status=200 "), "{name}: {stderr}");
+    }
+}
+
+/// A failed `ready\n` write (the reader is gone: `EPIPE`, SIGPIPE being
+/// blocked) is logged, and the server serves on.
+#[test]
+fn a_failed_ready_write_is_logged_and_the_server_serves_on() {
+    let dir = TempDir::new();
+    let addr = loopback(free_port());
+    let path = static_config(&dir, &addr.to_string());
+    let (read, write) = pipe().unwrap();
+    drop(read);
+    let server = Running::start(&["--ready-fd", "3", &path], ready_setup(write), addr);
+    let response = get(addr, "/index.html");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    let stderr = server.kill();
+    assert!(stderr.contains("kind=ready_failed errno=32\n"), "{stderr}");
 }

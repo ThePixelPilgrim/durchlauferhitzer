@@ -80,6 +80,10 @@ pub enum DriverLog {
     /// A containment layer's outcome (FR-PROC-06), one per layer, logged
     /// once at startup.
     Containment(Outcome),
+    /// Writing `ready\n` to the `--ready-fd` descriptor failed (0 when
+    /// the error has no errno); the server serves all the same
+    /// (FR-PROC-07 step 3).
+    ReadyFailed { errno: i32 },
 }
 
 /// The steps of a shutdown the log reports (FR-PROC-05, FR-PROC-07, A9).

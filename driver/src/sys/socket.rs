@@ -46,12 +46,51 @@ fn tcp_socket(addr: &SocketAddr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// Binds a non-blocking listening socket with `SO_REUSEADDR` (and not
-/// `SO_REUSEPORT`). An IPv6 listener sets `IPV6_V6ONLY`, so it accepts
-/// IPv6 only, whatever the host's default (FR-CFG-10, A6).
-pub fn tcp_listen(addr: SocketAddr, backlog: u32) -> io::Result<OwnedFd> {
+/// Whether [`tcp_listen`] first checks that the address is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    /// A plain `SO_REUSEADDR` socket is bound to the address and closed
+    /// first: a port held by anyone (a running server's group included)
+    /// fails it with `EADDRINUSE`, as before `SO_REUSEPORT` (FR-CFG-10).
+    First,
+    /// No probe: the listener joins a group already on the port (a
+    /// `--ready-fd` start, FR-PROC-07).
+    Skip,
+}
+
+/// Whether a bound socket may share its port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Share {
+    /// `SO_REUSEADDR` only.
+    No,
+    /// `SO_REUSEADDR` and `SO_REUSEPORT`.
+    Port,
+}
+
+/// Binds a non-blocking listening socket with `SO_REUSEADDR` and
+/// `SO_REUSEPORT`, after the [`Probe`] if asked. An IPv6 socket (the probe
+/// too) sets `IPV6_V6ONLY`, so it accepts IPv6 only, whatever the host's
+/// default (FR-CFG-10, A6, FR-PROC-07).
+pub fn tcp_listen(addr: SocketAddr, backlog: u32, probe: Probe) -> io::Result<OwnedFd> {
+    match probe {
+        Probe::First => drop(tcp_bind(addr, Share::No)?),
+        Probe::Skip => {}
+    }
+    let fd = tcp_bind(addr, Share::Port)?;
+    let backlog = libc::c_int::try_from(backlog).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `listen` takes no pointers.
+    cvt(unsafe { libc::listen(fd.as_raw_fd(), backlog) })?;
+    Ok(fd)
+}
+
+/// A new TCP socket bound to `addr`, with the options of `share`.
+fn tcp_bind(addr: SocketAddr, share: Share) -> io::Result<OwnedFd> {
     let fd = tcp_socket(&addr)?;
     set_int_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_REUSEADDR, 1)?;
+    match share {
+        Share::No => {}
+        Share::Port => set_int_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_REUSEPORT, 1)?,
+    }
     match addr {
         SocketAddr::V4(_) => {}
         SocketAddr::V6(_) => {
@@ -67,9 +106,6 @@ pub fn tcp_listen(addr: SocketAddr, backlog: u32) -> io::Result<OwnedFd> {
             len,
         )
     })?;
-    let backlog = libc::c_int::try_from(backlog).unwrap_or(libc::c_int::MAX);
-    // SAFETY: `listen` takes no pointers.
-    cvt(unsafe { libc::listen(fd.as_raw_fd(), backlog) })?;
     Ok(fd)
 }
 
@@ -392,7 +428,7 @@ mod tests {
 
     use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 
-    use super::{from_sockaddr, get_int_option, tcp_listen, to_sockaddr};
+    use super::{Probe, from_sockaddr, get_int_option, tcp_listen, to_sockaddr};
 
     use super::ipv6;
 
@@ -440,17 +476,21 @@ mod tests {
     }
 
     #[test]
-    fn listeners_set_reuseaddr_and_not_reuseport() {
-        let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16).unwrap();
-        let fd = listener.as_raw_fd();
-        let reuseaddr = get_int_option(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).unwrap();
-        let reuseport = get_int_option(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT).unwrap();
-        assert_eq!((reuseaddr, reuseport), (1, 0));
+    fn listeners_set_reuseaddr_and_reuseport() {
+        for probe in [Probe::First, Probe::Skip] {
+            let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16, probe).unwrap();
+            let fd = listener.as_raw_fd();
+            let reuseaddr = get_int_option(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).unwrap();
+            let reuseport = get_int_option(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT).unwrap();
+            assert_eq!((reuseaddr, reuseport), (1, 1), "{probe:?}");
+        }
     }
 
     #[test]
     fn ipv6_listeners_are_ipv6_only() {
-        let Some(listener) = ipv6::or_skip(tcp_listen("[::1]:0".parse().unwrap(), 16)) else {
+        let Some(listener) =
+            ipv6::or_skip(tcp_listen("[::1]:0".parse().unwrap(), 16, Probe::First))
+        else {
             return;
         };
         let v6only =

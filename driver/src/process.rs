@@ -1,5 +1,6 @@
 //! The process: the command line (FR-PROC-01), the startup sequence
-//! (FR-PROC-04, A11), the signals (A9) and the exit codes (FR-PROC-05a).
+//! (FR-PROC-04, A11), readiness (`--ready-fd`, FR-PROC-07), the signals
+//! (A9) and the exit codes (FR-PROC-05a).
 //!
 //! Everything this module prints (the usage, `--check`'s answer, every
 //! startup error) is printed before the stderr log sink exists, and
@@ -23,15 +24,19 @@ use crate::event_loop::{Driver, Exit};
 use crate::log::{DriverLog, LogEntry, LogSink};
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
 use crate::sys::signal::{Signal, SignalFd};
-use crate::sys::socket::tcp_listen;
+use crate::sys::socket::{Probe, tcp_listen};
 use crate::systemd::{Activation, take_sockets};
 
 mod budget;
 mod privileges;
+mod ready;
+
+use ready::{Readiness, ReadyFd};
 
 /// The usage text, printed to stderr for bad arguments (exit 1).
-const USAGE: &str =
-    "usage: durchlauferhitzer <config-path>\n       durchlauferhitzer --check <config-path>";
+const USAGE: &str = "usage: durchlauferhitzer <config-path>\n       \
+                     durchlauferhitzer --check <config-path>\n       \
+                     durchlauferhitzer --ready-fd <n> <config-path>";
 
 /// The listen backlog: `SOMAXCONN` (the kernel caps it at
 /// `net.core.somaxconn`).
@@ -51,8 +56,12 @@ enum ExitStatus {
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
-    /// `durchlauferhitzer <config-path>`.
-    Serve(PathBuf),
+    /// `durchlauferhitzer [--ready-fd <n>] <config-path>`.
+    Serve {
+        path: PathBuf,
+        /// Where readiness is reported (FR-PROC-07 step 3).
+        ready: Option<ReadyFd>,
+    },
     /// `durchlauferhitzer --check <config-path>`.
     Check(PathBuf),
 }
@@ -70,20 +79,28 @@ fn start(args: impl Iterator<Item = OsString>) -> ExitStatus {
     };
     match command {
         Command::Check(path) => check(&path),
-        Command::Serve(path) => serve(&path),
+        Command::Serve { path, ready } => serve(&path, ready),
     }
 }
 
-/// `<config-path>` or `--check <config-path>`; anything else (an unknown
-/// flag: any argument starting with `-` but `--check` in front) is `None`.
+/// `<config-path>`, `--check <config-path>` or `--ready-fd <n>
+/// <config-path>` (`n` decimal digits); anything else (an unknown flag:
+/// any argument starting with `-` but those in front) is `None`.
 fn parse_args(args: impl Iterator<Item = OsString>) -> Option<Command> {
     let args: Vec<OsString> = args.collect();
     let is_flag = |arg: &OsString| arg.as_encoded_bytes().starts_with(b"-");
     match args.as_slice() {
-        [path] if !is_flag(path) => Some(Command::Serve(PathBuf::from(path))),
+        [path] if !is_flag(path) => Some(Command::Serve {
+            path: PathBuf::from(path),
+            ready: None,
+        }),
         [flag, path] if flag == "--check" && !is_flag(path) => {
             Some(Command::Check(PathBuf::from(path)))
         }
+        [flag, n, path] if flag == "--ready-fd" && !is_flag(path) => Some(Command::Serve {
+            path: PathBuf::from(path),
+            ready: Some(ReadyFd::parse(n)?),
+        }),
         _ => None,
     }
 }
@@ -114,15 +131,28 @@ fn load_config(path: &Path) -> Result<Config, ExitStatus> {
     })
 }
 
-/// Serves `path`: loads the config, runs the startup sequence (A11), then
-/// the event loop until it ends.
-fn serve(path: &Path) -> ExitStatus {
+/// Serves `path`: takes the `--ready-fd` descriptor (before the config is
+/// read, FR-PROC-07), loads the config, runs the startup sequence (A11),
+/// then the event loop until it ends. A `--ready-fd` start binds without
+/// the probe, joining the ports of the server it replaces.
+fn serve(path: &Path, ready: Option<ReadyFd>) -> ExitStatus {
+    let readiness = match ready.map(ReadyFd::claim).transpose() {
+        Ok(readiness) => readiness,
+        Err(Failure(message)) => {
+            report(message);
+            return ExitStatus::Startup;
+        }
+    };
     let config = match load_config(path) {
         Ok(config) => config,
         Err(status) => return status,
     };
-    match start_up(config) {
-        Ok(ready) => run_loop(ready),
+    let probe = match readiness {
+        Some(_) => Probe::Skip,
+        None => Probe::First,
+    };
+    match start_up(config, probe) {
+        Ok(ready) => run_loop(ready, readiness),
         Err(Failure(message)) => {
             report(message);
             ExitStatus::Startup
@@ -163,11 +193,11 @@ struct Ready {
 }
 
 /// A11 steps 3 to 7a: the `openat2` probe, the static roots, the
-/// listeners (systemd's, A7, or bound here, A6), the descriptor budget
-/// (NFR-RES-05), the privilege drop (A8), then Landlock (FR-PROC-06),
-/// while the process has one thread and before anything else opens a
-/// path.
-fn start_up(config: Config) -> Result<Ready, Failure> {
+/// listeners (systemd's, A7, or bound here with `probe`, A6), the
+/// descriptor budget (NFR-RES-05), the privilege drop (A8), then
+/// Landlock (FR-PROC-06), while the process has one thread and before
+/// anything else opens a path.
+fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let containment = config.containment;
     let listen = config.listen.clone();
     let user = config.user.clone();
@@ -179,7 +209,7 @@ fn start_up(config: Config) -> Result<Ready, Failure> {
     let roots = open_roots(core.static_roots())?;
     let listeners = match take_sockets(&listen).map_err(Failure)? {
         Activation::Sockets(sockets) => sockets,
-        Activation::None => bind(&listen)?,
+        Activation::None => bind(&listen, probe)?,
     };
     budget::ensure(budget::needed(budget::Descriptors {
         open: budget::open_now()?,
@@ -244,12 +274,13 @@ fn probe_openat2(dir: BorrowedFd<'_>) -> Result<(), Failure> {
 }
 
 /// A11 step 5 without systemd (A6): binds every `listen` address in config
-/// order; the first failure names its address.
-fn bind(listen: &[SocketAddr]) -> Result<Vec<OwnedFd>, Failure> {
+/// order (`SO_REUSEPORT`, after the probe unless it is skipped,
+/// FR-PROC-07); the first failure names its address.
+fn bind(listen: &[SocketAddr], probe: Probe) -> Result<Vec<OwnedFd>, Failure> {
     listen
         .iter()
         .map(|&addr| {
-            tcp_listen(addr, BACKLOG)
+            tcp_listen(addr, BACKLOG, probe)
                 .map_err(|err| Failure(format!("cannot listen on {addr}: {err}")))
         })
         .collect()
@@ -259,11 +290,14 @@ fn bind(listen: &[SocketAddr]) -> Result<Vec<OwnedFd>, Failure> {
 /// workers start, so they inherit the mask; A9), the stderr log sink, the
 /// driver reading the signals, the seccomp filter (FR-PROC-06, step 10a:
 /// once the disk workers run, right before the loop) and the containment
-/// lines, then the loop. Every message is printed while no sink lives:
+/// lines, readiness on the `--ready-fd` descriptor (FR-PROC-07; a failed
+/// write is logged, `kind=ready_failed`), then the loop. A failure
+/// before that closes the descriptor unwritten. Every message is printed
+/// while no sink lives:
 /// before it is created, or after the driver holding it is gone. Every
 /// ending of the loop exits 0, a drain, an abort or a stop (A9); a
 /// failure of the loop itself, or of a containment layer, exits 2.
-fn run_loop(ready: Ready) -> ExitStatus {
+fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
     let Ready {
         core,
         listeners,
@@ -323,6 +357,12 @@ fn run_loop(ready: Ready) -> ExitStatus {
             return ExitStatus::Startup;
         }
     }
+    if let Some(readiness) = readiness
+        && let Err(err) = readiness.report()
+    {
+        let errno = err.raw_os_error().unwrap_or(0);
+        driver.write_log(DriverLog::ReadyFailed { errno });
+    }
     let result = driver.run();
     // The sink goes with the driver (the signalfd too); only then may std
     // print again.
@@ -352,7 +392,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    use super::{Command, parse_args};
+    use super::{Command, ReadyFd, parse_args};
 
     fn parse(args: &[&str]) -> Option<Command> {
         parse_args(args.iter().map(OsString::from))
@@ -360,9 +400,16 @@ mod tests {
 
     #[test]
     fn arguments() {
+        let serve = |ready| {
+            Some(Command::Serve {
+                path: PathBuf::from("a.conf"),
+                ready,
+            })
+        };
+        assert_eq!(parse(&["a.conf"]), serve(None));
         assert_eq!(
-            parse(&["a.conf"]),
-            Some(Command::Serve(PathBuf::from("a.conf")))
+            parse(&["--ready-fd", "3", "a.conf"]),
+            serve(ReadyFd::parse(std::ffi::OsStr::new("3")))
         );
         assert_eq!(
             parse(&["--check", "a.conf"]),
@@ -377,6 +424,12 @@ mod tests {
             &["a.conf", "--check"],
             &["a", "b"],
             &["--check", "a", "b"],
+            &["--ready-fd"],
+            &["--ready-fd", "a.conf"],
+            &["--ready-fd", "x", "a.conf"],
+            &["--ready-fd", "3", "-a.conf"],
+            &["--ready-fd", "3", "--check", "a.conf"],
+            &["--check", "--ready-fd", "3", "a.conf"],
         ] {
             assert_eq!(parse(bad), None, "{bad:?}");
         }

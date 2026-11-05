@@ -1,6 +1,7 @@
 //! The command line (FR-PROC-01, FR-PROC-05a): usage for bad arguments,
 //! `--check` (it loads the config and touches neither the network nor the
-//! roots). Each test runs the built binary in a subprocess.
+//! roots), a `--ready-fd` that cannot be used (exit 2 before the config is
+//! read, FR-PROC-07). Each test runs the built binary in a subprocess.
 
 #![allow(
     clippy::unwrap_used,
@@ -14,6 +15,7 @@
 mod child;
 
 use std::net::TcpListener;
+use std::os::fd::OwnedFd;
 
 use child::{Containment, PROXY_ROUTE, Setup, TempDir, USAGE, assert_exit, config, run, text};
 
@@ -30,7 +32,7 @@ fn valid(dir: &TempDir) -> String {
 fn bad_arguments_print_the_usage_and_exit_1() {
     let dir = TempDir::new();
     let path = valid(&dir);
-    let cases: [&[&str]; 7] = [
+    let cases: [&[&str]; 16] = [
         &[],
         &["--frobnicate"],
         &["--frobnicate", &path],
@@ -38,6 +40,16 @@ fn bad_arguments_print_the_usage_and_exit_1() {
         &["--check", &path, &path],
         &[&path, &path],
         &["-x"],
+        // `--ready-fd` without a number, or with anything else.
+        &["--ready-fd"],
+        &["--ready-fd", &path],
+        &["--ready-fd", "3"],
+        &["--ready-fd", "x", &path],
+        &["--ready-fd", "-1", &path],
+        &["--ready-fd", "+3", &path],
+        &["--ready-fd", "99999999999", &path],
+        &["--ready-fd", "3", "--check", &path],
+        &["--check", "--ready-fd", "3", &path],
     ];
     for args in cases {
         let output = run(args, Setup::default());
@@ -125,4 +137,60 @@ fn check_opens_no_root_and_binds_no_port() {
     let output = run(&["--check", path.to_str().unwrap()], Setup::default());
     assert_exit(&output, 0);
     assert_eq!(text(&output.stdout), "ok\n");
+}
+
+/// A `--ready-fd` descriptor that cannot be used is exit 2 before the
+/// config is read (the config named does not exist, which would be exit 1),
+/// so before anything is bound (FR-PROC-07 step 3, Review Focus 2): a
+/// standard descriptor, a closed one, a listening socket, or one of
+/// systemd's sockets.
+#[test]
+fn an_unusable_ready_fd_is_exit_2_before_the_config_is_read() {
+    let dir = TempDir::new();
+    let missing = dir.path().join("missing.conf");
+    let missing = missing.to_str().unwrap();
+    let listener = || OwnedFd::from(TcpListener::bind("127.0.0.1:0").unwrap());
+    let cases: Vec<(&str, Setup, &str)> = vec![
+        (
+            "0",
+            Setup::default(),
+            "a standard descriptor (0-2) cannot be used",
+        ),
+        (
+            "1",
+            Setup::default(),
+            "a standard descriptor (0-2) cannot be used",
+        ),
+        (
+            "2",
+            Setup::default(),
+            "a standard descriptor (0-2) cannot be used",
+        ),
+        ("99", Setup::default(), "not open"),
+        (
+            "3",
+            Setup {
+                stray_fd: Some(listener()),
+                ..Setup::default()
+            },
+            "a listening socket cannot be used",
+        ),
+        (
+            "3",
+            Setup {
+                listen_fd: Some(listener()),
+                ..Setup::default()
+            },
+            "one of systemd's sockets (LISTEN_FDS) cannot be used",
+        ),
+    ];
+    for (n, setup, reason) in cases {
+        let output = run(&["--ready-fd", n, missing], setup);
+        assert_exit(&output, 2);
+        assert_eq!(
+            text(&output.stderr),
+            format!("durchlauferhitzer: --ready-fd {n}: {reason}\n")
+        );
+        assert_eq!(text(&output.stdout), "", "{n}");
+    }
 }

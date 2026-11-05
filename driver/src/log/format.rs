@@ -116,6 +116,7 @@ pub fn format_driver(entry: &DriverLog, out: &mut Vec<u8>) {
         DriverLog::SocketFailed { errno } => ("socket_failed", "errno", i64::from(*errno)),
         DriverLog::OpenFailed { errno } => ("open_failed", "errno", i64::from(*errno)),
         DriverLog::RegisterFailed { errno } => ("register_failed", "errno", i64::from(*errno)),
+        DriverLog::ReadyFailed { errno } => ("ready_failed", "errno", i64::from(*errno)),
         DriverLog::Dropped { count } => {
             out.extend_from_slice(b"kind=dropped");
             number(out, "count", *count);

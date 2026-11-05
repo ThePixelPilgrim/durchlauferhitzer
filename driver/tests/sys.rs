@@ -33,7 +33,7 @@ use durchlauferhitzer::sys::file::{
 };
 use durchlauferhitzer::sys::rlimit::{nofile, raise_nofile};
 use durchlauferhitzer::sys::socket::{
-    ConnectStart, Listening, accept_nonblocking, connect_nonblocking, is_listening_stream,
+    ConnectStart, Listening, Probe, accept_nonblocking, connect_nonblocking, is_listening_stream,
     local_addr, read, set_nodelay, shutdown_write, take_error, tcp_listen, write,
 };
 use durchlauferhitzer::sys::user::{euid, lookup_user};
@@ -152,7 +152,7 @@ fn epoll_with_no_interest_still_reports_hangup() {
 
 #[test]
 fn accept_would_block_then_accepts_a_pending_connection() {
-    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16).unwrap();
+    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16, Probe::First).unwrap();
     let addr = local_addr(listener.as_fd()).unwrap();
     assert!(addr.ip().is_loopback());
     assert_ne!(addr.port(), 0);
@@ -174,7 +174,7 @@ fn accept_would_block_then_accepts_a_pending_connection() {
 
 #[test]
 fn listening_stream_is_recognised() {
-    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16).unwrap();
+    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16, Probe::First).unwrap();
     assert_eq!(
         is_listening_stream(listener.as_fd()).unwrap(),
         Listening::Yes
@@ -185,17 +185,23 @@ fn listening_stream_is_recognised() {
     assert_eq!(is_listening_stream(file.as_fd()).unwrap(), Listening::No);
 }
 
+/// The probe fails on a port another listener holds, even one that
+/// shares it (`SO_REUSEPORT`); without the probe the listener joins it
+/// (FR-CFG-10, FR-PROC-07).
 #[test]
-fn listen_on_an_address_in_use_fails() {
-    let first = tcp_listen("127.0.0.1:0".parse().unwrap(), 16).unwrap();
+fn listen_on_an_address_in_use_fails_unless_the_probe_is_skipped() {
+    let first = tcp_listen("127.0.0.1:0".parse().unwrap(), 16, Probe::First).unwrap();
     let addr = local_addr(first.as_fd()).unwrap();
-    let err = tcp_listen(addr, 16).unwrap_err();
+    let err = tcp_listen(addr, 16, Probe::First).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::AddrInUse);
+    let second = tcp_listen(addr, 16, Probe::Skip).unwrap();
+    assert_eq!(local_addr(second.as_fd()).unwrap(), addr);
 }
 
 #[test]
 fn ipv6_listen_and_local_addr_when_available() {
-    let Some(listener) = ipv6::or_skip(tcp_listen("[::1]:0".parse().unwrap(), 16)) else {
+    let Some(listener) = ipv6::or_skip(tcp_listen("[::1]:0".parse().unwrap(), 16, Probe::First))
+    else {
         return;
     };
     let addr = local_addr(listener.as_fd()).unwrap();
@@ -215,9 +221,13 @@ fn ipv6_and_ipv4_wildcards_bind_the_same_port_when_available() {
     // `0.0.0.0:p` whatever the host's `bindv6only` default. The IPv4 port
     // is taken first: an ephemeral port picked for a V6ONLY socket is not
     // checked against the IPv4 sockets of tests running in parallel.
-    let v4 = tcp_listen("0.0.0.0:0".parse().unwrap(), 16).unwrap();
+    let v4 = tcp_listen("0.0.0.0:0".parse().unwrap(), 16, Probe::First).unwrap();
     let port = local_addr(v4.as_fd()).unwrap().port();
-    let Some(v6) = ipv6::or_skip(tcp_listen(format!("[::]:{port}").parse().unwrap(), 16)) else {
+    let Some(v6) = ipv6::or_skip(tcp_listen(
+        format!("[::]:{port}").parse().unwrap(),
+        16,
+        Probe::First,
+    )) else {
         return;
     };
     assert_eq!(local_addr(v6.as_fd()).unwrap().port(), port);

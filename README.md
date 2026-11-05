@@ -19,6 +19,19 @@ cargo build --release --locked
 # the binary: target/release/durchlauferhitzer
 ```
 
+## Command line
+
+```
+usage: durchlauferhitzer <config-path>
+       durchlauferhitzer --check <config-path>
+       durchlauferhitzer --ready-fd <n> <config-path>
+```
+
+`--ready-fd <n>` serves like the first form, beside a running server on
+the same ports, and writes `ready\n` to descriptor `n` (then closes it)
+once it accepts connections; a failed start closes it unwritten (exit
+2). See `SIGHUP` below.
+
 ## Check a config
 
 ```sh
@@ -147,7 +160,14 @@ exit 2.
 - A second `SIGTERM`, or `SIGINT` (Ctrl-C): fast shutdown; every connection is
   cut at once.
 - `SIGHUP`: restart drain — the listeners close, the connections held are
-  served with `Connection: close`, bounded by `restart_timeout`.
+  served with `Connection: close`, bounded by `restart_timeout`. The
+  server's own listeners set `SO_REUSEPORT`, so a new process started
+  with `--ready-fd` shares the ports and, once it reports `ready`, takes
+  the new connections when the old one gets `SIGHUP` (with
+  `net.ipv4.tcp_migrate_req = 1`, the queued ones too). A second start
+  without `--ready-fd` still fails with "Address already in use". Only a
+  process of the same user can join the ports. Upgrading from a binary
+  whose listeners lack `SO_REUSEPORT` needs one full stop and start.
   `SIGPIPE` is ignored.
 - Exit codes: 0 after any shutdown (and `--check` on a valid config), 1 for
   an invalid or unreadable config or bad arguments, 2 for a startup

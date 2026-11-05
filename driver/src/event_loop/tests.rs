@@ -658,8 +658,8 @@ fn clients_and_upstreams_get_tcp_nodelay() {
 /// [`ACCEPT_BATCH`]: super::clients::ACCEPT_BATCH
 #[test]
 fn one_readiness_accepts_at_most_64_connections() {
-    use crate::sys::socket::{local_addr, tcp_listen};
-    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 1024).unwrap();
+    use crate::sys::socket::{Probe, local_addr, tcp_listen};
+    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 1024, Probe::First).unwrap();
     let addr = local_addr(listener.as_fd()).unwrap();
     let config = "listen 127.0.0.1:8080; limits { max_connections 1000; \
         max_connections_per_ip 1000; } host a.test { path / { proxy 127.0.0.1:9; \
