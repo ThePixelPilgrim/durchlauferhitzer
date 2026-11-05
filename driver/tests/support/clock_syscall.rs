@@ -1,5 +1,5 @@
 //! A test-only `LD_PRELOAD` library, never part of the product: its
-//! `clock_gettime` makes the system call every time, as glibc's vDSO
+//! `clock_gettime` makes the system call every time, as the libc's vDSO
 //! does where the clocksource has no vDSO mode (hpet, acpi_pm, Xen,
 //! arm64 errata). `containment.rs` builds it with `rustc` (it is no
 //! cargo target) and runs the server with it under `seccomp_action
@@ -8,7 +8,7 @@
 use std::ffi::{c_int, c_long, c_void};
 
 unsafe extern "C" {
-    /// glibc's `syscall(2)`.
+    /// The libc's `syscall(2)` (glibc or musl).
     fn syscall(number: c_long, ...) -> c_long;
 }
 

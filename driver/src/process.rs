@@ -38,9 +38,11 @@ const USAGE: &str = "usage: durchlauferhitzer <config-path>\n       \
                      durchlauferhitzer --check <config-path>\n       \
                      durchlauferhitzer --ready-fd <n> <config-path>";
 
-/// The listen backlog: `SOMAXCONN` (the kernel caps it at
-/// `net.core.somaxconn`).
-const BACKLOG: u32 = libc::SOMAXCONN as u32;
+/// The listen backlog: the kernel's `SOMAXCONN` since Linux 5.4 (it caps
+/// the backlog at `net.core.somaxconn`). Not `libc::SOMAXCONN`: that is
+/// 128 on musl, which would reset a restart's queued connections beyond
+/// it (FR-PROC-07).
+const BACKLOG: u32 = 4096;
 
 /// The exit codes (FR-PROC-05a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,7 +423,13 @@ mod tests {
 
     use std::net::SocketAddr;
 
-    use super::{Command, ReadyFd, overlap, parse_args};
+    use super::{BACKLOG, Command, ReadyFd, overlap, parse_args};
+
+    /// The same backlog whatever the libc (`libc::SOMAXCONN` differs).
+    #[test]
+    fn the_backlog_is_the_kernels_somaxconn() {
+        assert_eq!(BACKLOG, 4096);
+    }
 
     fn parse(args: &[&str]) -> Option<Command> {
         parse_args(args.iter().map(OsString::from))

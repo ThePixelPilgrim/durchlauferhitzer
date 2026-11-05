@@ -4,13 +4,15 @@
 //! `unsafe`).
 //!
 //! - `abort`: an abort still ends the process by `SIGABRT` under the
-//!   filter (glibc's path: `getpid`, `gettid`, `tgkill`). The fatal-path
+//!   filter (glibc's path: `getpid`, `gettid`, `tgkill`; musl's: `tkill`
+//!   of the main thread). The fatal-path
 //!   group's `rt_sigaction` and `rt_sigreturn` (std's fault handlers) are
 //!   listed but not exercised here.
 //! - `fstat`: `sys::file::fstat` works under the filter (it calls the
 //!   `fstat` system call itself, never `newfstatat`).
 //! - `threads` (under `kill`): std's thread start, a join that waits for
-//!   a thread still running (glibc's shared `futex` wait on its id), a
+//!   a thread still running (glibc's shared `futex` wait on its id;
+//!   musl's shared wait and wake of its thread list lock), a
 //!   timed condition-variable wait and a channel pass the `futex` check.
 
 #![allow(

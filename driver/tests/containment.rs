@@ -435,6 +435,14 @@ fn clock_syscall_library(dir: &TempDir) -> String {
         PathBuf::from("rustc")
     };
     let out = dir.path().join("libclock_syscall.so");
+    // A musl toolchain links statically by default, and drops a `cdylib`
+    // then; the server links the system musl dynamically
+    // (`.cargo/config.toml`), so the shim does too.
+    let musl: &[&str] = if cfg!(target_env = "musl") {
+        &["-C", "target-feature=-crt-static"]
+    } else {
+        &[]
+    };
     let output = Command::new(&rustc)
         .args([
             "--edition",
@@ -443,8 +451,9 @@ fn clock_syscall_library(dir: &TempDir) -> String {
             "cdylib",
             "-C",
             "panic=abort",
-            "-o",
         ])
+        .args(musl)
+        .arg("-o")
         .arg(&out)
         .arg(&source)
         .output()

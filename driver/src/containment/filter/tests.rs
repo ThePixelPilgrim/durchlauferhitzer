@@ -15,8 +15,19 @@ const KILL: u32 = libc::SECCOMP_RET_KILL_PROCESS;
 /// The server's pid the programs are built for.
 const PID: u32 = 4242;
 
-/// The thread flags glibc's `pthread_create` passes to `clone`.
-const THREAD: u64 = (libc::CLONE_VM
+/// `CLONE_DETACHED`, which musl's `pthread_create` adds.
+const CLONE_DETACHED: u64 = 0x0040_0000;
+
+/// The thread flags the libc's `pthread_create` passes to `clone`.
+const THREAD: u64 = GLIBC_THREAD
+    | if cfg!(target_env = "musl") {
+        CLONE_DETACHED
+    } else {
+        0
+    };
+
+/// glibc's.
+const GLIBC_THREAD: u64 = (libc::CLONE_VM
     | libc::CLONE_FS
     | libc::CLONE_FILES
     | libc::CLONE_SIGHAND
@@ -105,12 +116,16 @@ fn each(mut f: impl FnMut(Arch, SeccompAction, &[libc::sock_filter])) {
 
 /// Numbers that are in neither table: `ftruncate`, `truncate`, `ioctl`,
 /// `execve`, `getppid`, `openat`, `statx`, `ptrace`, `seccomp`,
-/// `newfstatat`, `kill`, `tkill`.
-fn unlisted(arch: Arch) -> [u32; 12] {
-    match arch {
-        Arch::X86_64 => [77, 76, 16, 59, 110, 257, 332, 101, 317, 262, 62, 200],
-        Arch::Aarch64 => [46, 45, 29, 221, 173, 56, 291, 117, 277, 79, 129, 130],
+/// `newfstatat`, `kill`, and (but on musl) `tkill`.
+fn unlisted(arch: Arch) -> Vec<u32> {
+    let (mut numbers, tkill) = match arch {
+        Arch::X86_64 => (vec![77, 76, 16, 59, 110, 257, 332, 101, 317, 262, 62], 200),
+        Arch::Aarch64 => (vec![46, 45, 29, 221, 173, 56, 291, 117, 277, 79, 129], 130),
+    };
+    if !cfg!(target_env = "musl") {
+        numbers.push(tkill);
     }
+    numbers
 }
 
 #[test]
@@ -143,7 +158,9 @@ fn unlisted_calls_get_the_action() {
 #[test]
 fn truncation_and_ioctl_are_never_allowed() {
     each(|arch, action, prog| {
-        let [ftruncate, truncate, ioctl, ..] = unlisted(arch);
+        let [ftruncate, truncate, ioctl, ..] = unlisted(arch)[..] else {
+            panic!("unlisted is shorter than three");
+        };
         for nr in [ftruncate, truncate, ioctl] {
             for args in [[0; 6], [3, 0, 0, 0, 0, 0], [u64::MAX; 6]] {
                 assert_eq!(run(prog, &call(arch, nr, args)), expected(action));
@@ -277,11 +294,18 @@ fn clone_only_as_a_thread_and_clone3_is_enosys() {
         // asks for a signal on exit.
         let sigchld = libc::SIGCHLD as u64;
         let vfork = (libc::CLONE_VM | libc::CLONE_VFORK) as u64 | sigchld;
+        // The other libc's thread flags.
+        let other = if cfg!(target_env = "musl") {
+            GLIBC_THREAD
+        } else {
+            GLIBC_THREAD | CLONE_DETACHED
+        };
         for flags in [
             sigchld,
             vfork,
             THREAD | libc::CLONE_NEWUSER as u64,
             THREAD | sigchld,
+            other,
             0,
         ] {
             assert_eq!(run_clone(flags), expected(action), "{flags:#x}");
@@ -412,19 +436,30 @@ fn futex_only_for_the_private_waits_and_wakes_and_the_join() {
     each(|arch, action, prog| {
         let futex = nr(arch, "futex");
         let run = |op: i32| run(prog, &call(arch, futex, [0x1000, op as u64, 1, 0, 0, !0]));
-        assert_eq!(FUTEX_OPERATIONS.len(), 4);
-        for op in [
+        // musl's thread list lock: a shared wait and wake.
+        let shared = [libc::FUTEX_WAIT, libc::FUTEX_WAKE];
+        let (musl, glibc): (&[i32], &[i32]) = if cfg!(target_env = "musl") {
+            (&shared, &[])
+        } else {
+            (&[], &shared)
+        };
+        assert_eq!(FUTEX_OPERATIONS.len(), 4 + musl.len());
+        for &op in [
             libc::FUTEX_WAIT | private,
             libc::FUTEX_WAKE | private,
             libc::FUTEX_WAIT_BITSET | private,
             // pthread_join: a shared wait on the thread id.
             libc::FUTEX_WAIT_BITSET | realtime,
-        ] {
+        ]
+        .iter()
+        .chain(musl)
+        {
             assert_eq!(run(op), ALLOW, "{op:#x}");
         }
+        for &op in glibc {
+            assert_eq!(run(op), expected(action), "{op:#x}");
+        }
         for op in [
-            libc::FUTEX_WAIT,
-            libc::FUTEX_WAKE,
             libc::FUTEX_WAIT_BITSET,
             libc::FUTEX_WAKE_BITSET | private,
             libc::FUTEX_WAIT_BITSET | private | realtime,
@@ -442,6 +477,59 @@ fn futex_only_for_the_private_waits_and_wakes_and_the_join() {
             assert_eq!(run(op), expected(action), "{op:#x}");
         }
     });
+}
+
+/// musl's `abort` (`raise`) is `tkill(gettid(), SIGABRT)`: allowed for
+/// the main thread (its id is the pid) and only with `SIGABRT`; glibc
+/// lists no `tkill`.
+#[test]
+fn tkill_only_for_sigabrt_to_the_main_thread_and_only_on_musl() {
+    each(|arch, action, prog| {
+        let tkill = match arch {
+            Arch::X86_64 => 200,
+            Arch::Aarch64 => 130,
+        };
+        let run = |tid: u64, sig: i32| run(prog, &call(arch, tkill, [tid, sig as u64, 0, 0, 0, 0]));
+        let own = u64::from(PID);
+        let main = if cfg!(target_env = "musl") {
+            ALLOW
+        } else {
+            expected(action)
+        };
+        assert_eq!(run(own, libc::SIGABRT), main, "{arch:?}");
+        for sig in [0, libc::SIGKILL, libc::SIGTERM, libc::SIGSYS, libc::SIGSEGV] {
+            assert_eq!(run(own, sig), expected(action), "{arch:?} {sig}");
+        }
+        // A worker's id, or another process's thread.
+        for tid in [0, 1, own + 1, own - 1, u64::from(u32::MAX)] {
+            assert_eq!(
+                run(tid, libc::SIGABRT),
+                expected(action),
+                "{arch:?} tid {tid}"
+            );
+        }
+    });
+}
+
+/// x86_64's `epoll_wait`: glibc makes the call; musl's `epoll_wait` is
+/// `epoll_pwait` (aarch64 has only `epoll_pwait`).
+#[test]
+fn x86_64_lists_the_epoll_wait_of_its_libc() {
+    for action in ACTIONS {
+        let prog = program(Arch::X86_64, action, PID);
+        let (wait, pwait) = (232, 281);
+        let (listed, other) = if cfg!(target_env = "musl") {
+            (pwait, wait)
+        } else {
+            (wait, pwait)
+        };
+        let args = [6, 0x1000, 256, u64::MAX, 0, 8];
+        assert_eq!(run(&prog, &call(Arch::X86_64, listed, args)), ALLOW);
+        assert_eq!(
+            run(&prog, &call(Arch::X86_64, other, args)),
+            expected(action)
+        );
+    }
 }
 
 /// The vDSO falls back to the `clock_gettime` system call where the
@@ -557,7 +645,9 @@ fn current_is_aarch64_here() {
 fn libc_number(name: &str) -> i64 {
     match name {
         "epoll_wait" => libc::SYS_epoll_wait,
+        "epoll_pwait" => libc::SYS_epoll_pwait,
         "poll" => libc::SYS_poll,
+        "tkill" => libc::SYS_tkill,
         other => common_number(other),
     }
 }
@@ -567,6 +657,7 @@ fn libc_number(name: &str) -> i64 {
     match name {
         "epoll_pwait" => libc::SYS_epoll_pwait,
         "ppoll" => libc::SYS_ppoll,
+        "tkill" => libc::SYS_tkill,
         other => common_number(other),
     }
 }

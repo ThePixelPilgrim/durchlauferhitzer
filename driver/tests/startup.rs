@@ -162,10 +162,9 @@ fn overlapping_listen_addresses_fail_at_the_second() {
         Containment::Switch,
     );
     let path = path.to_str().unwrap();
-    let expected = format!(
-        "durchlauferhitzer: cannot listen on 127.0.0.1:{port}: \
-         Address already in use (os error 98)\n"
-    );
+    // The message is the libc's (musl: "Address in use").
+    let in_use = std::io::Error::from_raw_os_error(libc::EADDRINUSE);
+    let expected = format!("durchlauferhitzer: cannot listen on 127.0.0.1:{port}: {in_use}\n");
     let output = run(&[path], Setup::non_root());
     assert_exit(&output, 2);
     assert_eq!(text(&output.stderr), expected);

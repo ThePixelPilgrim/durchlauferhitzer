@@ -11,8 +11,11 @@ for every rule.
 
 ## Build
 
-Linux 5.14 or later on x86_64 or aarch64 (glibc; CI builds and tests
-both), and the stable Rust toolchain pinned in `rust-toolchain.toml`:
+Linux 5.14 or later on x86_64 or aarch64, with glibc or musl (CI builds
+and tests all four, musl on Alpine), and the stable Rust toolchain pinned
+in `rust-toolchain.toml`. The binary links the system libc dynamically
+(`.cargo/config.toml` turns off musl's default static linking); on Alpine
+the linker needs `gcc` and `musl-dev`:
 
 ```sh
 cargo build --release --locked

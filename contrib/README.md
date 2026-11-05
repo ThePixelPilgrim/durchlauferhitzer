@@ -15,4 +15,15 @@ binary.
 - `openrc/durchlauferhitzer.confd` — its settings, as
   `/etc/conf.d/durchlauferhitzer`.
 
-Tested by `driver/tests/restart.rs` (as root; CI's root step).
+- `test-openrc.sh <binary>` — POSIX `sh`, as root on a throwaway system
+  with OpenRC (CI: the Alpine jobs, in a container): installs the script,
+  its conf.d, the helper and the binary, then `start`, a request,
+  replaces the binary in place and points the config at a second root,
+  `reload` (the answer comes from the new root) while a slow client keeps
+  the old process draining, `status` (started), the new process's
+  descriptors (only stdin, the log, the root, its listener and its
+  anonymous inodes), `stop` (the new and the draining old process end).
+  It installs into `/etc`, `/usr` and `/srv`: not for a real system.
+
+Tested by `driver/tests/restart.rs` (as root; CI's root step) and, under
+OpenRC itself, by `test-openrc.sh`.

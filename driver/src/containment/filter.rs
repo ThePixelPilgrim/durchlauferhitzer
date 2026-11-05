@@ -69,7 +69,7 @@ enum Rule {
     Socket,
     /// `mmap`, `mprotect`: `prot` (argument 2) without `PROT_EXEC`.
     NoExec,
-    /// `clone`: exactly the flags glibc's `pthread_create` passes.
+    /// `clone`: exactly the flags the libc's `pthread_create` passes.
     Thread,
     /// `prctl`: only the options in [`PRCTL_OPTIONS`].
     Prctl,
@@ -86,6 +86,11 @@ enum Rule {
     /// `tgkill`: only `SIGABRT` (glibc's `abort`) to the server's own
     /// process.
     Abort,
+    /// `tkill`: only `SIGABRT` (musl's `abort`, `raise`) to the server's
+    /// main thread, whose id is the pid: `tkill` names no process, so a
+    /// worker's id cannot be told from another process's thread.
+    #[cfg(target_env = "musl")]
+    AbortMain,
     /// `clone3`: `ENOSYS` whatever the action, so glibc falls back to
     /// `clone`, whose flags can be checked (`clone3` passes them in
     /// memory, out of the filter's reach).
@@ -106,10 +111,17 @@ const fn e(name: &'static str, nr: u32, rule: Rule) -> Entry {
 }
 
 /// x86_64 (`strace -f` over the driver tests on Ubuntu 24.04, glibc 2.39).
+/// Entries under `cfg(target_env = "musl")` replace or add to glibc's
+/// where musl makes other calls (Alpine 3.24, musl 1.2.5; NFR-PORT-02),
+/// each naming the musl function.
 const X86_64: &[Entry] = &[
     // The loop: epoll, and reads and writes of the wake eventfd, the
     // signalfd, the sockets and the log on stderr; closing descriptors.
+    #[cfg(not(target_env = "musl"))]
     e("epoll_wait", 232, Rule::Allow),
+    // musl's `epoll_wait` is `epoll_pwait` with no signal mask.
+    #[cfg(target_env = "musl")]
+    e("epoll_pwait", 281, Rule::Allow),
     e("epoll_ctl", 233, Rule::Allow),
     e("read", 0, Rule::Allow),
     e("write", 1, Rule::Allow),
@@ -173,6 +185,11 @@ const X86_64: &[Entry] = &[
     e("rt_sigaction", 13, Rule::Allow),
     e("getpid", 39, Rule::Allow),
     e("tgkill", 234, Rule::Abort),
+    // musl's `abort` is `tkill(gettid(), SIGABRT)`: allowed from the main
+    // thread; from a worker it fails, and `abort` ends the process by its
+    // `a_crash` (`SIGSEGV`) under `fail`, by `SIGSYS` under `kill`.
+    #[cfg(target_env = "musl")]
+    e("tkill", 200, Rule::AbortMain),
     // The end of the process.
     e("exit_group", 231, Rule::Allow),
 ];
@@ -233,6 +250,8 @@ const AARCH64: &[Entry] = &[
     e("rt_sigaction", 134, Rule::Allow),
     e("getpid", 172, Rule::Allow),
     e("tgkill", 131, Rule::Abort),
+    #[cfg(target_env = "musl")]
+    e("tkill", 130, Rule::AbortMain),
     // The end of the process.
     e("exit_group", 94, Rule::Allow),
 ];
@@ -255,7 +274,21 @@ const FUTEX_OPERATIONS: &[u32] = &[
     (libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG) as u32,
     (libc::FUTEX_WAIT_BITSET | libc::FUTEX_PRIVATE_FLAG) as u32,
     (libc::FUTEX_WAIT_BITSET | libc::FUTEX_CLOCK_REALTIME) as u32,
+    // musl's thread list lock (`__tl_lock`, `__tl_unlock` in
+    // `pthread_exit` and `pthread_create`; `__tl_sync` in `pthread_join`
+    // waits for an exiting thread's id, which the kernel clears): a shared
+    // `FUTEX_WAIT` and `FUTEX_WAKE`, musl's `__wait` and `__wake` with
+    // `priv` 0.
+    #[cfg(target_env = "musl")]
+    FUTEX_WAIT_SHARED,
+    #[cfg(target_env = "musl")]
+    FUTEX_WAKE_SHARED,
 ];
+
+#[cfg(target_env = "musl")]
+const FUTEX_WAIT_SHARED: u32 = libc::FUTEX_WAIT as u32;
+#[cfg(target_env = "musl")]
+const FUTEX_WAKE_SHARED: u32 = libc::FUTEX_WAKE as u32;
 
 /// The `fcntl` commands the server uses after startup (see the table).
 /// These values, like every constant the argument checks use, are the
@@ -268,7 +301,8 @@ const FCNTL_COMMANDS: &[u32] = &[
 
 /// The program for `arch`: every listed call allowed (with its argument
 /// checks), everything else answered by `action`. `pid` is the server's
-/// own (`getpid`): the only process `tgkill` may signal.
+/// own (`getpid`): the only process `tgkill` may signal (and on musl the
+/// only thread `tkill` may).
 pub fn program(arch: Arch, action: SeccompAction, pid: u32) -> Vec<libc::sock_filter> {
     let deny = match action {
         SeccompAction::Fail => libc::SECCOMP_RET_ERRNO | errno(libc::EPERM),
@@ -305,8 +339,12 @@ const fn arg(i: u32) -> u32 {
 const JEQ: u32 = libc::BPF_JEQ;
 const JSET: u32 = libc::BPF_JSET;
 
-/// glibc's `pthread_create` flags (`clone`, glibc ≥ 2.34).
-const THREAD_FLAGS: u32 = (libc::CLONE_VM
+/// The libc's `pthread_create` flags (`clone`): glibc's (≥ 2.34), and on
+/// musl the same plus `CLONE_DETACHED`, which the kernel ignores.
+const THREAD_FLAGS: u32 = GLIBC_THREAD_FLAGS | MUSL_THREAD_FLAGS;
+
+/// glibc's `pthread_create` flags (glibc ≥ 2.34).
+const GLIBC_THREAD_FLAGS: u32 = (libc::CLONE_VM
     | libc::CLONE_FS
     | libc::CLONE_FILES
     | libc::CLONE_SIGHAND
@@ -315,6 +353,13 @@ const THREAD_FLAGS: u32 = (libc::CLONE_VM
     | libc::CLONE_SETTLS
     | libc::CLONE_PARENT_SETTID
     | libc::CLONE_CHILD_CLEARTID) as u32;
+
+/// What musl's `pthread_create` adds: `CLONE_DETACHED` (`linux/sched.h`;
+/// not in the `libc` crate).
+#[cfg(target_env = "musl")]
+const MUSL_THREAD_FLAGS: u32 = 0x0040_0000;
+#[cfg(not(target_env = "musl"))]
+const MUSL_THREAD_FLAGS: u32 = 0;
 
 /// The instructions after an entry's number matched; `pid` is the
 /// server's.
@@ -356,6 +401,14 @@ fn body(rule: Rule, deny: u32, pid: u32) -> Vec<libc::sock_filter> {
             // `sig` SIGABRT.
             let mut out = vec![load(arg(0)), jump(JEQ, pid, 1, 0), ret(deny)];
             out.extend(one_of(arg(2), &[libc::SIGABRT as u32], deny));
+            out
+        }
+        #[cfg(target_env = "musl")]
+        Rule::AbortMain => {
+            // `tkill(tid, sig)`: `tid` must be the main thread (the pid),
+            // then `sig` SIGABRT.
+            let mut out = vec![load(arg(0)), jump(JEQ, pid, 1, 0), ret(deny)];
+            out.extend(one_of(arg(1), &[libc::SIGABRT as u32], deny));
             out
         }
     }

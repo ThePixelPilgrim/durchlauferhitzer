@@ -153,9 +153,11 @@ jobs:
         # systempaths=unconfined makes /proc/sys writable: the restart
         # tests and the reload helper write net.ipv4.tcp_migrate_req, in
         # the container's own network namespace. Its loopback gets IPv6.
+        # --init: a reaping pid 1, so the servers the tests and OpenRC
+        # stop leave no zombies.
         shell: bash
         run: |
-          docker run -d --name alpine \
+          docker run -d --init --name alpine \
             --security-opt seccomp=unconfined \
             --security-opt systempaths=unconfined \
             --cap-add SYS_PTRACE \
@@ -201,7 +203,7 @@ jobs:
           set -o pipefail
           DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 \
             DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
-            cargo test --workspace --locked -- --nocapture 2>&1 | tee tests.log
+            cargo test --workspace --locked --no-fail-fast -- --nocapture 2>&1 | tee tests.log
       - name: Driver tests under seccomp kill (as root)
         # Every server the tests start has `seccomp_action kill`: a call
         # missing from the musl allow-list ends it and fails its test.
@@ -210,12 +212,17 @@ jobs:
           DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 \
             DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
             DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1 \
-            cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee kill-tests.log
+            cargo test -p durchlauferhitzer --locked --no-fail-fast -- --nocapture 2>&1 \
+            | tee kill-tests.log
       - name: Skips
         if: always()
-        run: grep -h 'skipped:' tests.log kill-tests.log || echo "no skips"
+        run: cat tests.log kill-tests.log 2>/dev/null | grep 'skipped:' || echo "no skips"
       - name: Product dependency check
         run: scripts/check-product-deps.sh
+      - name: OpenRC end to end
+        # Installs the script and starts, reloads (binary replaced in
+        # place), checks status and descriptors, stops (contrib/README.md).
+        run: contrib/test-openrc.sh /tmp/target/debug/durchlauferhitzer
       - name: Stop the container
         if: always()
         shell: bash

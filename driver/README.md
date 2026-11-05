@@ -29,6 +29,10 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
   workspace denies `unsafe_code` rather than forbidding it, so `sys` can
   allow it; core and sim forbid it at their crate roots.
 - **Linux only** (NFR-PORT-01): the crate fails to build elsewhere.
+  glibc or musl (NFR-PORT-02); musl links the system musl dynamically
+  (`../.cargo/config.toml`). Where the two make other system calls, the
+  seccomp tables have `cfg(target_env = "musl")` entries; tests that
+  depend on libc text compare with the running libc's (`strerror`).
 
 ## Layout
 
@@ -121,11 +125,16 @@ src/
                       action, pid)`: the arch check, then each call with its
                       argument checks (`socket` AF_INET/AF_INET6 streams,
                       protocol 0, `mmap`/`mprotect` without PROT_EXEC,
-                      `clone` with glibc's thread flags, `prctl`
+                      `clone` with the libc's thread flags, `prctl`
                       PR_SET_NAME, `fcntl` F_GETFD/F_GETFL/F_SETFL,
                       `setsockopt` TCP_NODELAY, `getsockopt` SO_ERROR,
                       `futex` private wait/wake and `pthread_join`'s wait,
                       `tgkill` SIGABRT to `pid`; `clone3` ENOSYS;
+                      musl's own entries under `cfg(target_env = "musl")`:
+                      `epoll_pwait` for x86_64's `epoll_wait`, `clone`
+                      with `CLONE_DETACHED`, the thread list lock's shared
+                      `futex` wait/wake, `tkill` SIGABRT to the main
+                      thread;
                       `clock_gettime`, the vDSO fallback), the action for
                       the rest (`fail`: EPERM, `kill`); never `truncate`,
                       `ftruncate`, `ioctl`, `newfstatat` or `execve`.
@@ -684,7 +693,8 @@ Notes on the wrappers:
   SIGSYS and fails the test (FR-PROC-06). `containment.rs` keeps its own
   blocks, and invalid configs (exit 1 at load) get none. The loop tests
   run the driver in the test process, without a filter. CI runs the
-  server tests and the root step both ways. Rare paths the binary tests
+  server tests and the root step both ways, and on Alpine (musl, as root
+  in a container) the whole suite both ways. Rare paths the binary tests
   cannot reach (a disk timeout and a detached worker need a hung file
   system; a channel's `sched_yield`) rest on the filter's reasoning.
 - Tests: the signalfd test is a unit test in `src/sys/signal.rs`, because it

@@ -60,8 +60,8 @@ const HELPER: &str = concat!(
     "/../contrib/durchlauferhitzer-reload"
 );
 
-/// The OpenRC files, checked with `sh -n`.
-const OPENRC: [&str; 2] = [
+/// The OpenRC files and their end-to-end test, checked with `sh -n`.
+const OPENRC: [&str; 3] = [
     concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../contrib/openrc/durchlauferhitzer"
@@ -70,6 +70,7 @@ const OPENRC: [&str; 2] = [
         env!("CARGO_MANIFEST_DIR"),
         "/../contrib/openrc/durchlauferhitzer.confd"
     ),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../contrib/test-openrc.sh"),
 ];
 
 /// How long the old process may take to drain and exit.
