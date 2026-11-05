@@ -194,6 +194,7 @@ jobs:
           rustup show
           ldd --version 2>&1 | head -n2 || true
           uname -rm
+          cat /proc/sys/net/ipv6/bindv6only /proc/sys/net/ipv4/ip_unprivileged_port_start
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: The binary links the system musl
