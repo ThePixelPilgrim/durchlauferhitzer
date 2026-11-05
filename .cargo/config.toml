@@ -1,0 +1,7 @@
+# musl (Alpine, NFR-PORT-02): link the system musl dynamically, like the
+# system glibc, not a static copy of the musl the toolchain bundles.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]

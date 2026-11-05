@@ -118,3 +118,105 @@ jobs:
         run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+  alpine:
+    # musl (NFR-PORT-02): the build, the tests and the seccomp allow-list
+    # on Alpine, as root, with and without the kill switch, and the OpenRC
+    # script end to end (FR-PROC-07).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    name: alpine (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    # About 10 min.
+    timeout-minutes: 45
+    # Not a job `container:`: the runner cannot run JavaScript actions
+    # (checkout) inside an Alpine container on arm64, so checkout runs on
+    # the host and the steps run in a container started by hand, with the
+    # work directory mounted at the same path (the documented workaround).
+    defaults:
+      run:
+        shell: docker exec alpine sh -e {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start the Alpine container
+        # Alpine 3.24.3 (musl 1.2.5), pinned by digest (the multi-arch
+        # index) as of 2026-11-05. As the nightly Debian job: no Docker
+        # seccomp profile (it would filter every process and hide a call
+        # missing from our allow-list), CAP_SYS_PTRACE (root reads
+        # /proc/<pid>/fd of a server running as nobody).
+        # systempaths=unconfined makes /proc/sys writable: the restart
+        # tests and the reload helper write net.ipv4.tcp_migrate_req, in
+        # the container's own network namespace. Its loopback gets IPv6.
+        shell: bash
+        run: |
+          docker run -d --name alpine \
+            --security-opt seccomp=unconfined \
+            --security-opt systempaths=unconfined \
+            --cap-add SYS_PTRACE \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv6.conf.lo.disable_ipv6=0 \
+            -v /home/runner/work:/home/runner/work \
+            -w "$GITHUB_WORKSPACE" \
+            -e PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            -e CARGO_TARGET_DIR=/tmp/target \
+            -e TMPDIR=/tmp \
+            alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a \
+            sleep infinity
+      - name: Install build tools
+        # gcc is only the linker against the system musl; bash runs the
+        # dependency check; util-linux has setarch, setpriv and prlimit
+        # for the tests; openrc and curl the OpenRC test.
+        run: |
+          apk add --no-cache bash curl gcc musl-dev git util-linux openrc
+          command -v setpriv prlimit setarch
+      - name: Install rustup and the pinned toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          rustup toolchain install
+      - name: Versions
+        run: |
+          rustup show
+          ldd --version 2>&1 | head -n2 || true
+          uname -rm
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: The binary links the system musl
+        # .cargo/config.toml: -crt-static, so the binary needs libc.musl.
+        run: |
+          cargo build --locked -p durchlauferhitzer
+          readelf -d /tmp/target/debug/durchlauferhitzer | tee dynamic.txt
+          grep -q 'NEEDED.*libc\.musl' dynamic.txt
+      - name: Test (as root)
+        # Root-only tests run (root in the container); a root,
+        # tcp_migrate_req, Landlock or IPv6 skip is a failure. Every skip
+        # prints a `skipped:` line, listed by the Skips step.
+        run: |
+          set -o pipefail
+          DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 \
+            DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
+            cargo test --workspace --locked -- --nocapture 2>&1 | tee tests.log
+      - name: Driver tests under seccomp kill (as root)
+        # Every server the tests start has `seccomp_action kill`: a call
+        # missing from the musl allow-list ends it and fails its test.
+        run: |
+          set -o pipefail
+          DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 \
+            DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
+            DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1 \
+            cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee kill-tests.log
+      - name: Skips
+        if: always()
+        run: grep -h 'skipped:' tests.log kill-tests.log || echo "no skips"
+      - name: Product dependency check
+        run: scripts/check-product-deps.sh
+      - name: Stop the container
+        if: always()
+        shell: bash
+        run: docker rm -f alpine
