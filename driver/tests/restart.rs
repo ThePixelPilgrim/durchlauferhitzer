@@ -283,8 +283,9 @@ impl Site {
     }
 
     /// The pids `<pidfile>.draining` lists (none without the file).
-    /// Each line is `<pid> <start time>`; the start time must be the
-    /// process's own.
+    /// Each line is `<pid> <start time>`; while the process still runs,
+    /// the start time must be its own (one that finished draining may
+    /// be gone by the time this reads it).
     fn draining(&self) -> Vec<u32> {
         fs::read_to_string(self.draining_file())
             .unwrap_or_default()
@@ -292,7 +293,9 @@ impl Site {
             .map(|line| {
                 let (pid, start) = line.split_once(' ').unwrap();
                 let pid = pid.parse().unwrap();
-                assert_eq!(Some(start.to_owned()), start_time(pid), "{line}");
+                if let Some(now) = start_time(pid) {
+                    assert_eq!(start, now, "{line}");
+                }
                 pid
             })
             .collect()
