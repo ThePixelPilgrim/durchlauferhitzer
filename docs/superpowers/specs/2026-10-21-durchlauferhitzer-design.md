@@ -10,7 +10,7 @@ Status: approved — **single source of truth** for what the product must do.
   *withdrawn*. Plans, reviews, ledgers and commit messages cite IDs instead
   of restating requirements. A new owner decision is written here first
   (new ID or edited text), then cited.
-- Status tags: **[done]** implemented and tested (stages 1–5);
+- Status tags: **[done]** implemented and tested (stages 1–6);
   **[done in core; driver stage 4]** the core's half is done and the
   epoll driver's is due (none left after stage 4); **[done; X stage N]**
   done, with the follow-up X due in stage N (e.g. NFR-MAINT-04's CI
@@ -296,7 +296,7 @@ Structure and values:
   | `body_idle_timeout` | 30s | [done] |
   | `disk_threads` | 4 (disk worker pool size) | [done] |
   | `shutdown_timeout` | 30s (FR-PROC-05) | [done] |
-  | `restart_timeout` | 10m (the restart drain, FR-PROC-07; owner decision 2026-11-04) | [stage 6] |
+  | `restart_timeout` | 10m (the restart drain, FR-PROC-07; owner decision 2026-11-04) | [done] |
   | `memory_limit` | 1GiB (budget for per-connection buffers, FR-CFG-21) | [done] |
   | `ipv6_prefix` | 64 (per-IP grouping of IPv6 peers, FR-CONN-13; (owner decision 2026-10-29, stage 5 brainstorm)) | [done] |
 
@@ -1252,7 +1252,7 @@ Failures, persistence, timeouts:
   usage: durchlauferhitzer <config-path>
          durchlauferhitzer --check <config-path>
   ```
-  *[stage 6]* `durchlauferhitzer --ready-fd <n> <config-path>` runs the
+  *[done in stage 6]* `durchlauferhitzer --ready-fd <n> <config-path>` runs the
   server and reports readiness on descriptor `n` (FR-PROC-07); the usage
   gains that line.
 - **FR-PROC-02** [done] If systemd passes listening sockets (socket
@@ -1369,7 +1369,7 @@ Failures, persistence, timeouts:
   `no_socket_lands_on_a_standard_descriptor` pins the runtime's
   behaviour). Caveat: where `/dev/null` cannot be opened (a bare chroot)
   the runtime aborts the process (SIGABRT) before `main`.
-- **FR-PROC-05** [done; target restart stage 6, FR-PROC-07] Shutdown has two speeds and two targets (owner
+- **FR-PROC-05** [done] Shutdown has two speeds and two targets (owner
   decision):
   - *Graceful* (SIGTERM): stop accepting work, let in-flight requests
     finish, keep-alive connections are closed after their current
@@ -1583,7 +1583,7 @@ Failures, persistence, timeouts:
   - All containment code lives in one small driver module behind one
     interface, so a build without it (a future unikernel port, NFR-PORT-07)
     can leave it out without touching the core.
-- **FR-PROC-07** [stage 6] Zero-downtime restart: no connection is lost.
+- **FR-PROC-07** [done] Zero-downtime restart: no connection is lost.
   *(Owner decisions 2026-11-04, stage 6 brainstorm:)* a restart must not
   drop or reset a single connection, accepted or still queued; that is
   the stage's focus. The stage 5 sandbox stays strict (FR-PROC-06): the
@@ -1894,7 +1894,7 @@ Failures, persistence, timeouts:
   IPv6 required and the root step, the dependency check and its
   self-test, the docs) on x86_64 (`ubuntu-latest`) and on aarch64
   (`ubuntu-24.04-arm`).
-- **NFR-PORT-02** [done; musl stage 6] Links against the system libc; no
+- **NFR-PORT-02** [done] Links against the system libc; no
   other C. *(Owner decision 2026-11-04, stage 6 brainstorm:)* glibc or
   musl (Alpine, where OpenRC users are, FR-PROC-07): the musl build is
   built and tested in CI on Alpine, the driver suite under the seccomp
@@ -2231,7 +2231,7 @@ project working and tested.
    the config (FR-PROC-06, FR-CFG-25); long randomized simulation runs and
    fuzzing, nightly and on demand (NFR-TEST-08, NFR-SEC-13); IPv6 per-IP
    grouping by a settable prefix and a fair refused pool (FR-CONN-13).
-6. **Zero-downtime restart** — FR-PROC-07 (no connection lost; SIGHUP
+6. **Zero-downtime restart** [done] — FR-PROC-07 (no connection lost; SIGHUP
    restart drain, `restart_timeout`, `--ready-fd`, `SO_REUSEPORT`, an
    OpenRC script), musl builds on Alpine (NFR-PORT-02).
 7. **Scaling and efficiency** — N driver threads with `SO_REUSEPORT`,
