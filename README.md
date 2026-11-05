@@ -170,7 +170,8 @@ losing a connection; the OpenRC script's `reload` calls it
    process and leaves the old one alone;
 6. writes the new pid to `<pidfile>`, adds the old one to
    `<pidfile>.draining`, and sends it `SIGHUP` (it drains, then exits 0).
-   The OpenRC script's `stop` also stops the processes still draining.
+   The OpenRC script's `stop` also stops the processes still draining
+   (each checked by binary and start time, so a reused pid is left alone).
 
 It exits 0, or 1 with the reason. Notes:
 

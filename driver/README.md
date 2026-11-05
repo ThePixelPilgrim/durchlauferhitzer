@@ -273,10 +273,15 @@ tests/
                     meanwhile); a bad config, a new process failing before
                     or after binding, a stale pid file: exit 1, the old
                     serves on, no stray process; a dropped `listen`
-                    address is refused afterwards; a second helper while
-                    the lock is held is refused; the old pids are listed
-                    in `<pidfile>.draining` and the OpenRC script's
-                    `stop_post` ends them (not another program's pid);
+                    address is refused afterwards; a new process not ready
+                    within the timeout (its config a FIFO that only
+                    `--check` was fed) is stopped and reaped; a second
+                    helper while the lock is held is refused (naming its
+                    pid), a lock that cannot be created is named; the
+                    old pids are listed with their start times in
+                    `<pidfile>.draining` and the OpenRC script's
+                    `stop_post` ends them (not another program's pid, nor
+                    a pid with another start time);
                     the new process inherits no fd 4-9. Control: with
                     `tcp_migrate_req` 0 the queued connections are reset.
                     Root only (skipped with a reason, or failed with

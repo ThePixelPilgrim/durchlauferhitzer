@@ -40,17 +40,22 @@ start_pre() {
 }
 
 # The processes a reload left draining (the helper lists them in
-# $pidfile.draining): those still running $command get the signals of
-# $retry, like the server itself, then the list goes.
+# $pidfile.draining as "<pid> <start time>"): those still running
+# $command, with that start time (field 22 of their stat), get the
+# signals of $retry, like the server itself, then the list goes.
 stop_post() {
 	dl_list="$pidfile.draining"
 	[ -f "$dl_list" ] || return 0
 	dl_real=$(readlink -f "$command")
 	dl_pids=
-	while read -r dl_pid; do
+	while read -r dl_pid dl_start; do
 		case $dl_pid in
 		'' | *[!0-9]*) continue ;;
 		esac
+		dl_now=$(sed -n 's/^.*) //p' "/proc/$dl_pid/stat" 2>/dev/null | cut -d ' ' -f 20)
+		if [ -z "$dl_start" ] || [ "$dl_now" != "$dl_start" ]; then
+			continue
+		fi
 		dl_exe=$(readlink "/proc/$dl_pid/exe" 2>/dev/null) || continue
 		[ "${dl_exe% (deleted)}" = "$dl_real" ] && dl_pids="$dl_pids $dl_pid"
 	done <"$dl_list"

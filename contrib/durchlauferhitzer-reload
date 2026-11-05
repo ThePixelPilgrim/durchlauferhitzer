@@ -4,7 +4,8 @@
 #
 # usage: durchlauferhitzer-reload <binary> <config> <pidfile> <logfile> [ready-timeout-seconds]
 #
-#  0. Take the lock <pidfile>.lock (a directory): one reload at a time.
+#  0. Take the lock <pidfile>.lock (a directory holding the helper's pid):
+#     one reload at a time.
 #  1. <binary> --check <config>; on an error, print it and stop.
 #  2. net.ipv4.tcp_migrate_req must be 1 (written if 0, never restored):
 #     the old process's queued connections then move to the new one.
@@ -16,8 +17,9 @@
 #  5. Wait for "ready" (default 30 s). Otherwise stop the new process and
 #     leave the old one untouched.
 #  6. Signals ignored from here: point <pidfile> at the new process (temp
-#     file, then rename), add the old pid to <pidfile>.draining (the
-#     OpenRC script's stop ends those still running), send it SIGHUP: it
+#     file, then rename), add the old pid and its start time to
+#     <pidfile>.draining (the OpenRC script's stop ends those still
+#     running), send it SIGHUP: it
 #     closes its listeners and drains.
 #
 # Exit 0 on success; 1 with a one-line reason on stderr otherwise.
@@ -52,6 +54,12 @@ running() {
 	[ -n "$s" ] && [ "$s" != Z ]
 }
 
+# The start time of a pid (field 22 of its stat, counted after the last
+# ")": the command name may hold spaces and parentheses).
+start_time() {
+	sed -n 's/^.*) //p' "/proc/$1/stat" 2>/dev/null | cut -d ' ' -f 20
+}
+
 # The executable a pid runs, without the " (deleted)" of a replaced file.
 exe_of() {
 	e=$(readlink "/proc/$1/exe" 2>/dev/null) || return 1
@@ -77,15 +85,22 @@ cleanup() {
 	[ -n "$reader" ] && kill "$reader" 2>/dev/null
 	[ -n "$new" ] && [ -z "$handed_over" ] && stop_new
 	[ -n "$dir" ] && rm -rf "$dir"
-	[ -n "$locked" ] && rmdir "$lock" 2>/dev/null
+	[ -n "$locked" ] && rm -f "$lock/pid" && rmdir "$lock" 2>/dev/null
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 # 0. One reload at a time.
-mkdir "$lock" 2>/dev/null ||
-	fail "another reload is running ($lock exists; remove it if none is)"
+if ! err=$(mkdir "$lock" 2>&1); then
+	if [ -d "$lock" ]; then
+		holder=
+		{ read -r holder <"$lock/pid"; } 2>/dev/null
+		fail "another reload is running (pid ${holder:-unknown}; remove $lock if none is)"
+	fi
+	fail "cannot create the lock $lock: ${err#mkdir: }"
+fi
 locked=yes
+echo $$ >"$lock/pid"
 
 # 1. The config.
 if ! out=$("$binary" --check "$config" 2>&1); then
@@ -161,19 +176,22 @@ if ! { printf '%s\n' "$new" >"$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$pidfil
 	fail "cannot write $pidfile"
 fi
 handed_over=yes
-# The draining list: the old pid, after those listed that still run.
+# The draining list ("<pid> <start time>" lines): the old process, after
+# those listed that still run (same binary, same start time).
 draining=$pidfile.draining
+old_start=$(start_time "$old")
 if tmp=$(mktemp "$draining.XXXXXX"); then
 	if ! {
 		if [ -f "$draining" ]; then
-			while read -r pid; do
+			while read -r pid start; do
 				case $pid in
 				'' | *[!0-9]* | "$old") continue ;;
 				esac
-				[ "$(exe_of "$pid")" = "$real" ] && printf '%s\n' "$pid"
+				[ -n "$start" ] && [ "$(start_time "$pid")" = "$start" ] &&
+					[ "$(exe_of "$pid")" = "$real" ] && printf '%s %s\n' "$pid" "$start"
 			done <"$draining"
 		fi
-		printf '%s\n' "$old"
+		printf '%s %s\n' "$old" "$old_start"
 	} >"$tmp" || ! mv -f "$tmp" "$draining"; then
 		rm -f "$tmp"
 	fi

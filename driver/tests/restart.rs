@@ -234,13 +234,23 @@ impl Site {
 
     /// Runs the reload helper with `conf` and a 10 s readiness timeout.
     fn reload(&self, conf: &Path) -> Output {
-        reload_with(&[
-            self.bin.as_os_str(),
-            conf.as_os_str(),
-            self.pidfile.as_os_str(),
-            self.log.as_os_str(),
-            "10".as_ref(),
-        ])
+        self.reload_within(conf, "10")
+    }
+
+    /// Runs the reload helper with `conf` and a readiness timeout of
+    /// `timeout` seconds; its temp dirs go to [`Site::tmp`].
+    fn reload_within(&self, conf: &Path, timeout: &str) -> Output {
+        let mut cmd = Command::new("sh");
+        cmd.arg(HELPER)
+            .args([&self.bin, conf, &self.pidfile, &self.log])
+            .arg(timeout)
+            .env("TMPDIR", self.tmp());
+        bounded(cmd)
+    }
+
+    /// The helper's `TMPDIR`.
+    fn tmp(&self) -> PathBuf {
+        self.dir.dir("tmp")
     }
 
     /// Runs the helper as [`Site::reload`] does, with `file` open on fds 5
@@ -273,11 +283,18 @@ impl Site {
     }
 
     /// The pids `<pidfile>.draining` lists (none without the file).
+    /// Each line is `<pid> <start time>`; the start time must be the
+    /// process's own.
     fn draining(&self) -> Vec<u32> {
         fs::read_to_string(self.draining_file())
             .unwrap_or_default()
             .lines()
-            .map(|line| line.parse().unwrap())
+            .map(|line| {
+                let (pid, start) = line.split_once(' ').unwrap();
+                let pid = pid.parse().unwrap();
+                assert_eq!(Some(start.to_owned()), start_time(pid), "{line}");
+                pid
+            })
             .collect()
     }
 
@@ -376,6 +393,14 @@ fn bounded(mut cmd: Command) -> Output {
         thread::sleep(Duration::from_millis(5));
     }
     child.wait_with_output().unwrap()
+}
+
+/// Field 22 of `/proc/<pid>/stat`, the start time (counted after the
+/// last `)`, since the command name may contain spaces and parentheses).
+fn start_time(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(") ")?;
+    rest.split(' ').nth(19).map(str::to_owned)
 }
 
 /// Whether `pid` is running (a zombie is not).
@@ -717,10 +742,16 @@ fn a_concurrent_reload_is_refused() {
     let mut old = site.start(&old_conf);
     let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
     fs::create_dir(&lock).unwrap();
+    fs::write(lock.join("pid"), "12345\n").unwrap();
     let output = site.reload(&new_conf);
-    assert_refused(&site, &mut old, &output, "another reload is running");
+    assert_refused(
+        &site,
+        &mut old,
+        &output,
+        "another reload is running (pid 12345;",
+    );
     assert!(lock.is_dir(), "the refused run removed the lock");
-    fs::remove_dir(&lock).unwrap();
+    fs::remove_dir_all(&lock).unwrap();
     site.assert_reload_ok(&site.reload(&new_conf));
     assert!(!lock.exists(), "the lock was left behind");
 }
@@ -750,7 +781,11 @@ fn stop_post_ends_the_draining_processes() {
     assert_eq!(site.draining(), vec![old.pid()]);
     let mut sleeper = Command::new("sleep").arg("30").spawn().unwrap();
     let mut list = fs::read_to_string(site.draining_file()).unwrap();
-    list.push_str(&format!("{}\n", sleeper.id()));
+    // Another program; the server's binary but another start time (a
+    // reused pid); a line without a start time.
+    let sleeper_start = start_time(sleeper.id()).unwrap();
+    list.push_str(&format!("{} {sleeper_start}\n", sleeper.id()));
+    list.push_str(&format!("{new} 1\n{new}\n"));
     fs::write(site.draining_file(), list).unwrap();
     assert!(
         old.child.try_wait().unwrap().is_none(),
@@ -796,4 +831,64 @@ fn the_new_process_inherits_no_helper_descriptors() {
         !fds.iter().any(|fd| *fd == marker || fd.contains("ready")),
         "{fds:?}"
     );
+}
+
+/// A lock that cannot be created (its directory is missing) is named as
+/// such, not as another reload.
+#[test]
+fn a_lock_that_cannot_be_created_is_named() {
+    let _serial = serial();
+    let output = reload_with(&[
+        exe(),
+        "/nonexistent-dlh/x.conf",
+        "/nonexistent-dlh/x.pid",
+        "/nonexistent-dlh/x.log",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.starts_with(
+            "durchlauferhitzer-reload: cannot create the lock /nonexistent-dlh/x.pid.lock: "
+        ),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+}
+
+/// A new process that never reports ready (it blocks opening its config,
+/// a FIFO that `--check` alone was fed) is stopped and reaped after the
+/// timeout; the old process, the pid file and the temp dirs are as before.
+#[test]
+fn a_new_process_that_is_not_ready_in_time_is_stopped() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let fed = site.config("fifo", &[addr], "new");
+    let text_of_conf = fs::read_to_string(&fed).unwrap();
+    fs::remove_file(&fed).unwrap();
+    let made = Command::new("mkfifo").arg(&fed).status().unwrap();
+    assert!(made.success());
+    let mut old = site.start(&old_conf);
+    let feeder = {
+        let fed = fed.clone();
+        thread::spawn(move || fs::write(fed, text_of_conf).unwrap())
+    };
+    let started = Instant::now();
+    let output = site.reload_within(&fed, "2");
+    let took = started.elapsed();
+    feeder.join().unwrap();
+    assert_refused(
+        &site,
+        &mut old,
+        &output,
+        "the new process was not ready within 2 s",
+    );
+    assert!(took >= Duration::from_secs(2), "{took:?}");
+    assert!(took < Duration::from_secs(8), "{took:?}");
+    assert_eq!(fs::read_dir(site.tmp()).unwrap().count(), 0);
+    assert!(!site.dir.path().join("durchlauferhitzer.pid.lock").exists());
 }
