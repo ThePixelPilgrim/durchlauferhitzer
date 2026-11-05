@@ -24,7 +24,7 @@ jobs:
     env:
       # The test files that run the server (the root step checks the
       # list against the files that include `support/child.rs`).
-      SERVER_TESTS: budget cli containment privileges shutdown smoke startup systemd
+      SERVER_TESTS: budget cli containment privileges restart shutdown smoke startup systemd
     steps:
       # Pinned by commit: the v7.0.1 tag (Node 24) as of 2026-11-01.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +56,7 @@ jobs:
           DURCHLAUFERHITZER_REQUIRE_IPV6: "1"
           DURCHLAUFERHITZER_REQUIRE_LANDLOCK: "1"
           DURCHLAUFERHITZER_TEST_SECCOMP_KILL: "1"
-      - name: Root tests (as root; a root skip is a failure)
+      - name: Root tests (as root; a root or tcp_migrate_req skip is a failure)
         # The test binaries that run the server are built as the runner
         # user (cargo never runs as root) and run with sudo: the privilege
         # drop's root-only cases run, and the others run the server as
@@ -87,11 +87,14 @@ jobs:
             | grep -o '"executable":"[^"]*/deps/[^"]*"' | cut -d '"' -f 4)
           test "$(wc -l <<< "$bins")" -eq "${#tests[@]}"
           chmod a+x "$HOME"
+          # restart.rs: queued connections move on a listener's close.
+          sudo sysctl -w net.ipv4.tcp_migrate_req=1
           cd driver
           for bin in $bins; do
             for kill in 0 1; do
               echo "== $bin (seccomp kill switch: $kill)"
               sudo env DURCHLAUFERHITZER_REQUIRE_ROOT=1 \
+                DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 \
                 DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
                 DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 \
                 DURCHLAUFERHITZER_TEST_SECCOMP_KILL="$kill" TMPDIR=/tmp "$bin"

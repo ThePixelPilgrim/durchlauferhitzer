@@ -149,6 +149,36 @@ connection. Without `LISTEN_PID`/`LISTEN_FDS` the server binds itself; a
 socket that does not match the config, or a dual-stack IPv6 socket, is
 exit 2.
 
+## Restart without systemd
+
+`contrib/durchlauferhitzer-reload <binary> <config> <pidfile> <logfile>
+[ready-timeout-seconds]` (POSIX `sh`) restarts a running server without
+losing a connection; the OpenRC script's `reload` calls it
+([`contrib/`](contrib)). In order, it
+
+1. checks the config (`--check`) and stops on an error;
+2. sets `net.ipv4.tcp_migrate_req` to 1 (Linux 5.14 or later; left set),
+   so connections queued on the old process move to the new one when it
+   closes its listeners;
+3. checks that the pid in `<pidfile>` runs `<binary>` (a replaced binary
+   counts);
+4. starts `<binary> --ready-fd 3 <config>` beside it, in its own session,
+   output appended to `<logfile>`;
+5. waits for `ready` (default 30 s); if it does not come, it stops the new
+   process and leaves the old one alone;
+6. writes the new pid to `<pidfile>` and sends the old process `SIGHUP`
+   (it drains, then exits 0).
+
+It exits 0, or 1 with the reason. Notes:
+
+- Only a process with the same effective uid at bind time can share the
+  ports: start the server as root with `user` set (it binds, then
+  drops), and run the helper as root.
+- A `listen` address the new config drops closes with the old process;
+  connections queued on it are reset.
+- Upgrading from a stage 5 binary (listeners without `SO_REUSEPORT`)
+  needs one full stop and start.
+
 ## Signals and exit codes
 
 - `SIGTERM`: graceful shutdown. The listeners close (new connections are
@@ -192,6 +222,7 @@ keyed by a fingerprint of the failure (`scripts/nightly-report.py`).
 - [`sim/`](sim) — test-only simulation driver: simulated network, clock, file system and backends, with contract checks and randomized runs.
 - [`fuzz/`](fuzz) — test-only fuzz targets for the parsers and the config (outside the workspace).
 - [`examples/`](examples) — documented example configuration.
+- [`contrib/`](contrib) — the reload helper and the OpenRC script.
 - [`docs/superpowers/`](docs/superpowers) — design spec, implementation plans per stage, and review records.
 - [`scripts/`](scripts) — CI helpers (product dependency check, nightly failure issues).
 

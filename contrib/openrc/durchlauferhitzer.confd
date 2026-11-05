@@ -1,0 +1,20 @@
+# Settings of the durchlauferhitzer OpenRC script (/etc/conf.d/durchlauferhitzer).
+
+# The server binary.
+#command=/usr/sbin/durchlauferhitzer
+
+# The config. Set `user`: the server binds as root, then drops to it.
+#cfgfile=/etc/durchlauferhitzer/durchlauferhitzer.conf
+
+# stdout and stderr (the access and error log) are appended here.
+#logfile=/var/log/durchlauferhitzer.log
+
+# The reload helper (contrib/durchlauferhitzer-reload).
+#reload_helper=/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload
+
+# How long `reload` waits for the new process to be ready, in seconds.
+#ready_timeout=30
+
+# How `stop` ends the server: SIGTERM, then SIGKILL; keep the first wait
+# above the config's shutdown_timeout.
+#retry=TERM/35/KILL/5

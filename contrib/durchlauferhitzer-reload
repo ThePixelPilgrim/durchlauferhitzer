@@ -1,0 +1,146 @@
+#!/bin/sh
+# durchlauferhitzer-reload: restart a running server without losing a
+# connection (FR-PROC-07, the HAProxy model). POSIX sh (dash, busybox ash).
+#
+# usage: durchlauferhitzer-reload <binary> <config> <pidfile> <logfile> [ready-timeout-seconds]
+#
+#  1. <binary> --check <config>; on an error, print it and stop.
+#  2. net.ipv4.tcp_migrate_req must be 1 (written if 0, never restored):
+#     the old process's queued connections then move to the new one.
+#  3. The pid in <pidfile> must run <binary> (" (deleted)" allowed, for an
+#     upgraded binary).
+#  4. Start "<binary> --ready-fd 3 <config>" in its own session, output
+#     appended to <logfile>, fd 3 a FIFO in a fresh private directory.
+#  5. Wait for "ready" (default 30 s). On EOF or timeout, stop the new
+#     process and leave the old one untouched.
+#  6. Point <pidfile> at the new process (temp file, then rename), send
+#     SIGHUP to the old one: it closes its listeners and drains.
+#
+# Exit 0 on success; 1 with a one-line reason on stderr otherwise.
+
+# shellcheck disable=SC2317 # cleanup and its helpers run from a trap
+
+me=durchlauferhitzer-reload
+migrate=/proc/sys/net/ipv4/tcp_migrate_req
+
+fail() {
+	printf '%s: %s\n' "$me" "$*" >&2
+	exit 1
+}
+
+usage() {
+	fail "usage: $me <binary> <config> <pidfile> <logfile> [ready-timeout-seconds]"
+}
+
+[ $# -eq 4 ] || [ $# -eq 5 ] || usage
+binary=$1 config=$2 pidfile=$3 logfile=$4 timeout=${5:-30}
+case $timeout in
+'' | *[!0-9]* | 0*) usage ;;
+esac
+
+# The state of a pid ("R", "S", "Z", ...), empty if there is none.
+state() {
+	sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$1/stat" 2>/dev/null
+}
+
+running() {
+	s=$(state "$1")
+	[ -n "$s" ] && [ "$s" != Z ]
+}
+
+# The executable a pid runs, without the " (deleted)" of a replaced file.
+exe_of() {
+	e=$(readlink "/proc/$1/exe" 2>/dev/null) || return 1
+	printf '%s\n' "${e% (deleted)}"
+}
+
+dir='' new='' reader='' watchdog='' handed_over=''
+
+# Stops a new process that never became ready: SIGTERM, then SIGKILL
+# after 5 s; then reaps it.
+stop_new() {
+	kill -TERM "$new" 2>/dev/null
+	n=0
+	while running "$new" && [ "$n" -lt 5 ]; do
+		sleep 1
+		n=$((n + 1))
+	done
+	running "$new" && kill -KILL "$new" 2>/dev/null
+	wait "$new" 2>/dev/null
+}
+
+cleanup() {
+	[ -n "$watchdog" ] && kill "$watchdog" 2>/dev/null
+	[ -n "$reader" ] && kill "$reader" 2>/dev/null
+	[ -n "$new" ] && [ -z "$handed_over" ] && stop_new
+	[ -n "$dir" ] && rm -rf "$dir"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# 1. The config.
+if ! out=$("$binary" --check "$config" 2>&1); then
+	[ -n "$out" ] && printf '%s\n' "$out" >&2
+	fail "the config check failed: $config"
+fi
+
+# 2. Queued connections must move to the new process.
+[ -e "$migrate" ] || fail "$migrate is missing (Linux 5.14 or later is needed)"
+if [ "$(cat "$migrate" 2>/dev/null)" != 1 ]; then
+	{ echo 1 >"$migrate"; } 2>/dev/null
+	[ "$(cat "$migrate" 2>/dev/null)" = 1 ] || fail "cannot set $migrate to 1"
+fi
+
+# 3. The old process.
+real=$(readlink -f "$binary") || fail "no binary: $binary"
+old=
+{ read -r old <"$pidfile"; } 2>/dev/null
+case $old in
+'' | *[!0-9]*) fail "no pid in $pidfile" ;;
+esac
+[ "$(exe_of "$old")" = "$real" ] || fail "pid $old (from $pidfile) is not running $real"
+
+# 4. The new process, with fd 3 the write end of the FIFO.
+{ printf '' >>"$logfile"; } 2>/dev/null || fail "cannot append to $logfile"
+dir=$(mktemp -d) || fail "mktemp -d failed"
+fifo=$dir/ready
+mkfifo -m 600 "$fifo" || fail "mkfifo failed"
+setsid "$binary" --ready-fd 3 "$config" </dev/null >>"$logfile" 2>&1 3>"$fifo" &
+new=$!
+
+# 5. Readiness: a reader, and a watchdog that kills it after the timeout.
+(IFS= read -r line <"$fifo" && [ "$line" = ready ]) &
+reader=$!
+(
+	s=
+	trap '[ -n "$s" ] && kill "$s" 2>/dev/null; exit 0' TERM
+	sleep "$timeout" >/dev/null 2>&1 &
+	s=$!
+	wait "$s"
+	kill "$reader" 2>/dev/null
+) &
+watchdog=$!
+wait "$reader" 2>/dev/null
+ready=$?
+reader=
+kill "$watchdog" 2>/dev/null
+wait "$watchdog" 2>/dev/null
+watchdog=
+case $ready in
+0) ;;
+1) fail "the new process exited before it was ready (see $logfile)" ;;
+*) fail "the new process was not ready within $timeout s (see $logfile)" ;;
+esac
+[ "$(exe_of "$new")" = "$real" ] || fail "the new process (pid $new) is not running $real"
+
+# 6. The pid file, then the old process's SIGHUP.
+tmp=$(mktemp "$pidfile.XXXXXX") || fail "cannot write next to $pidfile"
+if ! { printf '%s\n' "$new" >"$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$pidfile"; }; then
+	rm -f "$tmp"
+	fail "cannot write $pidfile"
+fi
+handed_over=yes
+if [ "$(exe_of "$old")" = "$real" ]; then
+	kill -HUP "$old" || fail "cannot send SIGHUP to pid $old"
+fi
+exit 0

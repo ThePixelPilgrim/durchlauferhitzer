@@ -1,0 +1,46 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh disable=SC2034 # the variables are read by openrc-run
+# durchlauferhitzer under OpenRC (FR-PROC-07), modelled on Alpine's haproxy
+# script. Settings: /etc/conf.d/durchlauferhitzer. `reload` restarts
+# without losing a connection (durchlauferhitzer-reload).
+
+description="durchlauferhitzer HTTP server"
+extra_commands="checkconfig"
+extra_started_commands="reload"
+
+command=${command:-/usr/sbin/durchlauferhitzer}
+cfgfile=${cfgfile:-/etc/durchlauferhitzer/durchlauferhitzer.conf}
+logfile=${logfile:-/var/log/durchlauferhitzer.log}
+reload_helper=${reload_helper:-/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload}
+ready_timeout=${ready_timeout:-30}
+
+command_args="$cfgfile"
+command_background=yes
+pidfile="/run/$RC_SVCNAME.pid"
+output_log="$logfile"
+error_log="$logfile"
+required_files="$cfgfile"
+# SIGTERM drains for up to shutdown_timeout (default 30s).
+retry=${retry:-TERM/35/KILL/5}
+
+depend() {
+	need net
+	after firewall
+	use logger
+}
+
+checkconfig() {
+	ebegin "Checking $cfgfile"
+	"$command" --check "$cfgfile" >/dev/null
+	eend $?
+}
+
+start_pre() {
+	checkconfig
+}
+
+reload() {
+	ebegin "Reloading $RC_SVCNAME"
+	"$reload_helper" "$command" "$cfgfile" "$pidfile" "$logfile" "$ready_timeout"
+	eend $?
+}

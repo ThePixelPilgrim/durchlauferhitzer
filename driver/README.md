@@ -9,8 +9,8 @@ in the [design spec](../docs/superpowers/specs/2026-10-21-durchlauferhitzer-desi
 
 The package is `durchlauferhitzer`: a library (so tests can drive its parts)
 plus the `durchlauferhitzer` binary.
-How to build it, check a config, run it, use systemd socket activation
-and stop it: [`../README.md`](../README.md).
+How to build it, check a config, run it, use systemd socket activation,
+restart it without systemd and stop it: [`../README.md`](../README.md).
 
 Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 
@@ -260,6 +260,26 @@ tests/
                     server logs `restarting` then `done`. Each waits for
                     the server's `phase=draining` or `phase=restarting`
                     line, so the order is deterministic
+  restart.rs        the restart without systemd (FR-PROC-07):
+                    `contrib/durchlauferhitzer-reload` run with `sh`
+                    against servers started as root (`user nobody`).
+                    Under load (keep-alive and fresh clients, 400
+                    connections queued while the old process is stopped
+                    across its SIGHUP), with the binary replaced and a new
+                    route: every request a complete 200, some queued ones
+                    moved to the new process, old exit 0, the pid file
+                    names the new one; two reloads back to back (the
+                    first old process drains a half-received request
+                    meanwhile); a bad config, a new process failing before
+                    or after binding, a stale pid file: exit 1, the old
+                    serves on, no stray process; a dropped `listen`
+                    address is refused afterwards. Control: with
+                    `tcp_migrate_req` 0 the queued connections are reset.
+                    Root only (skipped with a reason, or failed with
+                    DURCHLAUFERHITZER_REQUIRE_ROOT=1), `tcp_migrate_req`
+                    set to 1 by the tests (if it cannot be: skipped, or
+                    failed with DURCHLAUFERHITZER_REQUIRE_MIGRATE=1); one
+                    test at a time. The scripts parse (`sh -n`)
   smoke.rs          the end-to-end smoke run (NFR-TEST-07): one binary
                     serving a static and a proxy host to a test backend,
                     200 requests over 32 parallel keep-alive connections
@@ -667,6 +687,10 @@ Notes on the wrappers:
   the root cases run in CI too. That step fails unless its list names
   every test file that includes `support/child.rs` (but those it
   excludes with a reason), so a new server test cannot miss it.
+- Tests: `tests/restart.rs` writes the global sysctl
+  `net.ipv4.tcp_migrate_req` (to 1, and to 0 for its control, then back
+  to 1); it never restores the value it found. CI's root step sets it to
+  1 and passes `DURCHLAUFERHITZER_REQUIRE_MIGRATE=1`.
 - Tests as root start the server as `nobody` in many cases, so `nobody`
   must reach the built binary: every directory above the target dir
   needs `o+x`. A target dir under a private home directory fails such a
