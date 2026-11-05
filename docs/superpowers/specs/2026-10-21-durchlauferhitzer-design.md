@@ -68,7 +68,8 @@ way that matters.
 These would make the project a failure even if everything "works":
 
 - Any C code in the repo or the product's dependency tree (the system libc,
-  glibc or musl, is the sole exception) — NFR-MAINT-01.
+  glibc or musl, and the toolchain's `libgcc_s` are the sole exception) —
+  NFR-MAINT-01.
 - A dependency tree that grows for convenience — NFR-MAINT-03.
 - Being usable as an open proxy: the destination of a proxied request is
   only ever a backend named in the config — NFR-SEC-08.
@@ -1553,14 +1554,18 @@ Failures, persistence, timeouts:
     Task 6, builder calls for musl, `cfg(target_env = "musl")`:)* x86_64
     lists `epoll_pwait` instead of `epoll_wait` (musl's `epoll_wait`);
     `clone`'s thread flags include `CLONE_DETACHED` (musl's
-    `pthread_create`; the kernel ignores it); `futex` also allows the
+    `pthread_create`; the kernel ignores it). *(Owner decisions
+    2026-11-05, stage 6 Task 6 review:)* `futex` also allows the plain
     shared `FUTEX_WAIT` and `FUTEX_WAKE` of musl's thread list lock
-    (`pthread_exit`, `pthread_join`), still no priority-inheritance or
-    requeue operation; `tkill` only with `SIGABRT` to the main thread
-    (thread id = pid; musl's `abort`), so a worker's abort ends the
-    process by `SIGSEGV` (musl's `a_crash`) or, under `kill`, `SIGSYS`. A crash or misbehaviour caused by a failed call is a
-    bug in the server (a missing allow-list entry or wrong error handling),
-    never the intended effect.
+    (`pthread_create`, `pthread_exit`, `pthread_join`), still no
+    priority-inheritance, requeue or wake-op operation; `tkill` only with
+    `SIGABRT` to the main thread (thread id = pid; musl's `abort`), since
+    a filter cannot tell the server's own threads from other processes'.
+    A crash or misbehaviour caused by a failed call is a bug in the
+    server (a missing allow-list entry or wrong error handling), never
+    the intended effect — with one accepted exception: under musl, an
+    abort on a worker thread still ends the process, but by `SIGSEGV`
+    (musl's `a_crash`) or, under `kill`, `SIGSYS` instead of `SIGABRT`.
   - (owner decision 2026-10-29, stage 5 builder check) Stage 5 sandboxes strictly: no `execve`, no reading
     outside the roots. Stage 6's restart (FR-PROC-07) must therefore not
     rely on exec-ing the new binary from inside the sandbox; it adapts its
@@ -1853,7 +1858,10 @@ Failures, persistence, timeouts:
   musl (Alpine, where OpenRC users are, FR-PROC-07): the musl build is
   built and tested in CI on Alpine, the driver suite under the seccomp
   kill switch included; the seccomp allow-list has a table per libc where
-  their system calls differ (FR-PROC-06).
+  their system calls differ (FR-PROC-06). *(Owner decision 2026-11-05,
+  stage 6 Task 6 review:)* the toolchain's `libgcc_s` (the unwinder Rust's
+  std links; not removable on stable Rust) counts as part of the system C
+  runtime: like libc, it is linked dynamically from the system.
 - **NFR-PORT-03** [done] `openat2` is required (startup error without
   it; the probe is FR-PROC-04 step 3). Every file open uses `openat2` and
   every startup runs the probe (each test of the binary passes it).
@@ -1878,8 +1886,9 @@ Failures, persistence, timeouts:
 ### NFR-MAINT — Maintainability and supply chain
 
 - **NFR-MAINT-01** [done] Pure Rust: no C in the repo or in the product's
-  dependency tree; the system libc (glibc or musl, NFR-PORT-02) is the
-  only exception. No `cc`/`cmake` build
+  dependency tree; the system libc (glibc or musl) and the toolchain's
+  `libgcc_s`, both linked dynamically from the system (NFR-PORT-02), are
+  the only exception. No `cc`/`cmake` build
   scripts, no `*-sys` crates except `libc`, no OpenSSL, `ring` or
   `aws-lc-rs`; TLS, if ever, uses a pure-Rust provider.
 - **NFR-MAINT-02** [done] Test-only tooling (e.g. `cargo-fuzz`) may contain

@@ -54,7 +54,9 @@ Requirements live in the design spec (`docs/superpowers/specs/2026-10-21-durchla
 
 - No C code in this project, ever — neither in the repo nor in the
   dependency tree. The project is pure Rust; the **only** exception is
-  linking against the system libc, glibc or musl (owner, 2026-11-04).
+  linking against the system libc, glibc or musl (owner, 2026-11-04),
+  and the toolchain's `libgcc_s`, the unwinder Rust's std links (owner,
+  2026-11-05).
 - That rules out any crate that compiles or links C/C++/assembly: no `cc`
   or `cmake` build scripts, no `*-sys` crates other than `libc`, no
   OpenSSL, `ring`, or `aws-lc-rs`. If TLS crypto is ever needed, use a
