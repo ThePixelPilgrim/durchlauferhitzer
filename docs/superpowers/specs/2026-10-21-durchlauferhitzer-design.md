@@ -222,8 +222,13 @@ Structure and values:
   more IP socket addresses; no duplicates; no port 0), `user` (optional),
   at most one `limits` block, at most one `containment` block (FR-CFG-25,
   [done in stage 5]) and one or more `host` blocks.
-  Overlapping binds such as `0.0.0.0:80` + `127.0.0.1:80` are only detected
-  at bind time [done in stage 4]: the addresses are bound in config order
+  Overlapping binds such as `0.0.0.0:80` + `127.0.0.1:80` are detected
+  at startup, not by `--check` [done in stage 4]. *(Stage 6 Task 4:)*
+  right before binding, a `listen` address on the port of an earlier
+  one of its family, either of them unspecified, fails as its bind
+  would (`cannot listen on <later>: Address already in use (os error
+  98)`), since `SO_REUSEPORT` would let both bind. Then the addresses
+  are bound in config order
   (`SO_REUSEADDR`; from stage 6 also `SO_REUSEPORT` after a probe,
   FR-PROC-07), and the first failure
   (`EADDRINUSE`, `EACCES`, ...) is a startup error naming its address
@@ -1218,7 +1223,9 @@ Failures, persistence, timeouts:
   caused it. *(Stage 5 Task 5:)* the other startup kind is
   `containment`, one line per layer, Landlock first, written once the
   seccomp filter is installed, right before the loop (FR-PROC-04 step
-  10a, FR-PROC-06).
+  10a, FR-PROC-06). *(Stage 6 Task 4:)* `ready_failed errno` is logged
+  when writing `ready\n` to the `--ready-fd` descriptor fails, right
+  after the `containment` lines; the server serves on (FR-PROC-07).
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 

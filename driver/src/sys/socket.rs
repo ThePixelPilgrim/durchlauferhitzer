@@ -49,9 +49,13 @@ fn tcp_socket(addr: &SocketAddr) -> io::Result<OwnedFd> {
 /// Whether [`tcp_listen`] first checks that the address is free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Probe {
-    /// A plain `SO_REUSEADDR` socket is bound to the address and closed
-    /// first: a port held by anyone (a running server's group included)
-    /// fails it with `EADDRINUSE`, as before `SO_REUSEPORT` (FR-CFG-10).
+    /// A plain `SO_REUSEADDR` socket is bound to the address, made to
+    /// listen (so a concurrent probe of the same port fails too) and
+    /// closed first: a port held by anyone (a running server's group
+    /// included) fails it with `EADDRINUSE`, as before `SO_REUSEPORT`
+    /// (FR-CFG-10). A window remains between the probe's close and the
+    /// listener's bind: a second normal start probing exactly then passes
+    /// its probe and joins the port.
     First,
     /// No probe: the listener joins a group already on the port (a
     /// `--ready-fd` start, FR-PROC-07).
@@ -73,10 +77,14 @@ enum Share {
 /// default (FR-CFG-10, A6, FR-PROC-07).
 pub fn tcp_listen(addr: SocketAddr, backlog: u32, probe: Probe) -> io::Result<OwnedFd> {
     match probe {
-        Probe::First => drop(tcp_bind(addr, Share::No)?),
+        Probe::First => drop(listening(tcp_bind(addr, Share::No)?, 1)?),
         Probe::Skip => {}
     }
-    let fd = tcp_bind(addr, Share::Port)?;
+    listening(tcp_bind(addr, Share::Port)?, backlog)
+}
+
+/// `listen(fd, backlog)`; the backlog is capped at `c_int::MAX`.
+fn listening(fd: OwnedFd, backlog: u32) -> io::Result<OwnedFd> {
     let backlog = libc::c_int::try_from(backlog).unwrap_or(libc::c_int::MAX);
     // SAFETY: `listen` takes no pointers.
     cvt(unsafe { libc::listen(fd.as_raw_fd(), backlog) })?;

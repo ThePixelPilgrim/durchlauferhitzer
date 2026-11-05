@@ -70,9 +70,11 @@ pub(super) struct Readiness(OwnedFd);
 
 impl Readiness {
     /// Writes `ready\n` (continuing after a short write; `EINTR` is
-    /// retried) and closes the descriptor, whatever the outcome. A
-    /// non-blocking descriptor that is full is `EAGAIN`; a write of 0
-    /// bytes is `WriteZero` (no errno).
+    /// retried) and closes the descriptor, whatever the outcome. The
+    /// descriptor must have room for these 6 bytes: a full blocking pipe
+    /// would block the server here, before its loop. A non-blocking
+    /// descriptor that is full is `EAGAIN`; a write of 0 bytes is
+    /// `WriteZero` (no errno).
     pub(super) fn report(self) -> io::Result<()> {
         let mut rest = READY;
         while !rest.is_empty() {

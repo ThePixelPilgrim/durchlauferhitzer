@@ -161,13 +161,8 @@ exit 2.
   cut at once.
 - `SIGHUP`: restart drain — the listeners close, the connections held are
   served with `Connection: close`, bounded by `restart_timeout`. The
-  server's own listeners set `SO_REUSEPORT`, so a new process started
-  with `--ready-fd` shares the ports and, once it reports `ready`, takes
-  the new connections when the old one gets `SIGHUP` (with
-  `net.ipv4.tcp_migrate_req = 1`, the queued ones too). A second start
-  without `--ready-fd` still fails with "Address already in use". Only a
-  process of the same user can join the ports. Upgrading from a binary
-  whose listeners lack `SO_REUSEPORT` needs one full stop and start.
+  server's own listeners set `SO_REUSEPORT`: a `--ready-fd` start shares
+  the ports; a second normal start still fails ("Address already in use").
   `SIGPIPE` is ignored.
 - Exit codes: 0 after any shutdown (and `--check` on a valid config), 1 for
   an invalid or unreadable config or bad arguments, 2 for a startup

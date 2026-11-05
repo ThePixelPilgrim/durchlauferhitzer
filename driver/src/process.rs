@@ -273,10 +273,16 @@ fn probe_openat2(dir: BorrowedFd<'_>) -> Result<(), Failure> {
     }
 }
 
-/// A11 step 5 without systemd (A6): binds every `listen` address in config
-/// order (`SO_REUSEPORT`, after the probe unless it is skipped,
-/// FR-PROC-07); the first failure names its address.
+/// A11 step 5 without systemd (A6): refuses overlapping addresses before
+/// any socket (FR-CFG-10: `SO_REUSEPORT` would let a `--ready-fd` start
+/// bind both), then binds every `listen` address in config order
+/// (`SO_REUSEPORT`, after the probe unless it is skipped, FR-PROC-07);
+/// the first failure names its address.
 fn bind(listen: &[SocketAddr], probe: Probe) -> Result<Vec<OwnedFd>, Failure> {
+    if let Some((_, later)) = overlap(listen) {
+        let err = io::Error::from_raw_os_error(libc::EADDRINUSE);
+        return Err(Failure(format!("cannot listen on {later}: {err}")));
+    }
     listen
         .iter()
         .map(|&addr| {
@@ -284,6 +290,25 @@ fn bind(listen: &[SocketAddr], probe: Probe) -> Result<Vec<OwnedFd>, Failure> {
                 .map_err(|err| Failure(format!("cannot listen on {addr}: {err}")))
         })
         .collect()
+}
+
+/// The first pair of `listen` addresses (earlier, later in config order)
+/// that cannot both be bound: the same family and port, one of them
+/// unspecified (`0.0.0.0`, `::`). IPv6 listeners are IPv6-only, so the
+/// families never overlap; config validation has refused duplicates.
+fn overlap(listen: &[SocketAddr]) -> Option<(SocketAddr, SocketAddr)> {
+    let clash = |a: &SocketAddr, b: &SocketAddr| {
+        a.is_ipv4() == b.is_ipv4()
+            && a.port() == b.port()
+            && (a.ip().is_unspecified() || b.ip().is_unspecified())
+    };
+    listen.iter().enumerate().find_map(|(i, later)| {
+        let earlier = listen
+            .iter()
+            .take(i)
+            .find(|earlier| clash(earlier, later))?;
+        Some((*earlier, *later))
+    })
 }
 
 /// A11 steps 8 to 11: the signal mask and its signalfd (before the disk
@@ -357,6 +382,8 @@ fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
             return ExitStatus::Startup;
         }
     }
+    // Readiness is the last step of startup: nothing that can fail may
+    // follow it, or the old process would get SIGHUP for a dead one.
     if let Some(readiness) = readiness
         && let Err(err) = readiness.report()
     {
@@ -392,7 +419,9 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    use super::{Command, ReadyFd, parse_args};
+    use std::net::SocketAddr;
+
+    use super::{Command, ReadyFd, overlap, parse_args};
 
     fn parse(args: &[&str]) -> Option<Command> {
         parse_args(args.iter().map(OsString::from))
@@ -432,6 +461,43 @@ mod tests {
             &["--check", "--ready-fd", "3", "a.conf"],
         ] {
             assert_eq!(parse(bad), None, "{bad:?}");
+        }
+    }
+
+    /// FR-CFG-10: an unspecified address and another of its family on the
+    /// same port overlap; the pair is (earlier, later) in config order, the
+    /// first later one that overlaps any earlier one.
+    #[test]
+    fn overlapping_listen_addresses() {
+        let addrs = |list: &[&str]| -> Vec<SocketAddr> {
+            list.iter().map(|addr| addr.parse().unwrap()).collect()
+        };
+        let pair = |a: &str, b: &str| Some((a.parse().unwrap(), b.parse().unwrap()));
+        type Pair = Option<(SocketAddr, SocketAddr)>;
+        let cases: [(&[&str], Pair); 10] = [
+            (
+                &["0.0.0.0:80", "127.0.0.1:80"],
+                pair("0.0.0.0:80", "127.0.0.1:80"),
+            ),
+            (
+                &["127.0.0.1:80", "0.0.0.0:80"],
+                pair("127.0.0.1:80", "0.0.0.0:80"),
+            ),
+            (&["[::]:80", "[::1]:80"], pair("[::]:80", "[::1]:80")),
+            (&["[::1]:80", "[::]:80"], pair("[::1]:80", "[::]:80")),
+            (
+                &["127.0.0.1:81", "0.0.0.0:80", "127.0.0.2:80", "127.0.0.1:80"],
+                pair("0.0.0.0:80", "127.0.0.2:80"),
+            ),
+            // IPv6 listeners are IPv6-only: no overlap across families.
+            (&["0.0.0.0:80", "[::]:80"], None),
+            (&["127.0.0.1:80", "127.0.0.2:80"], None),
+            (&["[::1]:80", "[fe80::1]:80"], None),
+            (&["0.0.0.0:80", "127.0.0.1:81"], None),
+            (&["127.0.0.1:80"], None),
+        ];
+        for (list, expected) in cases {
+            assert_eq!(overlap(&addrs(list)), expected, "{list:?}");
         }
     }
 }

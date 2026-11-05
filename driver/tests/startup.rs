@@ -149,7 +149,9 @@ fn a_port_in_use_is_exit_2_naming_the_address() {
 }
 
 /// A6: binding goes in config order and the first failure names its
-/// address: `0.0.0.0:P` then `127.0.0.1:P` fails at the second.
+/// address: `0.0.0.0:P` then `127.0.0.1:P` fails at the second. The
+/// overlap is checked before any bind, so a `--ready-fd` start (no probe,
+/// `SO_REUSEPORT` on both) fails the same way, its descriptor unwritten.
 #[test]
 fn overlapping_listen_addresses_fail_at_the_second() {
     let port = free_port();
@@ -159,15 +161,19 @@ fn overlapping_listen_addresses_fail_at_the_second() {
         &config(&format!("0.0.0.0:{port} 127.0.0.1:{port}"), "", PROXY_ROUTE),
         Containment::Switch,
     );
-    let output = run(&[path.to_str().unwrap()], Setup::non_root());
-    assert_exit(&output, 2);
-    let stderr = text(&output.stderr);
-    assert!(
-        stderr.starts_with(&format!(
-            "durchlauferhitzer: cannot listen on 127.0.0.1:{port}: "
-        )),
-        "{stderr}"
+    let path = path.to_str().unwrap();
+    let expected = format!(
+        "durchlauferhitzer: cannot listen on 127.0.0.1:{port}: \
+         Address already in use (os error 98)\n"
     );
+    let output = run(&[path], Setup::non_root());
+    assert_exit(&output, 2);
+    assert_eq!(text(&output.stderr), expected);
+    let (read, write) = pipe().unwrap();
+    let output = run(&["--ready-fd", "3", path], ready_setup(write));
+    assert_exit(&output, 2);
+    assert_eq!(text(&output.stderr), expected);
+    assert_eq!(read_to_eof(read), b"");
 }
 
 /// The signal mask (A9) is set before the disk workers start, so every

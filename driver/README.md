@@ -226,7 +226,8 @@ tests/
                     or EOF alone when startup fails before or after
                     binding; a failed write (EPIPE) is logged and the
                     server serves on; a second normal start is `EADDRINUSE`, a
-                    `--ready-fd` start shares the port (both serve)
+                    `--ready-fd` start shares the port (both serve);
+                    overlapping addresses fail at the second in both modes
   systemd.rs        socket activation of the binary: a listener passed as
                     fd 3 (`sh -c` sets `LISTEN_PID=$$`) is served; an
                     address not configured, a configured address without a
@@ -398,11 +399,8 @@ tests/
                     answered ENOSYS, `landlock_restrict_self` EPERM,
                     `seccomp(SECCOMP_SET_MODE_FILTER)` EINVAL),
                     capabilities (`Caps`); the test crate's only
-                    `unsafe`),
-                    a guard that kills a running server on drop; signals
-                    by the shell's `kill`, stderr read line by line while
-                    the server runs (`Lines`), a bounded wait for the exit;
-                    a server ended by SIGSYS fails its test
+                    `unsafe`), a bounded wait for the exit; re-exports
+                    `conf.rs` and `running.rs`
   support/clock_syscall.rs  a test-only `LD_PRELOAD` cdylib whose
                     `clock_gettime` always makes the system call; built
                     by `containment.rs` with the toolchain's `rustc`, no
@@ -412,6 +410,11 @@ tests/
                     `Containment`: the seccomp kill switch's block, the
                     text's own, or none for an invalid config)
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
+  support/running.rs `Running`: a guard that kills a running server on
+                    drop (a server ended by SIGSYS fails its test);
+                    signals by the shell's `kill` (`signal_pid`), stderr
+                    read line by line while the server runs (`Lines`),
+                    `get` (one request)
   support/server.rs the loop tests' harness: a `Driver` in a thread on an
                     ephemeral port (`start_static` opens the config's roots
                     and starts the pool), a std backend, response readers
@@ -425,9 +428,10 @@ tests/
 claims the `--ready-fd` descriptor (`process/ready.rs`, exit 2 before
 the config is read), loads the config, then: the `openat2` probe beneath
 the first root (or `/`), the roots (`O_PATH | O_DIRECTORY`), the
-listeners (systemd's, `systemd.rs`, untouched; or bound in config order
-with `SO_REUSEPORT`, after a plain probe bind unless `--ready-fd` is
-given, the first failure named), the
+listeners (systemd's, `systemd.rs`, untouched; or, overlapping
+addresses refused first (`overlap`, FR-CFG-10), bound in config order
+with `SO_REUSEPORT`, after a plain probe bind (listening, then closed)
+unless `--ready-fd` is given, the first failure named), the
 descriptor budget (`process/budget.rs`), the privilege drop
 and the clearing of every capability (`process/privileges.rs`, while
 the process has one thread), Landlock (`containment::restrict_files`,
