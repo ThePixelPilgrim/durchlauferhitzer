@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-05, after stage 6 Task 4 landed on `main`.
+Last updated 2026-11-05, after stage 6 Task 5 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -12,7 +12,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 3 Reverse proxy | done (`576a77c..b583d96`) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
 | 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
-| 6 Restart | **in progress** — plan `docs/superpowers/plans/2026-11-04-stage-6-restart.md` (owner-approved `22fd0ce`; decisions of 2026-11-04 in the spec: FR-PROC-07, FR-PROC-05, FR-CFG-20, NFR-PORT-02). Task 1 ✅ (`restart_timeout`, default 10m); Task 2 ✅ (core `DrainTarget::Restart`: requests served with `Connection: close`, idle connections kept, late connections served, a shutdown drain final; both sim nets check restart plans, `seed % 5 == 2`); Task 3 ✅ (SIGHUP starts the restart drain, bounded by `restart_timeout`, `phase=restarting`; systemd sockets too); Task 4 ✅ (`SO_REUSEPORT` on self-bound listeners after a listening probe; overlap checked before binding; `--ready-fd <n>` checked before the config, `ready\n` after seccomp, `kind=ready_failed`); **next: Task 5** (reload helper, OpenRC script, lossless handover proven) |
+| 6 Restart | **in progress** — plan `docs/superpowers/plans/2026-11-04-stage-6-restart.md` (owner-approved `22fd0ce`; decisions of 2026-11-04 in the spec: FR-PROC-07, FR-PROC-05, FR-CFG-20, NFR-PORT-02). Task 1 ✅ (`restart_timeout`, default 10m); Task 2 ✅ (core `DrainTarget::Restart`: requests served with `Connection: close`, idle connections kept, late connections served, a shutdown drain final; both sim nets check restart plans, `seed % 5 == 2`); Task 3 ✅ (SIGHUP starts the restart drain, bounded by `restart_timeout`, `phase=restarting`; systemd sockets too); Task 4 ✅ (`SO_REUSEPORT` on self-bound listeners after a listening probe; overlap checked before binding; `--ready-fd <n>` checked before the config, `ready\n` after seccomp, `kind=ready_failed`); Task 5 ✅ (`contrib/durchlauferhitzer-reload` + OpenRC script; `driver/tests/restart.rs` proves a reload under load with 400 queued connections loses nothing, control with `tcp_migrate_req=0` resets them; draining pids ended by OpenRC `stop`; lock; CI root step sets the sysctl); **next: Task 6** (musl on Alpine; also confirm under real OpenRC: `status`/`stop` after an in-place binary upgrade, no fd inherited from openrc-run, `stop` ends draining processes) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
