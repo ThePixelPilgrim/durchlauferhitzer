@@ -163,14 +163,15 @@ fn a_connected_socket_is_not_a_listener() {
 #[path = "support/ipv6.rs"]
 mod ipv6;
 
-/// A listening IPv6 socket on `[::1]:0` that also accepts IPv4: it
-/// clears `IPV6_V6ONLY` before bind, so the host default (`bindv6only`)
-/// does not matter.
+/// A listening IPv6 socket that also accepts IPv4: it clears
+/// `IPV6_V6ONLY` before bind, so the host default (`bindv6only`) does not
+/// matter. It binds the wildcard `[::]`: binding a specific address such
+/// as `[::1]` makes the kernel set `IPV6_V6ONLY` itself.
 fn dual_stack_listener() -> io::Result<OwnedFd> {
     use socket2::{Domain, Socket, Type};
     let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
     socket.set_only_v6(false)?;
-    let addr: SocketAddr = "[::1]:0".parse().unwrap();
+    let addr: SocketAddr = "[::]:0".parse().unwrap();
     socket.bind(&addr.into())?;
     socket.listen(16)?;
     Ok(OwnedFd::from(socket))
