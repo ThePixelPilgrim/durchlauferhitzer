@@ -146,7 +146,9 @@ exit 2.
   `TimeoutStopSec` above `shutdown_timeout` plus 2 s.
 - A second `SIGTERM`, or `SIGINT` (Ctrl-C): fast shutdown; every connection is
   cut at once.
-- `SIGHUP` and `SIGPIPE` are ignored.
+- `SIGHUP`: restart drain — the listeners close, the connections held are
+  served with `Connection: close`, bounded by `restart_timeout`.
+  `SIGPIPE` is ignored.
 - Exit codes: 0 after any shutdown (and `--check` on a valid config), 1 for
   an invalid or unreadable config or bad arguments, 2 for a startup
   failure or a failure of the event loop itself (printed as

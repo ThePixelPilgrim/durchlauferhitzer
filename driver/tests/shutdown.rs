@@ -481,6 +481,7 @@ fn signals_while_draining_change_nothing() {
     let all = lines.all();
     assert_eq!(all.last().map(String::as_str), Some(DONE), "{all:?}");
     assert!(!all.iter().any(|l| l == ABORTING), "{all:?}");
+    assert!(!all.iter().any(|l| l == RESTARTING), "{all:?}");
 }
 
 /// How long the final log flush waits for a stalled stderr (R3,

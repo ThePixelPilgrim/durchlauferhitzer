@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-05, after stage 6 Task 2 landed on `main`.
+Last updated 2026-11-05, after stage 6 Task 3 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -12,7 +12,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 3 Reverse proxy | done (`576a77c..b583d96`) — record: `docs/superpowers/reviews/2026-10-27-stage-3-review.md` |
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
 | 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
-| 6 Restart | **in progress** — plan `docs/superpowers/plans/2026-11-04-stage-6-restart.md` (owner-approved `22fd0ce`; decisions of 2026-11-04 in the spec: FR-PROC-07, FR-PROC-05, FR-CFG-20, NFR-PORT-02). Task 1 ✅ (`restart_timeout`, default 10m); Task 2 ✅ (core `DrainTarget::Restart`: requests served with `Connection: close`, idle connections kept, late connections served, a shutdown drain final; both sim nets check restart plans, `seed % 5 == 2`); **next: Task 3** (driver: SIGHUP starts the restart drain) |
+| 6 Restart | **in progress** — plan `docs/superpowers/plans/2026-11-04-stage-6-restart.md` (owner-approved `22fd0ce`; decisions of 2026-11-04 in the spec: FR-PROC-07, FR-PROC-05, FR-CFG-20, NFR-PORT-02). Task 1 ✅ (`restart_timeout`, default 10m); Task 2 ✅ (core `DrainTarget::Restart`: requests served with `Connection: close`, idle connections kept, late connections served, a shutdown drain final; both sim nets check restart plans, `seed % 5 == 2`); Task 3 ✅ (SIGHUP starts the restart drain, bounded by `restart_timeout`, `phase=restarting`; systemd sockets too); **next: Task 4** (`SO_REUSEPORT` listeners with a probe, `--ready-fd`) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 

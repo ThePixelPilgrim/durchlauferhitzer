@@ -1203,9 +1203,10 @@ Failures, persistence, timeouts:
   before the sink exists (FR-PROC-04). *(Stage 4 Task 9, controller
   ruling R4:)* the one shutdown kind is `shutdown`, one line per step
   (FR-PROC-05): `kind=shutdown phase=draining` once the first SIGTERM
-  has closed the listeners, before the drain begins;
-  `kind=shutdown phase=aborting` before `abort_all` (a second SIGTERM, a
-  SIGINT or `shutdown_timeout`), so the `rejected ... reason=shutting_down`
+  has closed the listeners, before the drain begins; `kind=shutdown
+  phase=restarting` likewise for SIGHUP's restart drain (FR-PROC-07);
+  `kind=shutdown phase=aborting` before `abort_all` (a SIGTERM or SIGINT
+  during a drain, a SIGINT, `shutdown_timeout` or `restart_timeout`), so the `rejected ... reason=shutting_down`
   lines of the cut exchanges follow it; `kind=shutdown phase=done
   detached=N` once the loop and the disk pool are shut down, `N` the
   workers still running after the pool's 1 s grace and left to the
@@ -1399,9 +1400,9 @@ Failures, persistence, timeouts:
     or the deadline logs `phase=aborting`, closes the listeners if they
     are still open, calls `abort_all`, performs its actions and ends the
     loop at once, without waiting for orphaned opens (DRV-14). SIGPIPE is
-    read and ignored. SIGHUP is ignored in stage 4 (the restart signal
-    of FR-PROC-07 is stage 6): it is blocked and read, so its default
-    action can never end the server. Then, in this order: the disk pool
+    read and ignored. SIGHUP starts the restart drain (FR-PROC-07); it
+    is blocked and read, so its default action can never end the
+    server. Then, in this order: the disk pool
     is shut down, waiting at most 1 s for its workers, the ones still
     running (stuck in the kernel) are detached and counted (caveat: a
     worker in uninterruptible sleep, a hung disk's D state, still delays
