@@ -133,8 +133,8 @@ jobs:
             runner: ubuntu-24.04-arm
     name: alpine (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    # About 10 min.
-    timeout-minutes: 45
+    # About 3 min.
+    timeout-minutes: 30
     # Not a job `container:`: the runner cannot run JavaScript actions
     # (checkout) inside an Alpine container on arm64, so checkout runs on
     # the host and the steps run in a container started by hand, with the
@@ -145,14 +145,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Start the Alpine container
-        # Alpine 3.24.3 (musl 1.2.5), pinned by digest (the multi-arch
+        # Alpine 3.24.3 (musl 1.2.6), pinned by digest (the multi-arch
         # index) as of 2026-11-05. As the nightly Debian job: no Docker
         # seccomp profile (it would filter every process and hide a call
         # missing from our allow-list), CAP_SYS_PTRACE (root reads
         # /proc/<pid>/fd of a server running as nobody).
         # systempaths=unconfined makes /proc/sys writable: the restart
         # tests and the reload helper write net.ipv4.tcp_migrate_req, in
-        # the container's own network namespace. Its loopback gets IPv6.
+        # the container's own network namespace; AppArmor unconfined, as
+        # Docker's profile denies writes to /proc/sys. Its loopback gets
+        # IPv6, and the host defaults the containers change are set back
+        # (dual-stack IPv6 sockets, privileged ports below 1024), so no
+        # test skips for them.
         # --init: a reaping pid 1, so the servers the tests and OpenRC
         # stop leave no zombies.
         shell: bash
@@ -165,6 +169,7 @@ jobs:
             --sysctl net.ipv6.conf.all.disable_ipv6=0 \
             --sysctl net.ipv6.conf.lo.disable_ipv6=0 \
             --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
+            --sysctl net.ipv6.bindv6only=0 \
             -v /home/runner/work:/home/runner/work \
             -w "$GITHUB_WORKSPACE" \
             -e PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

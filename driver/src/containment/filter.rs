@@ -112,7 +112,7 @@ const fn e(name: &'static str, nr: u32, rule: Rule) -> Entry {
 
 /// x86_64 (`strace -f` over the driver tests on Ubuntu 24.04, glibc 2.39).
 /// Entries under `cfg(target_env = "musl")` replace or add to glibc's
-/// where musl makes other calls (Alpine 3.24, musl 1.2.5; NFR-PORT-02),
+/// where musl makes other calls (Alpine 3.24, musl 1.2.6; NFR-PORT-02),
 /// each naming the musl function.
 const X86_64: &[Entry] = &[
     // The loop: epoll, and reads and writes of the wake eventfd, the
