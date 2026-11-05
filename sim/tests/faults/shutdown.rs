@@ -303,9 +303,10 @@ pub(crate) fn shutdown_at(
 /// finish, then every connection closes): after `within`, which the net
 /// chooses as the longest chain of deadlines an exchange may still wait
 /// on and shorter than `keepalive_timeout`, no connection is `Open` any
-/// more. A restart's drain keeps an idle connection until its keep-alive
-/// deadline (FR-PROC-07), so it waits `keepalive` longer (each is closed, or shut down for writing and lingering), although
-/// no client ended its stream. Every byte a client accepts restarts
+/// more (each is closed, or shut down for writing and lingering),
+/// although no client ended its stream. A restart's drain keeps an idle
+/// connection until its keep-alive deadline (FR-PROC-07), so it waits
+/// `keepalive` longer. Every byte a client accepts restarts
 /// `send_idle_timeout` (FR-CONN-08), so a connection that made send
 /// progress during the check may stay open until `send_idle` after its
 /// last progress (plus one clock step), when that is later. The clock

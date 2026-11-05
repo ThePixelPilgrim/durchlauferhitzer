@@ -312,3 +312,57 @@ fn abort_after_a_restart_drain_refuses_stragglers() {
         }))
     );
 }
+
+/// A shutdown's drain is final: a restart's `begin_drain` after it
+/// changes nothing (driver mistake tolerated), so a straggler is still
+/// refused and a request completed later still gets the 503.
+#[test]
+fn restart_after_a_shutdown_drain_is_ignored() {
+    let mut core = files_core();
+    accept(&mut core, secs(0), 1, PEER);
+    deliver(&mut core, secs(0), ConnId(1), b"G");
+    assert!(drain(&mut core, DrainTarget::Shutdown).is_empty());
+    assert!(drain(&mut core, DrainTarget::Restart).is_empty());
+    let actions = deliver(&mut core, secs(1), ConnId(1), &GET_F[1..]);
+    assert!(logged(&actions, Status::ServiceUnavailable), "{actions:?}");
+    let actions = accept(&mut core, secs(1), 2, PEER);
+    assert_eq!(
+        actions.first(),
+        Some(&Action::Log(Log::Rejected {
+            conn: ConnId(2),
+            peer: PEER,
+            reason: RejectReason::ShuttingDown,
+        }))
+    );
+}
+
+/// A second restart's drain changes nothing; a shutdown's after it
+/// escalates: idle and fresh connections close at once, stragglers are
+/// refused.
+#[test]
+fn a_shutdown_drain_escalates_a_restart_drain() {
+    let mut core = files_core();
+    let actions = idle_then_drain(&mut core, DrainTarget::Restart);
+    assert!(actions.is_empty(), "{actions:?}");
+    assert!(drain(&mut core, DrainTarget::Restart).is_empty());
+    assert_eq!(
+        drain(&mut core, DrainTarget::Shutdown),
+        [
+            Action::Close { conn: ConnId(1) },
+            Action::Close { conn: ConnId(2) },
+            Action::Close { conn: ConnId(3) },
+        ]
+    );
+    assert!(core.is_drained());
+    let actions = accepted_after_drain(&mut core, DrainTarget::Shutdown);
+    assert!(
+        matches!(
+            actions.first(),
+            Some(Action::Log(Log::Rejected {
+                reason: RejectReason::ShuttingDown,
+                ..
+            }))
+        ),
+        "{actions:?}"
+    );
+}

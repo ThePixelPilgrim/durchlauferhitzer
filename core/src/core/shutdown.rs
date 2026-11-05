@@ -75,7 +75,17 @@ impl Core {
     /// `restart_timeout`), then calls [`Core::abort_all`]. Deadlines are
     /// unchanged, so `now` is not needed yet; it is taken for symmetry
     /// with `handle`.
+    ///
+    /// A second call is a driver mistake the core tolerates: a restart
+    /// during a shutdown's drain is ignored (no change, no action), since
+    /// a shutdown is final; a second restart changes nothing; a shutdown
+    /// during a restart's drain escalates it as if it came first (idle and
+    /// fresh connections close, requests and connections are refused).
     pub fn begin_drain(&mut self, _now: Instant, target: DrainTarget, actions: &mut Vec<Action>) {
+        // A shutdown is final: a restart cannot reopen what it refuses.
+        if (self.mode, target) == (Mode::Draining(DrainTarget::Shutdown), DrainTarget::Restart) {
+            return;
+        }
         self.mode = Mode::Draining(target);
         let ids: Vec<ConnId> = self.conns.keys().copied().collect();
         for conn in ids {

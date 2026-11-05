@@ -438,9 +438,10 @@
 //! after any of them:
 //!
 //! - [`Core::begin_drain`] with [`DrainTarget::Shutdown`]: on the first
-//!   SIGTERM, after the driver closed its listeners. Idle keep-alive connections and connections without a
-//!   byte of their request are closed at once (`Close`, nothing logged); a
-//!   partly received head completes and is answered `503` with
+//!   SIGTERM, after the driver closed its listeners. Idle keep-alive
+//!   connections and connections without a byte of their request are
+//!   closed at once (`Close`, nothing logged); a partly received head
+//!   completes and is answered `503` with
 //!   `Connection: close`, as is any request completed later, one
 //!   pipelined behind a head queued keep-alive before the drain included
 //!   (a head the parser rejects keeps its own error with `Connection:
@@ -473,11 +474,11 @@
 //!   every call and exits when it is true.
 //! - [`Core::abort_all`]: on a second SIGTERM, a SIGINT or when
 //!   `shutdown_timeout` (or, in a restart drain, `restart_timeout`)
-//!   expires. The core then drains for a shutdown. Every connection is closed at once, per
-//!   connection `CloseFile`, `CloseUpstream`, `Close` as usual, each
-//!   exactly once; each connection with an exchange in flight is logged
-//!   first as `Rejected` with `ShuttingDown`, idle, lingering and refused
-//!   connections are cut silently. Unanswered opens become orphaned opens
+//!   expires. The core then drains for a shutdown. Every connection is
+//!   closed at once, per connection `CloseFile`, `CloseUpstream`, `Close`
+//!   as usual, each exactly once; each connection with an exchange in
+//!   flight is logged first as `Rejected` with `ShuttingDown`, idle,
+//!   lingering and refused connections are cut silently. Unanswered opens become orphaned opens
 //!   (the core would answer a late `FileOpened` with `CloseFile` as
 //!   always); the driver exits after this call without waiting for them
 //!   (DRV-14), so `is_drained` is not polled after it.
@@ -516,9 +517,11 @@
 //! The core tolerates driver mistakes without panicking: events for unknown
 //! connections, files or upstreams are ignored, a duplicate `Accepted` is
 //! ignored, a file or upstream event that does not fit its state is
-//! ignored, and a `Received`/`Sent`/`FileSent`/`UpstreamReceived`/
-//! `UpstreamSent` length larger than the space, bytes or segment offered is
-//! clamped.
+//! ignored, a `begin_drain` for a restart during a shutdown's drain is
+//! ignored (a shutdown is final; a second restart changes nothing, a
+//! shutdown after a restart escalates it), and a
+//! `Received`/`Sent`/`FileSent`/`UpstreamReceived`/`UpstreamSent` length
+//! larger than the space, bytes or segment offered is clamped.
 
 use std::net::IpAddr;
 
