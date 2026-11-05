@@ -47,8 +47,9 @@ src/
                         stream mid-body, the 408 for a stalled body
     limits.rs           connection counting per peer group (IPv6 by
                         prefix), refusals (503), orphaned opens
-    shutdown.rs         begin_drain, abort_all, is_drained; the 503 for
-                        requests completed during the drain
+    shutdown.rs         DrainTarget, begin_drain, abort_all, is_drained;
+                        the 503 for requests completed during a shutdown's
+                        drain, the restart drain's serving with close
     timers.rs           deadlines and TimerFired; closing on a timeout
     test_support.rs     helpers shared by the unit tests
   conn.rs             per-connection state (ConnState) and buffers

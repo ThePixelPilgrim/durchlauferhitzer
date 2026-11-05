@@ -1,6 +1,7 @@
 //! Shutdown (FR-PROC-05, stage 4 amendment A4, with the owner decisions
-//! of 2026-10-27 and 2026-10-29 in FR-PROC-05b to 05d): the graceful drain, the
-//! fast path, and the 503 that answers work arriving during the drain.
+//! of 2026-10-27 and 2026-10-29 in FR-PROC-05b to 05d): the graceful drain
+//! for a shutdown or a restart (FR-PROC-07), the fast path, and the 503
+//! that answers work arriving during a shutdown's drain.
 
 use super::{Action, ConnId, Core, Mode};
 use crate::conn::{Conn, ConnState, Counted, UnreadBody};
@@ -10,10 +11,24 @@ use crate::http::status::Status;
 use crate::log::{Log, RejectReason, RequestSummary};
 use crate::time::Instant;
 
+/// What a drain prepares for (FR-PROC-05): the process exits
+/// (`Shutdown`, SIGTERM), or a new process has taken over the listening
+/// ports (`Restart`, SIGHUP, FR-PROC-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainTarget {
+    /// Work arriving during the drain is refused with 503.
+    Shutdown,
+    /// What the process holds is served, with `Connection: close`.
+    Restart,
+}
+
 impl Core {
-    /// Start the graceful drain. The driver calls it once, on the first
-    /// SIGTERM, after it closed its listening sockets, between two
-    /// [`Core::handle`] calls. From then on:
+    /// Start the graceful drain for `target`. The driver calls it once,
+    /// after it closed its listening sockets, between two
+    /// [`Core::handle`] calls: on the first SIGTERM for
+    /// [`DrainTarget::Shutdown`], on SIGHUP for [`DrainTarget::Restart`].
+    ///
+    /// For a shutdown (FR-PROC-05), from then on:
     ///
     /// - idle keep-alive connections, and connections that have not
     ///   received a byte of their request yet, are closed at once (in this
@@ -41,14 +56,27 @@ impl Core {
     ///   closed like one over the limits, logged as
     ///   [`RejectReason::ShuttingDown`].
     ///
-    /// It emits only `Close`: the connections it closes hold no file or
-    /// upstream. [`Core::handle`] keeps working as
+    /// For a restart (FR-PROC-07), nothing is refused: every request
+    /// completed from then on (a partly received head, one pipelined
+    /// behind a queued head, the next one on an idle keep-alive
+    /// connection, the first one on a connection delivered by `Accepted`)
+    /// is routed and answered as usual, its head saying
+    /// `Connection: close`; a head the parser rejects keeps its own error.
+    /// Idle connections and those without a byte of their request stay:
+    /// each ends with its next request or at its keep-alive or header
+    /// deadline, as usual; so does a connection whose head was queued
+    /// keep-alive before the drain, once its response is written. The
+    /// exchanges in flight finish as for a shutdown.
+    ///
+    /// It emits only `Close` (none for a restart): the connections it
+    /// closes hold no file or upstream. [`Core::handle`] keeps working as
     /// before; the driver keeps running its loop until
-    /// [`Core::is_drained`] or `shutdown_timeout`, then calls
-    /// [`Core::abort_all`]. Deadlines are unchanged, so `now` is not
-    /// needed yet; it is taken for symmetry with `handle`.
-    pub fn begin_drain(&mut self, _now: Instant, actions: &mut Vec<Action>) {
-        self.mode = Mode::Draining;
+    /// [`Core::is_drained`] or its deadline (`shutdown_timeout`,
+    /// `restart_timeout`), then calls [`Core::abort_all`]. Deadlines are
+    /// unchanged, so `now` is not needed yet; it is taken for symmetry
+    /// with `handle`.
+    pub fn begin_drain(&mut self, _now: Instant, target: DrainTarget, actions: &mut Vec<Action>) {
+        self.mode = Mode::Draining(target);
         let ids: Vec<ConnId> = self.conns.keys().copied().collect();
         for conn in ids {
             let Some(c) = self.conns.get_mut(&conn) else {
@@ -56,15 +84,24 @@ impl Core {
             };
             match &mut c.state {
                 ConnState::Idle { .. } | ConnState::ReadingHead { buffered: 0, .. } => {
-                    self.forget(conn, actions);
-                    actions.push(Action::Close { conn });
+                    match target {
+                        DrainTarget::Shutdown => {
+                            self.forget(conn, actions);
+                            actions.push(Action::Close { conn });
+                        }
+                        // Closing it would race a request the client may
+                        // be sending (FR-PROC-07).
+                        DrainTarget::Restart => {}
+                    }
                 }
-                // A partly received head completes, then gets 503; a
-                // lingering connection is already closing.
+                // A partly received head completes, then gets 503 (or, in
+                // a restart, its answer); a lingering connection is
+                // already closing.
                 ConnState::ReadingHead { .. } | ConnState::Lingering { .. } => {}
                 // The head is queued: it keeps what it said, and `finish`
                 // ends the connection after it, or answers a request
-                // pipelined behind it 503 (owner decision 2026-10-27).
+                // pipelined behind it 503 (owner decision 2026-10-27; in a
+                // restart, with its answer).
                 ConnState::Responding { .. }
                 | ConnState::SendingFile { .. }
                 | ConnState::Relaying { .. } => {}
@@ -96,10 +133,11 @@ impl Core {
     /// as for any connection that closes: its `FileOpened` is answered
     /// with `CloseFile` if it comes, and [`Core::is_drained`] stays false
     /// until then; the driver exits after this call without waiting for
-    /// orphaned opens (DRV-14). The core is draining afterwards, and
-    /// `handle` keeps working (a stray `Accepted` is answered 503).
+    /// orphaned opens (DRV-14). The core is draining for a shutdown
+    /// afterwards, also after a restart drain, and `handle` keeps working
+    /// (a stray `Accepted` is answered 503).
     pub fn abort_all(&mut self, actions: &mut Vec<Action>) {
-        self.mode = Mode::Draining;
+        self.mode = Mode::Draining(DrainTarget::Shutdown);
         let ids: Vec<ConnId> = self.conns.keys().copied().collect();
         for conn in ids {
             let Some(c) = self.conns.get(&conn) else {
@@ -126,7 +164,8 @@ impl Core {
         self.conns.is_empty() && self.upstreams.is_empty() && self.files.is_empty()
     }
 
-    /// While draining, a complete request `head` on `conn` is answered 503
+    /// While draining for a shutdown, a complete request `head` on `conn`
+    /// is answered 503
     /// with `Connection: close` (FR-PROC-05 "target shutdown",
     /// FR-PROC-05b), and logged as its response; a body it announced is
     /// left unread.
@@ -195,3 +234,6 @@ fn cuts_an_exchange(c: &Conn) -> bool {
         | ConnState::Relaying { .. } => true,
     }
 }
+
+#[cfg(test)]
+mod tests;

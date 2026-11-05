@@ -193,7 +193,7 @@ pub(crate) fn shutdown_at(
             let read = sim.delivered_to_server(conn);
             marks.at_drain.insert(conn, AtDrain { read, opening });
         }
-        sim.begin_drain();
+        sim.begin_drain(DrainTarget::Shutdown);
         if abort.is_none() {
             for &conn in clients {
                 if sim.state(conn) != SimConnState::Closed {

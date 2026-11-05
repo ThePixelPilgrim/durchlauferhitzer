@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::proxy::close_upstream;
-use super::{Action, ConnId, Core, Mode};
+use super::{Action, ConnId, Core, DrainTarget, Mode};
 use crate::conn::{Conn, ConnState, Counted, UnreadBody};
 use crate::file::{FileId, OrphanSlots, Owner};
 use crate::http::request::{HeadParser, Persistence};
@@ -139,9 +139,10 @@ impl Core {
         let limits = &self.config.limits;
         let group = peer_group(peer, limits.ipv6_prefix);
         let per_ip = self.counted_per_ip.get(&group).copied().unwrap_or(0);
-        let refusal = if self.mode == Mode::Draining {
+        let refusal = if self.mode == Mode::Draining(DrainTarget::Shutdown) {
             // The driver closed its listeners before the drain; answer a
-            // straggler all the same (FR-PROC-05).
+            // straggler all the same (FR-PROC-05). A restart drain serves
+            // it (FR-PROC-07).
             Some(RejectReason::ShuttingDown)
         } else if self.counted >= limits.max_connections {
             Some(RejectReason::Limit(LimitKind::Connections))

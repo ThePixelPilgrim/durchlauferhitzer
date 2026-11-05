@@ -437,8 +437,8 @@
 //! (never between a read and its report), and `handle` keeps working
 //! after any of them:
 //!
-//! - [`Core::begin_drain`]: on the first SIGTERM, after the driver closed
-//!   its listeners. Idle keep-alive connections and connections without a
+//! - [`Core::begin_drain`] with [`DrainTarget::Shutdown`]: on the first
+//!   SIGTERM, after the driver closed its listeners. Idle keep-alive connections and connections without a
 //!   byte of their request are closed at once (`Close`, nothing logged); a
 //!   partly received head completes and is answered `503` with
 //!   `Connection: close`, as is any request completed later, one
@@ -458,11 +458,22 @@
 //!   does not read while it sends), the lingering close discards them,
 //!   and the client sees a clean close (RFC 9112 §9.6) after which it may
 //!   retry an idempotent request (§9.3.1).
+//! - [`Core::begin_drain`] with [`DrainTarget::Restart`] (FR-PROC-07): on
+//!   SIGHUP, after the driver closed its listeners (a new process took
+//!   over the ports). Nothing is refused: every request completed from
+//!   then on, on any connection the core holds or is given by `Accepted`,
+//!   is routed and answered as usual, its head saying `Connection: close`
+//!   (a head the parser rejects keeps its own error). Nothing is closed at
+//!   once: an idle keep-alive connection, a fresh one, and one whose
+//!   head was queued keep-alive before the drain (once that response is
+//!   written) each end with their next request or at their keep-alive or
+//!   header deadline. Exchanges in flight finish as for a shutdown.
 //! - [`Core::is_drained`]: true once no connection, upstream, open file or
 //!   orphaned open is left; during the drain the driver polls it after
 //!   every call and exits when it is true.
 //! - [`Core::abort_all`]: on a second SIGTERM, a SIGINT or when
-//!   `shutdown_timeout` expires. Every connection is closed at once, per
+//!   `shutdown_timeout` (or, in a restart drain, `restart_timeout`)
+//!   expires. The core then drains for a shutdown. Every connection is closed at once, per
 //!   connection `CloseFile`, `CloseUpstream`, `Close` as usual, each
 //!   exactly once; each connection with an exchange in flight is logged
 //!   first as `Rejected` with `ShuttingDown`, idle, lingering and refused
@@ -512,7 +523,7 @@
 use std::net::IpAddr;
 
 #[cfg(doc)]
-use super::Core;
+use super::{Core, DrainTarget};
 #[cfg(doc)]
 use crate::conn::{LINGER_SCRATCH, LINGER_TIMEOUT};
 use crate::file::{FileError, FileId, FileMeta, FileStamp, RootId};

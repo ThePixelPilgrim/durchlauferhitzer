@@ -10,7 +10,7 @@ use std::time::Duration;
 use durchlauferhitzer_core::http::request::{HttpError, Method, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
-use durchlauferhitzer_core::{Log, RejectReason, RequestSummary, TimeoutKind};
+use durchlauferhitzer_core::{DrainTarget, Log, RejectReason, RequestSummary, TimeoutKind};
 use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
 
 #[allow(dead_code, reason = "shared by all test binaries; each uses part")]
@@ -73,7 +73,7 @@ fn idle_and_fresh_connections_close_at_once() {
     let fresh = sim.connect(peer());
     sim.run_until_idle();
     let logs = sim.logs().len();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.state(idle), SimConnState::Closed, "{}", sim.trace());
     assert_eq!(sim.state(fresh), SimConnState::Closed, "{}", sim.trace());
     // Closed silently, like a keep-alive or header timeout without bytes.
@@ -87,7 +87,7 @@ fn a_head_completed_during_the_drain_gets_503_with_close() {
     let c = sim.connect(peer());
     sim.send(c, b"HEAD /f.txt HTTP/1.1\r\nHo");
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     assert!(!sim.is_drained());
     sim.send(c, b"st: example.test\r\n\r\n");
@@ -131,7 +131,7 @@ fn an_inflight_download_completes_then_closes() {
     sim.set_client_window(c, Window::Budget(1000));
     sim.send(c, GET_F);
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     assert_eq!(sim.open_files(), 1);
     sim.set_client_window(c, Window::Unlimited);
@@ -154,7 +154,7 @@ fn a_response_rendered_after_the_drain_began_says_close() {
     let c = sim.connect(peer());
     sim.send(c, GET_F);
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     sim.advance(Duration::from_millis(50));
     let mut expected = model_file_head(TEXT, 3000, Persistence::Close, None);
     expected.extend_from_slice(&[b'x'; 3000]);
@@ -171,7 +171,7 @@ fn a_proxied_exchange_completes_then_closes() {
     sim.send(c, b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n");
     sim.run_until_idle();
     let up = *sim.upstreams().first().unwrap();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
     sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     sim.run_until_idle();
@@ -198,7 +198,7 @@ fn a_connect_timing_out_during_the_drain_gets_504_with_close() {
     sim.send(c, b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n");
     sim.run_until_idle();
     assert_eq!(sim.open_upstreams(), 1, "{}", sim.trace());
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     // `backend_connect_timeout` defaults to 5s.
     sim.advance(Duration::from_secs(6));
@@ -229,7 +229,7 @@ fn a_connect_completed_during_the_drain_relays_with_close() {
     sim.send(c, b"GET /api/x HTTP/1.1\r\nHost: example.test\r\n\r\n");
     sim.run_until_idle();
     let up = *sim.upstreams().first().unwrap();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     sim.accept_upstream(up);
     sim.run_until_idle();
     sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
@@ -261,7 +261,7 @@ fn is_drained_flips_when_the_last_resource_goes() {
     sim.send(lingering, b"GET / HTTP/1.1\nHost: a\n\n");
     sim.run_until_idle();
     assert_eq!(sim.state(lingering), SimConnState::WriteShutdown);
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert!(!sim.is_drained(), "{}", sim.trace());
     finish_client(&mut sim, lingering);
     assert_eq!(sim.state(lingering), SimConnState::Closed);
@@ -278,7 +278,7 @@ fn is_drained_flips_when_the_last_resource_goes() {
 #[test]
 fn a_connection_accepted_during_the_drain_is_refused() {
     let mut sim = sim();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     let c = sim.connect(peer());
     sim.run_until_idle();
     assert_eq!(
@@ -403,7 +403,7 @@ fn abort_all_closes_everything_and_waits_for_orphans() {
 #[test]
 fn abort_all_cuts_a_refused_connection_silently() {
     let mut sim = sim();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     let refused = sim.connect(peer());
     sim.set_client_window(refused, Window::Budget(0));
     sim.run_until_idle();
@@ -426,7 +426,7 @@ fn a_request_pipelined_behind_the_drain_gets_503() {
     sim.set_client_window(c, Window::Budget(1000));
     sim.send(c, &[GET_F, GET_F].concat());
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     let logs = sim.logs().len();
     sim.set_client_window(c, Window::Unlimited);
@@ -469,7 +469,7 @@ fn a_malformed_request_pipelined_during_the_drain_keeps_its_400() {
     sim.set_client_window(c, Window::Budget(10));
     sim.send(c, &[MISSING, b"GET / HTTP/1.1\nHost: a\n\n"].concat());
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     let logs = sim.logs().len();
     sim.set_client_window(c, Window::Unlimited);
@@ -508,7 +508,7 @@ fn a_proxy_request_with_a_body_during_the_drain_gets_503() {
     let c = sim.connect(peer());
     sim.send(c, b"POST /api/x HTTP/1.1\r\n");
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     sim.send(c, b"Host: example.test\r\nContent-Length: 5\r\n\r\nhello");
     sim.run_until_idle();
     assert_eq!(
@@ -552,7 +552,7 @@ fn the_drain_503_carries_the_date() {
     let c = sim.connect(peer());
     sim.send(c, b"GET /f.txt HTTP/1.1\r\n");
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     sim.send(c, b"Host: example.test\r\n\r\n");
     sim.run_until_idle();
     assert_eq!(
@@ -580,7 +580,7 @@ fn a_relayed_response_completes_then_closes() {
     let up = *sim.upstreams().first().unwrap();
     sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nok");
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     sim.backend_send(up, b"ok");
     sim.run_until_idle();
@@ -629,7 +629,7 @@ fn a_request_pipelined_behind_an_open_in_flight_is_not_answered() {
     let c = sim.connect(peer());
     sim.send(c, &[GET_F, MISSING].concat());
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     sim.advance(Duration::from_millis(50));
     let mut expected = model_file_head(TEXT, 3000, Persistence::Close, None);
     expected.extend_from_slice(&[b'x'; 3000]);
@@ -668,7 +668,7 @@ fn a_request_pipelined_behind_an_awaited_response_is_not_answered() {
     );
     sim.run_until_idle();
     let up = *sim.upstreams().first().unwrap();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     sim.backend_send(up, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     sim.run_until_idle();
     assert_eq!(
@@ -705,7 +705,7 @@ fn partial_pipelined_behind_a_download(sim: &mut Sim) -> durchlauferhitzer_core:
     );
     sim.run_until_idle();
     sim.advance(Duration::from_secs(3));
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     sim.set_client_window(c, Window::Unlimited);
     sim.run_until_idle();
     let mut expected = model_file_head(TEXT, 3000, Persistence::KeepAlive, None);
@@ -788,7 +788,7 @@ fn an_inflight_fixed_response_completes_then_closes() {
     sim.set_client_window(c, Window::Budget(10));
     sim.send(c, MISSING);
     sim.run_until_idle();
-    sim.begin_drain();
+    sim.begin_drain(DrainTarget::Shutdown);
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     sim.set_client_window(c, Window::Unlimited);
     sim.run_until_idle();

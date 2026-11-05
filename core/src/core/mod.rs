@@ -39,6 +39,7 @@ use crate::upstream::BackendId;
 use crate::upstream::{UpstreamId, UpstreamTable, head_capacity, recv_capacity};
 
 pub use contract::{Action, ConnError, ConnId, Event, Interest};
+pub use shutdown::DrainTarget;
 
 /// The I/O-free server core. See `contract.rs` for the driver contract.
 #[derive(Debug)]
@@ -73,7 +74,7 @@ pub struct Core {
     /// the IMF-fixdate of the second last passed to [`Core::set_date`];
     /// `None` until then, and no `Date` is sent.
     date: Option<ImfFixdate>,
-    /// Serving, or draining for shutdown (FR-PROC-05).
+    /// Serving, or draining for a shutdown or a restart (FR-PROC-05).
     mode: Mode,
 }
 
@@ -81,11 +82,13 @@ pub struct Core {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Serving,
-    /// [`Core::begin_drain`] or [`Core::abort_all`] was called: every
-    /// request completed from now on is answered 503 with
-    /// `Connection: close`, and every connection delivered afterwards is
-    /// refused with 503.
-    Draining,
+    /// [`Core::begin_drain`] was called with this target, or
+    /// [`Core::abort_all`] (target shutdown). For a shutdown, every request
+    /// completed from now on is answered 503 with `Connection: close`, and
+    /// every connection delivered afterwards is refused with 503; for a
+    /// restart, both are served as usual, every head rendered saying
+    /// `Connection: close`.
+    Draining(DrainTarget),
 }
 
 /// Capacity of a connection's receive buffer: room for the largest allowed

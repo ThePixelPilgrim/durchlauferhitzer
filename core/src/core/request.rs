@@ -3,7 +3,7 @@
 
 use super::proxy::{self, ProxyPlan};
 use super::static_files::{Plan, plan};
-use super::{Action, ConnId, Core, Mode};
+use super::{Action, ConnId, Core, DrainTarget, Mode};
 use crate::config::{Limits, RouteAction};
 use crate::conn::{Conn, ConnState, LINGER_TIMEOUT, UnreadBody};
 use crate::file::Chunk;
@@ -205,7 +205,17 @@ impl Core {
                 };
                 match self.mode {
                     Mode::Serving => self.respond(now, conn, head, after, actions),
-                    Mode::Draining => self.refuse_during_drain(now, conn, head, actions),
+                    // FR-PROC-07: served as usual, its head saying close.
+                    Mode::Draining(DrainTarget::Restart) => {
+                        let head = RequestHead {
+                            persistence: Persistence::Close,
+                            ..head
+                        };
+                        self.respond(now, conn, head, after, actions);
+                    }
+                    Mode::Draining(DrainTarget::Shutdown) => {
+                        self.refuse_during_drain(now, conn, head, actions);
+                    }
                 }
             }
             Err(error) => {
@@ -278,9 +288,11 @@ pub(super) struct AfterResponse {
 
 /// The response on `conn` is fully written: keep the connection for the
 /// next request, or shut down its sending side and linger. While the core
-/// drains (`mode`), a kept connection with no pipelined input closes
-/// instead of waiting; pipelined input is parsed as usual, so a complete
-/// request gets the drain's 503 (FR-PROC-05b).
+/// drains for a shutdown (`mode`), a kept connection with no pipelined
+/// input closes instead of waiting; pipelined input is parsed as usual, so
+/// a complete request gets the drain's 503 (FR-PROC-05b). A restart drain
+/// keeps it like an idle connection (FR-PROC-07): its next request is
+/// served with close, or its keep-alive deadline ends it.
 pub(super) fn finish(
     conn: ConnId,
     c: &mut Conn,
@@ -296,7 +308,7 @@ pub(super) fn finish(
         buffered,
     } = after;
     match (persistence, unread_body, mode) {
-        (Persistence::KeepAlive, UnreadBody::None, Mode::Serving | Mode::Draining)
+        (Persistence::KeepAlive, UnreadBody::None, Mode::Serving | Mode::Draining(_))
             if buffered > 0 =>
         {
             ConnState::ReadingHead {
@@ -305,16 +317,20 @@ pub(super) fn finish(
                 deadline: now.saturating_add(limits.header_timeout),
             }
         }
-        (Persistence::KeepAlive, UnreadBody::None, Mode::Serving) => ConnState::Idle {
+        (
+            Persistence::KeepAlive,
+            UnreadBody::None,
+            Mode::Serving | Mode::Draining(DrainTarget::Restart),
+        ) => ConnState::Idle {
             deadline: now.saturating_add(limits.keepalive_timeout),
         },
-        (Persistence::KeepAlive, UnreadBody::None, Mode::Draining)
+        (Persistence::KeepAlive, UnreadBody::None, Mode::Draining(DrainTarget::Shutdown))
         | (
             Persistence::Close,
             UnreadBody::None | UnreadBody::Pending,
-            Mode::Serving | Mode::Draining,
+            Mode::Serving | Mode::Draining(_),
         )
-        | (Persistence::KeepAlive, UnreadBody::Pending, Mode::Serving | Mode::Draining) => {
+        | (Persistence::KeepAlive, UnreadBody::Pending, Mode::Serving | Mode::Draining(_)) => {
             actions.push(Action::ShutdownWrite { conn });
             // Lingering input goes to the shared scratch buffer.
             c.recv = Box::default();

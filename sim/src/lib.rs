@@ -44,7 +44,8 @@ use std::time::Duration;
 use durchlauferhitzer_core::config::load;
 use durchlauferhitzer_core::http::chunked::MAX_UNCONSUMED;
 use durchlauferhitzer_core::{
-    Action, BodyPending, ConnError, ConnId, Core, Event, FileId, Instant, Interest, Log, UpstreamId,
+    Action, BodyPending, ConnError, ConnId, Core, DrainTarget, Event, FileId, Instant, Interest,
+    Log, UpstreamId,
 };
 
 use crate::backend::Backends;
@@ -542,9 +543,9 @@ impl Sim {
     /// connections close at once, the rest finish their exchange and then
     /// close; requests completed from now on get 503. Pump with
     /// `run_until_idle` or `advance` afterwards.
-    pub fn begin_drain(&mut self) {
-        self.line("begin_drain");
-        self.call_core(|core, now, actions| core.begin_drain(now, actions));
+    pub fn begin_drain(&mut self, target: DrainTarget) {
+        self.line(&format!("begin_drain {target:?}"));
+        self.call_core(|core, now, actions| core.begin_drain(now, target, actions));
     }
 
     /// The fast shutdown (`Core::abort_all`): every connection, upstream

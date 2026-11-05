@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use durchlauferhitzer_core::{
-    Action, ConnError, ConnId, Core, Event, FileError, FileId, Instant, UpstreamId,
+    Action, ConnError, ConnId, Core, DrainTarget, Event, FileError, FileId, Instant, UpstreamId,
 };
 
 use self::accept::AcceptGate;
@@ -416,7 +416,7 @@ impl Driver {
         self.listeners.clear();
         self.log_shutdown(ShutdownPhase::Draining);
         let now = self.clock.now();
-        self.run_core(|core, actions| core.begin_drain(now, actions))?;
+        self.run_core(|core, actions| core.begin_drain(now, DrainTarget::Shutdown, actions))?;
         self.flush_queued()
     }
 
