@@ -25,7 +25,7 @@ mod upstreams;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -289,6 +289,12 @@ impl Driver {
     /// is installed after `new` (FR-PROC-04).
     pub fn write_log(&mut self, entry: DriverLog) {
         self.log.write(LogEntry::Driver(entry));
+    }
+
+    /// The listeners, for the steering right before the seccomp filter
+    /// (FR-PROC-07).
+    pub fn listeners(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
+        self.listeners.iter().map(AsFd::as_fd)
     }
 
     /// A handle that stops [`Driver::run`] from another thread.

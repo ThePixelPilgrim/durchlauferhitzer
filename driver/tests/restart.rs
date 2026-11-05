@@ -11,6 +11,10 @@
 //!   a bad config, a new process that fails at startup, a pid file that
 //!   names another program; the old process serves on, untouched.
 //! - A `listen` address the new config drops is closed (documented).
+//! - Steering: a ready new process gets every new connection before any
+//!   SIGHUP; fresh clients across back-to-back reloads lose nothing (a
+//!   kernel race resets a handshake completing on a listener as it
+//!   closes); the helper keeps its lock until the old listeners closed.
 //! - Control: with `tcp_migrate_req` 0 the connections queued in the old
 //!   process at its SIGHUP are reset. The old process accepts at most 64
 //!   connections per wakeup (`ACCEPT_BATCH`) before it reads the signal,
@@ -37,41 +41,24 @@ mod child;
 #[path = "support/load.rs"]
 mod load;
 
-use std::fs::{self, OpenOptions};
+#[path = "support/site.rs"]
+mod site;
+
+use std::fs;
 use std::io::{self, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::path::Path;
+use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use child::{Containment, Running, TempDir, config, exe, free_port, is_root, signal_pid, text};
-use load::{Load, Tally, collect, connect, fresh_request, queue, read_response, warm_up};
-
-const REQUIRE_ROOT: &str = "DURCHLAUFERHITZER_REQUIRE_ROOT";
-const REQUIRE_MIGRATE: &str = "DURCHLAUFERHITZER_REQUIRE_MIGRATE";
-const MIGRATE: &str = "/proc/sys/net/ipv4/tcp_migrate_req";
-
-/// The reload helper, run with `sh`.
-const HELPER: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../contrib/durchlauferhitzer-reload"
-);
-
-/// The OpenRC files and their end-to-end test, checked with `sh -n`.
-const OPENRC: [&str; 3] = [
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../contrib/openrc/durchlauferhitzer"
-    ),
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../contrib/openrc/durchlauferhitzer.confd"
-    ),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../contrib/test-openrc.sh"),
-];
+use child::{Containment, Running, exe, free_port, signal_pid, text};
+use load::{Load, Pattern, Tally, collect, connect, fresh_request, queue, read_response, warm_up};
+use site::{
+    HELPER, Migration, OPENRC, Site, alive, can_restart, hup_pending, loopback, reload_with,
+    serial, set_migrate, start_time, wait_gone,
+};
 
 /// How long the old process may take to drain and exit.
 const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
@@ -79,371 +66,40 @@ const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
 /// How many connections are queued in the stopped old process.
 const QUEUED: usize = 400;
 
-/// One test at a time: the sysctl is global, and a binary copied while
-/// another test forks would be busy (`ETXTBSY`) for its `exec`.
-fn serial() -> MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn required(var: &str) -> bool {
-    std::env::var_os(var).is_some_and(|v| v == "1")
-}
-
-/// Whether the restart tests can run here: as root, with
-/// `tcp_migrate_req` set to 1 (by this test, as the helper would).
-fn can_restart() -> bool {
-    if !is_root() {
-        assert!(
-            !required(REQUIRE_ROOT),
-            "not root, but {REQUIRE_ROOT}=1 requires it"
-        );
-        eprintln!("skipped: the restart tests need root");
-        return false;
-    }
-    set_migrate(Migration::On)
-}
-
-/// The value of `tcp_migrate_req`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Migration {
-    /// 1: a closing listener's queue moves to another in its group.
-    On,
-    /// 0: it is reset.
-    Off,
-}
-
-/// Sets `tcp_migrate_req`; whether it took (a failure skips the test, or
-/// fails it with `DURCHLAUFERHITZER_REQUIRE_MIGRATE=1`).
-fn set_migrate(migration: Migration) -> bool {
-    let value = match migration {
-        Migration::On => "1",
-        Migration::Off => "0",
-    };
-    let set = fs::write(MIGRATE, value)
-        .and_then(|()| fs::read_to_string(MIGRATE))
-        .map(|now| now.trim() == value);
-    match set {
-        Ok(true) => true,
-        other => {
-            assert!(
-                !required(REQUIRE_MIGRATE),
-                "{MIGRATE} cannot be set to {value} ({other:?}), but {REQUIRE_MIGRATE}=1 requires it"
-            );
-            eprintln!("skipped: {MIGRATE} cannot be set to {value}: {other:?}");
-            false
-        }
-    }
-}
-
-fn loopback(port: u16) -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], port))
-}
-
-/// A site in a temp dir: its own copy of the binary, a pid file, a log,
-/// one document root per answer (`<answer>/a.txt` holds `<answer>\n`).
-/// Every process running its binary is killed when it is dropped.
-struct Site {
-    dir: TempDir,
-    /// The address the tests serve on (a free loopback port).
-    addr: SocketAddr,
-    bin: PathBuf,
-    pidfile: PathBuf,
-    log: PathBuf,
-}
-
-impl Site {
-    fn new() -> Site {
-        let dir = TempDir::new();
-        let bin_dir = dir.dir("bin");
-        let bin = bin_dir.join("durchlauferhitzer");
-        install(&bin);
-        let bin = fs::canonicalize(bin).unwrap();
-        let pidfile = dir.path().join("durchlauferhitzer.pid");
-        let log = dir.path().join("durchlauferhitzer.log");
-        Site {
-            dir,
-            addr: loopback(free_port()),
-            bin,
-            pidfile,
-            log,
-        }
-    }
-
-    /// The config `name.conf`: `listen` on each address, `user nobody`,
-    /// a per-IP limit above the tests' connection counts, and `/` served
-    /// from `root` (which holds `a.txt` = `root\n` unless it is absolute,
-    /// then used as written).
-    fn config(&self, name: &str, listen: &[SocketAddr], root: &str) -> PathBuf {
-        let root = if root.starts_with('/') {
-            root.to_owned()
-        } else {
-            let www = self.dir.dir(root);
-            self.dir
-                .file(&format!("{root}/a.txt"), &format!("{root}\n"));
-            www.display().to_string()
-        };
-        let listen: Vec<String> = listen.iter().map(ToString::to_string).collect();
-        let text = config(
-            &listen.join(" "),
-            "user nobody;\nlimits { max_connections_per_ip 1024; }",
-            &format!("static {root};"),
-        );
-        self.dir
-            .config(&format!("{name}.conf"), &text, Containment::Switch)
-    }
-
-    /// Starts the server on `conf` as root (it drops to `nobody`), its
-    /// output appended to the log, waits until the site's address
-    /// answers, and writes the pid file, as OpenRC's `start` would.
-    fn start(&self, conf: &Path) -> Running {
-        let log = || {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.log)
-                .unwrap()
-        };
-        let child = Command::new(&self.bin)
-            .arg(conf)
-            .stdin(Stdio::null())
-            .stdout(log())
-            .stderr(log())
-            .spawn()
-            .unwrap_or_else(|err| panic!("{}: {err}", self.bin.display()));
-        let mut server = Running { child };
-        let deadline = Instant::now() + child::PATIENCE;
-        while TcpStream::connect(self.addr).is_err() {
-            if let Some(status) = server.child.try_wait().unwrap() {
-                panic!("the server exited ({status}): {}", self.log_text());
-            }
-            assert!(Instant::now() < deadline, "the server never listened");
-            thread::sleep(Duration::from_millis(10));
-        }
-        fs::write(&self.pidfile, format!("{}\n", server.pid())).unwrap();
-        server
-    }
-
-    /// Replaces the binary with a fresh copy (a new file renamed over it),
-    /// so a running process's `/proc/<pid>/exe` reads ` (deleted)`.
-    fn replace_binary(&self) {
-        let fresh = self.bin.with_extension("new");
-        install(&fresh);
-        fs::rename(&fresh, &self.bin).unwrap();
-    }
-
-    /// Runs the reload helper with `conf` and a 10 s readiness timeout.
-    fn reload(&self, conf: &Path) -> Output {
-        self.reload_within(conf, "10")
-    }
-
-    /// Runs the reload helper with `conf` and a readiness timeout of
-    /// `timeout` seconds; its temp dirs go to [`Site::tmp`].
-    fn reload_within(&self, conf: &Path, timeout: &str) -> Output {
-        let mut cmd = Command::new("sh");
-        cmd.arg(HELPER)
-            .args([&self.bin, conf, &self.pidfile, &self.log])
-            .arg(timeout)
-            .env("TMPDIR", self.tmp());
-        bounded(cmd)
-    }
-
-    /// The helper's `TMPDIR`.
-    fn tmp(&self) -> PathBuf {
-        self.dir.dir("tmp")
-    }
-
-    /// Runs the helper as [`Site::reload`] does, with `file` open on fds 5
-    /// and 9 (as a caller such as `openrc-run` may leave descriptors open).
-    fn reload_inheriting(&self, conf: &Path, file: &Path) -> Output {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(r#"exec 5<"$1" 9<"$1"; shift; exec sh "$@""#)
-            .arg("sh")
-            .arg(file)
-            .arg(HELPER)
-            .args([&self.bin, conf, &self.pidfile, &self.log])
-            .arg("10");
-        bounded(cmd)
-    }
-
-    /// Runs the OpenRC script's `stop_post` (sourced by `sh`, with stub
-    /// `ebegin`/`eend`) for this site, with `retry`.
-    fn stop_post(&self, retry: &str) -> Output {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(
-                r#"ebegin() { :; }; eend() { :; }; . "$1"; command=$2 pidfile=$3 retry=$4; stop_post"#,
-            )
-            .arg("sh")
-            .arg(OPENRC[0])
-            .args([&self.bin, &self.pidfile])
-            .arg(retry);
-        bounded(cmd)
-    }
-
-    /// The pids `<pidfile>.draining` lists (none without the file).
-    /// Each line is `<pid> <start time>`; while the process still runs,
-    /// the start time must be its own (one that finished draining may
-    /// be gone by the time this reads it).
-    fn draining(&self) -> Vec<u32> {
-        fs::read_to_string(self.draining_file())
-            .unwrap_or_default()
-            .lines()
-            .map(|line| {
-                let (pid, start) = line.split_once(' ').unwrap();
-                let pid = pid.parse().unwrap();
-                if let Some(now) = start_time(pid) {
-                    assert_eq!(start, now, "{line}");
-                }
-                pid
-            })
-            .collect()
-    }
-
-    fn draining_file(&self) -> PathBuf {
-        self.dir.path().join("durchlauferhitzer.pid.draining")
-    }
-
-    /// The pid the pid file names.
-    fn pid(&self) -> u32 {
-        fs::read_to_string(&self.pidfile)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap()
-    }
-
-    fn log_text(&self) -> String {
-        fs::read_to_string(&self.log).unwrap_or_default()
-    }
-
-    /// Every live process running this site's binary (the current file or
-    /// a replaced one).
-    fn processes(&self) -> Vec<u32> {
-        let bin = self.bin.display().to_string();
-        let deleted = format!("{bin} (deleted)");
-        let mut pids = Vec::new();
-        for entry in fs::read_dir("/proc").unwrap() {
-            let Ok(entry) = entry else { continue };
-            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            // A zombie's `exe` cannot be read: it is not running.
-            let Ok(exe) = fs::read_link(entry.path().join("exe")) else {
-                continue;
-            };
-            let exe = exe.display().to_string();
-            if exe == bin || exe == deleted {
-                pids.push(pid);
-            }
-        }
-        pids.sort_unstable();
-        pids
-    }
-
-    fn assert_reload_ok(&self, output: &Output) {
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "reload: {:?}\nstdout: {}\nstderr: {}\nlog: {}",
-            output.status,
-            text(&output.stdout),
-            text(&output.stderr),
-            self.log_text()
-        );
-    }
-}
-
-impl Drop for Site {
-    fn drop(&mut self) {
-        for pid in self.processes() {
-            let _ = Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .stderr(Stdio::null())
-                .status();
-        }
-    }
-}
-
-/// Copies the built binary to `path`, executable by everyone.
-fn install(path: &Path) {
-    fs::copy(exe(), path).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-/// Runs the helper with `args`, at most 20 s.
-fn reload_with<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Output {
-    let mut cmd = Command::new("sh");
-    cmd.arg(HELPER).args(args);
-    bounded(cmd)
-}
-
-/// Runs `cmd` to its end, at most 20 s.
-fn bounded(mut cmd: Command) -> Output {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while child.try_wait().unwrap().is_none() {
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            panic!("{cmd:?} did not finish within 20 s");
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    child.wait_with_output().unwrap()
-}
-
-/// Field 22 of `/proc/<pid>/stat`, the start time (counted after the
-/// last `)`, since the command name may contain spaces and parentheses).
-fn start_time(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, rest) = stat.rsplit_once(") ")?;
-    rest.split(' ').nth(19).map(str::to_owned)
-}
-
-/// Whether `pid` is running (a zombie is not).
-fn alive(pid: u32) -> bool {
-    match fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => stat
-            .rsplit_once(") ")
-            .is_some_and(|(_, rest)| !rest.starts_with('Z')),
-        Err(_) => false,
-    }
-}
-
-fn wait_gone(pid: u32, limit: Duration) {
-    let deadline = Instant::now() + limit;
-    while alive(pid) {
-        assert!(
-            Instant::now() < deadline,
-            "pid {pid} still runs after {limit:?}"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// The handover under load, with the old process stopped across the
 /// helper's SIGHUP: connections queue in its backlog (and some of the
-/// clients' too), then it continues.
+/// clients' too), then it continues. The helper waits for its listeners
+/// to close, so it runs in the background until then.
 fn stopped_handover(site: &Site, old: &Running, new_conf: &Path, migration: Migration) -> Tally {
     let addr = site.addr;
     signal_pid(old.pid(), "STOP");
     let queued = queue(addr, QUEUED);
     site.replace_binary();
-    let output = site.reload(new_conf);
-    site.assert_reload_ok(&output);
-    // The helper set it to 1.
-    assert!(set_migrate(migration));
-    signal_pid(old.pid(), "CONT");
+    thread::scope(|scope| {
+        let reload = scope.spawn(|| site.reload(new_conf));
+        await_hup(old.pid(), &reload);
+        // The helper set it to 1.
+        assert!(set_migrate(migration));
+        signal_pid(old.pid(), "CONT");
+        site.assert_reload_ok(&reload.join().unwrap());
+    });
     let tally = collect(queued, &["old", "new"]);
     assert!(set_migrate(Migration::On));
     tally
+}
+
+/// Waits until the stopped `pid` has the helper's SIGHUP pending; a
+/// helper that ends without having sent it fails the test.
+fn await_hup(pid: u32, reload: &thread::ScopedJoinHandle<'_, Output>) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !hup_pending(pid) {
+        assert!(
+            !reload.is_finished() || hup_pending(pid),
+            "the helper ended, and pid {pid} has no SIGHUP pending"
+        );
+        assert!(Instant::now() < deadline, "no SIGHUP for pid {pid}");
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// FR-PROC-07: no connection is lost, accepted or queued, and the binary
@@ -484,6 +140,91 @@ fn reload_under_load_loses_nothing() {
     for _ in 0..10 {
         assert_eq!(fresh_request(addr, &["new"]), Ok("new".to_owned()));
     }
+}
+
+/// FR-PROC-07 "Steering": once the new process is ready, before any
+/// SIGHUP, every new connection reaches it, none the old process.
+#[test]
+fn ready_steers_new_connections_to_the_new_process() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let _old = site.start(&old_conf);
+    let _new = site.start_ready(&new_conf);
+    for _ in 0..50 {
+        assert_eq!(fresh_request(addr, &["old", "new"]), Ok("new".to_owned()));
+    }
+}
+
+/// How many back-to-back reloads the storm sees.
+const STORM_RELOADS: usize = 6;
+
+/// FR-PROC-07 "Steering": many fresh connections across several reloads
+/// lose nothing (a connect reset at the old listener's close was the
+/// kernel race steering avoids).
+#[test]
+fn reload_under_fresh_storm_loses_nothing() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let confs = [
+        site.config("old", &[addr], "old"),
+        site.config("new", &[addr], "new"),
+    ];
+    let _first = site.start(&confs[0]);
+    let load = Load::with(addr, &["old", "new"], &[Pattern::Fresh; 12]);
+    warm_up();
+    for i in 0..STORM_RELOADS {
+        site.assert_reload_ok(&site.reload(&confs[(i + 1) % 2]));
+    }
+    let deadline = Instant::now() + DRAIN_PATIENCE;
+    while site.processes() != vec![site.pid()] {
+        assert!(Instant::now() < deadline, "{:?}", site.processes());
+        thread::sleep(Duration::from_millis(10));
+    }
+    let load = load.finish();
+    eprintln!("load: {:?}", load.answers);
+    assert!(load.failures.is_empty(), "load: {:?}", load.failures);
+}
+
+/// The helper releases its lock only once the old process has closed its
+/// listeners: here the old process is stopped across its SIGHUP, and the
+/// helper runs on until it continues.
+#[test]
+fn the_helper_waits_for_the_old_listeners_to_close() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let mut old = site.start(&old_conf);
+    let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
+    signal_pid(old.pid(), "STOP");
+    thread::scope(|scope| {
+        let reload = scope.spawn(|| site.reload(&new_conf));
+        await_hup(old.pid(), &reload);
+        thread::sleep(Duration::from_millis(500));
+        assert!(!reload.is_finished(), "the helper did not wait");
+        assert!(lock.is_dir(), "the lock went early");
+        signal_pid(old.pid(), "CONT");
+        let output = reload.join().unwrap();
+        site.assert_reload_ok(&output);
+        assert_eq!(text(&output.stderr), "");
+    });
+    assert!(!lock.exists(), "the lock was left behind");
+    assert_eq!(old.wait_exit(DRAIN_PATIENCE).code(), Some(0));
+    assert_eq!(fresh_request(addr, &["new"]), Ok("new".to_owned()));
 }
 
 /// Control: without `tcp_migrate_req` the connections still queued in
@@ -708,6 +449,8 @@ fn the_helper_refuses_bad_arguments() {
         &["a", "b", "c", "d", "0"][..],
         &["a", "b", "c", "d", "x"][..],
         &["a", "b", "c", "d", "1", "e"][..],
+        &["a", "b", "c", "d", "1", "01"][..],
+        &["a", "b", "c", "d", "1", "1", "f"][..],
     ] {
         let output = reload_with(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");

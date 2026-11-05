@@ -24,7 +24,7 @@ use crate::event_loop::{Driver, Exit};
 use crate::log::{DriverLog, LogEntry, LogSink};
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
 use crate::sys::signal::{Signal, SignalFd};
-use crate::sys::socket::{Probe, tcp_listen};
+use crate::sys::socket::{Probe, steer_reuseport, tcp_listen};
 use crate::systemd::{Activation, take_sockets};
 
 mod budget;
@@ -43,6 +43,27 @@ const USAGE: &str = "usage: durchlauferhitzer <config-path>\n       \
 /// 128 on musl, which would reset a restart's queued connections beyond
 /// it (FR-PROC-07).
 const BACKLOG: u32 = 4096;
+
+/// The reuseport steering program attached right after binding: an index
+/// past any group's end, so the hash chooses (FR-PROC-07 "Steering"). It
+/// replaces the program the running server attached, which would steer
+/// connections to this process before it is ready.
+const STEER_NEUTRAL: u32 = u32::MAX;
+
+/// The reuseport steering program attached right before readiness: the
+/// running server's listener joined each group first (index 0), this
+/// process's second (index 1). Once the old one leaves, this process is
+/// index 0, and the index past the end falls back to the hash.
+const STEER_OWN: u32 = 1;
+
+/// Whether startup steers its port groups (FR-PROC-07 "Steering").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Steering {
+    /// A normal start, or listeners from systemd.
+    Off,
+    /// A `--ready-fd` start that bound its own listeners.
+    On,
+}
 
 /// The exit codes (FR-PROC-05a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,13 +213,16 @@ struct Ready {
     containment: Containment,
     /// Landlock's outcome (A11 step 7a); the filter settles its gaps.
     landlock: Files,
+    /// Whether the listeners are steered to this process before readiness.
+    steering: Steering,
 }
 
 /// A11 steps 3 to 7a: the `openat2` probe, the static roots, the
-/// listeners (systemd's, A7, or bound here with `probe`, A6), the
-/// descriptor budget (NFR-RES-05), the privilege drop (A8), then
-/// Landlock (FR-PROC-06), while the process has one thread and before
-/// anything else opens a path.
+/// listeners (systemd's, A7, or bound here with `probe`, A6; a
+/// `--ready-fd` start attaches the neutral steering program to those it
+/// binds, FR-PROC-07), the descriptor budget (NFR-RES-05), the privilege
+/// drop (A8), then Landlock (FR-PROC-06), while the process has one
+/// thread and before anything else opens a path.
 fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let containment = config.containment;
     let listen = config.listen.clone();
@@ -209,10 +233,17 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let restart_timeout = config.limits.restart_timeout;
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
-    let listeners = match take_sockets(&listen).map_err(Failure)? {
-        Activation::Sockets(sockets) => sockets,
-        Activation::None => bind(&listen, probe)?,
+    let (listeners, steering) = match take_sockets(&listen).map_err(Failure)? {
+        Activation::Sockets(sockets) => (sockets, Steering::Off),
+        Activation::None => {
+            let steering = match probe {
+                Probe::First => Steering::Off,
+                Probe::Skip => Steering::On,
+            };
+            (bind(&listen, probe)?, steering)
+        }
     };
+    let mut notes = steer(&listeners, steering, STEER_NEUTRAL);
     budget::ensure(budget::needed(budget::Descriptors {
         open: budget::open_now()?,
         max_connections,
@@ -220,9 +251,7 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
         roots: roots.len(),
         backends: core.backends().len(),
     }))?;
-    let notes = privileges::drop_privileges(user.as_deref())?
-        .into_iter()
-        .collect();
+    notes.extend(privileges::drop_privileges(user.as_deref())?);
     let landlock = containment::restrict_files(&containment, &roots)?;
     Ok(Ready {
         core,
@@ -234,7 +263,28 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
         notes,
         containment,
         landlock,
+        steering,
     })
+}
+
+/// With [`Steering::On`], attaches the program returning `index` to each
+/// listener's port group; a failure is a `steer_failed` entry, and
+/// startup goes on without it (FR-PROC-07 "Steering").
+fn steer(
+    listeners: impl IntoIterator<Item = impl AsFd>,
+    steering: Steering,
+    index: u32,
+) -> Vec<DriverLog> {
+    match steering {
+        Steering::Off => Vec::new(),
+        Steering::On => listeners
+            .into_iter()
+            .filter_map(|listener| steer_reuseport(listener.as_fd(), index).err())
+            .map(|err| DriverLog::SteerFailed {
+                errno: err.raw_os_error().unwrap_or(0),
+            })
+            .collect(),
+    }
 }
 
 /// A11 steps 3 and 4: probes for `openat2` beneath the first root (or
@@ -315,10 +365,13 @@ fn overlap(listen: &[SocketAddr]) -> Option<(SocketAddr, SocketAddr)> {
 
 /// A11 steps 8 to 11: the signal mask and its signalfd (before the disk
 /// workers start, so they inherit the mask; A9), the stderr log sink, the
-/// driver reading the signals, the seccomp filter (FR-PROC-06, step 10a:
-/// once the disk workers run, right before the loop) and the containment
-/// lines, readiness on the `--ready-fd` descriptor (FR-PROC-07; a failed
-/// write is logged, `kind=ready_failed`), then the loop. A failure
+/// driver reading the signals, the steering to this process of a
+/// `--ready-fd` start (FR-PROC-07; right before the filter, which forbids
+/// it; a failure is logged, `kind=steer_failed`), the seccomp filter
+/// (FR-PROC-06, step 10a: once the disk workers run, right before the
+/// loop) and the containment lines, readiness on the `--ready-fd`
+/// descriptor (FR-PROC-07; a failed write is logged, `kind=ready_failed`),
+/// then the loop. A failure
 /// before that closes the descriptor unwritten. Every message is printed
 /// while no sink lives:
 /// before it is created, or after the driver holding it is gone. Every
@@ -335,6 +388,7 @@ fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
         notes,
         containment,
         landlock,
+        steering,
     } = ready;
     // SIGTERM, SIGINT, SIGPIPE and SIGHUP: blocked in every thread, read
     // by the loop (SIGPIPE ignored there).
@@ -370,6 +424,9 @@ fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
         drop(driver);
         report(format_args!("event loop: {err}"));
         return ExitStatus::Startup;
+    }
+    for note in steer(driver.listeners().collect::<Vec<_>>(), steering, STEER_OWN) {
+        driver.write_log(note);
     }
     match containment::restrict_calls(&containment, landlock) {
         Ok(outcomes) => {

@@ -13,6 +13,7 @@ cfgfile=${cfgfile:-/etc/durchlauferhitzer/durchlauferhitzer.conf}
 logfile=${logfile:-/var/log/durchlauferhitzer.log}
 reload_helper=${reload_helper:-/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload}
 ready_timeout=${ready_timeout:-30}
+reload_grace=${reload_grace:-1}
 
 command_args="$cfgfile"
 command_background=yes
@@ -97,6 +98,6 @@ stop_post() {
 
 reload() {
 	ebegin "Reloading $RC_SVCNAME"
-	"$reload_helper" "$command" "$cfgfile" "$pidfile" "$logfile" "$ready_timeout"
+	"$reload_helper" "$command" "$cfgfile" "$pidfile" "$logfile" "$ready_timeout" "$reload_grace"
 	eend $?
 }

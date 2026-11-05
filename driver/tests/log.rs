@@ -235,6 +235,12 @@ fn driver_kinds() {
             DriverLog::ReadyFailed { errno: libc::EPIPE },
             "kind=ready_failed errno=32\n",
         ),
+        (
+            DriverLog::SteerFailed {
+                errno: libc::EINVAL,
+            },
+            "kind=steer_failed errno=22\n",
+        ),
         (DriverLog::Dropped { count: 17 }, "kind=dropped count=17\n"),
         (
             DriverLog::PrivilegesKept {

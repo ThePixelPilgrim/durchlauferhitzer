@@ -135,17 +135,23 @@ pub struct Load {
 }
 
 impl Load {
+    /// Two keep-alive and two fresh clients.
     pub fn start(addr: SocketAddr, answers: &'static [&'static str]) -> Load {
-        let stop = Arc::new(AtomicBool::new(false));
         let patterns = [
             Pattern::KeepAlive,
             Pattern::KeepAlive,
             Pattern::Fresh,
             Pattern::Fresh,
         ];
+        Load::with(addr, answers, &patterns)
+    }
+
+    /// One client per pattern.
+    pub fn with(addr: SocketAddr, answers: &'static [&'static str], patterns: &[Pattern]) -> Load {
+        let stop = Arc::new(AtomicBool::new(false));
         let clients = patterns
-            .into_iter()
-            .map(|pattern| {
+            .iter()
+            .map(|&pattern| {
                 let stop = Arc::clone(&stop);
                 thread::spawn(move || run_client(addr, pattern, &stop, answers))
             })

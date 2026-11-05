@@ -16,6 +16,10 @@
 # How long `reload` waits for the new process to be ready, in seconds.
 #ready_timeout=30
 
+# How long `reload` waits after the new process is ready before it
+# signals the old one, in seconds (handshakes under way finish).
+#reload_grace=1
+
 # How `stop` ends the server: SIGTERM, then SIGKILL; keep the first wait
 # above the config's shutdown_timeout.
 #retry=TERM/35/KILL/5

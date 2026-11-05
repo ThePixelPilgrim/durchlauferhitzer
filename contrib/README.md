@@ -6,14 +6,17 @@ binary.
 - `durchlauferhitzer-reload` — POSIX `sh` (dash, busybox ash): restarts a
   running server without losing a connection. Steps and requirements:
   [`../README.md`](../README.md#restart-without-systemd). It sets
-  `net.ipv4.tcp_migrate_req` to 1 and does not restore it.
+  `net.ipv4.tcp_migrate_req` to 1 and does not restore it. After `ready`
+  it waits a grace (default 1 s, its sixth argument) before the SIGHUP,
+  and keeps its lock until the old process has closed its listeners
+  (at most 10 s, then a warning).
 - `openrc/durchlauferhitzer` — the OpenRC script (`start`, `stop`,
   `checkconfig`, `reload`), modelled on Alpine's haproxy script; `stop`
   also ends the processes a reload left draining (`<pidfile>.draining`). Install
   it as `/etc/init.d/durchlauferhitzer`, the helper as
   `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`.
 - `openrc/durchlauferhitzer.confd` — its settings, as
-  `/etc/conf.d/durchlauferhitzer`.
+  `/etc/conf.d/durchlauferhitzer` (`ready_timeout`, `reload_grace`, ...).
 
 - `test-openrc.sh <binary>` — POSIX `sh`, as root on a throwaway system
   with OpenRC (CI: the Alpine jobs, in a container): installs the script,

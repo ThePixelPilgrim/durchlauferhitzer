@@ -159,7 +159,7 @@ exit 2.
 ## Restart without systemd
 
 `contrib/durchlauferhitzer-reload <binary> <config> <pidfile> <logfile>
-[ready-timeout-seconds]` (POSIX `sh`) restarts a running server without
+[ready-timeout-seconds [grace-seconds]]` (POSIX `sh`) restarts a running server without
 losing a connection; the OpenRC script's `reload` calls it
 ([`contrib/`](contrib)). In order, it
 
@@ -174,11 +174,15 @@ losing a connection; the OpenRC script's `reload` calls it
 4. starts `<binary> --ready-fd 3 <config>` beside it, in its own session,
    output appended to `<logfile>`;
 5. waits for `ready` (default 30 s); if it does not come, it stops the new
-   process and leaves the old one alone;
+   process and leaves the old one alone. Once ready, the new process
+   steers every new connection on its ports to itself;
 6. writes the new pid to `<pidfile>`, adds the old one to
-   `<pidfile>.draining`, and sends it `SIGHUP` (it drains, then exits 0).
-   The OpenRC script's `stop` also stops the processes still draining
-   (each checked by binary and start time, so a reused pid is left alone).
+   `<pidfile>.draining`, waits the grace (default 1 s) and sends it
+   `SIGHUP` (it drains, then exits 0). The OpenRC script's `stop` also
+   stops the processes still draining (each checked by binary and start
+   time, so a reused pid is left alone);
+7. waits (at most 10 s, then a warning) until the old process has closed
+   its listeners, then releases the lock.
 
 It exits 0, or 1 with the reason. Notes:
 
@@ -189,6 +193,11 @@ It exits 0, or 1 with the reason. Notes:
   connections queued on it are reset.
 - Upgrading from a stage 5 binary (listeners without `SO_REUSEPORT`)
   needs one full stop and start.
+- The grace lets handshakes under way on the old listeners finish before
+  they close. A Linux race resets a handshake whose last ACK reaches a
+  listener exactly as it closes, so one begun before the steering and
+  still unfinished after the grace (a client round trip above it, or a
+  retransmitted SYN-ACK) can still be reset.
 
 ## Signals and exit codes
 

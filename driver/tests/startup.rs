@@ -5,7 +5,8 @@
 //! (A9), and no socket lands on fds 0–2. Shared ports and readiness
 //! (FR-PROC-07): `--ready-fd` gets `ready\n` then EOF, or EOF alone when
 //! startup fails; a second normal start fails with `EADDRINUSE`, a
-//! `--ready-fd` start shares the port.
+//! `--ready-fd` start shares the port and, once ready, takes its new
+//! connections.
 
 #![allow(
     clippy::unwrap_used,
@@ -356,25 +357,29 @@ fn a_second_normal_start_fails_with_eaddrinuse() {
     assert!(stderr.contains("in use"), "{stderr}");
 }
 
-/// FR-PROC-07 step 2: a `--ready-fd` start skips the probe and joins the
-/// running server's port; the kernel spreads new connections over both
-/// (by a hash of the peer address), so 64 connections reach both but
-/// with a chance of 2^-63.
+/// FR-PROC-07 step 2 and "Steering": a `--ready-fd` start skips the
+/// probe and joins the running server's port; once ready, it steers every
+/// new connection to itself, while the old server still runs.
 #[test]
-fn a_ready_fd_start_shares_the_port_with_a_running_server() {
+fn a_ready_fd_start_shares_the_port_and_takes_its_new_connections() {
     let dir = TempDir::new();
     let addr = loopback(free_port());
     let path = static_config(&dir, &addr.to_string());
-    let old = Running::start(&[&path], Setup::non_root(), addr);
+    let mut old = Running::start(&[&path], Setup::non_root(), addr);
     let (new, written) = start_with_ready_fd(&path);
     assert_eq!(text(&written), "ready\n");
     for _ in 0..64 {
         let response = get(addr, "/index.html");
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     }
-    for (name, stderr) in [("old", old.kill()), ("new", new.kill())] {
-        assert!(stderr.contains(" status=200 "), "{name}: {stderr}");
-    }
+    assert!(
+        old.child.try_wait().unwrap().is_none(),
+        "the old server ended"
+    );
+    let old = old.kill();
+    assert!(!old.contains(" status=200 "), "old: {old}");
+    let new = new.kill();
+    assert_eq!(new.matches(" status=200 ").count(), 64, "new: {new}");
 }
 
 /// A failed `ready\n` write (the reader is gone: `EPIPE`, SIGPIPE being

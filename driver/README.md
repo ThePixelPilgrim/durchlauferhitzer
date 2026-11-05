@@ -48,7 +48,10 @@ src/
                     `--ready-fd`, the usage), the exit codes
                     (`ExitStatus`, FR-PROC-05a),
                     the startup sequence (A11), the signalfd handed to
-                    the driver with `shutdown_timeout`
+                    the driver with `shutdown_timeout`, the reuseport
+                    steering of a `--ready-fd` start (`Steering`,
+                    `steer`: neutral after binding, to itself before the
+                    seccomp filter, FR-PROC-07)
     budget.rs         NFR-RES-05: `open_now` (`/proc/self/fd`, O5),
                       `needed` (the formula in its docs and the spec),
                       `ensure` (raise the soft limit, or fail naming both
@@ -182,7 +185,10 @@ src/
                       (`ConnectStart`), `take_error`, `set_nodelay`, `read`,
                       `write` (MSG_NOSIGNAL), `shutdown_write`, `local_addr`,
                       `is_listening_stream` (TCP only, `SO_PROTOCOL`),
-                      `ipv6_only` (`V6Only`), `buffer_sizes`
+                      `ipv6_only` (`V6Only`), `buffer_sizes`,
+                      `steer_reuseport` (a one-instruction classic BPF
+                      program choosing the port group's member by index,
+                      `SO_ATTACH_REUSEPORT_CBPF`)
                       (`BufferSizes`: SO_SNDBUF / SO_RCVBUF, read only)
     file.rs           `openat2_beneath` (RESOLVE_BENEATH |
                       RESOLVE_NO_SYMLINKS, `OPEN_FLAGS`), `openat2_supported`,
@@ -236,7 +242,8 @@ tests/
                     or EOF alone when startup fails before or after
                     binding; a failed write (EPIPE) is logged and the
                     server serves on; a second normal start is `EADDRINUSE`, a
-                    `--ready-fd` start shares the port (both serve);
+                    `--ready-fd` start shares the port and, once ready,
+                    gets every new connection (the old one none);
                     overlapping addresses fail at the second in both modes
   systemd.rs        socket activation of the binary: a listener passed as
                     fd 3 (`sh -c` sets `LISTEN_PID=$$`) is served; an
@@ -292,7 +299,13 @@ tests/
                     `<pidfile>.draining` and the OpenRC script's
                     `stop_post` ends them (not another program's pid, nor
                     a pid with another start time);
-                    the new process inherits no fd 4-9. Control: with
+                    the new process inherits no fd 4-9. Steering: once a
+                    `--ready-fd` process is ready, before any SIGHUP, 50
+                    fresh requests all reach it; 12 fresh clients across
+                    6 back-to-back reloads lose nothing (the kernel race
+                    at a listener's close); the helper keeps its lock
+                    until the old process, stopped across its SIGHUP, has
+                    closed its listeners. Control: with
                     `tcp_migrate_req` 0 the queued connections are reset.
                     Root only (skipped with a reason, or failed with
                     DURCHLAUFERHITZER_REQUIRE_ROOT=1), `tcp_migrate_req`
@@ -450,7 +463,13 @@ tests/
                     text's own, or none for an invalid config)
   support/load.rs   `restart.rs`'s HTTP clients: a response read by its
                     `Content-Length`, a fresh request, keep-alive and
-                    fresh clients in a loop (`Load`), queued connections
+                    fresh clients in a loop (`Load`, `Load::with` for a
+                    mix of `Pattern`s), queued connections
+  support/site.rs   `restart.rs`'s scaffolding: the root and
+                    `tcp_migrate_req` checks, `serial`, a `Site` (its own
+                    binary copy, configs, pid file, log; the helper run
+                    against it; a `--ready-fd` start beside it), `/proc`
+                    helpers (start time, liveness, a pending SIGHUP)
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
   support/running.rs `Running`: a guard that kills a running server on
                     drop (a server ended by SIGSYS fails its test);
@@ -481,7 +500,12 @@ still with one thread, before anything else opens a path), the signal
 mask and its `signalfd` (before any thread, so the disk workers inherit
 it), the stderr log sink, then `Driver::new` with `limits.disk_threads`,
 `Driver::watch_signals` with the signalfd and `limits.shutdown_timeout`,
-the seccomp filter (`containment::restrict_calls`, TSYNC: the disk
+for a `--ready-fd` start that bound its listeners the steering program
+that sends every new connection of each port group to this process
+(`STEER_OWN`, index 1: the running server joined first; right after
+binding it attached the neutral `STEER_NEUTRAL`, FR-PROC-07; a failure
+is logged, `kind=steer_failed errno=N`, and startup goes on), the
+seccomp filter (`containment::restrict_calls`, TSYNC: the disk
 workers run by then) and the two `containment` lines
 (`Driver::write_log`), `ready\n` on the `--ready-fd` descriptor, which
 is then closed (a failed write is logged, `kind=ready_failed errno=N`;

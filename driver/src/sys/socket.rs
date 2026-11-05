@@ -83,6 +83,42 @@ pub fn tcp_listen(addr: SocketAddr, backlog: u32, probe: Probe) -> io::Result<Ow
     listening(tcp_bind(addr, Share::Port)?, backlog)
 }
 
+/// `SO_ATTACH_REUSEPORT_CBPF` (asm-generic, which x86_64 and aarch64
+/// use; libc exports it for Android only).
+const SO_ATTACH_REUSEPORT_CBPF: libc::c_int = 51;
+
+/// Steers the new connections of `listener`'s `SO_REUSEPORT` group to
+/// the member at `index` (FR-PROC-07 "Steering"): a classic BPF program
+/// of one instruction returning `index`. The members are indexed in join
+/// order (`listen`); one that leaves takes the last member's place. The
+/// program belongs to the group: it replaces the group's previous one and
+/// outlives `listener`. An index past the group's end falls back to the
+/// hash. Connections already queued are not moved. Needs no privilege.
+pub fn steer_reuseport(listener: BorrowedFd<'_>, index: u32) -> io::Result<()> {
+    let code = [libc::sock_filter {
+        code: (libc::BPF_RET | libc::BPF_K) as u16,
+        jt: 0,
+        jf: 0,
+        k: index,
+    }];
+    let prog = libc::sock_fprog {
+        len: 1,
+        filter: code.as_ptr().cast_mut(),
+    };
+    // SAFETY: `prog` points to the one instruction in `code`; both outlive
+    // the call, and the kernel only reads them (it copies the program).
+    cvt(unsafe {
+        libc::setsockopt(
+            listener.as_raw_fd(),
+            libc::SOL_SOCKET,
+            SO_ATTACH_REUSEPORT_CBPF,
+            (&raw const prog).cast::<libc::c_void>(),
+            socklen::<libc::sock_fprog>(),
+        )
+    })?;
+    Ok(())
+}
+
 /// `listen(fd, backlog)`; the backlog is capped at `c_int::MAX`.
 fn listening(fd: OwnedFd, backlog: u32) -> io::Result<OwnedFd> {
     let backlog = libc::c_int::try_from(backlog).unwrap_or(libc::c_int::MAX);
@@ -432,11 +468,14 @@ mod ipv6;
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::AsRawFd;
+    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, TcpStream};
+    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+    use std::time::{Duration, Instant};
 
-    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
-
-    use super::{Probe, from_sockaddr, get_int_option, tcp_listen, to_sockaddr};
+    use super::{
+        Probe, accept_nonblocking, from_sockaddr, get_int_option, local_addr, steer_reuseport,
+        tcp_listen, to_sockaddr,
+    };
 
     use super::ipv6;
 
@@ -504,5 +543,57 @@ mod tests {
         let v6only =
             get_int_option(listener.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_V6ONLY).unwrap();
         assert_eq!(v6only, 1);
+    }
+
+    /// Connects `n` times to `addr`, then counts the connections each of
+    /// `listeners` accepts, until all `n` are accepted (at most 5 s).
+    fn spread(addr: SocketAddr, n: usize, listeners: &[&OwnedFd]) -> Vec<usize> {
+        let held: Vec<TcpStream> = (0..n).map(|_| TcpStream::connect(addr).unwrap()).collect();
+        let mut counts = vec![0; listeners.len()];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while counts.iter().sum::<usize>() < n {
+            assert!(Instant::now() < deadline, "accepted {counts:?} of {n}");
+            for (count, listener) in counts.iter_mut().zip(listeners) {
+                while accept_nonblocking(listener.as_fd()).unwrap().is_some() {
+                    *count += 1;
+                }
+            }
+        }
+        drop(held);
+        counts
+    }
+
+    /// FR-PROC-07 "Steering", the kernel semantics it relies on: the
+    /// members of a port group are indexed in join order; the program
+    /// belongs to the group (attached through any member, it replaces the
+    /// one before, and it outlives the member that attached it); an index
+    /// past the group's end falls back to the hash.
+    #[test]
+    fn steering_sends_new_connections_to_the_member_at_the_index() {
+        // A joins the group first (index 0), B second (index 1).
+        let a = tcp_listen("127.0.0.1:0".parse().unwrap(), 128, Probe::First).unwrap();
+        let addr = local_addr(a.as_fd()).unwrap();
+        let b = tcp_listen(addr, 128, Probe::Skip).unwrap();
+        steer_reuseport(b.as_fd(), 1).unwrap();
+        assert_eq!(spread(addr, 64, &[&a, &b]), [0, 64]);
+        assert!(accept_nonblocking(a.as_fd()).unwrap().is_none());
+        // Through A, the group's program is replaced.
+        steer_reuseport(a.as_fd(), 0).unwrap();
+        assert_eq!(spread(addr, 64, &[&a, &b]), [64, 0]);
+        // Neutral: the hash spreads them (all on one: a chance of 2^-63).
+        steer_reuseport(b.as_fd(), u32::MAX).unwrap();
+        let counts = spread(addr, 64, &[&a, &b]);
+        assert!(counts.iter().all(|&n| n > 0), "{counts:?}");
+        // A leaves: B is index 0, index 1 is past the end, B gets them.
+        steer_reuseport(b.as_fd(), 1).unwrap();
+        drop(a);
+        assert_eq!(spread(addr, 64, &[&b]), [64]);
+        // The program outlived A: C joins at index 1 and gets them all,
+        // which is why a new process attaches the neutral one at once.
+        let c = tcp_listen(addr, 128, Probe::Skip).unwrap();
+        assert_eq!(spread(addr, 64, &[&b, &c]), [0, 64]);
+        steer_reuseport(c.as_fd(), u32::MAX).unwrap();
+        let counts = spread(addr, 64, &[&b, &c]);
+        assert!(counts.iter().all(|&n| n > 0), "{counts:?}");
     }
 }

@@ -1123,7 +1123,9 @@ Failures, persistence, timeouts:
       `phase=done detached=N`; FR-PROC-07: `phase=restarting`),
       `kind=ready_failed errno` (FR-PROC-07: writing `ready\n` to the
       `--ready-fd` descriptor failed; errno 0 for a write of 0 bytes;
-      the server serves on),
+      the server serves on), `kind=steer_failed errno` (FR-PROC-07
+      "Steering": attaching a reuseport steering program to a listener
+      failed in a `--ready-fd` start; startup goes on),
       `kind=containment layer state [abi |
       action log] [gaps covered_by] [uncovered]` (FR-PROC-06, below).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
@@ -1227,6 +1229,11 @@ Failures, persistence, timeouts:
   10a, FR-PROC-06). *(Stage 6 Task 4:)* `ready_failed errno` is logged
   when writing `ready\n` to the `--ready-fd` descriptor fails, right
   after the `containment` lines; the server serves on (FR-PROC-07).
+  *(Stage 6 Task 6b:)* `steer_failed errno` is logged, one line per
+  listener, when a `--ready-fd` start cannot attach a steering program
+  (FR-PROC-07 "Steering"): the neutral one after binding (written with
+  the startup notes, before `privileges`) or the one steering to itself
+  before the seccomp filter; startup goes on.
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
@@ -1646,7 +1653,13 @@ Failures, persistence, timeouts:
     port. Residual kernel window, documented: a handshake begun before
     the steer whose final ACK reaches the old listener exactly as it
     closes, after the grace (a client RTT above the grace or a
-    retransmitted SYN-ACK).
+    retransmitted SYN-ACK). *(Stage 6 Task 6b:)* a program that cannot
+    be attached is logged (`kind=steer_failed errno`, FR-LOG-05) and
+    startup goes on, as before steering. The grace is the script's
+    optional sixth argument (default 1 s); its wait for the old listeners
+    is bounded (10 s), after which it warns on stderr, releases the lock
+    and exits 0 (the handover is done). Only a self-bound listener of a
+    `--ready-fd` start is steered, not one from systemd.
   - *What a restart may change:* anything — hosts, routes, backends,
     limits, roots, `user`, `listen`: the new process binds and opens its
     own. A `listen` address the new config drops is closed by the old

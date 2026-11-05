@@ -84,6 +84,11 @@ pub enum DriverLog {
     /// the error has no errno); the server serves all the same
     /// (FR-PROC-07 step 3).
     ReadyFailed { errno: i32 },
+    /// Attaching a reuseport steering program to a listener failed in a
+    /// `--ready-fd` start (the neutral one after binding, or the one
+    /// steering to this process before readiness); startup goes on
+    /// without it (FR-PROC-07 "Steering").
+    SteerFailed { errno: i32 },
 }
 
 /// The steps of a shutdown the log reports (FR-PROC-05, FR-PROC-07, A9).

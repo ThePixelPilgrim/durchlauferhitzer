@@ -2,7 +2,8 @@
 # durchlauferhitzer-reload: restart a running server without losing a
 # connection (FR-PROC-07, the HAProxy model). POSIX sh (dash, busybox ash).
 #
-# usage: durchlauferhitzer-reload <binary> <config> <pidfile> <logfile> [ready-timeout-seconds]
+# usage: durchlauferhitzer-reload <binary> <config> <pidfile> <logfile>
+#        [ready-timeout-seconds [grace-seconds]]
 #
 #  0. Take the lock <pidfile>.lock (a directory holding the helper's pid):
 #     one reload at a time.
@@ -15,14 +16,21 @@
 #     appended to <logfile>, fd 3 a FIFO in a fresh private directory,
 #     fds 4-9 closed.
 #  5. Wait for "ready" (default 30 s). Otherwise stop the new process and
-#     leave the old one untouched.
+#     leave the old one untouched. Once ready, the new process steers every
+#     new connection to itself.
 #  6. Signals ignored from here: point <pidfile> at the new process (temp
 #     file, then rename), add the old pid and its start time to
 #     <pidfile>.draining (the OpenRC script's stop ends those still
-#     running), send it SIGHUP: it
-#     closes its listeners and drains.
+#     running), wait the grace (default 1 s: handshakes under way on the
+#     old listeners finish), send it SIGHUP: it closes its listeners and
+#     drains.
+#  7. Wait (at most 10 s) until the old process holds no listening socket
+#     (its /proc/<pid>/fd sockets against the LISTEN rows of
+#     /proc/net/tcp and tcp6), so the next reload finds two processes per
+#     port; only then release the lock. Past 10 s, warn and release.
 #
-# Exit 0 on success; 1 with a one-line reason on stderr otherwise.
+# Exit 0 on success (a step 7 timeout included: the handover is done); 1
+# with a one-line reason on stderr otherwise.
 
 # shellcheck disable=SC2317 # cleanup and its helpers run from a trap
 
@@ -35,14 +43,22 @@ fail() {
 }
 
 usage() {
-	fail "usage: $me <binary> <config> <pidfile> <logfile> [ready-timeout-seconds]"
+	fail "usage: $me <binary> <config> <pidfile> <logfile> [ready-timeout-seconds [grace-seconds]]"
 }
 
-[ $# -eq 4 ] || [ $# -eq 5 ] || usage
-binary=$1 config=$2 pidfile=$3 logfile=$4 timeout=${5:-30}
+case $# in
+4 | 5 | 6) ;;
+*) usage ;;
+esac
+binary=$1 config=$2 pidfile=$3 logfile=$4 timeout=${5:-30} grace=${6:-1}
 case $timeout in
 '' | *[!0-9]* | 0*) usage ;;
 esac
+case $grace in
+'' | *[!0-9]* | 0?*) usage ;;
+esac
+# How long step 7 waits for the old listeners to close, in seconds.
+close_timeout=10
 
 # The state of a pid ("R", "S", "Z", ...), empty if there is none.
 state() {
@@ -64,6 +80,22 @@ start_time() {
 exe_of() {
 	e=$(readlink "/proc/$1/exe" 2>/dev/null) || return 1
 	printf '%s\n' "${e% (deleted)}"
+}
+
+# Whether pid $1 holds a listening TCP socket: 0 yes, 1 no, 2 its
+# descriptors cannot be read. One `ls` for all its descriptors, since a
+# draining process may hold many.
+holds_listener() {
+	fds=$(ls -l "/proc/$1/fd" 2>/dev/null) || return 2
+	tables=
+	for t in /proc/net/tcp /proc/net/tcp6; do
+		[ -r "$t" ] && tables="$tables $t"
+	done
+	# shellcheck disable=SC2086 # one argument per table
+	printf '%s\n' "$fds" | sed -n 's/.*-> socket:\[\([0-9]*\)\]$/\1/p' |
+		awk 'FILENAME == "-" { held[$1] = 1; next }
+			$4 == "0A" && ($10 in held) { found = 1 }
+			END { exit !found }' - $tables
 }
 
 lock=$pidfile.lock locked='' dir='' new='' reader='' handed_over=''
@@ -196,8 +228,28 @@ if tmp=$(mktemp "$draining.XXXXXX"); then
 		rm -f "$tmp"
 	fi
 fi
-if [ "$(exe_of "$old")" = "$real" ]; then
-	kill -HUP "$old" 2>/dev/null ||
-		fail "cannot send SIGHUP to pid $old ($pidfile already names the new pid $new)"
-fi
+sleep "$grace"
+[ "$(exe_of "$old")" = "$real" ] || exit 0
+kill -HUP "$old" 2>/dev/null ||
+	fail "cannot send SIGHUP to pid $old ($pidfile already names the new pid $new)"
+
+# 7. The lock goes once the old listeners are closed.
+n=0
+while running "$old"; do
+	holds_listener "$old"
+	case $? in
+	1) break ;;
+	2)
+		running "$old" || break
+		printf '%s: warning: cannot read /proc/%s/fd; not waiting for its listeners to close\n' "$me" "$old" >&2
+		break
+		;;
+	esac
+	if [ "$n" -ge $((close_timeout * per)) ]; then
+		printf '%s: warning: pid %s still listens after %s s; releasing the lock\n' "$me" "$old" "$close_timeout" >&2
+		break
+	fi
+	sleep "$tick"
+	n=$((n + 1))
+done
 exit 0
