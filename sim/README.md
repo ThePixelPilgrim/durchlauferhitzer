@@ -61,7 +61,8 @@ tests/
   routing.rs          request handling, keep-alive, pipelining
   limits.rs           timeouts, connection caps, lingering close
   shutdown.rs         the graceful drain and the fast path (FR-PROC-05):
-                      `Sim::begin_drain`, `abort_all`, `is_drained`
+                      `Sim::begin_drain(target)`, `abort_all`,
+                      `is_drained`
   late_timers.rs      the late-timer mode (NFR-TEST-07): I/O and disk
                       completions before an overdue `TimerFired`, and
                       the outcomes that differ by order (DRV-06)
@@ -90,13 +91,14 @@ tests/
                         what the connection limits admit
     oracle.rs           what each client must receive; coverage
     parse.rs            the parser model of the request templates: which
-                        heads the parser rejects (no drain `503` for them)
+                        heads the parser rejects (no drain `503` for them);
+                        where a parse error's request line comes from
     unanswered.rs       no request the spec says must be answered vanishes
     run.rs              one random schedule; the test over all seeds;
                         seed replay for every net of the binary
     shutdown.rs         the shutdown plans of both nets (drain, drain
-                        then abort, abort), where they fell in the log,
-                        and the checks they add
+                        then abort, abort, restart, restart then abort),
+                        where they fell in the log, and the checks they add
     proxy/              the randomized proxy net (see below)
       mod.rs              random configs, coverage, the test over all seeds
       request.rs          random client requests (smuggling attempts among
@@ -109,7 +111,8 @@ tests/
       drive.rs            stories, rounds, backends, timed scenarios
       check.rs            the oracle: each story against the model
       drain.rs            the shutdown in this net: when it falls, and
-                          the outcomes a drain allows an exchange
+                          the outcomes a drain (shutdown or restart)
+                          allows an exchange
 ```
 
 ## Randomized runs
@@ -163,13 +166,21 @@ One seed in five of either net (`seed % 5 == 0`) also shuts the server down
 (FR-PROC-05, `faults/shutdown.rs`): half of those call `begin_drain` at
 a seeded step (then every client reads all it is sent), a third call
 `abort_all` some steps after the drain, a sixth call `abort_all` without
-a drain. The plan follows from the seed alone, by an RNG of its own (the
-other seeds keep their schedules), and a failure prints it too. In the
+a drain. Another one in five (`seed % 5 == 2`) restarts (FR-PROC-07):
+two thirds of those call `begin_drain` with `DrainTarget::Restart`, a
+third follow it with `abort_all` (`restart_timeout` expired). The plan
+follows from the seed alone, by an RNG of its own (the other seeds keep
+their schedules), and a failure prints it too; the coverage gates
+require each restart plan in the per-push seed range. In the
 static net two witness clients join at the drain, kept apart from the
 random steps, and their bytes are checked exactly: one with a keep-alive
 `404` queued (alone: the `404`, then the shutdown; with a request
 pipelined behind it: the `404`, then the `503` with close), one idle (its
-`404`, then the close at once). In the proxy net it falls among the
+`404`, then the close at once). In a restart the pipelined one gets the
+`404`, then a `404` with close; the other in-flight one only its `404`
+(no shutdown: it is kept until its keep-alive deadline); the idle one
+sends a second request just after the drain began and gets a `404` with
+close. In the proxy net it falls among the
 steps of a round without a timed scenario (or after the last round), the
 round runs on, and the seed ends with it; an exchange whose head is
 rendered during the drain must match the model's outcome for a client
@@ -195,7 +206,14 @@ the `503` with close for a request completed during it; a connection
 accepted meanwhile is refused (`Rejected { ShuttingDown }`); the abort
 logs each exchange it cuts; no upstream opens once the drain began; a
 plain drain finishes (no connection left open) within the deadlines it
-waits on; the core is drained (`is_drained`) after the wind-down.
+waits on; the core is drained (`is_drained`) after the wind-down. A
+restart's drain differs as FR-PROC-07 says: no `503` answers any request
+(every one gets its own answer with close, forwarded requests open their
+upstreams), a connection accepted meanwhile is admitted like any other,
+`begin_drain` closes no connection, a keep-alive response queued before
+it is not followed by a shutdown, a request the core read any byte of
+must be answered (no "unread at the drain" exemption), and the plain
+drain may wait a keep-alive timeout longer to finish.
 
 Both nets (the whole `faults` binary) run with a date set (`Sim::set_date`,
 the RFC 9110 example `Sun, 06 Nov 1994 08:49:37 GMT`), so every response

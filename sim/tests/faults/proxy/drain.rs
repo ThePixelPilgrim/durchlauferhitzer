@@ -9,8 +9,10 @@
 //! a client that closes (`Connection: close` in the head), or, for a
 //! request completed during the drain, the `503` with close, with no
 //! upstream; a head the parser rejects keeps its own error (owner
-//! decision 2026-10-29, FR-PROC-05b). A story may end silently only where
-//! the drain may close it (`check.rs`).
+//! decision 2026-10-29, FR-PROC-05b). In a restart's drain (FR-PROC-07)
+//! there is no `503`: a request completed during it is the model's for a
+//! client that closes, forwarded as usual. A story may end silently only
+//! where the drain may close it (`check.rs`).
 
 use super::*;
 
@@ -76,10 +78,13 @@ fn refused_alt(ex: &Exchange, who: &Who) -> Alt {
 
 /// The model's outcomes of `ex` for a client that closes after it: its
 /// head rendered during the drain says `Connection: close` (the backend
-/// side is unchanged, it was decided before).
-fn closing_alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
+/// side is unchanged, it was decided before), tagged `tag`.
+fn closing_alts(ex: &Exchange, who: &Who, net: &NetConfig, tag: &'static str) -> Vec<Alt> {
     let mut req = ex.req.clone();
     req.persistence = Persistence::Close;
+    if let Verdict::Answer(status, _) = req.verdict {
+        req.verdict = Verdict::Answer(status, Persistence::Close);
+    }
     let script = ex.script.clone().map(|mut s| {
         if let Reply::Relay(r) = &s.reply {
             if r.persistence == Persistence::KeepAlive {
@@ -98,22 +103,33 @@ fn closing_alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
     };
     let mut out = alts(&closing_ex, who, net);
     for alt in &mut out {
-        alt.tags = vec!["drain: closing head"];
+        alt.tags = vec![tag];
     }
     out
 }
 
-/// The outcomes `ex` may have once the drain began, given that its first
-/// log (if any) was written in `phase`.
+/// The outcomes `ex` may have once the drain (of `marks`) began, given
+/// that its first log (if any) was written in `phase`.
 pub(crate) fn drain_alts(
     ex: &Exchange,
     who: &Who,
     net: &NetConfig,
+    marks: &Marks,
     phase: Option<Phase>,
 ) -> Vec<Alt> {
     match phase {
         Some(Phase::Serving) => return ex.alts.clone(),
         Some(Phase::Draining | Phase::AbortCut) | None => {}
+    }
+    if marks.restart() {
+        return match &ex.req.verdict {
+            // Its own error, which closes (FR-PROC-05b).
+            Verdict::Parse(_) => ex.alts.clone(),
+            // Served as usual, its head saying close (FR-PROC-07).
+            Verdict::Answer(..) | Verdict::Forward(_) | Verdict::BadBody { .. } => {
+                closing_alts(ex, who, net, "restart: served with close")
+            }
+        };
     }
     match &ex.req.verdict {
         // Answered with its head: during the drain that head gets the 503.
@@ -123,7 +139,7 @@ pub(crate) fn drain_alts(
         // the 503.
         Verdict::Parse(_) => ex.alts.clone(),
         Verdict::Forward(_) | Verdict::BadBody { .. } => {
-            let mut out = closing_alts(ex, who, net);
+            let mut out = closing_alts(ex, who, net, "drain: closing head");
             out.push(refused_alt(ex, who));
             out
         }
@@ -135,9 +151,11 @@ pub(crate) fn drain_alts(
 /// received or logged): the client cut the story itself (`truncated`: a
 /// reset, an end of stream anywhere, the abort's log), the abort found
 /// the connection open, or none of the request's bytes had been read by
-/// the core when the drain began (FR-PROC-05b "buffered": an idle
-/// connection is closed at once, and the lingering close after an
-/// in-flight response discards what the kernel holds). A request the core
+/// the core when a shutdown's drain began (FR-PROC-05b "buffered": an
+/// idle connection is closed at once, and the lingering close after an
+/// in-flight response discards what the kernel holds). A restart's drain
+/// closes nothing early (FR-PROC-07): there, only a request of which the
+/// core never read a byte (its keep-alive deadline came first) may go. A request the core
 /// had read part of must be answered: the drain's 503 with close, or its
 /// own error; behind a head rendered during the drain nothing is, but
 /// that head closes, which the outcome of the exchange before matched.
@@ -155,6 +173,17 @@ pub(crate) fn silent_stop(
         return Ok("abort: closed before a request");
     }
     let start: usize = story.exchanges[..i].iter().map(Exchange::send_len).sum();
+    if marks.restart() {
+        let read = sim.delivered_to_server(story.conn);
+        return if read <= start {
+            Ok("restart: closed before a request")
+        } else {
+            Err(format!(
+                "the request vanished in a restart's drain: the core read {read} bytes of \
+                 the connection, the request starts at byte {start}"
+            ))
+        };
+    }
     match marks.read_at_drain(story.conn) {
         Some(read) if read <= start => Ok("drain: closed before a request"),
         read => Err(format!(

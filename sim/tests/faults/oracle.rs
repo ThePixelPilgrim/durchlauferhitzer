@@ -69,6 +69,10 @@ impl Coverage {
                 "two /64s in one group (ipv6_prefix 48)",
                 self.admission.joined_prefixes,
             ),
+            (
+                "a connection admitted during a restart's drain",
+                self.admission.restart_admitted,
+            ),
             ("pipelined pairs", self.pipelined),
             ("FileAborted(Truncated)", self.aborted_truncated),
             ("FileAborted(Changed)", self.aborted_changed),
@@ -187,15 +191,18 @@ pub(crate) const BOTH: [Persistence; 2] = [Persistence::KeepAlive, Persistence::
 pub(crate) enum Refusable {
     Yes,
     /// Its file was being opened when the drain began, so it was parsed
-    /// before: it gets the tree's status (with close), not the 503.
+    /// before, or the drain is a restart's (FR-PROC-07): it gets the
+    /// tree's status (with close), not the 503.
     No,
 }
 
 /// The response `log` (written in `phase`) announces, if it announces
 /// one, with the exact bytes it may be sent as. A logged request status
-/// that does not follow from the tree is an error; during the drain a
-/// request may be answered `503` with close instead (FR-PROC-05), unless
-/// it was parsed before the drain (`refusable`).
+/// that does not follow from the tree is an error; during a shutdown's
+/// drain a request may be answered `503` with close instead (FR-PROC-05),
+/// unless it was parsed before the drain (`refusable`). Nothing else in
+/// this net answers a request `503` (refusals are `Rejected`), so any
+/// other `503` response is an error, whatever the host.
 pub(crate) fn announced<'t>(
     log: &Log,
     tree: &'t Tree,
@@ -247,10 +254,13 @@ pub(crate) fn announced<'t>(
         Some(Method::Head) => BodyMode::HeadOnly,
         Some(Method::Get | Method::Other(_)) | None => BodyMode::Full,
     };
-    if phase == Phase::Draining
-        && status == Status::ServiceUnavailable
-        && refusable == Refusable::Yes
-    {
+    if status == Status::ServiceUnavailable {
+        if phase != Phase::Draining || refusable == Refusable::No {
+            return Err(format!(
+                "{log:?}: a 503 answers a request, but no shutdown's drain may refuse it \
+                 ({phase:?}, {refusable:?})"
+            ));
+        }
         if request.is_none() {
             return Err(format!("{log:?}: a drain's 503 without its request"));
         }
@@ -343,79 +353,6 @@ pub(crate) fn announced<'t>(
         },
     };
     Ok(Some(announced))
-}
-
-/// Where the parser finds an error: in the request line, after a valid
-/// one, or (a head over its limit, a bare LF) in either.
-enum Found {
-    RequestLine,
-    Headers,
-    Either,
-}
-
-/// The raw path of `template`'s request target, without the query.
-pub(crate) fn template_path(template: &[u8]) -> String {
-    let line = String::from_utf8_lossy(template);
-    let target = line.split(' ').nth(1).unwrap_or_default();
-    target.split('?').next().unwrap_or_default().to_owned()
-}
-
-/// FR-LOG-07: a parse error of `template` carries the request line
-/// exactly when it was found after a valid one, with the template's raw
-/// path. An error that can be in either place is placed by the template:
-/// after the request line if that line ended with CRLF (a bare LF ending
-/// it is the error itself; a head over its limit with a valid request
-/// line is found in the headers).
-fn check_request_line(
-    error: &HttpError,
-    request: Option<&RequestLine>,
-    template: &[u8],
-) -> Result<(), String> {
-    let found = match error {
-        HttpError::RequestLineTooLong
-        | HttpError::BadRequestLine
-        | HttpError::BadMethod
-        | HttpError::BadVersion
-        | HttpError::UnsupportedVersion
-        | HttpError::BadTarget(_) => Found::RequestLine,
-        HttpError::TooManyHeaders
-        | HttpError::BadHeaderName
-        | HttpError::BadHeaderValue
-        | HttpError::ObsFold
-        | HttpError::MissingHost
-        | HttpError::DuplicateHost
-        | HttpError::BadHost
-        | HttpError::ContentLengthWithTransferEncoding
-        | HttpError::BadContentLength
-        | HttpError::DuplicateContentLength
-        | HttpError::UnsupportedTransferEncoding
-        | HttpError::TransferEncodingInHttp10
-        | HttpError::ConnectionNamesFraming
-        | HttpError::BadExpect => Found::Headers,
-        HttpError::HeadTooLarge | HttpError::BareLf => Found::Either,
-    };
-    let crlf_line = template
-        .iter()
-        .position(|&b| b == b'\n')
-        .is_some_and(|lf| lf > 0 && template.get(lf - 1) == Some(&b'\r'));
-    let after_line = match found {
-        Found::RequestLine => false,
-        Found::Headers => true,
-        Found::Either => crlf_line,
-    };
-    match (after_line, request) {
-        (false, Some(line)) => Err(format!(
-            "{error:?} is in the request line, but {line:?} was logged"
-        )),
-        (true, None) => Err(format!(
-            "{error:?} follows a valid request line, which was not logged"
-        )),
-        (true, Some(line)) if line.path != template_path(template) => Err(format!(
-            "{line:?} logged for request {:?}",
-            template_path(template)
-        )),
-        (false, None) | (true, Some(_)) => Ok(()),
-    }
 }
 
 pub(crate) fn log_conn(log: &Log) -> ConnId {
@@ -528,7 +465,9 @@ pub(crate) fn check_client(
         if phase == Phase::AbortCut {
             coverage.shutdown.abort_cut += 1;
         }
-        let refusable = if opened_at_drain && first_draining == Some(n) {
+        let refusable = if marks.restart() {
+            Refusable::No
+        } else if opened_at_drain && first_draining == Some(n) {
             if matches!(log, Log::Response { .. }) {
                 coverage.shutdown.opened_before_drain += 1;
             }
@@ -625,7 +564,11 @@ pub(crate) fn check_client(
             });
             last_seen_phase = expected_phase.get(index).copied();
             if last_seen_phase == Some(Phase::Draining) {
-                if a.status != Status::ServiceUnavailable {
+                if marks.restart() {
+                    if !refused {
+                        coverage.shutdown.restart_served += 1;
+                    }
+                } else if a.status != Status::ServiceUnavailable {
                     coverage.shutdown.closing_head += 1;
                 } else if !refused {
                     coverage.shutdown.refused_request += 1;
@@ -824,15 +767,17 @@ pub(crate) fn check_client(
     let shut = sim
         .trace()
         .contains(&format!(" conn={} -> ShutdownWrite", client.id.0));
-    // During the drain it also does after a keep-alive response queued
-    // before the drain began (FR-PROC-05 "Core half", FR-PROC-05b).
+    // During a shutdown's drain it also does after a keep-alive response
+    // queued before the drain began (FR-PROC-05 "Core half",
+    // FR-PROC-05b); a restart's drain keeps that connection for its next
+    // request (FR-PROC-07).
     if shut
         && !truncated
         && seen
             .last()
             .is_none_or(|s| s.persistence != Persistence::Close)
     {
-        if marks.shut_down() && last_seen_phase == Some(Phase::Serving) {
+        if marks.shutdown_drain() && last_seen_phase == Some(Phase::Serving) {
             coverage.shutdown.shut_after_keep_alive += 1;
         } else {
             fail(format!(
@@ -869,7 +814,7 @@ pub(crate) fn check_client(
     if let Err(e) = check_unanswered(sim, client, marks, &answers) {
         fail(e);
     }
-    if marks.drain.is_some()
+    if marks.shutdown_drain()
         && consumed < client.templates.len()
         && answers.last == LastAnswer::KeepsOpen
         && answers.cut == CutOff::No

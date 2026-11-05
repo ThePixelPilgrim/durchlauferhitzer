@@ -82,15 +82,18 @@ fn ends_head(template: &[u8]) -> bool {
 ///   head rendered says close, so a request behind it is not answered,
 ///   owner decision 2026-10-29, FR-PROC-05b);
 /// - the abort found the connection open (it cuts whatever is left);
-/// - none of its bytes had been read by the core when the drain began
-///   (FR-PROC-05b "buffered": the drain closes an idle connection, and an
-///   in-flight response's lingering close discards what the kernel holds);
+/// - none of its bytes had been read by the core when a shutdown's drain
+///   began (FR-PROC-05b "buffered": the drain closes an idle connection,
+///   and an in-flight response's lingering close discards what the kernel
+///   holds); a restart's drain closes nothing early (FR-PROC-07), so it
+///   grants no such exemption;
 /// - none of its bytes were ever read by the core (a keep-alive or header
 ///   timeout closed the connection first);
 /// - it was not sent whole, so it never completed: the client's end of
 ///   stream closes it silently (FR-CONN-12), unless a plain drain began
-///   with part of it read and the client sent no end of stream, for then
-///   the header deadline expires within the net's wait (408).
+///   with part of it read (for a shutdown: read when it began) and the
+///   client sent no end of stream, for then the header deadline expires
+///   within the net's wait (408).
 ///
 /// Anything else is a request that vanished.
 pub(crate) fn check_unanswered(
@@ -126,11 +129,17 @@ pub(crate) fn check_unanswered(
     let end = start + template.len();
     let read_at_drain = marks.read_at_drain(client.id);
     let read = sim.delivered_to_server(client.id);
-    if read_at_drain.is_some_and(|r| r <= start) || read <= start {
+    let unread_at_drain = marks.shutdown_drain() && read_at_drain.is_some_and(|r| r <= start);
+    if unread_at_drain || read <= start {
         return Ok(());
     }
     let whole = client.sent >= end;
-    let times_out = marks.plain_drain() && read_at_drain.is_some_and(|r| r > start) && !client.eof;
+    let read_in_drain = if marks.restart() {
+        marks.drain.is_some()
+    } else {
+        read_at_drain.is_some_and(|r| r > start)
+    };
+    let times_out = marks.plain_drain() && read_in_drain && !client.eof;
     if !whole && !times_out {
         return Ok(());
     }

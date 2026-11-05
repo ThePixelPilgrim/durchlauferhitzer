@@ -258,7 +258,7 @@ pub(crate) fn check_story(
         // when its first log was written.
         let drained;
         let candidates: &[Alt] = if marks.shut_down() {
-            drained = drain_alts(ex, &who, net, phases.get(c.lpos).copied());
+            drained = drain_alts(ex, &who, net, marks, phases.get(c.lpos).copied());
             &drained
         } else {
             &ex.alts

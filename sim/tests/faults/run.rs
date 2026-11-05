@@ -41,6 +41,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
         }
         let ids: Vec<ConnId> = clients.iter().chain(&witnesses).map(|c| c.id).collect();
         shutdown_at(&mut sim, plan, step, &mut marks, &ids);
+        ask_idle_witness_again(&mut sim, &marks, &mut witnesses);
         let op = rng.u8(0..100);
         if op < 25 || step < 3 || clients.is_empty() {
             let ip = peers
@@ -95,6 +96,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
     clients.append(&mut witnesses);
     let ids: Vec<ConnId> = clients.iter().map(|c| c.id).collect();
     shutdown_at(&mut sim, plan, END, &mut marks, &ids);
+    ask_idle_witness_again(&mut sim, &marks, &mut clients);
     // The longest wait left: a disk answer (45 s), then a pipelined head's
     // deadline (10 s); `keepalive_timeout` is 60 s, `send_idle_timeout`
     // 30 s.
@@ -105,6 +107,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
         &ids,
         Duration::from_secs(59),
         Duration::from_secs(30),
+        Duration::from_secs(60),
     );
     collect(&mut sim, &mut clients);
     // Wind down: every client sends EOF, then 5 minutes pass (longer than
@@ -206,6 +209,32 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
         .collect();
     check_full_house(&mut sim, &marks, &peers);
     coverage.admission.add(admission.coverage);
+    if marks.restart() {
+        match marks.abort {
+            None => coverage.shutdown.restart_drains += 1,
+            Some(_) => coverage.shutdown.restart_aborts += 1,
+        }
+    }
+}
+
+/// Just after a restart's drain began (and no abort came with it), the
+/// idle witness among `clients` sends a second request: the drain kept
+/// its connection, so it is answered, with close (FR-PROC-07,
+/// `check_witness`).
+fn ask_idle_witness_again(sim: &mut Sim, marks: &Marks, clients: &mut [Client]) {
+    if !marks.restart() || marks.abort.is_some() {
+        return;
+    }
+    for client in clients.iter_mut() {
+        if client.role != Role::IdleWitness || client.templates.len() > 1 {
+            continue;
+        }
+        sim.send(client.id, VALID);
+        sim.run_until_idle();
+        client.templates.push(VALID.to_vec());
+        client.started += 1;
+        client.sent += VALID.len();
+    }
 }
 
 /// The static net's shutdown steps: below its longest schedule (80 steps).

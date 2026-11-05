@@ -3,7 +3,8 @@
 //! template is a request or a head the parser rejects. The drain answers a
 //! request `503` with close, but a head the parser rejects is no request
 //! and keeps its own error (FR-PROC-05b, owner decision 2026-10-29), so a
-//! drain's `503` paired with such a template fails the oracle.
+//! drain's `503` paired with such a template fails the oracle. Also where
+//! a parse error's logged request line must come from (FR-LOG-07).
 
 use super::*;
 
@@ -140,6 +141,79 @@ impl Drained<'_> {
             | Log::ProxiedResponse { .. }
             | Log::BackendFailed { .. } => Ok(()),
         }
+    }
+}
+
+/// Where the parser finds an error: in the request line, after a valid
+/// one, or (a head over its limit, a bare LF) in either.
+enum Found {
+    RequestLine,
+    Headers,
+    Either,
+}
+
+/// The raw path of `template`'s request target, without the query.
+pub(crate) fn template_path(template: &[u8]) -> String {
+    let line = String::from_utf8_lossy(template);
+    let target = line.split(' ').nth(1).unwrap_or_default();
+    target.split('?').next().unwrap_or_default().to_owned()
+}
+
+/// FR-LOG-07: a parse error of `template` carries the request line
+/// exactly when it was found after a valid one, with the template's raw
+/// path. An error that can be in either place is placed by the template:
+/// after the request line if that line ended with CRLF (a bare LF ending
+/// it is the error itself; a head over its limit with a valid request
+/// line is found in the headers).
+pub(crate) fn check_request_line(
+    error: &HttpError,
+    request: Option<&RequestLine>,
+    template: &[u8],
+) -> Result<(), String> {
+    let found = match error {
+        HttpError::RequestLineTooLong
+        | HttpError::BadRequestLine
+        | HttpError::BadMethod
+        | HttpError::BadVersion
+        | HttpError::UnsupportedVersion
+        | HttpError::BadTarget(_) => Found::RequestLine,
+        HttpError::TooManyHeaders
+        | HttpError::BadHeaderName
+        | HttpError::BadHeaderValue
+        | HttpError::ObsFold
+        | HttpError::MissingHost
+        | HttpError::DuplicateHost
+        | HttpError::BadHost
+        | HttpError::ContentLengthWithTransferEncoding
+        | HttpError::BadContentLength
+        | HttpError::DuplicateContentLength
+        | HttpError::UnsupportedTransferEncoding
+        | HttpError::TransferEncodingInHttp10
+        | HttpError::ConnectionNamesFraming
+        | HttpError::BadExpect => Found::Headers,
+        HttpError::HeadTooLarge | HttpError::BareLf => Found::Either,
+    };
+    let crlf_line = template
+        .iter()
+        .position(|&b| b == b'\n')
+        .is_some_and(|lf| lf > 0 && template.get(lf - 1) == Some(&b'\r'));
+    let after_line = match found {
+        Found::RequestLine => false,
+        Found::Headers => true,
+        Found::Either => crlf_line,
+    };
+    match (after_line, request) {
+        (false, Some(line)) => Err(format!(
+            "{error:?} is in the request line, but {line:?} was logged"
+        )),
+        (true, None) => Err(format!(
+            "{error:?} follows a valid request line, which was not logged"
+        )),
+        (true, Some(line)) if line.path != template_path(template) => Err(format!(
+            "{line:?} logged for request {:?}",
+            template_path(template)
+        )),
+        (false, None) | (true, Some(_)) => Ok(()),
     }
 }
 

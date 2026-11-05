@@ -1,17 +1,23 @@
-//! Shutdown in both randomized nets (FR-PROC-05, 05b to 05d): one seed in
-//! five drains (`begin_drain`), drains and then aborts (`abort_all`), or
-//! aborts without a drain (a SIGINT), at seeded steps. The plan follows
-//! from the seed alone, by an RNG of its own, so the other seeds keep
-//! their schedules and a failure replays from `SIM_SEED`.
+//! Shutdown and restart in both randomized nets (FR-PROC-05, 05b to 05d,
+//! FR-PROC-07): one seed in five drains for a shutdown (`begin_drain`),
+//! drains and then aborts (`abort_all`), or aborts without a drain (a
+//! SIGINT); another one in five drains for a restart, alone or followed by
+//! the abort; each at seeded steps. The plan follows from the seed alone,
+//! by an RNG of its own, so the other seeds keep their schedules and a
+//! failure replays from `SIM_SEED`.
 //!
 //! What the oracles may expect of a drain comes from the spec, not the
 //! core: a response head logged before the drain keeps what it said; one
-//! logged after it says `Connection: close`, or is the `503` with
-//! `Connection: close` that answers a request completed during the drain;
-//! a connection accepted during the drain (or after the abort) is refused
-//! with `503`, logged `Rejected { ShuttingDown }`; the abort cuts every
-//! connection, logging `Rejected { ShuttingDown }` for each exchange in
-//! flight; no upstream is opened once the drain began.
+//! logged after it says `Connection: close`. In a shutdown's drain it may
+//! be the `503` with `Connection: close` that answers a request completed
+//! during the drain; a connection accepted during the drain (or after the
+//! abort) is refused with `503`, logged `Rejected { ShuttingDown }`; no
+//! upstream is opened once the drain began. In a restart's drain there is
+//! no `503` at all: every request gets its own answer, with close; a
+//! connection accepted during it is admitted as usual; idle connections
+//! stay until their next request or their keep-alive deadline. The abort
+//! cuts every connection, logging `Rejected { ShuttingDown }` for each
+//! exchange in flight, and refuses connections from then on.
 //!
 //! A request the spec says must be answered may not vanish: what the
 //! core had read of each connection when the drain began (`AtDrain`, the
@@ -36,24 +42,40 @@ pub(crate) enum ShutdownPlan {
     DrainThenAbort { drain: usize, abort: usize },
     /// `abort_all` before step `abort`, without a drain.
     Abort { abort: usize },
+    /// A restart's `begin_drain` before step `drain`; the clients read as
+    /// for `Drain`.
+    Restart { drain: usize },
+    /// A restart's `begin_drain` before step `drain`, then `abort_all`
+    /// before step `abort` (`restart_timeout` expired).
+    RestartThenAbort { drain: usize, abort: usize },
 }
 
-/// The shutdown plan of `seed`: one seed in five shuts down, at a step
-/// below `span` (a plan whose step the run never reaches is carried out
-/// at its end, before the wind-down).
+/// The shutdown plan of `seed`: one seed in five shuts down, another one
+/// in five restarts, at a step below `span` (a plan whose step the run
+/// never reaches is carried out at its end, before the wind-down). The
+/// restarts take seeds of their own, so the shutdown seeds keep their
+/// plans.
 pub(crate) fn shutdown_plan(seed: u64, span: usize) -> ShutdownPlan {
-    if seed % 5 != 0 {
-        return ShutdownPlan::None;
-    }
     let mut rng = fastrand::Rng::with_seed(seed ^ 0x0d4a_1b5e_ed00);
     let drain = rng.usize(0..span / 2);
-    match rng.u8(0..6) {
-        0..3 => ShutdownPlan::Drain { drain },
-        3 | 4 => ShutdownPlan::DrainThenAbort {
-            drain,
-            abort: drain + rng.usize(1..=span / 2 + 1),
+    let abort = |rng: &mut fastrand::Rng| drain + rng.usize(1..=span / 2 + 1);
+    match seed % 5 {
+        0 => match rng.u8(0..6) {
+            0..3 => ShutdownPlan::Drain { drain },
+            3 | 4 => ShutdownPlan::DrainThenAbort {
+                drain,
+                abort: abort(&mut rng),
+            },
+            _ => ShutdownPlan::Abort { abort: drain },
         },
-        _ => ShutdownPlan::Abort { abort: drain },
+        2 => match rng.u8(0..3) {
+            0 | 1 => ShutdownPlan::Restart { drain },
+            _ => ShutdownPlan::RestartThenAbort {
+                drain,
+                abort: abort(&mut rng),
+            },
+        },
+        _ => ShutdownPlan::None,
     }
 }
 
@@ -62,9 +84,12 @@ pub(crate) fn shutdown_plan(seed: u64, span: usize) -> ShutdownPlan {
 pub(crate) struct Marks {
     /// `sim.logs().len()` when `begin_drain` was called.
     pub(crate) drain: Option<usize>,
+    /// The target `begin_drain` was called with.
+    pub(crate) target: Option<DrainTarget>,
     /// The logs `abort_all` wrote: `start..end`.
     pub(crate) abort: Option<(usize, usize)>,
-    /// `sim.upstreams().len()` when the drain (or the abort) began.
+    /// `sim.upstreams().len()` when a shutdown's drain (or the abort)
+    /// began; a restart's drain still forwards requests.
     pub(crate) upstreams: Option<usize>,
     /// Each net connection as `begin_drain` found it.
     pub(crate) at_drain: BTreeMap<ConnId, AtDrain>,
@@ -104,6 +129,22 @@ impl Marks {
     pub(crate) fn plain_drain(&self) -> bool {
         self.drain.is_some() && self.abort.is_none()
     }
+
+    /// Whether the drain that began is a restart's (FR-PROC-07).
+    pub(crate) fn restart(&self) -> bool {
+        self.target == Some(DrainTarget::Restart)
+    }
+
+    /// Whether the drain that began is a shutdown's.
+    pub(crate) fn shutdown_drain(&self) -> bool {
+        self.target == Some(DrainTarget::Shutdown)
+    }
+
+    /// Whether a new connection is refused with `503` (FR-PROC-05d): once
+    /// a shutdown's drain or the abort began, not in a restart's drain.
+    pub(crate) fn refuses(&self) -> bool {
+        self.shutdown_drain() || self.abort.is_some()
+    }
 }
 
 /// When a log entry was written, relative to the shutdown.
@@ -111,8 +152,8 @@ impl Marks {
 pub(crate) enum Phase {
     /// Before any shutdown call: the server serves as usual.
     Serving,
-    /// After `begin_drain` (or `abort_all`): heads say close, requests
-    /// get 503, connections are refused.
+    /// After `begin_drain` (or `abort_all`): heads say close; in a
+    /// shutdown's drain requests get 503 and connections are refused.
     Draining,
     /// Written by `abort_all` itself: an exchange it cut.
     AbortCut,
@@ -157,9 +198,23 @@ impl ShutdownPlan {
     fn steps(self) -> (Option<usize>, Option<usize>) {
         match self {
             ShutdownPlan::None => (None, None),
-            ShutdownPlan::Drain { drain } => (Some(drain), None),
-            ShutdownPlan::DrainThenAbort { drain, abort } => (Some(drain), Some(abort)),
+            ShutdownPlan::Drain { drain } | ShutdownPlan::Restart { drain } => (Some(drain), None),
+            ShutdownPlan::DrainThenAbort { drain, abort }
+            | ShutdownPlan::RestartThenAbort { drain, abort } => (Some(drain), Some(abort)),
             ShutdownPlan::Abort { abort } => (None, Some(abort)),
+        }
+    }
+
+    /// The target of its `begin_drain`.
+    fn target(self) -> DrainTarget {
+        match self {
+            ShutdownPlan::Restart { .. } | ShutdownPlan::RestartThenAbort { .. } => {
+                DrainTarget::Restart
+            }
+            ShutdownPlan::None
+            | ShutdownPlan::Drain { .. }
+            | ShutdownPlan::DrainThenAbort { .. }
+            | ShutdownPlan::Abort { .. } => DrainTarget::Shutdown,
         }
     }
 
@@ -182,8 +237,15 @@ pub(crate) fn shutdown_at(
 ) {
     let (_, abort) = plan.steps();
     if plan.drain_due(step, marks) {
+        let target = plan.target();
         marks.drain = Some(sim.logs().len());
-        marks.upstreams.get_or_insert(sim.upstreams().len());
+        marks.target = Some(target);
+        match target {
+            DrainTarget::Shutdown => {
+                marks.upstreams.get_or_insert(sim.upstreams().len());
+            }
+            DrainTarget::Restart => {}
+        }
         for &conn in clients {
             let opening = if sim.opening_file(conn) {
                 Opening::File
@@ -193,7 +255,25 @@ pub(crate) fn shutdown_at(
             let read = sim.delivered_to_server(conn);
             marks.at_drain.insert(conn, AtDrain { read, opening });
         }
-        sim.begin_drain(DrainTarget::Shutdown);
+        let open: Vec<ConnId> = clients
+            .iter()
+            .copied()
+            .filter(|&conn| sim.state(conn) == SimConnState::Open)
+            .collect();
+        sim.begin_drain(target);
+        // A restart's drain closes nothing at once (FR-PROC-07): an idle
+        // connection waits for its next request or its keep-alive deadline.
+        if target == DrainTarget::Restart {
+            for &conn in &open {
+                assert_eq!(
+                    sim.state(conn),
+                    SimConnState::Open,
+                    "a restart's drain closed conn={} at once\ntrace:\n{}",
+                    conn.0,
+                    sim.trace()
+                );
+            }
+        }
         if abort.is_none() {
             for &conn in clients {
                 if sim.state(conn) != SimConnState::Closed {
@@ -223,7 +303,8 @@ pub(crate) fn shutdown_at(
 /// finish, then every connection closes): after `within`, which the net
 /// chooses as the longest chain of deadlines an exchange may still wait
 /// on and shorter than `keepalive_timeout`, no connection is `Open` any
-/// more (each is closed, or shut down for writing and lingering), although
+/// more. A restart's drain keeps an idle connection until its keep-alive
+/// deadline (FR-PROC-07), so it waits `keepalive` longer (each is closed, or shut down for writing and lingering), although
 /// no client ended its stream. Every byte a client accepts restarts
 /// `send_idle_timeout` (FR-CONN-08), so a connection that made send
 /// progress during the check may stay open until `send_idle` after its
@@ -239,14 +320,18 @@ pub(crate) fn check_drain_finishes(
     clients: &[ConnId],
     within: Duration,
     send_idle: Duration,
+    keepalive: Duration,
 ) {
-    match plan {
-        ShutdownPlan::Drain { .. } if marks.drain.is_some() => {}
+    let within = match plan {
+        ShutdownPlan::Drain { .. } if marks.drain.is_some() => within,
+        ShutdownPlan::Restart { .. } if marks.drain.is_some() => within.saturating_add(keepalive),
         ShutdownPlan::None
         | ShutdownPlan::Drain { .. }
         | ShutdownPlan::DrainThenAbort { .. }
+        | ShutdownPlan::Restart { .. }
+        | ShutdownPlan::RestartThenAbort { .. }
         | ShutdownPlan::Abort { .. } => return,
-    }
+    };
     let step = Duration::from_secs(1);
     let start = sim.now();
     let base = start.saturating_add(within);
@@ -312,7 +397,8 @@ fn since(from: Instant, to: Instant) -> Duration {
 }
 
 /// After the wind-down: the core holds nothing (`is_drained`), and, once
-/// the server shut down, no upstream was opened after the drain began.
+/// the server shut down, no upstream was opened after a shutdown's drain
+/// or the abort began.
 pub(crate) fn check_wound_down(sim: &Sim, marks: &Marks) {
     assert!(
         sim.is_drained(),
@@ -330,12 +416,12 @@ pub(crate) fn check_wound_down(sim: &Sim, marks: &Marks) {
 }
 
 /// `count` new connections from `peers`: accepted (nothing logged) while
-/// the server serves; refused, each logged `Rejected { ShuttingDown }`,
-/// once it shut down (FR-PROC-05d).
+/// the server serves or drains for a restart (FR-PROC-07); refused, each
+/// logged `Rejected { ShuttingDown }`, once it shut down (FR-PROC-05d).
 pub(crate) fn check_full_house(sim: &mut Sim, marks: &Marks, peers: &[IpAddr]) {
     let logged = sim.logs().len();
     let ids: Vec<ConnId> = peers.iter().map(|&peer| sim.connect(peer)).collect();
-    let expected: Vec<Log> = if marks.shut_down() {
+    let expected: Vec<Log> = if marks.refuses() {
         ids.iter()
             .zip(peers)
             .map(|(&conn, &peer)| Log::Rejected {
@@ -350,8 +436,8 @@ pub(crate) fn check_full_house(sim: &mut Sim, marks: &Marks, peers: &[IpAddr]) {
     assert_eq!(
         sim.logs().get(logged..).unwrap_or_default(),
         expected.as_slice(),
-        "connection slots still taken after the run (shut down: {})\ntrace:\n{}",
-        marks.shut_down(),
+        "connection slots still taken after the run (refusing: {})\ntrace:\n{}",
+        marks.refuses(),
         sim.trace()
     );
 }
@@ -383,6 +469,14 @@ pub(crate) struct ShutdownCoverage {
     /// Heads the parser model rejects, answered during the drain with
     /// their own error, not the drain's 503 (FR-PROC-05b).
     pub(crate) own_error: usize,
+    /// Seeds whose restart's drain ran alone, and followed by the abort.
+    pub(crate) restart_drains: usize,
+    pub(crate) restart_aborts: usize,
+    /// Requests answered during a restart's drain with their own status,
+    /// with close (FR-PROC-07).
+    pub(crate) restart_served: usize,
+    /// Witnesses of a restart checked exactly.
+    pub(crate) restart_witnesses: usize,
 }
 
 impl ShutdownCoverage {
@@ -413,6 +507,13 @@ impl ShutdownCoverage {
                 "rejected head with its own error during the drain",
                 self.own_error,
             ),
+            ("plain restart drain", self.restart_drains),
+            ("restart drain cut by the abort", self.restart_aborts),
+            (
+                "request answered with close during a restart drain",
+                self.restart_served,
+            ),
+            ("restart witness checked exactly", self.restart_witnesses),
         ];
         for (what, n) in named {
             assert!(n > 0, "no {what} in any seed");
@@ -421,14 +522,21 @@ impl ShutdownCoverage {
 }
 
 /// A witness of the static net receives exactly what the spec says
-/// (`run.rs` sets them up just before the drain): after a plain drain
-/// the pipelined one its `404` keep-alive and then the `503` with close
-/// for the request behind it (FR-PROC-05b), the other in-flight one its
-/// `404` and then the shutdown of the sending side, the idle one its
-/// `404` and then the close at once (no shutdown, nothing more). With an
-/// abort after the drain the in-flight ones, whose windows stay shut,
-/// receive nothing. A witness over the connection limits is refused
-/// instead, and `check_client` judges it like any refused connection.
+/// (`run.rs` sets them up just before the drain). After a shutdown's
+/// plain drain: the pipelined one its `404` keep-alive and then the `503`
+/// with close for the request behind it (FR-PROC-05b), the other
+/// in-flight one its `404` and then the shutdown of the sending side, the
+/// idle one its `404` and then the close at once (no shutdown, nothing
+/// more). After a restart's plain drain (FR-PROC-07): the pipelined one
+/// its `404` keep-alive and then the `404` with close for the request
+/// behind it, then the shutdown; the other in-flight one its `404` and
+/// then nothing until its keep-alive deadline closes it (no shutdown).
+/// The idle one sends a second request just after a restart's drain
+/// began (`run.rs`), unless the abort came with it: it gets the `404`
+/// with close, then the shutdown. With an abort after the drain the
+/// in-flight ones, whose windows stay shut, receive nothing. A witness
+/// over the connection limits is refused instead, and `check_client`
+/// judges it like any refused connection.
 pub(crate) fn check_witness(
     sim: &Sim,
     client: &Client,
@@ -445,6 +553,7 @@ pub(crate) fn check_witness(
         return;
     }
     let not_found = not_found_keep_alive();
+    let not_found_close = fixed(Status::NotFound, Persistence::Close, BodyMode::Full);
     let unavailable = fixed(
         Status::ServiceUnavailable,
         Persistence::Close,
@@ -453,13 +562,25 @@ pub(crate) fn check_witness(
     let shut = sim
         .trace()
         .contains(&format!(" conn={} -> ShutdownWrite", client.id.0));
-    let (want, want_shut): (Vec<u8>, Option<bool>) = match (client.role, marks.plain_drain()) {
-        (Role::Random, _) => return,
-        (Role::PipelinedWitness, true) => ([not_found, unavailable].concat(), Some(true)),
-        (Role::InFlightWitness, true) => (not_found, Some(true)),
-        (Role::PipelinedWitness | Role::InFlightWitness, false) => (Vec::new(), None),
-        (Role::IdleWitness, true | false) => (not_found, Some(false)),
-    };
+    let restart = marks.restart();
+    let asked_again = client.templates.len() > 1;
+    let (want, want_shut): (Vec<u8>, Option<bool>) =
+        match (client.role, marks.plain_drain(), restart) {
+            (Role::Random, _, _) => return,
+            (Role::PipelinedWitness, true, false) => {
+                ([not_found, unavailable].concat(), Some(true))
+            }
+            (Role::PipelinedWitness, true, true) => {
+                ([not_found, not_found_close].concat(), Some(true))
+            }
+            (Role::InFlightWitness, true, false) => (not_found, Some(true)),
+            (Role::InFlightWitness, true, true) => (not_found, Some(false)),
+            (Role::PipelinedWitness | Role::InFlightWitness, false, _) => (Vec::new(), None),
+            (Role::IdleWitness, _, true) if asked_again => {
+                ([not_found, not_found_close].concat(), Some(true))
+            }
+            (Role::IdleWitness, _, _) => (not_found, Some(false)),
+        };
     if client.received != want || want_shut.is_some_and(|w| w != shut) {
         panic!(
             "witness conn={} ({:?}) received {:?} (shut down: {shut}), want {:?} (shut down: \
@@ -472,4 +593,7 @@ pub(crate) fn check_witness(
         );
     }
     coverage.witnesses += 1;
+    if restart {
+        coverage.restart_witnesses += 1;
+    }
 }

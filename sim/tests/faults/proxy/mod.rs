@@ -311,6 +311,10 @@ pub(crate) const REQUIRED: &[&str] = &[
     "drain: closed before a request",
     "abort: exchange cut",
     "abort: response cut short",
+    // Restart (FR-PROC-07, `drain.rs`).
+    "restart: plain drain",
+    "restart: drain cut by the abort",
+    "restart: served with close",
 ];
 
 impl ProxyCoverage {

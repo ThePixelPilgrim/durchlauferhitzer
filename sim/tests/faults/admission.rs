@@ -132,6 +132,8 @@ pub(crate) struct AdmissionCoverage {
     /// Of `shared_group`: the two addresses in different /64s, one group
     /// by a shorter `ipv6_prefix` (48).
     pub(crate) joined_prefixes: usize,
+    /// A connection admitted during a restart's drain (FR-PROC-07).
+    pub(crate) restart_admitted: usize,
 }
 
 impl AdmissionCoverage {
@@ -139,6 +141,7 @@ impl AdmissionCoverage {
         self.shared_group += other.shared_group;
         self.group_dropped += other.group_dropped;
         self.joined_prefixes += other.joined_prefixes;
+        self.restart_admitted += other.restart_admitted;
     }
 }
 
@@ -183,7 +186,8 @@ impl Admission {
                 Verdict::Counted | Verdict::Refused | Verdict::Dropped => {}
             }
         }
-        let reason = if marks.shut_down() {
+        // A restart's drain admits as usual (FR-PROC-07).
+        let reason = if marks.refuses() {
             Some(RejectReason::ShuttingDown)
         } else if counted >= MAX_CONNECTIONS {
             Some(RejectReason::Limit(LimitKind::Connections))
@@ -216,6 +220,7 @@ impl Admission {
                 if !logs.is_empty() || state != SimConnState::Open {
                     fail("must be accepted");
                 }
+                self.coverage.restart_admitted += usize::from(marks.restart());
                 Verdict::Counted
             }
             Some(reason) => {

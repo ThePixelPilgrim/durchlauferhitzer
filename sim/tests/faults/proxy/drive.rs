@@ -759,6 +759,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
             &conns,
             Duration::from_secs(30),
             net.send_idle,
+            Duration::from_secs(120),
         );
         wind_down(&mut sim, &mut stories, &mut assigned);
         for story in &stories {
@@ -816,4 +817,10 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         })
         .collect();
     check_full_house(&mut sim, &shutdown.marks, &peers);
+    if shutdown.marks.restart() {
+        coverage.add(match shutdown.marks.abort {
+            None => "restart: plain drain",
+            Some(_) => "restart: drain cut by the abort",
+        });
+    }
 }
