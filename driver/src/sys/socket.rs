@@ -90,7 +90,7 @@ const SO_ATTACH_REUSEPORT_CBPF: libc::c_int = 51;
 /// Steers the new connections of `listener`'s `SO_REUSEPORT` group to
 /// the member at `index` (FR-PROC-07 "Steering"): a classic BPF program
 /// of one instruction returning `index`. The members are indexed in join
-/// order (`listen`); one that leaves takes the last member's place. The
+/// order (`listen`); the last member takes the slot of one that leaves. The
 /// program belongs to the group: it replaces the group's previous one and
 /// outlives `listener`. An index past the group's end falls back to the
 /// hash. Connections already queued are not moved. Needs no privilege.
@@ -564,23 +564,29 @@ mod tests {
     }
 
     /// FR-PROC-07 "Steering", the kernel semantics it relies on: the
-    /// members of a port group are indexed in join order; the program
-    /// belongs to the group (attached through any member, it replaces the
-    /// one before, and it outlives the member that attached it); an index
-    /// past the group's end falls back to the hash.
+    /// members of a port group are indexed in join order, and the last
+    /// member takes the slot of one that leaves; the program belongs to
+    /// the group (attached through any member, it replaces the one before,
+    /// and it outlives the member that attached it); an index past the
+    /// group's end falls back to the hash.
     #[test]
     fn steering_sends_new_connections_to_the_member_at_the_index() {
         // A joins the group first (index 0), B second (index 1).
         let a = tcp_listen("127.0.0.1:0".parse().unwrap(), 128, Probe::First).unwrap();
         let addr = local_addr(a.as_fd()).unwrap();
         let b = tcp_listen(addr, 128, Probe::Skip).unwrap();
+        // B, starting, steers to index 0: everything goes to A.
+        steer_reuseport(b.as_fd(), 0).unwrap();
+        assert_eq!(spread(addr, 64, &[&a, &b]), [64, 0]);
+        assert!(accept_nonblocking(b.as_fd()).unwrap().is_none());
+        // B, ready, steers to index 1: everything goes to B.
         steer_reuseport(b.as_fd(), 1).unwrap();
         assert_eq!(spread(addr, 64, &[&a, &b]), [0, 64]);
         assert!(accept_nonblocking(a.as_fd()).unwrap().is_none());
         // Through A, the group's program is replaced.
         steer_reuseport(a.as_fd(), 0).unwrap();
         assert_eq!(spread(addr, 64, &[&a, &b]), [64, 0]);
-        // Neutral: the hash spreads them (all on one: a chance of 2^-63).
+        // Past the end: the hash spreads them (all on one: a chance of 2^-63).
         steer_reuseport(b.as_fd(), u32::MAX).unwrap();
         let counts = spread(addr, 64, &[&a, &b]);
         assert!(counts.iter().all(|&n| n > 0), "{counts:?}");
@@ -589,11 +595,19 @@ mod tests {
         drop(a);
         assert_eq!(spread(addr, 64, &[&b]), [64]);
         // The program outlived A: C joins at index 1 and gets them all,
-        // which is why a new process attaches the neutral one at once.
+        // which is why a starting process steers to index 0 at once.
         let c = tcp_listen(addr, 128, Probe::Skip).unwrap();
         assert_eq!(spread(addr, 64, &[&b, &c]), [0, 64]);
-        steer_reuseport(c.as_fd(), u32::MAX).unwrap();
-        let counts = spread(addr, 64, &[&b, &c]);
-        assert!(counts.iter().all(|&n| n > 0), "{counts:?}");
+        steer_reuseport(c.as_fd(), 0).unwrap();
+        assert_eq!(spread(addr, 64, &[&b, &c]), [64, 0]);
+        // Three members B, C, D: index 1 is C. B leaves and D, the last,
+        // takes its slot (D, C), not C (C, D): index 1 is still C.
+        let d = tcp_listen(addr, 128, Probe::Skip).unwrap();
+        steer_reuseport(d.as_fd(), 1).unwrap();
+        assert_eq!(spread(addr, 64, &[&b, &c, &d]), [0, 64, 0]);
+        drop(b);
+        assert_eq!(spread(addr, 64, &[&c, &d]), [64, 0]);
+        steer_reuseport(d.as_fd(), 0).unwrap();
+        assert_eq!(spread(addr, 64, &[&c, &d]), [0, 64]);
     }
 }

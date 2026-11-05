@@ -1231,9 +1231,10 @@ Failures, persistence, timeouts:
   after the `containment` lines; the server serves on (FR-PROC-07).
   *(Stage 6 Task 6b:)* `steer_failed errno` is logged, one line per
   listener, when a `--ready-fd` start cannot attach a steering program
-  (FR-PROC-07 "Steering"): the neutral one after binding (written with
-  the startup notes, before `privileges`) or the one steering to itself
-  before the seccomp filter; startup goes on.
+  (FR-PROC-07 "Steering"): the one steering to the running server after
+  each `listen` (written with the startup notes, before `privileges`) or
+  the one steering to itself before the seccomp filter; startup goes
+  on.
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
@@ -1644,7 +1645,7 @@ Failures, persistence, timeouts:
     no new handshakes before it closes: a `--ready-fd` start attaches a
     classic BPF reuseport program to its port groups (no privilege; before
     its seccomp filter, so no new system call for the running server) —
-    a neutral one right after binding, then one steering every new
+    one right after binding, then one steering every new
     connection to its own listener right before readiness — and the
     reload script waits a short grace after `ready` before it signals the
     old process, so handshakes under way on the old listener finish. It
@@ -1659,7 +1660,15 @@ Failures, persistence, timeouts:
     optional sixth argument (default 1 s); its wait for the old listeners
     is bounded (10 s), after which it warns on stderr, releases the lock
     and exits 0 (the handover is done). Only a self-bound listener of a
-    `--ready-fd` start is steered, not one from systemd.
+    `--ready-fd` start is steered, not one from systemd. *(Builder call,
+    stage 6 Task 6b review:)* the program attached right after binding
+    steers to index 0, the group's oldest member, the running server
+    (the process itself when no group existed), each listener right
+    after its `listen`, so a process that is not ready gets no
+    connection, and the previous reload's program (index 1) stops
+    steering to it at once. A startup that fails at the seccomp filter,
+    after the steering to itself, steers back to index 0 before its
+    listeners close (that call's failure is not logged).
   - *What a restart may change:* anything — hosts, routes, backends,
     limits, roots, `user`, `listen`: the new process binds and opens its
     own. A `listen` address the new config drops is closed by the old

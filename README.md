@@ -174,8 +174,9 @@ losing a connection; the OpenRC script's `reload` calls it
 4. starts `<binary> --ready-fd 3 <config>` beside it, in its own session,
    output appended to `<logfile>`;
 5. waits for `ready` (default 30 s); if it does not come, it stops the new
-   process and leaves the old one alone. Once ready, the new process
-   steers every new connection on its ports to itself;
+   process and leaves the old one alone. Until it is ready, every new
+   connection goes to the old process; once ready, the new process steers
+   them all to itself;
 6. writes the new pid to `<pidfile>`, adds the old one to
    `<pidfile>.draining`, waits the grace (default 1 s) and sends it
    `SIGHUP` (it drains, then exits 0). The OpenRC script's `stop` also
@@ -198,6 +199,10 @@ It exits 0, or 1 with the reason. Notes:
   listener exactly as it closes, so one begun before the steering and
   still unfinished after the grace (a client round trip above it, or a
   retransmitted SYN-ACK) can still be reset.
+- The wait for the old listeners reads `/proc/<pid>/fd` of a server
+  running as `user`: that needs root with `CAP_SYS_PTRACE` (as root
+  normally has on a host; not in a container that drops it). Without it
+  the helper warns and releases the lock without waiting.
 
 ## Signals and exit codes
 

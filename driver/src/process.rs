@@ -44,11 +44,13 @@ const USAGE: &str = "usage: durchlauferhitzer <config-path>\n       \
 /// it (FR-PROC-07).
 const BACKLOG: u32 = 4096;
 
-/// The reuseport steering program attached right after binding: an index
-/// past any group's end, so the hash chooses (FR-PROC-07 "Steering"). It
-/// replaces the program the running server attached, which would steer
-/// connections to this process before it is ready.
-const STEER_NEUTRAL: u32 = u32::MAX;
+/// The reuseport steering program attached right after each listener of a
+/// `--ready-fd` start is bound, and again if startup fails after
+/// [`STEER_OWN`]: index 0, the group's oldest member, the running server
+/// (FR-PROC-07 "Steering"; this process itself when it is alone). A
+/// process that is not ready gets no connection, and the program the
+/// running server attached (index 1) no longer steers to this one.
+const STEER_OLDEST: u32 = 0;
 
 /// The reuseport steering program attached right before readiness: the
 /// running server's listener joined each group first (index 0), this
@@ -219,8 +221,8 @@ struct Ready {
 
 /// A11 steps 3 to 7a: the `openat2` probe, the static roots, the
 /// listeners (systemd's, A7, or bound here with `probe`, A6; a
-/// `--ready-fd` start attaches the neutral steering program to those it
-/// binds, FR-PROC-07), the descriptor budget (NFR-RES-05), the privilege
+/// `--ready-fd` start steers each, right after its `listen`, to the
+/// running server, FR-PROC-07), the descriptor budget (NFR-RES-05), the privilege
 /// drop (A8), then Landlock (FR-PROC-06), while the process has one
 /// thread and before anything else opens a path.
 fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
@@ -233,17 +235,17 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let restart_timeout = config.limits.restart_timeout;
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
-    let (listeners, steering) = match take_sockets(&listen).map_err(Failure)? {
-        Activation::Sockets(sockets) => (sockets, Steering::Off),
+    let (listeners, steering, mut notes) = match take_sockets(&listen).map_err(Failure)? {
+        Activation::Sockets(sockets) => (sockets, Steering::Off, Vec::new()),
         Activation::None => {
             let steering = match probe {
                 Probe::First => Steering::Off,
                 Probe::Skip => Steering::On,
             };
-            (bind(&listen, probe)?, steering)
+            let (listeners, notes) = bind(&listen, probe, steering)?;
+            (listeners, steering, notes)
         }
     };
-    let mut notes = steer(&listeners, steering, STEER_NEUTRAL);
     budget::ensure(budget::needed(budget::Descriptors {
         open: budget::open_now()?,
         max_connections,
@@ -329,19 +331,27 @@ fn probe_openat2(dir: BorrowedFd<'_>) -> Result<(), Failure> {
 /// any socket (FR-CFG-10: `SO_REUSEPORT` would let a `--ready-fd` start
 /// bind both), then binds every `listen` address in config order
 /// (`SO_REUSEPORT`, after the probe unless it is skipped, FR-PROC-07);
-/// the first failure names its address.
-fn bind(listen: &[SocketAddr], probe: Probe) -> Result<Vec<OwnedFd>, Failure> {
+/// the first failure names its address. With [`Steering::On`] each
+/// listener is steered to the running server right after its `listen`
+/// ([`STEER_OLDEST`]); the notes are the `steer_failed` entries.
+fn bind(
+    listen: &[SocketAddr],
+    probe: Probe,
+    steering: Steering,
+) -> Result<(Vec<OwnedFd>, Vec<DriverLog>), Failure> {
     if let Some((_, later)) = overlap(listen) {
         let err = io::Error::from_raw_os_error(libc::EADDRINUSE);
         return Err(Failure(format!("cannot listen on {later}: {err}")));
     }
-    listen
-        .iter()
-        .map(|&addr| {
-            tcp_listen(addr, BACKLOG, probe)
-                .map_err(|err| Failure(format!("cannot listen on {addr}: {err}")))
-        })
-        .collect()
+    let mut listeners = Vec::with_capacity(listen.len());
+    let mut notes = Vec::new();
+    for &addr in listen {
+        let listener = tcp_listen(addr, BACKLOG, probe)
+            .map_err(|err| Failure(format!("cannot listen on {addr}: {err}")))?;
+        notes.extend(steer([&listener], steering, STEER_OLDEST));
+        listeners.push(listener);
+    }
+    Ok((listeners, notes))
 }
 
 /// The first pair of `listen` addresses (earlier, later in config order)
@@ -435,6 +445,13 @@ fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
             }
         }
         Err(err) => {
+            // Back to the running server before the listeners close; a
+            // failure here changes nothing (the process exits 2).
+            let _ = steer(
+                driver.listeners().collect::<Vec<_>>(),
+                steering,
+                STEER_OLDEST,
+            );
             // The sink goes first (FR-LOG-06).
             drop(driver);
             report(err);
@@ -480,7 +497,11 @@ mod tests {
 
     use std::net::SocketAddr;
 
-    use super::{Command, ReadyFd, overlap, parse_args};
+    use std::net::TcpStream;
+    use std::os::fd::{AsFd, OwnedFd};
+
+    use super::{Command, Probe, ReadyFd, Steering, bind, overlap, parse_args};
+    use crate::sys::socket::{accept_nonblocking, local_addr, tcp_listen};
 
     fn parse(args: &[&str]) -> Option<Command> {
         parse_args(args.iter().map(OsString::from))
@@ -558,5 +579,34 @@ mod tests {
         for (list, expected) in cases {
             assert_eq!(overlap(&addrs(list)), expected, "{list:?}");
         }
+    }
+
+    /// How many of `n` connects to `addr` each listener accepts.
+    fn accepted(addr: SocketAddr, n: usize, listeners: &[&OwnedFd]) -> Vec<usize> {
+        let held: Vec<TcpStream> = (0..n).map(|_| TcpStream::connect(addr).unwrap()).collect();
+        let mut counts = vec![0; listeners.len()];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while counts.iter().sum::<usize>() < n {
+            assert!(std::time::Instant::now() < deadline, "{counts:?} of {n}");
+            for (count, listener) in counts.iter_mut().zip(listeners) {
+                while accept_nonblocking(listener.as_fd()).unwrap().is_some() {
+                    *count += 1;
+                }
+            }
+        }
+        drop(held);
+        counts
+    }
+
+    /// FR-PROC-07 "Steering": a `--ready-fd` start that has bound but is
+    /// not ready gets no connection; the running server (index 0) gets
+    /// them all.
+    #[test]
+    fn a_starting_ready_fd_listener_gets_no_connection() {
+        let running = tcp_listen("127.0.0.1:0".parse().unwrap(), 128, Probe::First).unwrap();
+        let addr = local_addr(running.as_fd()).unwrap();
+        let (starting, notes) = bind(&[addr], Probe::Skip, Steering::On).unwrap();
+        assert_eq!(notes, []);
+        assert_eq!(accepted(addr, 64, &[&running, &starting[0]]), [64, 0]);
     }
 }

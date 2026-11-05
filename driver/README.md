@@ -50,8 +50,9 @@ src/
                     the startup sequence (A11), the signalfd handed to
                     the driver with `shutdown_timeout`, the reuseport
                     steering of a `--ready-fd` start (`Steering`,
-                    `steer`: neutral after binding, to itself before the
-                    seccomp filter, FR-PROC-07)
+                    `steer`: to the running server, index 0, after each
+                    `listen`; to itself before the seccomp filter; back to
+                    index 0 if the filter fails, FR-PROC-07)
     budget.rs         NFR-RES-05: `open_now` (`/proc/self/fd`, O5),
                       `needed` (the formula in its docs and the spec),
                       `ensure` (raise the soft limit, or fail naming both
@@ -305,7 +306,8 @@ tests/
                     6 back-to-back reloads lose nothing (the kernel race
                     at a listener's close); the helper keeps its lock
                     until the old process, stopped across its SIGHUP, has
-                    closed its listeners. Control: with
+                    closed its listeners (skipped with a reason when
+                    `/proc/<pid>/fd` cannot be read: no CAP_SYS_PTRACE). Control: with
                     `tcp_migrate_req` 0 the queued connections are reset.
                     Root only (skipped with a reason, or failed with
                     DURCHLAUFERHITZER_REQUIRE_ROOT=1), `tcp_migrate_req`
@@ -503,8 +505,10 @@ it), the stderr log sink, then `Driver::new` with `limits.disk_threads`,
 for a `--ready-fd` start that bound its listeners the steering program
 that sends every new connection of each port group to this process
 (`STEER_OWN`, index 1: the running server joined first; right after
-binding it attached the neutral `STEER_NEUTRAL`, FR-PROC-07; a failure
-is logged, `kind=steer_failed errno=N`, and startup goes on), the
+each `listen` it attached `STEER_OLDEST`, index 0, so a process not yet
+ready gets no connection, FR-PROC-07; a failure is logged,
+`kind=steer_failed errno=N`, and startup goes on; a failing filter
+steers back to index 0 before the listeners close), the
 seccomp filter (`containment::restrict_calls`, TSYNC: the disk
 workers run by then) and the two `containment` lines
 (`Driver::write_log`), `ready\n` on the `--ready-fd` descriptor, which

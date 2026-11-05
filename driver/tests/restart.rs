@@ -164,9 +164,13 @@ fn ready_steers_new_connections_to_the_new_process() {
 /// How many back-to-back reloads the storm sees.
 const STORM_RELOADS: usize = 6;
 
-/// FR-PROC-07 "Steering": many fresh connections across several reloads
-/// lose nothing (a connect reset at the old listener's close was the
-/// kernel race steering avoids).
+/// FR-PROC-07 "Steering": a probabilistic regression smoke test, not a
+/// proof. Many fresh connections across several reloads lose nothing; a
+/// connect reset at the old listener's close is the kernel race steering
+/// avoids. Before steering it failed about 1 run in 10 here. The
+/// deterministic guard is `ready_steers_new_connections_to_the_new_process`;
+/// the grace has no test of its own (on loopback every handshake finishes
+/// within it).
 #[test]
 fn reload_under_fresh_storm_loses_nothing() {
     let _serial = serial();
@@ -209,6 +213,13 @@ fn the_helper_waits_for_the_old_listeners_to_close() {
     let old_conf = site.config("old", &[addr], "old");
     let new_conf = site.config("new", &[addr], "new");
     let mut old = site.start(&old_conf);
+    // The helper reads it to see the listeners: root without
+    // CAP_SYS_PTRACE cannot (the server runs as `nobody`), and the helper
+    // then warns and does not wait (README).
+    if let Err(err) = fs::read_dir(format!("/proc/{}/fd", old.pid())) {
+        eprintln!("skipped: /proc/<server>/fd cannot be read here ({err})");
+        return;
+    }
     let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
     signal_pid(old.pid(), "STOP");
     thread::scope(|scope| {

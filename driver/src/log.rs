@@ -85,9 +85,10 @@ pub enum DriverLog {
     /// (FR-PROC-07 step 3).
     ReadyFailed { errno: i32 },
     /// Attaching a reuseport steering program to a listener failed in a
-    /// `--ready-fd` start (the neutral one after binding, or the one
-    /// steering to this process before readiness); startup goes on
-    /// without it (FR-PROC-07 "Steering").
+    /// `--ready-fd` start (the one steering to the running server after
+    /// binding, or the one steering to this process before readiness);
+    /// startup goes on without it (FR-PROC-07 "Steering"). The steering
+    /// back after a failed seccomp filter is not logged.
     SteerFailed { errno: i32 },
 }
 
