@@ -215,6 +215,33 @@
 - [ ] **Step 3: CI green on all four jobs** (two glibc, two Alpine). Run the gate locally on glibc.
 - [ ] **Step 4: Commit(s)** "Portability: musl builds on Alpine (NFR-PORT-02)" (one per fix group is fine), push.
 
+### Task 6b: Steer new connections before the old listener closes (owner decision 2026-11-05)
+
+Root cause and evidence: `.superpowers/sdd/2026-11-04-stage-6-restart/reset-investigation.md` (git-ignored; the controller passes it to the implementer). Spec: FR-PROC-07 "Steering".
+
+**Files:**
+- Modify: `driver/src/sys/socket.rs`, `driver/src/process.rs`, `contrib/durchlauferhitzer-reload`, `driver/tests/restart.rs` (stay < 900 lines; split helpers into `support/` if needed), `driver/README.md`, `contrib/README.md`, `README.md` ("Restart without systemd": one line on the grace).
+
+**Interfaces:**
+- `sys::socket::steer_reuseport(listener: BorrowedFd<'_>, index: u32) -> io::Result<()>`: attaches a one-instruction classic BPF program returning `index` (`SO_ATTACH_REUSEPORT_CBPF`, defined locally as 51, asm-generic; check aarch64 and x86_64).
+- In a `--ready-fd` start:
+  - right after binding: `steer_reuseport(fd, u32::MAX)` (neutral: an out-of-range index falls back to the hash);
+  - as the last step before the seccomp filter: `steer_reuseport(fd, 1)`.
+  - A failure is a driver log entry (name the kind) and startup goes on.
+- The helper:
+  - waits a grace after `ready` before `kill -HUP` (default 1 s; an optional sixth argument);
+  - after SIGHUP, waits (bounded, default 10 s) until the old pid holds no listening socket, comparing `/proc/<old>/fd` socket inodes with the LISTEN entries of `/proc/net/tcp` and `/proc/net/tcp6`;
+  - releases its lock only then. On timeout it releases with a warning on stderr; the exit status stays 0, since the handover itself succeeded.
+
+- [ ] **Step 1: Failing tests:**
+  - unit (`sys/socket.rs`): listeners A and B share a port; after `steer_reuseport(B, 1)`, 64 connects all reach B and A's accept gives `EAGAIN`; after A closes, connects still reach B.
+  - `restart.rs` `ready_steers_new_connections_to_the_new_process`: after `ready`, before any SIGHUP, 50 fresh requests all answer from the new process.
+  - `restart.rs` `reload_under_fresh_storm_loses_nothing`: about 12 fresh-connection clients across several back-to-back reloads, zero failures.
+  - The helper waiting for the old listeners: lock released only after they closed.
+- [ ] **Step 2: Run, see them fail.** The storm test should fail on `main` within a few runs (about 1 in 80 per reload locally). Record the evidence.
+- [ ] **Step 3: Implement.** No allow-list change (both calls run before the filter); the kill switch confirms it.
+- [ ] **Step 4: Gate (both suites), CI green on all four jobs. Commit** "Restart: steer new connections before the old listener closes (FR-PROC-07)", push.
+
 ### Task 7: Stage close-out (controller, inline)
 
 - [ ] Spec statuses: FR-PROC-07, FR-PROC-05, FR-PROC-01, FR-CFG-10, FR-CFG-20/21 (`restart_timeout`), NFR-PORT-02 → `[done]`; Timeline 6 `[done]`; the legend "stages 1–6".

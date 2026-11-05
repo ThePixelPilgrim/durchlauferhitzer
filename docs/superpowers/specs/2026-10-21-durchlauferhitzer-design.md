@@ -1630,6 +1630,23 @@ Failures, persistence, timeouts:
     SIGHUP is ignored; SIGTERM or SIGINT during it takes the fast path;
     SIGHUP during a SIGTERM drain is ignored. A server whose listeners
     came from systemd treats SIGHUP the same way.
+  - *Steering (owner decision 2026-11-05, stage 6 Task 6 CI):* a kernel
+    race resets a client whose handshake completes on a listener at the
+    instant it closes (`tcp_migrate_req` does not cover it; seen once in
+    CI, about 0.1% of reloads under load). So the old listener must get
+    no new handshakes before it closes: a `--ready-fd` start attaches a
+    classic BPF reuseport program to its port groups (no privilege; before
+    its seccomp filter, so no new system call for the running server) —
+    a neutral one right after binding, then one steering every new
+    connection to its own listener right before readiness — and the
+    reload script waits a short grace after `ready` before it signals the
+    old process, so handshakes under way on the old listener finish. It
+    also waits until the old process has closed its listeners before it
+    releases its lock, so the next reload always finds two members per
+    port. Residual kernel window, documented: a handshake begun before
+    the steer whose final ACK reaches the old listener exactly as it
+    closes, after the grace (a client RTT above the grace or a
+    retransmitted SYN-ACK).
   - *What a restart may change:* anything — hosts, routes, backends,
     limits, roots, `user`, `listen`: the new process binds and opens its
     own. A `listen` address the new config drops is closed by the old
