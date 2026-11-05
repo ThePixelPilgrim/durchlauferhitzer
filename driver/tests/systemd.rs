@@ -163,23 +163,30 @@ fn a_connected_socket_is_not_a_listener() {
 #[path = "support/ipv6.rs"]
 mod ipv6;
 
-/// O4: an IPv6 socket from systemd that also accepts IPv4 is exit 2. std's
-/// listener leaves `IPV6_V6ONLY` at the host default (`bindv6only`, 0
-/// on most hosts); a host defaulting to 1 cannot build the case and skips.
+/// A listening IPv6 socket on `[::1]:0` that also accepts IPv4: it
+/// clears `IPV6_V6ONLY` before bind, so the host default (`bindv6only`)
+/// does not matter.
+fn dual_stack_listener() -> io::Result<OwnedFd> {
+    use socket2::{Domain, Socket, Type};
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
+    socket.set_only_v6(false)?;
+    let addr: SocketAddr = "[::1]:0".parse().unwrap();
+    socket.bind(&addr.into())?;
+    socket.listen(16)?;
+    Ok(OwnedFd::from(socket))
+}
+
+/// O4: an IPv6 socket from systemd that also accepts IPv4 is exit 2.
 #[test]
 fn a_dual_stack_ipv6_socket_is_exit_2() {
-    let Some(listener) = ipv6::or_skip(TcpListener::bind("[::1]:0")) else {
+    let Some(fd) = ipv6::or_skip(dual_stack_listener()) else {
         return;
     };
-    let addr = listener.local_addr().unwrap();
-    let fd = OwnedFd::from(listener);
-    match durchlauferhitzer::sys::socket::ipv6_only(std::os::fd::AsFd::as_fd(&fd)).unwrap() {
-        durchlauferhitzer::sys::socket::V6Only::No => {}
-        durchlauferhitzer::sys::socket::V6Only::Yes => {
-            eprintln!("skipped: this host's IPv6 sockets are IPv6-only by default");
-            return;
-        }
-    }
+    let addr = durchlauferhitzer::sys::socket::local_addr(std::os::fd::AsFd::as_fd(&fd)).unwrap();
+    assert_eq!(
+        durchlauferhitzer::sys::socket::ipv6_only(std::os::fd::AsFd::as_fd(&fd)).unwrap(),
+        durchlauferhitzer::sys::socket::V6Only::No
+    );
     let dir = TempDir::new();
     let path = dir.config(
         "dual.conf",

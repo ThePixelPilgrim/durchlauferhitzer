@@ -20,6 +20,12 @@ workspace = true
 durchlauferhitzer-core = { path = "../core" }
 libc = { version = "0.2.191", default-features = false }
 
+# Test-only. socket2 builds sockets the product never builds, without
+# `unsafe` in the tests (NFR-MAINT-05): systemd.rs's dual-stack IPv6
+# listener clears `IPV6_V6ONLY` before bind, whatever the host default.
+[dev-dependencies]
+socket2 = { version = "0.6.5", default-features = false }
+
 # `sys::env::remove_vars` works only while the process has one thread,
 # and libtest always runs tests on threads of their own: this test has
 # its own `main` (no harness).

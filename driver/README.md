@@ -16,7 +16,8 @@ Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 
 - **One dependency besides the core: `libc`** (`default-features = false`),
   pinned in `Cargo.lock`. No other crate, no C. CI checks the tree
-  (`scripts/check-product-deps.sh`, NFR-MAINT-04).
+  (`scripts/check-product-deps.sh`, NFR-MAINT-04). Tests only: `socket2`
+  (a dual-stack IPv6 listener in `tests/systemd.rs`, without `unsafe`).
 - **`unsafe` only in `src/sys/`.** The crate root has
   `#![deny(unsafe_code)]`, and only `mod sys` is `#[allow(unsafe_code)]`.
   Every `unsafe` block carries a `// SAFETY:` comment

@@ -1348,7 +1348,9 @@ Failures, persistence, timeouts:
 
   Every startup error is one line on stderr, `durchlauferhitzer:
   <message>`, printed before the log sink exists (exit 2). *Builder
-  calls:* the listen backlog is `SOMAXCONN`; a failure of the loop itself
+  calls:* the listen backlog is the kernel's `SOMAXCONN` (4096 since
+  Linux 5.4, capped by `net.core.somaxconn`), not `libc::SOMAXCONN`
+  (128 on musl); a failure of the loop itself
   (DRV-15) is printed once the driver and its sink are gone, exit 2.
   *Standard descriptors (owner decision 2026-10-28, O1, replacing the
   earlier "check fds 0–2 first, exit 2 if fd 2 is closed"):* the Rust

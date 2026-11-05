@@ -22,6 +22,10 @@ cargo build --release --locked
 # the binary: target/release/durchlauferhitzer
 ```
 
+Build the musl binary on Alpine: on a glibc host, `--target *-musl` with
+`-crt-static` links the host's glibc dynamically; for a static musl binary
+there, override it with `RUSTFLAGS="-C target-feature=+crt-static"`.
+
 ## Command line
 
 ```

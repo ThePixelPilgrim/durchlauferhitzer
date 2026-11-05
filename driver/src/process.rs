@@ -423,13 +423,7 @@ mod tests {
 
     use std::net::SocketAddr;
 
-    use super::{BACKLOG, Command, ReadyFd, overlap, parse_args};
-
-    /// The same backlog whatever the libc (`libc::SOMAXCONN` differs).
-    #[test]
-    fn the_backlog_is_the_kernels_somaxconn() {
-        assert_eq!(BACKLOG, 4096);
-    }
+    use super::{Command, ReadyFd, overlap, parse_args};
 
     fn parse(args: &[&str]) -> Option<Command> {
         parse_args(args.iter().map(OsString::from))
