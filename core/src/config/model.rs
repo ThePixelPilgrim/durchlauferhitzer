@@ -84,6 +84,9 @@ pub struct Limits {
     /// How long a graceful shutdown may take before connections are
     /// aborted (FR-PROC-05).
     pub shutdown_timeout: Duration,
+    /// How long a restart may wait for the new process to report ready
+    /// before it is abandoned (FR-PROC-07).
+    pub restart_timeout: Duration,
     /// The memory budget in bytes: `max_connections` times
     /// [`worst_case_per_connection`] must fit in it (FR-CFG-21). It budgets
     /// each connection's own buffers only. Outside it, and not counted: the
@@ -135,6 +138,7 @@ impl Default for Limits {
             body_idle_timeout: Duration::from_secs(30),
             disk_threads: 4,
             shutdown_timeout: Duration::from_secs(30),
+            restart_timeout: Duration::from_secs(600),
             memory_limit: 1 << 30,
             ipv6_prefix: 64,
         }

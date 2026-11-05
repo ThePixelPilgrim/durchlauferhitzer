@@ -197,6 +197,7 @@ enum LimitKey {
     BodyIdleTimeout,
     DiskThreads,
     ShutdownTimeout,
+    RestartTimeout,
     MemoryLimit,
     Ipv6Prefix,
 }
@@ -204,7 +205,7 @@ enum LimitKey {
 impl LimitKey {
     /// Every `limits` key with its name: the one list the parser and the
     /// example config's test read.
-    const ALL: [(&'static str, LimitKey); 15] = [
+    const ALL: [(&'static str, LimitKey); 16] = [
         ("max_connections", Self::MaxConnections),
         ("max_connections_per_ip", Self::MaxConnectionsPerIp),
         ("max_request_line", Self::MaxRequestLine),
@@ -218,6 +219,7 @@ impl LimitKey {
         ("body_idle_timeout", Self::BodyIdleTimeout),
         ("disk_threads", Self::DiskThreads),
         ("shutdown_timeout", Self::ShutdownTimeout),
+        ("restart_timeout", Self::RestartTimeout),
         ("memory_limit", Self::MemoryLimit),
         ("ipv6_prefix", Self::Ipv6Prefix),
     ];
@@ -335,6 +337,9 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
             }
             LimitKey::ShutdownTimeout => {
                 limits.shutdown_timeout = duration().ok_or_else(bad)?;
+            }
+            LimitKey::RestartTimeout => {
+                limits.restart_timeout = duration().ok_or_else(bad)?;
             }
             LimitKey::MemoryLimit => {
                 limits.memory_limit = parse_size(value)
