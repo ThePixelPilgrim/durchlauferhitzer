@@ -439,8 +439,8 @@ tests/
                     `src/lib.rs`; in `tests/` the `unsafe` keyword
                     appears only in `child.rs`'s `pre_exec` and in
                     `clock_syscall.rs`
-  support/child.rs  running the binary: temp configs (conf.rs), a free port (below
-                    the kernel's ephemeral range, so no other socket is
+  support/child.rs  running the binary: temp configs (conf.rs), a free port
+                    (port.rs, re-exported; below the kernel's ephemeral range, so no other socket is
                     given it before the server binds; a new one per pick
                     within the process; only another program binding
                     that port could take it, which a server exiting
@@ -473,6 +473,11 @@ tests/
                     against it; a `--ready-fd` start beside it), `/proc`
                     helpers (start time, liveness, a pending SIGHUP)
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
+  support/port.rs   `free_port`, shared by `child.rs` and `sys.rs`: below
+                    the ephemeral range, so neither a bind to 0 nor a
+                    connect's source port can get it; also the tests'
+                    refused ports (a connect to an ephemeral port nothing
+                    listens on can connect to itself)
   support/running.rs `Running`: a guard that kills a running server on
                     drop (a server ended by SIGSYS fails its test);
                     signals by the shell's `kill` (`signal_pid`), stderr

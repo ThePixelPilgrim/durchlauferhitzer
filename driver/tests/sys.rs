@@ -42,6 +42,9 @@ use durchlauferhitzer_core::{FileError, FileKind};
 #[path = "support/ipv6.rs"]
 mod ipv6;
 
+#[path = "support/port.rs"]
+mod port;
+
 const WAIT: Option<Duration> = Some(Duration::from_secs(5));
 
 /// A directory under the system temp dir, removed on drop.
@@ -244,11 +247,10 @@ fn finish_connect(fd: &OwnedFd) -> Option<std::io::Error> {
 
 #[test]
 fn connect_to_a_closed_port_fails_via_so_error() {
-    // A port held by a socket that is bound but not listening (the client
-    // end of a connection) refuses connects, and no other test can take it
-    // while it is held.
-    let (held, _server) = loopback_pair();
-    let addr = held.local_addr().unwrap();
+    // A port below the ephemeral range that nothing listens on: refused.
+    // Not an ephemeral one: a connect to it could get it as its own
+    // source port and connect to itself.
+    let addr = SocketAddr::from(([127, 0, 0, 1], port::free_port()));
     let connecting = connect_nonblocking(addr).unwrap();
     match connecting.immediate {
         Ok(ConnectStart::InProgress) => {

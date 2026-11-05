@@ -30,8 +30,11 @@ use child::{
     get, run, text,
 };
 
+/// A listener as systemd would pass it, on a port below the ephemeral
+/// range: once the server closes the only copy, a connect to it must be
+/// refused, and one to an ephemeral port could connect to itself.
 fn listener() -> (OwnedFd, SocketAddr) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", free_port())).unwrap();
     let addr = listener.local_addr().unwrap();
     (OwnedFd::from(listener), addr)
 }

@@ -663,27 +663,6 @@ fn descriptors(pid: u32, listener: &str) -> (usize, usize) {
     (total, connections)
 }
 
-/// A loopback port held for the whole test by a socket that is bound but
-/// never listens: the local end of a connection to a throwaway listener.
-/// A connect to it is refused every time, and no other socket can bind
-/// the port while it is held (unlike a released free port).
-struct RefusedPort {
-    addr: SocketAddr,
-    _held: (TcpStream, TcpStream),
-}
-
-impl RefusedPort {
-    fn new() -> RefusedPort {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let local = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (remote, _) = listener.accept().unwrap();
-        RefusedPort {
-            addr: local.local_addr().unwrap(),
-            _held: (local, remote),
-        }
-    }
-}
-
 /// The descriptor count once it is stable: the same in two samples 5 ms
 /// apart with no connection left, at most [`PATIENCE`].
 fn settled_descriptors(pid: u32, listener: &str) -> usize {
@@ -725,9 +704,11 @@ fn smoke_static_and_proxy_in_parallel_then_sigterm() {
     let backend_addr = backend_listener.local_addr().unwrap();
     let (results_in, results) = mpsc::channel();
     thread::spawn(move || backend(backend_listener, results_in));
-    // A port nothing listens on: the connect is refused (502).
-    let refused = RefusedPort::new();
-    let down = refused.addr;
+    // A port nothing listens on: the connect is refused (502). Below the
+    // ephemeral range: a connect to an ephemeral port nothing listens on
+    // can get that port as its own source and connect to itself (seen in
+    // CI: it read its own request as the response, `bad_version`).
+    let down = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let probe = TcpStream::connect(down).map(|_| ()).map_err(|e| e.kind());
     assert_eq!(probe, Err(io::ErrorKind::ConnectionRefused), "{down}");
 
@@ -795,7 +776,6 @@ host proxy.test {{
     let status = server.wait_exit(PATIENCE);
     assert_eq!(status.code(), Some(0), "{status}");
     assert!(results.try_recv().is_err(), "a backend connection too many");
-    drop(refused);
 
     let mut got: Vec<String> = lines.all().iter().map(|l| without_conn(l)).collect();
     // The containment lines come first, one per layer (their values are
