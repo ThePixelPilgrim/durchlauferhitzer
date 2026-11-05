@@ -1548,7 +1548,17 @@ Failures, persistence, timeouts:
     call number); the startup log says so, so an operator knows where to
     look. *Builder call:* the allow-list is proven by running the end-to-end
     tests under `kill` in CI on the x86_64 and aarch64 runners (Ubuntu
-    24.04's glibc) and in a Debian 12 container (glibc 2.36) on x86_64. A crash or misbehaviour caused by a failed call is a
+    24.04's glibc) and in a Debian 12 container (glibc 2.36) on x86_64,
+    and on musl in Alpine containers on both (NFR-PORT-02). *(Stage 6
+    Task 6, builder calls for musl, `cfg(target_env = "musl")`:)* x86_64
+    lists `epoll_pwait` instead of `epoll_wait` (musl's `epoll_wait`);
+    `clone`'s thread flags include `CLONE_DETACHED` (musl's
+    `pthread_create`; the kernel ignores it); `futex` also allows the
+    shared `FUTEX_WAIT` and `FUTEX_WAKE` of musl's thread list lock
+    (`pthread_exit`, `pthread_join`), still no priority-inheritance or
+    requeue operation; `tkill` only with `SIGABRT` to the main thread
+    (thread id = pid; musl's `abort`), so a worker's abort ends the
+    process by `SIGSEGV` (musl's `a_crash`) or, under `kill`, `SIGSYS`. A crash or misbehaviour caused by a failed call is a
     bug in the server (a missing allow-list entry or wrong error handling),
     never the intended effect.
   - (owner decision 2026-10-29, stage 5 builder check) Stage 5 sandboxes strictly: no `execve`, no reading
