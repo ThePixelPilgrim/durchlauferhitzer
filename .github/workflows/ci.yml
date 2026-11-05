@@ -106,21 +106,21 @@ jobs:
         # them needs nightly (nightly.yml).
         run: cargo check --manifest-path fuzz/Cargo.toml --locked
       - name: The binary links the system glibc and nothing else
-        # Its NEEDED entries are exactly the system runtime: glibc (libc
-        # and the dynamic loader it splits off) and libgcc_s (std's
-        # unwinder, owner decision 2026-11-05), so a new native library
-        # fails here.
+        # Its NEEDED entries are exactly the system runtime: glibc and
+        # libgcc_s (std's unwinder, owner decision 2026-11-05), so a new
+        # native library fails here. On x86_64 glibc's dynamic loader is
+        # NEEDED too; on aarch64 it is not (as of 2026-11-05).
         run: |
           set -euo pipefail
           cargo build --locked -p durchlauferhitzer
           case "$(uname -m)" in
-            x86_64) loader=ld-linux-x86-64.so.2 ;;
-            aarch64) loader=ld-linux-aarch64.so.1 ;;
+            x86_64) runtime="libc.so.6 ld-linux-x86-64.so.2 libgcc_s.so.1" ;;
+            aarch64) runtime="libc.so.6 libgcc_s.so.1" ;;
             *) echo "unknown architecture: $(uname -m)"; exit 1 ;;
           esac
           readelf -d target/debug/durchlauferhitzer | tee dynamic.txt
           sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p' dynamic.txt | sort > needed.txt
-          printf '%s\n' libc.so.6 "$loader" libgcc_s.so.1 | sort > expected.txt
+          printf '%s\n' $runtime | sort > expected.txt
           diff expected.txt needed.txt
       - name: Product dependency check
         run: scripts/check-product-deps.sh
