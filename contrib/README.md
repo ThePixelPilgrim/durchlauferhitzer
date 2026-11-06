@@ -9,7 +9,11 @@ binary.
   `net.ipv4.tcp_migrate_req` to 1 and does not restore it. After `ready`
   it waits a grace (default 1 s, its sixth argument) before the SIGHUP,
   and keeps its lock until the old process has closed its listeners
-  (at most 10 s, then a warning).
+  (at most 10 s, then a warning). The lock is the file
+  `<pidfile>.lock/pid` (pid and start time), created with the shell's
+  noclobber; a lock whose holder no longer runs is taken over. A new
+  process it does not hand over gets `SIGHUP`; one that never reached
+  its event loop is killed after 10 s.
 - `openrc/durchlauferhitzer` — the OpenRC script (`start`, `stop`,
   `checkconfig`, `reload`), modelled on Alpine's haproxy script; `stop`
   also ends the processes a reload left draining (`<pidfile>.draining`). Install

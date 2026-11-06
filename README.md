@@ -168,8 +168,9 @@ exit 2.
 losing a connection; the OpenRC script's `reload` calls it
 ([`contrib/`](contrib)). In order, it
 
-1. takes the lock `<pidfile>.lock` (a second reload meanwhile is refused),
-   checks the config (`--check`) and stops on an error;
+1. takes the lock `<pidfile>.lock` (a second reload meanwhile is refused;
+   one whose helper no longer runs is taken over, with a note), checks
+   the config (`--check`) and stops on an error;
 2. sets `net.ipv4.tcp_migrate_req` to 1 (Linux 5.14 or later; left set),
    so connections queued on the old process move to the new one when it
    closes its listeners;
@@ -177,14 +178,20 @@ losing a connection; the OpenRC script's `reload` calls it
    in place to upgrade (a symlink re-pointed to another version is
    refused);
 4. starts `<binary> --ready-fd 3 <config>` beside it, in its own session,
-   output appended to `<logfile>`;
-5. waits for `ready` (default 30 s); if it does not come, it stops the new
-   process and leaves the old one alone. Until it is ready, every new
+   output appended to `<logfile>`, and lists its pid in
+   `<pidfile>.draining` at once (so `stop` ends it if the helper dies);
+5. waits for `ready` (default 30 s); if it does not come, it sends the
+   new process `SIGHUP` (one already serving drains, its queue moving to
+   the old process; one stuck before its event loop is killed after
+   10 s) and leaves the old one alone. Until it is ready, every new
    connection goes to the old process; once ready, the new process steers
    them all to itself;
-6. writes the new pid to `<pidfile>`, adds the old one to
-   `<pidfile>.draining`, waits the grace (default 1 s) and sends it
-   `SIGHUP` (it drains, then exits 0). The OpenRC script's `stop` also
+6. adds the old pid to `<pidfile>.draining`, writes the new pid to
+   `<pidfile>`, waits the grace (default 1 s), checks that the new process
+   still runs (if not, `<pidfile>` names the old one again and the helper
+   exits 1) and sends the old one `SIGHUP` (it drains, then exits 0); if
+   the new process is gone right after, the helper exits 1: start the
+   server again. The OpenRC script's `stop` also
    stops the processes still draining (each checked by binary and start
    time, so a reused pid is left alone);
 7. waits (at most 10 s, then a warning) until the old process has closed
@@ -195,8 +202,13 @@ It exits 0, or 1 with the reason. Notes:
 - Only a process with the same effective uid at bind time can share the
   ports: start the server as root with `user` set (it binds, then
   drops), and run the helper as root.
-- A `listen` address the new config drops closes with the old process;
-  connections queued on it are reset.
+- Only a `listen` address kept exactly is shared. One the new config
+  drops closes with the old process, and its queued connections are
+  reset; a changed one (`0.0.0.0:80` to `127.0.0.1:80`) is separate, and
+  its queued connections are reset if the new process fails. Change
+  addresses with a full stop and start if nothing may be lost.
+- Do not run the helper under `nohup`: the new process would ignore
+  `SIGHUP` too, so one the helper must stop is left to `stop`.
 - Upgrading from a stage 5 binary (listeners without `SO_REUSEPORT`)
   needs one full stop and start.
 - The grace lets handshakes under way on the old listeners finish before
@@ -217,7 +229,7 @@ It exits 0, or 1 with the reason. Notes:
   then the server exits. It waits at most `shutdown_timeout` (default 30s),
   then cuts what is left. systemd's `systemctl stop` sends `SIGTERM`; keep
   `TimeoutStopSec` above `shutdown_timeout` plus 2 s.
-- A second `SIGTERM`, or `SIGINT` (Ctrl-C): fast shutdown; every connection is
+- A second `SIGTERM` during the graceful shutdown, or `SIGINT` (Ctrl-C): fast shutdown; every connection is
   cut at once.
 - `SIGHUP`: restart drain — the listeners close, the connections held are
   served with `Connection: close`, bounded by `restart_timeout` (default
@@ -226,8 +238,8 @@ It exits 0, or 1 with the reason. Notes:
   `SIGINT` or a second `SIGTERM` cuts every connection. The server's own
   listeners set `SO_REUSEPORT`: a `--ready-fd` start shares the ports; a
   second normal start still fails ("Address already in use"). A server
-  binding as a non-root user logs so at startup: any process of that
-  user could join its ports.
+  binding as a non-root user logs so at startup (`kind=shared_ports`):
+  any process of that user could join its ports.
   `SIGPIPE` is ignored.
 - Exit codes: 0 after any shutdown (and `--check` on a valid config), 1 for
   an invalid or unreadable config or bad arguments, 2 for a startup
