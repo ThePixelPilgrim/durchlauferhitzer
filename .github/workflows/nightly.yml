@@ -173,7 +173,7 @@ jobs:
     # the restart tests run (FR-PROC-07; owner decision 2026-11-06).
     name: older glibc (debian 12)
     runs-on: ubuntu-latest
-    # About 1 min.
+    # About 1.5 min.
     timeout-minutes: 30
     container:
       image: debian:12
@@ -308,7 +308,7 @@ jobs:
         # as ci.yml's root step does.
         if: matrix.libc == 'glibc'
         run: |
-          set -uo pipefail
+          set -euo pipefail
           bin=$(cargo test --locked -p durchlauferhitzer --test restart --no-run \
               --message-format=json \
             | grep -o '"executable":"[^"]*/deps/[^"]*"' | cut -d '"' -f 4)
@@ -332,8 +332,9 @@ jobs:
         # As root in the container, from driver/ as cargo test runs it.
         if: matrix.libc == 'musl'
         run: |
+          set -euo pipefail
           docker exec -e RESTART_RUNS alpine bash -c '
-            set -uo pipefail
+            set -euo pipefail
             bin=$(cargo test --locked -p durchlauferhitzer --test restart --no-run \
                 --message-format=json \
               | grep -o "\"executable\":\"[^\"]*/deps/[^\"]*\"" | cut -d "\"" -f 4)
@@ -390,6 +391,8 @@ jobs:
     permissions:
       contents: read
       issues: write
+      # Reads the run's jobs (each matrix leg's conclusion).
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -405,13 +408,21 @@ jobs:
           path: failures
       - name: File or update issues
         # A failed job that left no record (it failed before writing
-        # one) still gets an issue, from `needs`; so does a cancelled one
-        # (timed out), as `<job>|timeout-or-cancelled`.
+        # one) still gets an issue; so does a cancelled one (timed out),
+        # as `<job>|timeout-or-cancelled`. Checked per matrix leg from
+        # the run's jobs (`needs` has one result per job, so a cancelled
+        # leg beside a sibling's record would be missed), else from
+        # `needs`.
         run: |
           printf '%s' "$NEEDS" > needs.json
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=100" > jobs.json \
+            || rm -f jobs.json
+          jobs=()
+          if [ -s jobs.json ]; then jobs=(--jobs jobs.json); fi
           python3 scripts/nightly-report.py report --records failures \
-            --needs needs.json --run-url "$RUN_URL"
+            --needs needs.json "${jobs[@]}" --run-url "$RUN_URL"
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
           NEEDS: ${{ toJSON(needs) }}
