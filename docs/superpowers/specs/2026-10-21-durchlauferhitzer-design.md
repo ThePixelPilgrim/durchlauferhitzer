@@ -2110,12 +2110,25 @@ does not change stage 7's choices.
   (N threads or `splice` may be dropped); results are charted, with no
   regression alarm yet.
 
-- **NFR-PERF-01** [stage 7] Static-file throughput per core: target to be
-  set in stage 7.
-- **NFR-PERF-02** [stage 7] Proxy throughput and added latency: target to
-  be set in stage 7.
-- **NFR-PERF-03** [stage 7] Concurrent connections per core at a given
-  memory budget: target to be set in stage 7.
+*(Owner decisions 2026-11-06, stage 7 Task 1 baseline:)* targets are
+work per request measured by `bench` (NFR-PERF-08). System calls per
+request are firm targets; CPU time per request is a guide (runner noise
+up to 25%). **Ratchet:** a target only tightens — after each kept
+optimisation it moves to the new measured median plus a margin (2% for
+system calls, 15% for CPU). **Exceptions:** a change may make a metric
+worse only with the owner's explicit OK, given when there is a stated
+perspective for improvement down the line; the exception is recorded
+next to the target (the change, the allowed loss, the expected later
+gain) and reviewed at the next stage close.
+
+- **NFR-PERF-01** [stage 7] Static files (`bench` `static-small`,
+  1 KiB, keep-alive): at most 20 system calls and about 60 µs CPU per
+  request; `static-large` (1 MiB): at most 45 system calls per request.
+- **NFR-PERF-02** [stage 7] Proxy (`proxy-small`, keep-alive): at most 20
+  system calls and about 90 µs CPU per request; pooling (FR-PROXY-02) is
+  expected to bring `proxy-fresh` (about 27 today) toward `proxy-small`.
+- **NFR-PERF-03** [stage 7] Concurrent connections: target set when the
+  deadline index (NFR-PERF-06) is measured at 1 000 open connections.
 - **NFR-PERF-04** [done] Every client and upstream socket has
   `TCP_NODELAY`; each buffer is written until done or blocked (DRV-03);
   `SO_RCVBUF`/`SO_SNDBUF` are never set (kernel autotuning stays on).

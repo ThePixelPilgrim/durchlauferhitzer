@@ -99,6 +99,10 @@
 
 **Owner stop after Task 1:** the controller proposes targets for NFR-PERF-01…03 from the baseline; the owner approves before they enter the spec.
 
+### Task 1b: `bench/bisect.sh` (owner 2026-11-06)
+
+A POSIX `sh` script for `git bisect run`: it builds the release binary at the current commit, runs `bench` for one scenario (1 run, short duration, `strace` pass only), and exits 0 if `syscalls_per_req` is at most a given threshold, 1 if above, 125 if the build fails. Usage, documented in `bench/README.md`: `git bisect start <bad> <good>; git bisect run bench/bisect.sh <scenario> <max-syscalls>`. Test: a shell-level test in `scripts/` or `bench/` with a stub bench binary checks the exit codes. Gate, commit, push.
+
 ### Task 2: Conditional requests (FR-STATIC-18)
 
 **Files:**
