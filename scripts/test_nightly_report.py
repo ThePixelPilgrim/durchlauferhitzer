@@ -363,6 +363,17 @@ class RestartSoak(unittest.TestCase):
         self.assertNotEqual(nr.describe("restart-soak", a)[0], nr.describe("restart-soak", c)[0])
         self.assertIn("sudo", a["replay"])
 
+    def test_the_fingerprint_ignores_the_run_counts_and_keys_on_arch(self):
+        (a,) = nr.record_restart_soak(SOAK_LOG, WS, "x86_64", "glibc")
+        # 20 runs instead of 3, and the test failing in one run, not two.
+        fewer = SOAK_LOG.replace(" of 3", " of 20").split("== restart soak run 3")[0]
+        (b,) = nr.record_restart_soak(fewer, WS, "x86_64", "glibc")
+        self.assertIn("failed in 2 of 3 runs", a["panic_text"])
+        self.assertIn("failed in 1 of 20 runs", b["panic_text"])
+        self.assertEqual(nr.describe("restart-soak", a), nr.describe("restart-soak", b))
+        (c,) = nr.record_restart_soak(SOAK_LOG, WS, "arm64", "glibc")
+        self.assertNotEqual(nr.describe("restart-soak", a)[0], nr.describe("restart-soak", c)[0])
+
     def test_a_clean_or_missing_log_is_unrecognized(self):
         clean = SOAK_LOG.split("== restart soak run 2")[0]
         self.assertEqual(nr.record_restart_soak(clean, WS, "x86_64", "glibc")[0]["kind"], "unrecognized")
@@ -379,7 +390,104 @@ class RestartSoak(unittest.TestCase):
                          "--run-url", RUN, "--workspace", WS, "--out", out, log])
             (rec,) = nr.load_records(d)
             self.assertEqual(rec["job"], "restart-soak")
+            self.assertEqual(rec["libc"], "musl")
             self.assertEqual(rec["failures"][0]["libc"], "musl")
+
+
+# The run's jobs as the Actions API lists them (`jobs` of
+# GET /repos/{repo}/actions/runs/{id}/jobs), trimmed to what is read.
+def _legs(*pairs):
+    return {"jobs": [{"name": n, "conclusion": c} for n, c in pairs]}
+
+
+class Legs(unittest.TestCase):
+    """A matrix leg that timed out or was cancelled is reported even when
+    a sibling leg of the same job wrote a record (`needs` gives one result
+    per job, so the legs come from the run's jobs)."""
+
+    def test_leg_names_map_to_job_arch_and_libc(self):
+        self.assertEqual(nr.parse_leg("long runs (arm64)"), ("long-runs", "arm64", ""))
+        self.assertEqual(nr.parse_leg("fuzz"), ("fuzz", "x86_64", ""))
+        self.assertEqual(nr.parse_leg("older glibc (debian 12)"), ("older-glibc", "x86_64", ""))
+        self.assertEqual(
+            nr.parse_leg("restart soak (arm64, musl)"), ("restart-soak", "arm64", "musl")
+        )
+        self.assertIsNone(nr.parse_leg("report failures"))
+        self.assertIsNone(nr.parse_leg("restart soak (arm64)"))
+
+    def test_a_cancelled_leg_beside_a_failed_sibling_with_a_record(self):
+        rec = nr.make_record("restart-soak", "x86_64", RUN,
+                             nr.record_restart_soak(SOAK_LOG, WS, "x86_64", "glibc"), libc="glibc")
+        needs = {"restart-soak": {"result": "failure"}, "fuzz": {"result": "success"}}
+        legs = _legs(
+            ("restart soak (x86_64, glibc)", "failure"),
+            ("restart soak (arm64, musl)", "cancelled"),
+            ("restart soak (x86_64, musl)", "success"),
+            ("fuzz", "success"),
+            ("report failures", None),
+        )
+        out = nr.add_missing([rec], needs, RUN, legs)
+        self.assertEqual(len(out), 2)
+        added = out[1]
+        self.assertEqual((added["job"], added["arch"], added["libc"]), ("restart-soak", "arm64", "musl"))
+        self.assertEqual(added["failures"][0]["kind"], "timeout-or-cancelled")
+        fp, title = nr.describe("restart-soak", added["failures"][0])
+        self.assertEqual(fp, nr.fingerprint("restart-soak|timeout-or-cancelled"))
+        self.assertEqual(
+            title,
+            "nightly: restart soak (arm64, musl) — timed out or was cancelled, "
+            f"no failure record [{fp}]",
+        )
+        occurrence = {"job": added["job"], "arch": added["arch"], "failure": added["failures"][0]}
+        self.assertIn("restart soak musl (arm64)", nr._occurrence(occurrence, RUN))
+        # Without the leg (from `needs` alone): the same fingerprint, no
+        # parentheses in the title.
+        (bare,) = nr.add_missing([], {"restart-soak": {"result": "cancelled"}}, RUN)
+        fp_bare, title_bare = nr.describe("restart-soak", bare["failures"][0])
+        self.assertEqual(fp_bare, fp)
+        self.assertTrue(title_bare.startswith("nightly: restart soak — "), title_bare)
+
+    def test_a_failed_leg_without_a_record_and_timed_out(self):
+        rec = nr.make_record("long-runs", "x86_64", RUN, [nr._unrecognized("x")])
+        legs = _legs(("long runs (x86_64)", "failure"), ("long runs (arm64)", "timed_out"),
+                     ("older glibc (debian 12)", "failure"))
+        out = nr.add_missing([rec], {}, RUN, legs)
+        self.assertEqual([(r["job"], r["arch"]) for r in out],
+                         [("long-runs", "x86_64"), ("long-runs", "arm64"), ("older-glibc", "x86_64")])
+        self.assertEqual(out[1]["failures"][0]["kind"], "timeout-or-cancelled")
+        self.assertEqual(out[2]["failures"][0]["kind"], "unrecognized")
+
+    def test_a_job_the_legs_miss_falls_back_to_needs(self):
+        # The jobs listing failed or lacks the job: `needs` still files it.
+        out = nr.add_missing([], {"fuzz": {"result": "cancelled"}}, RUN, _legs())
+        self.assertEqual([r["job"] for r in out], ["fuzz"])
+        out = nr.add_missing([], {"fuzz": {"result": "cancelled"}}, RUN, None)
+        self.assertEqual([r["job"] for r in out], ["fuzz"])
+
+    def test_malformed_legs_are_ignored(self):
+        for legs in ({"jobs": "x"}, [], {"jobs": [1, {"name": 3}, {"conclusion": "failure"}]}):
+            self.assertEqual(nr.add_missing([], {}, RUN, legs), [])
+
+    def test_cli_reads_the_jobs_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            jobs = os.path.join(d, "jobs.json")
+            with open(jobs, "w") as fh:
+                json.dump(_legs(("restart soak (arm64, musl)", "cancelled")), fh)
+            needs = os.path.join(d, "needs.json")
+            with open(needs, "w") as fh:
+                json.dump({"restart-soak": {"result": "failure"}}, fh)
+            seen = []
+            orig = nr.report
+            nr.report = lambda records, gh, date, run_url: seen.append(records) or ""
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    nr.main(["report", "--records", os.path.join(d, "none"), "--needs", needs,
+                             "--jobs", jobs, "--run-url", RUN, "--summary", ""])
+            finally:
+                nr.report = orig
+            (records,) = seen
+            self.assertEqual([(r["job"], r["arch"], r["libc"]) for r in records],
+                             [("restart-soak", "arm64", "musl")])
 
 
 def _record(job, arch, failures):

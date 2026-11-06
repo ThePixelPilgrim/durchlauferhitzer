@@ -18,7 +18,13 @@ report  In the reporting job: read every record, group the failures by
         "regressed" comment, or file a new one labelled `nightly` (at most
         three per run; the rest are listed in the job summary).
 
-            nightly-report.py report --records DIR --needs needs.json --run-url URL
+            nightly-report.py report --records DIR --needs needs.json \
+                --jobs jobs.json --run-url URL
+
+        `jobs.json` is the run's jobs from the Actions API: a matrix leg
+        that failed or was cancelled without a record of its own is
+        reported even when a sibling leg wrote one (`needs` has one
+        result per job).
 
 The fingerprint is `fp-` + the first 8 hex digits of the SHA-256 of a
 normalized text, which names the failure, not the seed or input:
@@ -180,8 +186,8 @@ def describe(job, f):
     test = f.get("test", "")
     if job == "fuzz" and test:
         label = f"fuzz {test}"
-    if job == "restart-soak":
-        label = f"restart soak ({f.get('arch', '')}, {f.get('libc', '')})"
+    if job == "restart-soak" and f.get("libc"):
+        label = f"restart soak ({f.get('arch', '')}, {f['libc']})"
     if kind == "unrecognized":
         key = f"{job}|unrecognized"
         reason = "failed without a recognized failure"
@@ -439,8 +445,15 @@ def record_restart_soak(text, workspace, arch, libc):
 # --- records -------------------------------------------------------------
 
 
-def make_record(job, arch, run_url, failures):
-    return {"version": 1, "job": job, "arch": arch, "run_url": run_url, "failures": failures}
+def make_record(job, arch, run_url, failures, libc=""):
+    return {
+        "version": 1,
+        "job": job,
+        "arch": arch,
+        "libc": libc,
+        "run_url": run_url,
+        "failures": failures,
+    }
 
 
 def _valid(rec):
@@ -476,25 +489,75 @@ def load_records(directory):
     return records
 
 
-def add_missing(records, needs, run_url):
-    """A record for each failed or cancelled job (by `needs`) that left
-    none. A job ended by `timeout-minutes` concludes `cancelled` and runs
-    no `if: failure()` step, so it never writes a record; a job cancelled
-    by hand looks the same and is reported too (controller ruling
-    2026-11-02)."""
-    have = {r["job"] for r in records}
+# A leg's display name (nightly.yml's `name:`) -> (job, arch, libc).
+_LEG = re.compile(r"^(?P<label>[a-z ]+?)(?: \((?P<args>[^()]*)\))?$")
+_SINGLE_ARCH = {"fuzz": "x86_64", "older-glibc": "x86_64"}
+
+
+def parse_leg(name):
+    """(job, arch, libc) of a nightly job's display name, or None for a
+    name that is no failing-job leg (the reporting job, an unknown one)."""
+    m = _LEG.match(name) if isinstance(name, str) else None
+    if not m:
+        return None
+    job = next((j for j, label in JOBS.items() if label == m.group("label")), None)
+    args = [a.strip() for a in (m.group("args") or "").split(",")] if m.group("args") else []
+    if job in _SINGLE_ARCH:
+        return job, _SINGLE_ARCH[job], ""
+    if job == "long-runs" and len(args) == 1:
+        return job, args[0], ""
+    if job == "restart-soak" and len(args) == 2:
+        return job, args[0], args[1]
+    return None
+
+
+def _missing(job, arch, libc, result, run_url):
+    if result == "failure":
+        why = "The job failed but left no failure record; see the run."
+        f = _unrecognized(why)
+    else:
+        why = "The job timed out (timeout-minutes) or was cancelled; see the run."
+        f = _failure(kind="timeout-or-cancelled", panic_text=why)
+    if libc:
+        # The leg, for the title and the occurrence's heading (not the
+        # fingerprint).
+        f.update(arch=arch, libc=libc)
+    return make_record(job, arch, run_url, [f], libc=libc)
+
+
+def add_missing(records, needs, run_url, legs=None):
+    """A record for each failed or cancelled job leg that left none. A job
+    ended by `timeout-minutes` concludes `cancelled` and runs no `if:
+    failure()` step, so it never writes a record; a job cancelled by hand
+    looks the same and is reported too (controller ruling 2026-11-02).
+    `legs` (the run's jobs from the Actions API) is checked per leg, by
+    job, arch and libc, so a cancelled leg beside a sibling's record is
+    still reported; a job none of `legs` names falls back to `needs`,
+    per job."""
     out = list(records)
+    have = {(r["job"], r["arch"], r.get("libc", "")) for r in records}
+    jobs = legs.get("jobs") if isinstance(legs, dict) else None
+    seen = set()
+    for leg in jobs if isinstance(jobs, list) else []:
+        if not isinstance(leg, dict):
+            continue
+        key = parse_leg(leg.get("name"))
+        if key is None:
+            continue
+        seen.add(key[0])
+        result = leg.get("conclusion")
+        if result == "timed_out":
+            result = "cancelled"
+        if result in ("failure", "cancelled") and key not in have:
+            out.append(_missing(*key, result, run_url))
+            have.add(key)
+    jobs_with_records = {r["job"] for r in out}
     for job, info in needs.items():
-        if not isinstance(info, dict) or job in have:
+        if not isinstance(info, dict) or job in seen or job in jobs_with_records:
             continue
         result = info.get("result")
-        if result == "failure":
-            why = "The job failed but left no failure record; see the run."
-            out.append(make_record(job, "", run_url, [_unrecognized(why)]))
-        elif result == "cancelled":
-            why = "The job timed out (timeout-minutes) or was cancelled; see the run."
-            f = _failure(kind="timeout-or-cancelled", panic_text=why)
-            out.append(make_record(job, "", run_url, [f]))
+        if result in ("failure", "cancelled"):
+            out.append(_missing(job, "", "", result, run_url))
     return out
 
 
@@ -673,6 +736,7 @@ def main(argv=None):
     s = sub.add_parser("report", help="file or update issues from the records")
     s.add_argument("--records", required=True)
     s.add_argument("--needs", help="JSON of the workflow's `needs` context")
+    s.add_argument("--jobs", help="JSON of the run's jobs (Actions API), checked per leg")
     s.add_argument("--run-url", required=True)
     s.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY"))
     args = p.parse_args(argv)
@@ -690,16 +754,26 @@ def main(argv=None):
                 failures = record_restart_soak(text, args.workspace, args.arch, args.libc)
             else:
                 failures = record_older_glibc(text, args.workspace)
+        rec = make_record(args.job, args.arch, args.run_url, failures, libc=args.libc)
         with open(args.out, "w", encoding="utf-8") as fh:
-            json.dump(make_record(args.job, args.arch, args.run_url, failures), fh, indent=1)
+            json.dump(rec, fh, indent=1)
         for f in failures:
             print(describe(args.job, f)[1])
         return 0
 
     records = load_records(args.records)
+    needs, legs = {}, None
     if args.needs:
         with open(args.needs, encoding="utf-8") as fh:
-            records = add_missing(records, json.load(fh), args.run_url)
+            needs = json.load(fh)
+    if args.jobs:
+        try:
+            with open(args.jobs, encoding="utf-8") as fh:
+                legs = json.load(fh)
+        except (OSError, ValueError) as e:
+            print(f"no job legs ({e}); by `needs` only", file=sys.stderr)
+    if args.needs or legs is not None:
+        records = add_missing(records, needs if isinstance(needs, dict) else {}, args.run_url, legs)
     date = datetime.now(timezone.utc).date().isoformat()
     summary = report(records, _gh, date, args.run_url)
     print(summary)
