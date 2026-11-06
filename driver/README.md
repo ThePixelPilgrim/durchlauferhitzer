@@ -301,7 +301,9 @@ tests/
                     in the file's own docs. Lossless reloads (under load,
                     back to back, a storm, an added `listen` and a new
                     `user`), steering, the grace, the lock (concurrent,
-                    stale, the wait for the old listeners), each refusal
+                    stale, a reused pid, two helpers racing for a stale
+                    one, the wait for the old listeners), a new process
+                    ignoring SIGHUP (`nohup`) left to `stop_post`, each refusal
                     and failure path (the old serves on), the draining
                     list and OpenRC's `stop_post`. Root only (skipped, or
                     failed with DURCHLAUFERHITZER_REQUIRE_ROOT=1; also
@@ -669,8 +671,9 @@ leaves a choice, this is what the loop does:
   queued ones (FR-PROC-07); systemd's listeners are closed too (only
   this process's copies: systemd keeps the socket for the next process). Each turn,
   before the wait, a drained core (`is_drained`) ends the loop
-  (`Drained`). A SIGTERM or SIGINT during either drain, a SIGINT while
-  running, or the deadline logs `phase=aborting`, closes the listeners
+  (`Drained`). A SIGTERM during the SIGTERM drain, a SIGINT, or the
+  deadline logs `phase=aborting` (a SIGTERM during the restart drain
+  turns it into the SIGTERM drain instead), closes the listeners
   if still open, calls `abort_all`, performs its actions and ends the
   loop right after that descriptor (`Aborted`), without waiting for
   orphaned opens. SIGHUP during a drain and SIGPIPE are read and

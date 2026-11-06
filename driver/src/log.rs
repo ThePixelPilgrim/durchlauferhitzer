@@ -105,7 +105,7 @@ pub enum ShutdownPhase {
     Draining,
     /// SIGHUP: the listeners are closed and the restart drain begins.
     Restarting,
-    /// A SIGTERM or SIGINT during a drain, a SIGINT, or the end of the
+    /// A SIGTERM during the SIGTERM drain, a SIGINT, or the end of the
     /// drain's timeout: every connection is cut (`abort_all`).
     Aborting,
     /// The loop has ended and the disk pool is shut down: `detached`

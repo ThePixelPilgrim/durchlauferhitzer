@@ -17,7 +17,10 @@
 //! - A `listen` address the new config drops is closed (documented); one
 //!   it adds is served, with a new `user`, and nothing is lost.
 //! - The lock: a second helper is refused while the holder runs; a stale
-//!   one is taken over.
+//!   one (holder gone, or its pid reused) is taken over, and of two
+//!   helpers racing for it one at most proceeds. A new process that
+//!   ignores SIGHUP (the helper under `nohup`) is left running, listed
+//!   for `stop_post`.
 //! - Steering: a ready new process gets every new connection before any
 //!   SIGHUP; fresh clients across back-to-back reloads lose nothing (a
 //!   kernel race resets a handshake completing on a listener as it
@@ -65,8 +68,9 @@ use child::{Containment, Running, exe, free_port, signal_pid, text};
 use durchlauferhitzer::sys::user::lookup_user;
 use load::{Load, Pattern, Tally, collect, connect, fresh_request, queue, read_response, warm_up};
 use site::{
-    HELPER, Migration, OPENRC, REQUIRE_ROOT, Site, alive, await_new_pid, can_restart, finish,
-    hup_pending, loopback, reload_with, required, serial, set_migrate, start_time, wait_gone,
+    HELPER, Migration, OPENRC, REQUIRE_ROOT, Site, alive, await_new_pid, bounded, can_restart,
+    finish, hup_pending, loopback, reload_with, required, serial, set_migrate, start_time,
+    wait_gone,
 };
 
 /// How long the old process may take to drain and exit.
@@ -795,20 +799,29 @@ fn a_stale_lock_is_taken_over() {
     let new_conf = site.config("new", &[addr], "new");
     let _old = site.start(&old_conf);
     let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
-    fs::create_dir(&lock).unwrap();
-    // Above any pid_max: not running.
-    fs::write(lock.join("pid"), "4194304\n").unwrap();
-    let output = site.reload(&new_conf);
-    site.assert_reload_ok(&output);
-    assert_eq!(
-        text(&output.stderr),
-        format!(
-            "durchlauferhitzer-reload: taking over the stale lock {} (pid 4194304 is not running)\n",
-            lock.display()
-        )
-    );
-    assert!(!lock.exists(), "the lock was left behind");
-    assert_eq!(fresh_request(addr, &["new"]), Ok("new".to_owned()));
+    let mut reused = Command::new("sleep").arg("30").spawn().unwrap();
+    // A pid above any pid_max (not running), without a start time; a
+    // running pid with another start time (reused: review minor 6).
+    for (pid, holder) in [
+        ("4194304".to_owned(), "4194304\n".to_owned()),
+        (reused.id().to_string(), format!("{} 1\n", reused.id())),
+    ] {
+        fs::create_dir(&lock).unwrap();
+        fs::write(lock.join("pid"), holder).unwrap();
+        let output = site.reload(&new_conf);
+        site.assert_reload_ok(&output);
+        assert_eq!(
+            text(&output.stderr),
+            format!(
+                "durchlauferhitzer-reload: taking over the stale lock {} (pid {pid} is not running)\n",
+                lock.display()
+            )
+        );
+        assert!(!lock.exists(), "the lock was left behind");
+        assert_eq!(fresh_request(addr, &["new"]), Ok("new".to_owned()));
+    }
+    let _ = reused.kill();
+    let _ = reused.wait();
 }
 
 /// Review B-M4, FR-PROC-07 "What a restart may change": the new config
@@ -858,4 +871,149 @@ fn a_reload_may_add_a_listen_address_and_change_user() {
         .and_then(|ids| ids.split_whitespace().next())
         .unwrap();
     assert_eq!(real_uid, uid.to_string(), "{status}");
+}
+
+/// How many times two helpers race for one stale lock.
+const LOCK_RACES: usize = 30;
+
+/// Review M4 follow-up: two helpers that find the same stale lock at
+/// once never both hold it. Each holder blocks in `--check` on a FIFO
+/// config, so a second holder would still run when the race is over;
+/// the loser is refused with "another reload".
+#[test]
+fn two_helpers_racing_for_a_stale_lock_never_both_hold_it() {
+    let _serial = serial();
+    let mut holders = [0usize; 3];
+    for _ in 0..LOCK_RACES {
+        let site = Site::new();
+        let conf = site.dir.path().join("fifo.conf");
+        let made = Command::new("mkfifo").arg(&conf).status().unwrap();
+        assert!(made.success());
+        let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
+        fs::create_dir(&lock).unwrap();
+        // Above any pid_max: not running.
+        fs::write(lock.join("pid"), "4194304 1\n").unwrap();
+        let mut helpers = [site.spawn_reload(&conf, &[]), site.spawn_reload(&conf, &[])];
+        // Each holder blocks opening the FIFO in `--check`: the race is
+        // over once a helper is refused, or both still run after 1 s.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline
+            && helpers
+                .iter_mut()
+                .all(|helper| helper.try_wait().unwrap().is_none())
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        thread::sleep(Duration::from_millis(300));
+        let running = helpers
+            .iter_mut()
+            .map(|helper| helper.try_wait().unwrap().is_none())
+            .filter(|&runs| runs)
+            .count();
+        holders[running] += 1;
+        // Each holder's `--check` reads an invalid config and fails.
+        for _ in 0..running {
+            fs::write(&conf, "nonsense;\n").unwrap();
+        }
+        for helper in helpers {
+            let output = finish(helper);
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            let stderr = text(&output.stderr);
+            assert!(
+                stderr.contains("durchlauferhitzer-reload: the config check failed")
+                    || stderr.starts_with("durchlauferhitzer-reload: another reload "),
+                "{stderr}"
+            );
+        }
+        assert!(!lock.exists(), "the lock was left behind");
+    }
+    eprintln!("races with 0, 1, 2 holders: {holders:?}");
+    assert_eq!(holders[2], 0, "both helpers held the lock: {holders:?}");
+    assert!(holders[1] > 0, "{holders:?}");
+}
+
+/// Review minor 1: a helper started with SIGHUP ignored (`nohup`) passes
+/// that on to the new process, whose SIGHUP then stops nothing: after
+/// its 10 s wait the helper leaves it running, listed in
+/// `<pidfile>.draining` with a warning, and `stop_post` ends it.
+#[test]
+fn a_new_process_that_ignores_sighup_is_left_to_stop_post() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let stuck = site.config("fifo", &[addr], "new");
+    let text_of_conf = fs::read_to_string(&stuck).unwrap();
+    fs::remove_file(&stuck).unwrap();
+    let made = Command::new("mkfifo").arg(&stuck).status().unwrap();
+    assert!(made.success());
+    let old = site.start(&old_conf);
+    let feeder = {
+        let stuck = stuck.clone();
+        thread::spawn(move || fs::write(stuck, text_of_conf).unwrap())
+    };
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(r#"trap '' HUP; exec sh "$@""#)
+        .arg("sh")
+        .arg(HELPER)
+        .args([&site.bin, &stuck, &site.pidfile, &site.log])
+        .arg("1")
+        .env("TMPDIR", site.tmp());
+    let output = bounded(cmd);
+    feeder.join().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.starts_with("durchlauferhitzer-reload: the new process was not ready within 1 s"),
+        "{stderr}"
+    );
+    let new = *site.draining().first().unwrap();
+    assert!(
+        stderr.contains(&format!(
+            "durchlauferhitzer-reload: warning: the new process (pid {new}) still runs"
+        )),
+        "{stderr}"
+    );
+    assert!(alive(new));
+    assert_eq!(site.pid(), old.pid());
+    let output = site.stop_post("TERM/2/KILL/2");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!alive(new), "stop_post left the new process");
+    assert!(alive(old.pid()), "stop_post ended the old process");
+    assert_eq!(fresh_request(addr, &["old"]), Ok("old".to_owned()));
+}
+
+/// Review minor 4: the new and the old process both end during the
+/// grace: exit 1, no success claimed.
+#[test]
+fn both_processes_ending_during_the_grace_is_exit_1() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let mut old = site.start(&old_conf);
+    let helper = site.spawn_reload(&new_conf, &["10", "3"]);
+    let new = await_new_pid(&site.pidfile, old.pid());
+    signal_pid(new, "KILL");
+    signal_pid(old.pid(), "KILL");
+    let _ = old.child.wait();
+    let output = finish(helper);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "durchlauferhitzer-reload: the new process (pid {new}) and the old one (pid {}) \
+             both ended during the grace: nothing serves (see {})\n",
+            old.pid(),
+            site.log.display()
+        )
+    );
 }

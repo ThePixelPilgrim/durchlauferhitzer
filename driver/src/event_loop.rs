@@ -59,7 +59,7 @@ pub enum Exit {
     /// The drain after a SIGTERM or a SIGHUP finished: the core held
     /// nothing any more (`is_drained`, DRV-14).
     Drained,
-    /// A SIGTERM or SIGINT during a drain, a SIGINT, or the end of the
+    /// A SIGTERM during the SIGTERM drain, a SIGINT, or the end of the
     /// drain's timeout (`shutdown_timeout` or `restart_timeout`) cut
     /// every connection (`abort_all`); the loop left without waiting for
     /// orphaned opens (DRV-14).

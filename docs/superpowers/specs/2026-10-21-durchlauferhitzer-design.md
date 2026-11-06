@@ -1223,8 +1223,8 @@ Failures, persistence, timeouts:
   `kind=shutdown phase=draining` after it when a SIGTERM during the
   restart drain turns it into the SIGTERM drain (owner decision
   2026-11-06), before the core's drain is escalated;
-  `kind=shutdown phase=aborting` before `abort_all` (a SIGTERM or SIGINT
-  during a drain, a SIGINT, `shutdown_timeout` or `restart_timeout`), so the `rejected ... reason=shutting_down`
+  `kind=shutdown phase=aborting` before `abort_all` (a SIGTERM during
+  the SIGTERM drain, a SIGINT, `shutdown_timeout` or `restart_timeout`), so the `rejected ... reason=shutting_down`
   lines of the cut exchanges follow it; `kind=shutdown phase=done
   detached=N` once the loop and the disk pool are shut down, `N` the
   workers still running after the pool's 1 s grace and left to the
@@ -1715,20 +1715,34 @@ Failures, persistence, timeouts:
   - *The script's failure paths (stage 6 final review; M1, builder
     call):* the script ends a new process it does not hand over (not
     ready within the timeout, the pid file not written, the script
-    interrupted) with SIGHUP, never SIGTERM or SIGKILL: still starting
-    up, it ends at once (the default action); already serving (ready
-    late, or steering to itself), it closes its listeners, whose queues
-    move to the old process, and drains what it holds. The script waits
-    10 s for it to end, then leaves it draining. *(M2:)* the new pid is
+    interrupted) with SIGHUP, never SIGTERM: still starting up, it ends
+    at once (the default action); already serving (ready late, or
+    steering to itself), it closes its listeners, whose queues move to
+    the old process, and drains what it holds. The script waits 10 s for
+    it to end. *(Wave A review, minor 1:)* one whose SIGHUP is still
+    pending then never read it, so it is stuck before its event loop and
+    has accepted no connection: it gets SIGKILL. Any other is left
+    running on the draining list with a warning: one still draining, or
+    one that ignores SIGHUP because the script was started with it
+    ignored (`nohup`), which the new process inherits (a shell cannot
+    undo it; documented: do not run the script under `nohup`). *(M2:)* the new pid is
     listed in `<pidfile>.draining` as soon as it starts (dropped after
     the handover or once it ended), and the old pid before the pid file
     names the new one, so the OpenRC script's `stop` ends whatever a
     killed script left running. *(I1:)* right before the SIGHUP the new
     process must still run the binary: if it died during the grace, the
     pid file names the old process again, the old pid leaves the list,
-    and the script exits 1 without signalling it. *(M4:)* a lock whose
-    recorded pid no longer runs is stale and taken over, with a note on
-    stderr.
+    and the script exits 1 without signalling it (also when the old
+    process is gone too: then nothing serves); a new process gone right
+    after the SIGHUP is exit 1 as well. The old pid's list entry must be
+    written before the pid file names the new one, or the script stops
+    there. *(M4, wave A review:)* the lock records the script's pid and
+    start time; a lock whose pid no longer runs with that start time is
+    stale and taken over, with a note on stderr, under a guard directory
+    inside it: the guard's maker reads the holder again, renames the
+    stale lock away and takes the lock as usual, so of scripts finding a
+    stale lock at once one at most proceeds, and none removes a lock
+    another holds.
   - *Init script:* the repository ships an OpenRC script (Alpine's init
     system, the most used Linux without systemd; also Gentoo's and
     Artix's) with `start`, `stop`, `checkconfig` and `reload` (the
