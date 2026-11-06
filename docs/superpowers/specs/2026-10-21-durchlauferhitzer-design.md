@@ -1700,6 +1700,35 @@ Failures, persistence, timeouts:
     limits, roots, `user`, `listen`: the new process binds and opens its
     own. A `listen` address the new config drops is closed by the old
     process as on a stop: connections queued on it are reset (documented).
+    *(Stage 6 final review M3, controller ruling: documented, no code.)*
+    Only an address kept exactly (same IP and port) shares a port group
+    with the old listener. A changed one (`0.0.0.0:80` to
+    `127.0.0.1:80`, say) is a group of its own: the kernel may hand it
+    connections as soon as it is bound (a more specific address wins the
+    lookup), before the new process is ready, and neither steering nor
+    `tcp_migrate_req` moves them between the groups. Should the new
+    process then fail (before `ready`, or during the grace), the
+    connections queued on its listener are reset; once it took over,
+    those of the old listener on the dropped address are, as above. A
+    reload that changes an address is therefore not lossless; change one
+    with a full stop and start, or accept the loss (README).
+  - *The script's failure paths (stage 6 final review; M1, builder
+    call):* the script ends a new process it does not hand over (not
+    ready within the timeout, the pid file not written, the script
+    interrupted) with SIGHUP, never SIGTERM or SIGKILL: still starting
+    up, it ends at once (the default action); already serving (ready
+    late, or steering to itself), it closes its listeners, whose queues
+    move to the old process, and drains what it holds. The script waits
+    10 s for it to end, then leaves it draining. *(M2:)* the new pid is
+    listed in `<pidfile>.draining` as soon as it starts (dropped after
+    the handover or once it ended), and the old pid before the pid file
+    names the new one, so the OpenRC script's `stop` ends whatever a
+    killed script left running. *(I1:)* right before the SIGHUP the new
+    process must still run the binary: if it died during the grace, the
+    pid file names the old process again, the old pid leaves the list,
+    and the script exits 1 without signalling it. *(M4:)* a lock whose
+    recorded pid no longer runs is stale and taken over, with a note on
+    stderr.
   - *Init script:* the repository ships an OpenRC script (Alpine's init
     system, the most used Linux without systemd; also Gentoo's and
     Artix's) with `start`, `stop`, `checkconfig` and `reload` (the

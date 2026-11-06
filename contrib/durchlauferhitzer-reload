@@ -6,7 +6,8 @@
 #        [ready-timeout-seconds [grace-seconds]]
 #
 #  0. Take the lock <pidfile>.lock (a directory holding the helper's pid):
-#     one reload at a time.
+#     one reload at a time. A lock whose pid no longer runs is stale: it
+#     is taken over, with a note on stderr.
 #  1. <binary> --check <config>; on an error, print it and stop.
 #  2. net.ipv4.tcp_migrate_req must be 1 (written if 0, never restored):
 #     the old process's queued connections then move to the new one.
@@ -14,20 +15,34 @@
 #     binary may be replaced in place, not re-pointed by a symlink).
 #  4. Start "<binary> --ready-fd 3 <config>" in its own session, output
 #     appended to <logfile>, fd 3 a FIFO in a fresh private directory,
-#     fds 4-9 closed.
-#  5. Wait for "ready" (default 30 s). Otherwise stop the new process and
-#     leave the old one untouched. Once ready, the new process steers every
-#     new connection to itself.
-#  6. Signals ignored from here: point <pidfile> at the new process (temp
-#     file, then rename), add the old pid and its start time to
+#     fds 4-9 closed. Its pid and start time go to <pidfile>.draining at
+#     once, so the OpenRC script's stop ends it should this helper be
+#     killed before the handover.
+#  5. Wait for "ready" (at least the timeout, default 30 s, measured on
+#     the clock). Otherwise stop the new process (below) and leave the old
+#     one untouched. Once ready, the new process steers every new
+#     connection to itself.
+#  6. Signals ignored from here: add the old pid and its start time to
 #     <pidfile>.draining (the OpenRC script's stop ends those still
-#     running), wait the grace (default 1 s: handshakes under way on the
-#     old listeners finish), send it SIGHUP: it closes its listeners and
-#     drains.
-#  7. Wait (at most 10 s) until the old process holds no listening socket
+#     running), point <pidfile> at the new process (temp file, then
+#     rename), drop the new one from the list, wait the grace (default
+#     1 s: handshakes under way on the old listeners finish). Then the new
+#     process must still run <binary>: if it died during the grace, the
+#     old pid goes back into <pidfile>, off the list, and the helper
+#     exits 1 (the old process serves on). Otherwise send the old process
+#     SIGHUP: it closes its listeners and drains.
+#  7. Wait (at least 10 s) until the old process holds no listening socket
 #     (its /proc/<pid>/fd sockets against the LISTEN rows of
 #     /proc/net/tcp and tcp6), so the next reload finds two processes per
 #     port; only then release the lock. Past 10 s, warn and release.
+#
+# A new process that is not handed over (not ready in time, the pid file
+# not written, the helper interrupted before step 6) gets SIGHUP, not
+# SIGTERM: one that is still starting up ends at once (the signal's
+# default action), one that is already serving closes its listeners (the
+# old process still listens, so their queues move to it) and drains what
+# it holds. The helper waits for it 10 s, then leaves it draining, listed
+# in <pidfile>.draining, with a warning.
 #
 # Exit 0 on success (a step 7 timeout included: the handover is done); 1
 # with a one-line reason on stderr otherwise.
@@ -40,6 +55,10 @@ migrate=/proc/sys/net/ipv4/tcp_migrate_req
 fail() {
 	printf '%s: %s\n' "$me" "$*" >&2
 	exit 1
+}
+
+warn() {
+	printf '%s: warning: %s\n' "$me" "$*" >&2
 }
 
 usage() {
@@ -57,7 +76,8 @@ esac
 case $grace in
 '' | *[!0-9]* | 0?*) usage ;;
 esac
-# How long step 7 waits for the old listeners to close, in seconds.
+# How long step 7, and the stop of a new process not handed over, wait,
+# in seconds.
 close_timeout=10
 
 # The state of a pid ("R", "S", "Z", ...), empty if there is none.
@@ -84,9 +104,13 @@ exe_of() {
 
 # Whether pid $1 holds a listening TCP socket: 0 yes, 1 no, 2 its
 # descriptors cannot be read. One `ls` for all its descriptors, since a
-# draining process may hold many.
+# draining process may hold many; its exit status is not used (a
+# descriptor closing while it lists is an error there), only what it
+# printed: a running server always has descriptors, so nothing printed
+# means none could be read.
 holds_listener() {
-	fds=$(ls -l "/proc/$1/fd" 2>/dev/null) || return 2
+	fds=$(ls -l "/proc/$1/fd" 2>/dev/null)
+	[ -n "$fds" ] || return 2
 	tables=
 	for t in /proc/net/tcp /proc/net/tcp6; do
 		[ -r "$t" ] && tables="$tables $t"
@@ -98,22 +122,75 @@ holds_listener() {
 			END { exit !found }' - $tables
 }
 
-lock=$pidfile.lock locked='' dir='' new='' reader='' handed_over=''
+# Seconds since the epoch.
+now() {
+	date +%s
+}
 
-# Stops a new process that was not handed over: SIGTERM, then SIGKILL
-# after 5 s; then reaps it.
+# Whether more than $2 whole seconds have passed since $1 (from `now`):
+# then at least $2 seconds have.
+past() {
+	[ $(($(now) - $1)) -gt "$2" ]
+}
+
+lock=$pidfile.lock locked='' dir='' new='' reader='' handed_over=''
+draining=$pidfile.draining
+
+# Rewrites the draining list ("<pid> <start time>" lines): the entries
+# that still run <binary> with their start time, but $1 (a pid, or
+# empty), then $2 (a pid, or empty) with its own start time. Temp file,
+# then rename; a failure leaves the list as it was.
+list_draining() {
+	ld_tmp=$(mktemp "$draining.XXXXXX") || return 1
+	if {
+		if [ -f "$draining" ]; then
+			while read -r pid start; do
+				case $pid in
+				'' | *[!0-9]* | "$1" | "$2") continue ;;
+				esac
+				[ -n "$start" ] && [ "$(start_time "$pid")" = "$start" ] &&
+					[ "$(exe_of "$pid")" = "$real" ] && printf '%s %s\n' "$pid" "$start"
+			done <"$draining"
+		fi
+		if [ -n "$2" ]; then
+			printf '%s %s\n' "$2" "$(start_time "$2")"
+		fi
+	} >"$ld_tmp" && mv -f "$ld_tmp" "$draining"; then
+		return 0
+	fi
+	rm -f "$ld_tmp"
+	return 1
+}
+
+# Points <pidfile> at pid $1 (temp file, then rename).
+write_pidfile() {
+	wp_tmp=$(mktemp "$pidfile.XXXXXX") || return 1
+	if printf '%s\n' "$1" >"$wp_tmp" && chmod 644 "$wp_tmp" && mv -f "$wp_tmp" "$pidfile"; then
+		return 0
+	fi
+	rm -f "$wp_tmp"
+	return 1
+}
+
+# Stops a new process that was not handed over: SIGHUP (see the header),
+# then up to $close_timeout s for it to end; it is reaped and dropped
+# from the draining list, or, still draining, left on it with a warning.
 stop_new() {
-	kill -TERM "$new" 2>/dev/null
-	n=0
-	while running "$new" && [ "$n" -lt 5 ]; do
+	kill -HUP "$new" 2>/dev/null
+	t0=$(now)
+	while running "$new" && ! past "$t0" "$close_timeout"; do
 		sleep 1
-		n=$((n + 1))
 	done
-	running "$new" && kill -KILL "$new" 2>/dev/null
+	if running "$new"; then
+		warn "the new process (pid $new) still drains after $close_timeout s; left running, listed in $draining"
+		return
+	fi
 	wait "$new" 2>/dev/null
+	list_draining "$new" ''
 }
 
 cleanup() {
+	trap '' HUP INT TERM
 	[ -n "$reader" ] && kill "$reader" 2>/dev/null
 	[ -n "$new" ] && [ -z "$handed_over" ] && stop_new
 	[ -n "$dir" ] && rm -rf "$dir"
@@ -122,14 +199,23 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-# 0. One reload at a time.
+# 0. One reload at a time; a lock whose holder is gone is taken over
+# (removed, then taken as usual: of two helpers doing so, one wins).
 if ! err=$(mkdir "$lock" 2>&1); then
-	if [ -d "$lock" ]; then
-		holder=
-		{ read -r holder <"$lock/pid"; } 2>/dev/null
-		fail "another reload is running (pid ${holder:-unknown}; remove $lock if none is)"
-	fi
-	fail "cannot create the lock $lock: ${err#mkdir: }"
+	[ -d "$lock" ] || fail "cannot create the lock $lock: ${err#mkdir: }"
+	holder=
+	{ read -r holder <"$lock/pid"; } 2>/dev/null
+	case $holder in
+	'' | *[!0-9]*)
+		fail "another reload is running (pid unknown; remove $lock if none is)"
+		;;
+	esac
+	running "$holder" &&
+		fail "another reload is running (pid $holder; remove $lock if none is)"
+	printf '%s: taking over the stale lock %s (pid %s is not running)\n' "$me" "$lock" "$holder" >&2
+	rm -f "$lock/pid"
+	rmdir "$lock" 2>/dev/null
+	mkdir "$lock" 2>/dev/null || fail "another reload took the stale lock $lock first"
 fi
 locked=yes
 echo $$ >"$lock/pid"
@@ -165,10 +251,11 @@ mkfifo -m 600 "$fifo" || fail "mkfifo failed"
 setsid "$binary" --ready-fd 3 "$config" </dev/null >>"$logfile" 2>&1 3>"$fifo" \
 	4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
 new=$!
+list_draining '' "$new"
 
 # 5. Readiness: a reader (0 ready, 1 EOF, 2 another line, which it keeps),
-# polled until the timeout (in tenths of a second where `sleep` takes
-# them), then killed.
+# polled until the timeout has passed on the clock (in tenths of a second
+# where `sleep` takes them), then killed.
 (
 	if IFS= read -r line <"$fifo" && [ "$line" = ready ]; then
 		exit 0
@@ -178,16 +265,15 @@ new=$!
 	exit 2
 ) &
 reader=$!
-tick=0.1 per=10
-sleep "$tick" 2>/dev/null || tick=1 per=1
-n=0
+tick=0.1
+sleep "$tick" 2>/dev/null || tick=1
+t0=$(now)
 while running "$reader"; do
-	if [ "$n" -ge $((timeout * per)) ]; then
+	if past "$t0" "$timeout"; then
 		kill "$reader" 2>/dev/null
 		break
 	fi
 	sleep "$tick"
-	n=$((n + 1))
 done
 wait "$reader" 2>/dev/null
 ready=$?
@@ -200,56 +286,45 @@ case $ready in
 esac
 [ "$(exe_of "$new")" = "$real" ] || fail "the new process (pid $new) is not running $real"
 
-# 6. The handover, not to be interrupted halfway.
+# 6. The handover, not to be interrupted halfway. The old process is on
+# the draining list before the pid file names the new one.
 trap '' HUP INT TERM
-tmp=$(mktemp "$pidfile.XXXXXX") || fail "cannot write next to $pidfile"
-if ! { printf '%s\n' "$new" >"$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$pidfile"; }; then
-	rm -f "$tmp"
+list_draining '' "$old"
+if ! write_pidfile "$new"; then
+	list_draining "$old" ''
 	fail "cannot write $pidfile"
 fi
 handed_over=yes
-# The draining list ("<pid> <start time>" lines): the old process, after
-# those listed that still run (same binary, same start time).
-draining=$pidfile.draining
-old_start=$(start_time "$old")
-if tmp=$(mktemp "$draining.XXXXXX"); then
-	if ! {
-		if [ -f "$draining" ]; then
-			while read -r pid start; do
-				case $pid in
-				'' | *[!0-9]* | "$old") continue ;;
-				esac
-				[ -n "$start" ] && [ "$(start_time "$pid")" = "$start" ] &&
-					[ "$(exe_of "$pid")" = "$real" ] && printf '%s %s\n' "$pid" "$start"
-			done <"$draining"
-		fi
-		printf '%s %s\n' "$old" "$old_start"
-	} >"$tmp" || ! mv -f "$tmp" "$draining"; then
-		rm -f "$tmp"
-	fi
-fi
+list_draining "$new" ''
 sleep "$grace"
 [ "$(exe_of "$old")" = "$real" ] || exit 0
+if ! running "$new" || [ "$(exe_of "$new")" != "$real" ]; then
+	wait "$new" 2>/dev/null
+	write_pidfile "$old" || fail "the new process (pid $new) ended during the grace, and $pidfile cannot be pointed back at pid $old, which serves on"
+	list_draining "$old" ''
+	fail "the new process (pid $new) ended during the grace; pid $old serves on and $pidfile names it again (see $logfile)"
+fi
 kill -HUP "$old" 2>/dev/null ||
 	fail "cannot send SIGHUP to pid $old ($pidfile already names the new pid $new)"
+running "$new" ||
+	warn "the new process (pid $new) ended right after the SIGHUP to pid $old (see $logfile)"
 
 # 7. The lock goes once the old listeners are closed.
-n=0
+t0=$(now)
 while running "$old"; do
 	holds_listener "$old"
 	case $? in
 	1) break ;;
 	2)
 		running "$old" || break
-		printf '%s: warning: cannot read /proc/%s/fd; not waiting for its listeners to close\n' "$me" "$old" >&2
+		warn "cannot read /proc/$old/fd; not waiting for its listeners to close"
 		break
 		;;
 	esac
-	if [ "$n" -ge $((close_timeout * per)) ]; then
-		printf '%s: warning: pid %s still listens after %s s; releasing the lock\n' "$me" "$old" "$close_timeout" >&2
+	if past "$t0" "$close_timeout"; then
+		warn "pid $old still listens after $close_timeout s; releasing the lock"
 		break
 	fi
 	sleep "$tick"
-	n=$((n + 1))
 done
 exit 0

@@ -12,6 +12,15 @@ plus the `durchlauferhitzer` binary.
 How to build it, check a config, run it, use systemd socket activation,
 restart it without systemd and stop it: [`../README.md`](../README.md).
 
+`--ready-fd <n>` is the join-and-take-over mode of a restart, not a plain
+readiness flag (FR-PROC-01, owner decision 2026-11-06): it skips the bind
+probe, so it joins the port groups of a server already running, and once
+started it steers every new connection to itself. Point a supervisor's
+notification-fd convention (s6's `notification-fd`, OpenRC
+`supervise-daemon`'s `notify=fd:<n>`) only at the new process of a
+restart, never at an ordinary start: a second server started that way
+would share the ports silently and take the first one's connections.
+
 Rules for this crate (see [`../CLAUDE.md`](../CLAUDE.md)):
 
 - **One dependency besides the core: `libc`** (`default-features = false`),
@@ -52,7 +61,8 @@ src/
                     steering of a `--ready-fd` start (`Steering`,
                     `steer`: to the running server, index 0, after each
                     `listen`; to itself before the seccomp filter; back to
-                    index 0 if the filter fails, FR-PROC-07)
+                    index 0 if the filter fails, FR-PROC-07), the
+                    `shared_ports` note of a non-root bind
     budget.rs         NFR-RES-05: `open_now` (`/proc/self/fd`, O5),
                       `needed` (the formula in its docs and the spec),
                       `ensure` (raise the soft limit, or fail naming both
@@ -286,41 +296,17 @@ tests/
                     the server's `phase=draining` or `phase=restarting`
                     line, so the order is deterministic
   restart.rs        the restart without systemd (FR-PROC-07):
-                    `contrib/durchlauferhitzer-reload` run with `sh`
-                    against servers started as root (`user nobody`).
-                    Under load (keep-alive and fresh clients, 400
-                    connections queued while the old process is stopped
-                    across its SIGHUP), with the binary replaced and a new
-                    route: every request a complete 200, some queued ones
-                    moved to the new process, old exit 0, the pid file
-                    names the new one; two reloads back to back (the
-                    first old process drains a half-received request
-                    meanwhile); a bad config, a new process failing before
-                    or after binding, a stale pid file: exit 1, the old
-                    serves on, no stray process; a dropped `listen`
-                    address is refused afterwards; a new process not ready
-                    within the timeout (its config a FIFO that only
-                    `--check` was fed) is stopped and reaped; a second
-                    helper while the lock is held is refused (naming its
-                    pid), a lock that cannot be created is named; the
-                    old pids are listed with their start times in
-                    `<pidfile>.draining` and the OpenRC script's
-                    `stop_post` ends them (not another program's pid, nor
-                    a pid with another start time);
-                    the new process inherits no fd 4-9. Steering: once a
-                    `--ready-fd` process is ready, before any SIGHUP, 50
-                    fresh requests all reach it; 12 fresh clients across
-                    6 back-to-back reloads lose nothing (the kernel race
-                    at a listener's close); the helper keeps its lock
-                    until the old process, stopped across its SIGHUP, has
-                    closed its listeners (skipped with a reason when
-                    `/proc/<pid>/fd` cannot be read: no CAP_SYS_PTRACE). Control: with
-                    `tcp_migrate_req` 0 the queued connections are reset.
-                    Root only (skipped with a reason, or failed with
-                    DURCHLAUFERHITZER_REQUIRE_ROOT=1), `tcp_migrate_req`
-                    set to 1 by the tests (if it cannot be: skipped, or
-                    failed with DURCHLAUFERHITZER_REQUIRE_MIGRATE=1); one
-                    test at a time. The scripts parse (`sh -n`)
+                    `contrib/durchlauferhitzer-reload` against servers
+                    started as root (`user nobody`); each case is listed
+                    in the file's own docs. Lossless reloads (under load,
+                    back to back, a storm, an added `listen` and a new
+                    `user`), steering, the grace, the lock (concurrent,
+                    stale, the wait for the old listeners), each refusal
+                    and failure path (the old serves on), the draining
+                    list and OpenRC's `stop_post`. Root only (skipped, or
+                    failed with DURCHLAUFERHITZER_REQUIRE_ROOT=1; also
+                    `tcp_migrate_req` with
+                    DURCHLAUFERHITZER_REQUIRE_MIGRATE=1); one at a time
   smoke.rs          the end-to-end smoke run (NFR-TEST-07): one binary
                     serving a static and a proxy host to a test backend,
                     200 requests over 32 parallel keep-alive connections

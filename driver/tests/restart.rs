@@ -10,11 +10,19 @@
 //! - A handover that cannot be lossless does not start (Review Focus 4):
 //!   a bad config, a new process that fails at startup, a pid file that
 //!   names another program; the old process serves on, untouched.
-//! - A `listen` address the new config drops is closed (documented).
+//!   A new process that dies during the grace gets the pid file pointed
+//!   back at the old one (exit 1, no SIGHUP); one not ready in time is
+//!   stopped and reaped; one whose helper is killed is listed in
+//!   `<pidfile>.draining`, which OpenRC's `stop_post` ends.
+//! - A `listen` address the new config drops is closed (documented); one
+//!   it adds is served, with a new `user`, and nothing is lost.
+//! - The lock: a second helper is refused while the holder runs; a stale
+//!   one is taken over.
 //! - Steering: a ready new process gets every new connection before any
 //!   SIGHUP; fresh clients across back-to-back reloads lose nothing (a
 //!   kernel race resets a handshake completing on a listener as it
-//!   closes); the helper keeps its lock until the old listeners closed.
+//!   closes); the grace holds the SIGHUP back; the helper keeps its lock
+//!   until the old listeners closed.
 //! - Control: with `tcp_migrate_req` 0 the connections queued in the old
 //!   process at its SIGHUP are reset. The old process accepts at most 64
 //!   connections per wakeup (`ACCEPT_BATCH`) before it reads the signal,
@@ -54,10 +62,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use child::{Containment, Running, exe, free_port, signal_pid, text};
+use durchlauferhitzer::sys::user::lookup_user;
 use load::{Load, Pattern, Tally, collect, connect, fresh_request, queue, read_response, warm_up};
 use site::{
-    HELPER, Migration, OPENRC, Site, alive, can_restart, hup_pending, loopback, reload_with,
-    serial, set_migrate, start_time, wait_gone,
+    HELPER, Migration, OPENRC, REQUIRE_ROOT, Site, alive, await_new_pid, can_restart, finish,
+    hup_pending, loopback, reload_with, required, serial, set_migrate, start_time, wait_gone,
 };
 
 /// How long the old process may take to drain and exit.
@@ -169,8 +178,8 @@ const STORM_RELOADS: usize = 6;
 /// connect reset at the old listener's close is the kernel race steering
 /// avoids. Before steering it failed about 1 run in 10 here. The
 /// deterministic guard is `ready_steers_new_connections_to_the_new_process`;
-/// the grace has no test of its own (on loopback every handshake finishes
-/// within it).
+/// the grace's timing is pinned by
+/// `the_old_process_gets_no_sighup_before_the_grace_ends`.
 #[test]
 fn reload_under_fresh_storm_loses_nothing() {
     let _serial = serial();
@@ -215,8 +224,13 @@ fn the_helper_waits_for_the_old_listeners_to_close() {
     let mut old = site.start(&old_conf);
     // The helper reads it to see the listeners: root without
     // CAP_SYS_PTRACE cannot (the server runs as `nobody`), and the helper
-    // then warns and does not wait (README).
+    // then warns and does not wait (README). A skip, or a failure where
+    // root is required.
     if let Err(err) = fs::read_dir(format!("/proc/{}/fd", old.pid())) {
+        assert!(
+            !required(REQUIRE_ROOT),
+            "/proc/<server>/fd cannot be read here ({err}), but {REQUIRE_ROOT}=1 requires it"
+        );
         eprintln!("skipped: /proc/<server>/fd cannot be read here ({err})");
         return;
     }
@@ -485,8 +499,9 @@ fn the_scripts_parse() {
     assert_eq!(mode & 0o111, 0o111, "the helper is executable");
 }
 
-/// A second helper while one runs (its lock exists) is refused; the lock
-/// is only removed by the run that took it.
+/// A second helper while one runs (its lock exists and names a running
+/// pid, here a `sleep`) is refused; the lock is only removed by the run
+/// that took it.
 #[test]
 fn a_concurrent_reload_is_refused() {
     let _serial = serial();
@@ -499,14 +514,17 @@ fn a_concurrent_reload_is_refused() {
     let new_conf = site.config("new", &[addr], "new");
     let mut old = site.start(&old_conf);
     let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
+    let mut holder = Command::new("sleep").arg("30").spawn().unwrap();
     fs::create_dir(&lock).unwrap();
-    fs::write(lock.join("pid"), "12345\n").unwrap();
+    fs::write(lock.join("pid"), format!("{}\n", holder.id())).unwrap();
     let output = site.reload(&new_conf);
+    let _ = holder.kill();
+    let _ = holder.wait();
     assert_refused(
         &site,
         &mut old,
         &output,
-        "another reload is running (pid 12345;",
+        &format!("another reload is running (pid {};", holder.id()),
     );
     assert!(lock.is_dir(), "the refused run removed the lock");
     fs::remove_dir_all(&lock).unwrap();
@@ -649,4 +667,195 @@ fn a_new_process_that_is_not_ready_in_time_is_stopped() {
     assert!(took < Duration::from_secs(8), "{took:?}");
     assert_eq!(fs::read_dir(site.tmp()).unwrap().count(), 0);
     assert!(!site.dir.path().join("durchlauferhitzer.pid.lock").exists());
+    // Listed while it ran (review M2), dropped once it ended.
+    assert_eq!(site.draining(), Vec::<u32>::new());
+}
+
+/// Review I1: the new process dies during the grace (after the pid file
+/// names it, before the SIGHUP). The helper sends no SIGHUP, points the
+/// pid file back at the old process, takes it off the draining list and
+/// exits 1; the old process serves on.
+#[test]
+fn a_new_process_that_dies_during_the_grace_leaves_the_old_serving() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let mut old = site.start(&old_conf);
+    let helper = site.spawn_reload(&new_conf, &["10", "3"]);
+    let new = await_new_pid(&site.pidfile, old.pid());
+    signal_pid(new, "KILL");
+    let output = finish(helper);
+    assert_refused(
+        &site,
+        &mut old,
+        &output,
+        &format!("the new process (pid {new}) ended during the grace;"),
+    );
+    assert!(!hup_pending(old.pid()));
+    assert!(
+        !site.log_text().contains("phase=restarting"),
+        "{}",
+        site.log_text()
+    );
+    assert_eq!(site.draining(), Vec::<u32>::new());
+}
+
+/// Review B-M1: the grace holds the SIGHUP back. With a grace of 2 s the
+/// idle old process, which exits at once on SIGHUP, still runs about 2 s
+/// after the pid file names the new one, and the reload takes that long.
+#[test]
+fn the_old_process_gets_no_sighup_before_the_grace_ends() {
+    const GRACE: Duration = Duration::from_secs(2);
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let mut old = site.start(&old_conf);
+    let started = Instant::now();
+    let helper = site.spawn_reload(&new_conf, &["10", "2"]);
+    await_new_pid(&site.pidfile, old.pid());
+    let handed = Instant::now();
+    let status = old.wait_exit(DRAIN_PATIENCE);
+    let held = handed.elapsed();
+    let output = finish(helper);
+    site.assert_reload_ok(&output);
+    assert_eq!(status.code(), Some(0));
+    // The pid file is polled every 5 ms; the old process exits within
+    // milliseconds of its SIGHUP.
+    assert!(held >= GRACE - Duration::from_millis(100), "{held:?}");
+    assert!(started.elapsed() >= GRACE, "{:?}", started.elapsed());
+}
+
+/// Review M2: a helper killed before the handover (here while it waits
+/// for a new process stuck in its startup) leaves that process listed in
+/// `<pidfile>.draining`, so the OpenRC script's `stop_post` ends it; the
+/// old process is untouched.
+#[test]
+fn a_new_process_of_a_killed_helper_is_ended_by_stop_post() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let stuck = site.config("fifo", &[addr], "new");
+    let text_of_conf = fs::read_to_string(&stuck).unwrap();
+    fs::remove_file(&stuck).unwrap();
+    let made = Command::new("mkfifo").arg(&stuck).status().unwrap();
+    assert!(made.success());
+    let old = site.start(&old_conf);
+    // `--check` gets the config; the new process then blocks opening it.
+    let feeder = {
+        let stuck = stuck.clone();
+        thread::spawn(move || fs::write(stuck, text_of_conf).unwrap())
+    };
+    let mut helper = site.spawn_reload(&stuck, &["30"]);
+    feeder.join().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let new = loop {
+        if let Some(&new) = site.draining().first() {
+            break new;
+        }
+        assert!(Instant::now() < deadline, "the new pid was never listed");
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_ne!(new, old.pid());
+    signal_pid(helper.id(), "KILL");
+    let _ = helper.wait();
+    assert!(alive(new), "the new process is gone already");
+    let output = site.stop_post("TERM/2/KILL/2");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!alive(new), "stop_post left the new process");
+    assert!(alive(old.pid()), "stop_post ended the old process");
+    assert!(!site.draining_file().exists());
+    assert_eq!(site.pid(), old.pid());
+}
+
+/// Review M4: a lock left by a helper that no longer runs is taken over,
+/// with a note on stderr, and the reload goes on.
+#[test]
+fn a_stale_lock_is_taken_over() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let _old = site.start(&old_conf);
+    let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
+    fs::create_dir(&lock).unwrap();
+    // Above any pid_max: not running.
+    fs::write(lock.join("pid"), "4194304\n").unwrap();
+    let output = site.reload(&new_conf);
+    site.assert_reload_ok(&output);
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "durchlauferhitzer-reload: taking over the stale lock {} (pid 4194304 is not running)\n",
+            lock.display()
+        )
+    );
+    assert!(!lock.exists(), "the lock was left behind");
+    assert_eq!(fresh_request(addr, &["new"]), Ok("new".to_owned()));
+}
+
+/// Review B-M4, FR-PROC-07 "What a restart may change": the new config
+/// adds a `listen` address and changes `user` (to `daemon` where it
+/// exists); nothing on the old address is lost, and the new address is
+/// served by the new process.
+#[test]
+fn a_reload_may_add_a_listen_address_and_change_user() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let added = loopback(free_port());
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr, added], "new");
+    let user = match lookup_user("daemon") {
+        Ok(Some(_)) => "daemon",
+        _ => "nobody",
+    };
+    let new_conf = site.dir.config(
+        "new-user.conf",
+        &fs::read_to_string(&new_conf)
+            .unwrap()
+            .replace("user nobody;", &format!("user {user};")),
+        Containment::AsWritten,
+    );
+    let mut old = site.start(&old_conf);
+    let load = Load::start(addr, &["old", "new"]);
+    warm_up();
+    site.assert_reload_ok(&site.reload(&new_conf));
+    let status = old.wait_exit(DRAIN_PATIENCE);
+    thread::sleep(Duration::from_millis(200));
+    let load = load.finish();
+    assert_eq!(status.code(), Some(0));
+    assert!(load.failures.is_empty(), "load: {:?}", load.failures);
+    assert!(load.answers.get("new").is_some_and(|&n| n > 0), "{load:?}");
+    assert_eq!(fresh_request(added, &["new"]), Ok("new".to_owned()));
+    assert_eq!(fresh_request(addr, &["new"]), Ok("new".to_owned()));
+    let new = site.pid();
+    let (uid, _) = lookup_user(user).unwrap().unwrap();
+    let status = fs::read_to_string(format!("/proc/{new}/status")).unwrap();
+    let real_uid = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|ids| ids.split_whitespace().next())
+        .unwrap();
+    assert_eq!(real_uid, uid.to_string(), "{status}");
 }

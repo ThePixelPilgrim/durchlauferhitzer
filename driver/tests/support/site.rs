@@ -8,7 +8,7 @@ use std::io::Read as _;
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -234,12 +234,28 @@ impl Site {
     /// Runs the reload helper with `conf` and a readiness timeout of
     /// `timeout` seconds; its temp dirs go to [`Site::tmp`].
     pub fn reload_within(&self, conf: &Path, timeout: &str) -> Output {
+        bounded(self.helper(conf, &[timeout]))
+    }
+
+    /// Starts the reload helper with `conf` and `more` arguments (timeout,
+    /// grace) and returns at once, its output piped.
+    pub fn spawn_reload(&self, conf: &Path, more: &[&str]) -> Child {
+        self.helper(conf, more)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    /// The helper's command line for `conf`, then `more`.
+    fn helper(&self, conf: &Path, more: &[&str]) -> Command {
         let mut cmd = Command::new("sh");
         cmd.arg(HELPER)
             .args([&self.bin, conf, &self.pidfile, &self.log])
-            .arg(timeout)
+            .args(more)
             .env("TMPDIR", self.tmp());
-        bounded(cmd)
+        cmd
     }
 
     /// The helper's `TMPDIR`.
@@ -375,21 +391,44 @@ pub fn reload_with<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Output {
 
 /// Runs `cmd` to its end, at most 20 s.
 pub fn bounded(mut cmd: Command) -> Output {
-    let mut child = cmd
+    let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    finish(child)
+}
+
+/// Waits for `child` (its output piped) to end, at most 20 s.
+pub fn finish(mut child: Child) -> Output {
     let deadline = Instant::now() + Duration::from_secs(20);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("{cmd:?} did not finish within 20 s");
+            panic!("pid {} did not finish within 20 s", child.id());
         }
         thread::sleep(Duration::from_millis(5));
     }
     child.wait_with_output().unwrap()
+}
+
+/// Waits until the pid file names a pid other than `old` (the helper's
+/// handover), at most 15 s; returns it.
+pub fn await_new_pid(pidfile: &Path, old: u32) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let pid = fs::read_to_string(pidfile)
+            .ok()
+            .and_then(|text| text.trim().parse().ok());
+        if let Some(pid) = pid
+            && pid != old
+        {
+            return pid;
+        }
+        assert!(Instant::now() < deadline, "the pid file still names {old}");
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Field 22 of `/proc/<pid>/stat`, the start time (counted after the
