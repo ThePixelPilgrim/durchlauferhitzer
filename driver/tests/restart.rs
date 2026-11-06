@@ -886,6 +886,14 @@ const LOCK_RACES: usize = 30;
 #[test]
 fn two_helpers_racing_for_a_stale_lock_never_both_hold_it() {
     let _serial = serial();
+    // DIAGNOSTIC (temporary): which mkdir, and its status on an existing
+    // directory.
+    let probe = Command::new("sh")
+        .arg("-c")
+        .arg("echo PATH=$PATH; command -v mkdir mv; ls -l $(command -v mkdir) $(command -v mv); readlink -f $(command -v mkdir); mkdir /tmp; echo mkdir-status=$?; mkdir --version 2>&1 | head -2")
+        .output()
+        .unwrap();
+    eprintln!("PROBE:\n{}{}", text(&probe.stdout), text(&probe.stderr));
     let mut holders = [0usize; 3];
     for _ in 0..LOCK_RACES {
         let site = Site::new();
@@ -954,7 +962,9 @@ fn two_helpers_racing_for_a_stale_lock_never_both_hold_it() {
             assert!(
                 stderr.contains("durchlauferhitzer-reload: the config check failed")
                     || stderr.contains("durchlauferhitzer-reload: another reload "),
-                "{}",
+                "PROBE:\n{}{}\n{}",
+                text(&probe.stdout),
+                text(&probe.stderr),
                 outputs.join("\n=====\n")
             );
         }
