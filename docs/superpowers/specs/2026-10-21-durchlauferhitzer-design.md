@@ -1254,7 +1254,11 @@ Failures, persistence, timeouts:
   ```
   *[done in stage 6]* `durchlauferhitzer --ready-fd <n> <config-path>` runs the
   server and reports readiness on descriptor `n` (FR-PROC-07); the usage
-  gains that line.
+  gains that line. *(Owner decision 2026-11-06, stage 6 review:)* it is
+  the join-and-take-over mode, not a plain readiness flag: it skips the
+  bind probe and steers the port groups to itself, so a supervisor's
+  notification-fd convention (s6, `supervise-daemon`) must not be pointed
+  at it for ordinary starts (README).
 - **FR-PROC-02** [done] If systemd passes listening sockets (socket
   activation, `LISTEN_FDS`), they are used and the process never needs
   root. *(Stage 4 amendment A7, Task 8:)* `LISTEN_PID` must be the
@@ -1635,8 +1639,12 @@ Failures, persistence, timeouts:
     drain is final: a SIGHUP during it changes nothing. The drain is bounded by `limits { restart_timeout 10m; }`
     (FR-CFG-20), not `shutdown_timeout`, so long transfers finish;
     whatever still runs then is cut (FR-PROC-05c) and logged. A second
-    SIGHUP is ignored; SIGTERM or SIGINT during it takes the fast path;
-    SIGHUP during a SIGTERM drain is ignored. A server whose listeners
+    SIGHUP is ignored; *(owner decision 2026-11-06, stage 6 review:)*
+    SIGTERM during it turns it into the SIGTERM drain (requests answered
+    503 from then on, idle connections closed, bounded by
+    `shutdown_timeout` from the SIGTERM), so `stop` after a reload still
+    drains gracefully; SIGINT, a second SIGTERM or the deadline take the
+    fast path; SIGHUP during a SIGTERM drain is ignored. A server whose listeners
     came from systemd treats SIGHUP the same way.
   - *Steering (owner decision 2026-11-05, stage 6 Task 6 CI):* a kernel
     race resets a client whose handshake completes on a listener at the
@@ -1697,7 +1705,11 @@ Failures, persistence, timeouts:
       fails as before when it is taken. Only a process of the same
       effective uid can join a port group: listeners bound as root admit
       only root, so the README recommends binding as root and dropping
-      to `user`.
+      to `user`. *(Owner decision 2026-11-06, stage 6 review:)* a server
+      that binds its own listeners as a non-root uid logs it at startup
+      (any process of that uid could join its ports and take their
+      connections); `SO_REUSEPORT` stays on, since a non-root server's
+      reload needs it.
     - Upgrading from a stage 5 binary, whose listeners lack
       `SO_REUSEPORT`, needs one full stop and start (README).
 
