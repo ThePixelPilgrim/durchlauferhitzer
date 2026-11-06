@@ -216,6 +216,12 @@ upstreams), a connection accepted meanwhile is admitted like any other,
 it is not followed by a shutdown, a request the core read any byte of
 must be answered (no "unread at the drain" exemption), and the plain
 drain may wait a keep-alive timeout longer to finish.
+One branch is allowed but not reached: a restart's "closed before a
+request" (`silent_stop`), which needs a keep-alive deadline to pass
+during the drain before the next request is read, while the proxy net's
+drain falls only in rounds without a timed scenario. It is not gated;
+every proxy run prints its count (`PROXY RARE ...=<n>`, `RARE` in
+`faults/proxy/mod.rs`), zero in `0..200000`.
 
 Both nets (the whole `faults` binary) run with a date set (`Sim::set_date`,
 the RFC 9110 example `Sun, 06 Nov 1994 08:49:37 GMT`), so every response

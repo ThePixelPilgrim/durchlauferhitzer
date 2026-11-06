@@ -317,7 +317,27 @@ pub(crate) const REQUIRED: &[&str] = &[
     "restart: served with close",
 ];
 
+/// Branches the nets allow but no seed is known to reach: counted and
+/// printed (`PROXY RARE <what>=<count>`, zero included) by every run, not
+/// gated. "restart: closed before a request" (`silent_stop` in
+/// `drain.rs`) needs a keep-alive deadline to pass during a restart's
+/// drain before the client's next request is read; the drain falls only
+/// in rounds without a timed scenario, so none was seen in `0..200000`.
+pub(crate) const RARE: &[&str] = &["restart: closed before a request"];
+
 impl ProxyCoverage {
+    /// The `PROXY RARE` lines, one per `RARE` branch.
+    pub(crate) fn rare(&self) -> Vec<String> {
+        RARE.iter()
+            .map(|what| {
+                format!(
+                    "PROXY RARE {what}={}",
+                    self.seen.get(what).copied().unwrap_or(0)
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn check(&self) {
         for what in REQUIRED {
             assert!(
@@ -342,7 +362,24 @@ fn random_proxy_schedules() {
                 });
             }
             eprintln!("PROXY COVERAGE {:?}", coverage.seen);
+            for line in coverage.rare() {
+                eprintln!("{line}");
+            }
             coverage.check();
         }
     }
+}
+
+#[test]
+fn rare_branches_are_reported_even_at_zero() {
+    let mut coverage = ProxyCoverage::default();
+    assert_eq!(
+        coverage.rare(),
+        ["PROXY RARE restart: closed before a request=0"]
+    );
+    coverage.add("restart: closed before a request");
+    assert_eq!(
+        coverage.rare(),
+        ["PROXY RARE restart: closed before a request=1"]
+    );
 }
