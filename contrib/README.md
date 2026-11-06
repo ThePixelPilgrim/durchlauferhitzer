@@ -17,7 +17,6 @@ binary.
   `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`.
 - `openrc/durchlauferhitzer.confd` — its settings, as
   `/etc/conf.d/durchlauferhitzer` (`ready_timeout`, `reload_grace`, ...).
-
 - `test-openrc.sh <binary>` — POSIX `sh`, as root on a throwaway system
   with OpenRC (CI: the Alpine jobs, in a container): installs the script,
   its conf.d, the helper and the binary, then `start`, a request,
