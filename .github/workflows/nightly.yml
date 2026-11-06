@@ -216,7 +216,9 @@ jobs:
         # on request.
         run: |
           rustup toolchain install
-          ldd --version | head -n1
+          # sed reads all of ldd's output: `head` may close the pipe
+          # first, and the SIGPIPE (141) fails the step under pipefail.
+          ldd --version | sed -n 1p
           rustup show
           uname -r
       - name: Driver tests under seccomp kill
