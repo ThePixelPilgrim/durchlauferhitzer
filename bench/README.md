@@ -9,8 +9,13 @@ runs it and publishes the rows (`bench` and `bench publish` jobs).
 cargo build --release --locked -p durchlauferhitzer
 cargo run --release --locked --manifest-path bench/Cargo.toml -- \
   --binary target/release/durchlauferhitzer --out bench.csv \
-  [--runs 5] [--duration 10] [--scenarios static-small,proxy-fresh]
+  [--runs 5] [--duration 10] [--scenarios static-small,proxy-fresh] \
+  [--syscalls-only]
 ```
+
+`--syscalls-only` skips the measured window: only the strace pass runs,
+the row's `requests` are that pass's, `cpu_us_per_req` and `rss_kib` are
+empty.
 
 Per run a fresh server: a temp static root with a 1 KiB and a 1 MiB file,
 one proxy route to the in-process stub backend (1 KiB body, keep-alive),
@@ -47,6 +52,28 @@ CSV, one row per scenario and run:
   commit is `unknown`, and `scripts/bench-chart.py` drops such a row (it
   takes hex commits only).
 
+## Finding the commit
+
+`bisect.sh <scenario> <max-syscalls>` is a `git bisect run` script: it
+builds the release binary of the checked-out commit, runs the bench tool
+for that scenario (one run, `--syscalls-only`, `BENCH_DURATION` seconds
+per window, default 2) and exits 0 if `syscalls_per_req` is at most
+`<max-syscalls>`, 1 if above, 125 (skip the commit) if the build or the
+bench fails or the row has errors, 2 on bad usage. It needs `strace`
+(and passwordless `sudo` unless root), like the bench itself.
+
+```sh
+cp bench/bisect.sh /tmp/bisect.sh        # survives the checkouts
+git bisect start <bad> <good>            # good: e34cc72 or later
+git bisect run /tmp/bisect.sh static-small 25
+```
+
+The bench tool is built from `BENCH_DIR` (the crate directory, default
+`bench` of the checked-out commit). Commits before `e34cc72` have no
+bench tool: for a range reaching back further, point `BENCH_DIR` at a
+fixed checkout of it (e.g. a `git worktree` of a later commit).
+`scripts/test_bench_bisect.py` tests the exit codes with a stub `cargo`.
+
 A failure prints `bench failed: scenario=<s> reason=<r> (<detail>)` (the
 nightly issue's fingerprint is `bench|<s>|<r>`) and exits 1; rows with
 errors are still written. `scripts/bench-chart.py` renders the CSV: each
@@ -55,9 +82,10 @@ branch only from the default branch; a dispatch from another branch keeps
 its rows as the run's `bench-results` artifact.
 
 ```
+bisect.sh      the `git bisect run` script (tested by scripts/test_bench_bisect.py)
 src/
   main.rs      runs, scenarios, the measured window, failures
-  cli.rs       the command line
+  cli.rs       the command line (incl. --syscalls-only)
   scenario.rs  the scenarios: path, connection reuse, expected response
   load.rs      the client threads and the response check
   backend.rs   the stub backend

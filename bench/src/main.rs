@@ -99,6 +99,7 @@ struct Context {
     runner: String,
     duration: Duration,
     run: u32,
+    syscalls_only: bool,
 }
 
 /// One scenario on a running server: its row, or None after a failure
@@ -130,29 +131,38 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
     };
     load::drive(&target, CONCURRENCY, ctx.duration.min(WARM_UP));
 
-    let before = server.cpu_ticks();
-    let started = Instant::now();
-    let tally = load::drive(&target, CONCURRENCY, ctx.duration);
-    let seconds = started.elapsed().as_secs_f64();
-    thread::sleep(SETTLE);
-    let after = server.cpu_ticks();
-    let rss = server.rss_kib();
-    let (before, after) = match (before, after) {
-        (Ok(b), Ok(a)) => (b, a),
-        (Err(e), _) | (_, Err(e)) => {
-            match server.exited() {
-                Some(status) => fail(
-                    name,
-                    Reason::ServerExited,
-                    &format!("{status}: {}", server.last_lines()),
-                ),
-                None => fail(name, Reason::Proc, &e),
+    let (mut tally, seconds, cpu, rss) = if ctx.syscalls_only {
+        (
+            load::Tally::default(),
+            ctx.duration.as_secs_f64(),
+            None,
+            None,
+        )
+    } else {
+        let before = server.cpu_ticks();
+        let started = Instant::now();
+        let tally = load::drive(&target, CONCURRENCY, ctx.duration);
+        let seconds = started.elapsed().as_secs_f64();
+        thread::sleep(SETTLE);
+        let after = server.cpu_ticks();
+        let rss = server.rss_kib();
+        let (before, after) = match (before, after) {
+            (Ok(b), Ok(a)) => (b, a),
+            (Err(e), _) | (_, Err(e)) => {
+                match server.exited() {
+                    Some(status) => fail(
+                        name,
+                        Reason::ServerExited,
+                        &format!("{status}: {}", server.last_lines()),
+                    ),
+                    None => fail(name, Reason::Proc, &e),
+                }
+                return None;
             }
-            return None;
-        }
+        };
+        let cpu = measure::cpu_us_per_req(after.saturating_sub(before), tally.requests);
+        (tally, seconds, cpu, rss)
     };
-    let cpu = measure::cpu_us_per_req(after.saturating_sub(before), tally.requests);
-
     let (syscalls, strace_errors) = match strace::pass(server, &target, CONCURRENCY, ctx.duration) {
         Ok(t) => {
             if t.tally.errors > 0 {
@@ -166,6 +176,10 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
                         t.tally.first_error.as_deref().unwrap_or("")
                     ),
                 );
+            }
+            if ctx.syscalls_only {
+                // The strace pass is the only load: its requests count.
+                tally.requests = t.tally.requests;
             }
             (
                 measure::per_request(t.calls, t.tally.requests),
@@ -240,6 +254,7 @@ fn main() -> ExitCode {
         runner: std::env::var("BENCH_RUNNER").unwrap_or_else(|_| "local".to_string()),
         duration: args.duration,
         run: 0,
+        syscalls_only: args.syscalls_only,
     };
     let mut rows = Vec::new();
     let mut failed = false;

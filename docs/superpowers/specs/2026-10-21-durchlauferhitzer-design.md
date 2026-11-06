@@ -2119,7 +2119,10 @@ system calls, 15% for CPU). **Exceptions:** a change may make a metric
 worse only with the owner's explicit OK, given when there is a stated
 perspective for improvement down the line; the exception is recorded
 next to the target (the change, the allowed loss, the expected later
-gain) and reviewed at the next stage close.
+gain) and reviewed at the next stage close. The gain need not be
+performance: a security improvement justifies a loss on its own, and
+security trumps performance whenever the two conflict (still recorded
+and owner-approved).
 
 - **NFR-PERF-01** [stage 7] Static files (`bench` `static-small`,
   1 KiB, keep-alive): at most 20 system calls and about 60 µs CPU per

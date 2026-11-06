@@ -1,13 +1,13 @@
 //! The command line:
-//! `bench --binary <path> --out <csv> [--runs N] [--duration S] [--scenarios a,b]`.
+//! `bench --binary <path> --out <csv> [--runs N] [--duration S] [--scenarios a,b]
+//! [--syscalls-only]`.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::scenario::Scenario;
 
-pub const USAGE: &str =
-    "usage: bench --binary <path> --out <csv> [--runs N] [--duration S] [--scenarios a,b]";
+pub const USAGE: &str = "usage: bench --binary <path> --out <csv> [--runs N] [--duration S] [--scenarios a,b] [--syscalls-only]";
 
 #[derive(Debug, PartialEq)]
 pub struct Args {
@@ -16,6 +16,9 @@ pub struct Args {
     pub runs: u32,
     pub duration: Duration,
     pub scenarios: Vec<Scenario>,
+    /// Only the strace pass (no measured window): the row has no CPU
+    /// or RSS numbers.
+    pub syscalls_only: bool,
 }
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
@@ -24,8 +27,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut runs = 5;
     let mut duration = Duration::from_secs(10);
     let mut scenarios = Scenario::ALL.to_vec();
+    let mut syscalls_only = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
+        if flag == "--syscalls-only" {
+            syscalls_only = true;
+            continue;
+        }
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--binary" => binary = Some(PathBuf::from(value)),
@@ -62,6 +70,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         runs,
         duration,
         scenarios,
+        syscalls_only,
     })
 }
 
@@ -79,6 +88,15 @@ mod tests {
         assert_eq!(a.runs, 5);
         assert_eq!(a.duration, Duration::from_secs(10));
         assert_eq!(a.scenarios, Scenario::ALL.to_vec());
+        assert!(!a.syscalls_only);
+    }
+
+    #[test]
+    fn syscalls_only_takes_no_value() {
+        let a = args("--syscalls-only --binary b --out o.csv").unwrap();
+        assert!(a.syscalls_only);
+        let a = args("--binary b --out o.csv --syscalls-only").unwrap();
+        assert!(a.syscalls_only);
     }
 
     #[test]
