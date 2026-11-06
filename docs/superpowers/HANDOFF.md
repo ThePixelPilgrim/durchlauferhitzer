@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-06, after stage 6 closed and the Eyra spike on `main`.
+Last updated 2026-11-06, after stage 7 Task 1 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -13,7 +13,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
 | 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
 | 6 Restart | done (`22fd0ce..` this handoff) — record: `docs/superpowers/reviews/2026-11-06-stage-6-review.md` |
-| 7 Efficiency | plan `docs/superpowers/plans/2026-11-06-stage-7-efficiency.md` awaiting owner approval (decisions of 2026-11-06 in the spec: NFR-PERF intro, -07, -08, FR-PROXY-02, FR-STATIC-18). The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
+| 7 Efficiency | **in progress** — plan `docs/superpowers/plans/2026-11-06-stage-7-efficiency.md` (owner-approved `71d3867`). Task 1 ✅ (`bench/` tool, nightly `bench` + `bench publish` to the `benchmarks` branch, chart page linked from README; baseline in the task report); **next: the owner stop** — targets for NFR-PERF-01…03 from the baseline, then Task 2 (conditional requests). The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
