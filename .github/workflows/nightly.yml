@@ -1,8 +1,8 @@
 name: Nightly
 
-# Long randomized runs, fuzzing and an older glibc (NFR-TEST-08,
-# NFR-SEC-13, NFR-PORT-01): daily, and by hand with smaller or larger
-# budgets.
+# Long randomized runs, fuzzing, an older glibc and the restart soak
+# (NFR-TEST-08, NFR-SEC-13, NFR-PORT-01, FR-PROC-07): daily, and by hand
+# with smaller or larger budgets.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -16,6 +16,10 @@ on:
         description: "Seconds of fuzzing per target"
         type: number
         default: 600
+      restart_runs:
+        description: "Runs of the restart tests (driver/tests/restart.rs) per restart soak job"
+        type: number
+        default: 20
 
 # The jobs only read the repository; only `report` writes issues.
 permissions:
@@ -25,6 +29,7 @@ env:
   # A scheduled run has no inputs: the defaults above.
   SIM_SEEDS: ${{ inputs.seeds || '0..200000' }}
   FUZZ_SECONDS: ${{ inputs.fuzz_seconds || 600 }}
+  RESTART_RUNS: ${{ inputs.restart_runs || 20 }}
   # The failure records link the run.
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
@@ -164,7 +169,8 @@ jobs:
 
   older-glibc:
     # Debian 12 (glibc 2.36): the seccomp allow-list holds for an older
-    # glibc than the runners' (Task 6 runs every server under kill).
+    # glibc than the runners' (Task 6 runs every server under kill), and
+    # the restart tests run (FR-PROC-07; owner decision 2026-11-06).
     name: older glibc (debian 12)
     runs-on: ubuntu-latest
     # About 1 min.
@@ -175,8 +181,13 @@ jobs:
       # tests that check "no filter" would see one, and its EPERMs could
       # hide a call missing from our allow-list). CAP_SYS_PTRACE, which
       # Docker drops, lets root read /proc/<pid>/fd of a server running
-      # as nobody, as root on the host can.
-      options: --security-opt seccomp=unconfined --cap-add SYS_PTRACE
+      # as nobody, as root on the host can. systempaths and AppArmor
+      # unconfined make /proc/sys writable, as in ci.yml's Alpine job: the
+      # restart tests write net.ipv4.tcp_migrate_req, in the container's
+      # own network namespace.
+      options: >-
+        --security-opt seccomp=unconfined --security-opt systempaths=unconfined
+        --security-opt apparmor=unconfined --cap-add SYS_PTRACE
     defaults:
       run:
         # The container's default shell is sh.
@@ -209,14 +220,17 @@ jobs:
           rustup show
           uname -r
       - name: Driver tests under seccomp kill
-        # Root-only tests run (root in the container); Landlock is
-        # required. IPv6 is not: a container may have none. Every skip
-        # prints a `skipped:` line, listed by the next step.
+        # Root-only tests run (root in the container); Landlock and
+        # tcp_migrate_req (the restart tests) are required. IPv6 is not:
+        # a container may have none. Every skip prints a `skipped:` line,
+        # listed by the next step.
         run: |
           set -euo pipefail
+          echo 1 > /proc/sys/net/ipv4/tcp_migrate_req
           cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee driver-tests.log
         env:
           DURCHLAUFERHITZER_REQUIRE_ROOT: "1"
+          DURCHLAUFERHITZER_REQUIRE_MIGRATE: "1"
           DURCHLAUFERHITZER_REQUIRE_LANDLOCK: "1"
           DURCHLAUFERHITZER_TEST_SECCOMP_KILL: "1"
       - name: Skips
@@ -235,6 +249,129 @@ jobs:
           path: failure.json
           if-no-files-found: ignore
 
+  restart-soak:
+    # The restart tests (driver/tests/restart.rs, FR-PROC-07) looped
+    # RESTART_RUNS times, on glibc (the runner, the test binary run with
+    # sudo as in ci.yml's root step) and on musl (Alpine, a container as
+    # in ci.yml's Alpine job), so a rare lost connection is caught (owner
+    # decision 2026-11-06). Every run runs; a failing test is filed once
+    # per architecture, libc and test name, with how many runs it failed.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-latest, libc: glibc }
+          - { arch: arm64, runner: ubuntu-24.04-arm, libc: glibc }
+          - { arch: x86_64, runner: ubuntu-latest, libc: musl }
+          - { arch: arm64, runner: ubuntu-24.04-arm, libc: musl }
+    name: restart soak (${{ matrix.arch }}, ${{ matrix.libc }})
+    runs-on: ${{ matrix.runner }}
+    # One run takes about 30 s: 20 runs about 10 min, plus the build.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain from rust-toolchain.toml (glibc)
+        if: matrix.libc == 'glibc'
+        run: rustup show
+      - name: Start the Alpine container (musl)
+        # As ci.yml's Alpine job (its comments give the reasons): no
+        # Docker seccomp profile, /proc/sys writable, CAP_SYS_PTRACE,
+        # IPv6 on loopback, privileged low ports, a reaping pid 1.
+        if: matrix.libc == 'musl'
+        run: |
+          docker run -d --init --name alpine \
+            --security-opt seccomp=unconfined \
+            --security-opt systempaths=unconfined \
+            --security-opt apparmor=unconfined \
+            --cap-add SYS_PTRACE \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv6.conf.lo.disable_ipv6=0 \
+            --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
+            -v /home/runner/work:/home/runner/work \
+            -w "$GITHUB_WORKSPACE" \
+            -e PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            -e CARGO_TARGET_DIR=/tmp/target \
+            -e TMPDIR=/tmp \
+            alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a \
+            sleep infinity
+      - name: Install build tools and the pinned toolchain (musl)
+        if: matrix.libc == 'musl'
+        shell: docker exec alpine sh -e {0}
+        run: |
+          apk add --no-cache bash curl gcc musl-dev git util-linux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          rustup toolchain install
+          rustup show
+      - name: Restart tests, RESTART_RUNS times (glibc)
+        # Built as the runner user, run as root with sudo from driver/,
+        # as ci.yml's root step does.
+        if: matrix.libc == 'glibc'
+        run: |
+          set -uo pipefail
+          bin=$(cargo test --locked -p durchlauferhitzer --test restart --no-run \
+              --message-format=json \
+            | grep -o '"executable":"[^"]*/deps/[^"]*"' | cut -d '"' -f 4)
+          test -n "$bin"
+          chmod a+x "$HOME"
+          sudo sysctl -w net.ipv4.tcp_migrate_req=1
+          cd driver
+          {
+            status=0
+            for i in $(seq 1 "$RESTART_RUNS"); do
+              echo "== restart soak run $i of $RESTART_RUNS"
+              sudo env DURCHLAUFERHITZER_REQUIRE_ROOT=1 \
+                DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 \
+                DURCHLAUFERHITZER_REQUIRE_IPV6=1 \
+                DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 \
+                TMPDIR=/tmp "$bin" --nocapture || status=1
+            done
+            exit "$status"
+          } 2>&1 | tee ../soak.log
+      - name: Restart tests, RESTART_RUNS times (musl)
+        # As root in the container, from driver/ as cargo test runs it.
+        if: matrix.libc == 'musl'
+        run: |
+          docker exec -e RESTART_RUNS alpine bash -c '
+            set -uo pipefail
+            bin=$(cargo test --locked -p durchlauferhitzer --test restart --no-run \
+                --message-format=json \
+              | grep -o "\"executable\":\"[^\"]*/deps/[^\"]*\"" | cut -d "\"" -f 4)
+            test -n "$bin"
+            echo 1 > /proc/sys/net/ipv4/tcp_migrate_req
+            cd driver
+            {
+              status=0
+              for i in $(seq 1 "$RESTART_RUNS"); do
+                echo "== restart soak run $i of $RESTART_RUNS"
+                DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 \
+                  DURCHLAUFERHITZER_REQUIRE_IPV6=1 DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 \
+                  "$bin" --nocapture || status=1
+              done
+              exit "$status"
+            } 2>&1 | tee ../soak.log'
+      - name: Skips
+        if: always()
+        run: grep 'skipped:' soak.log || echo "no skips"
+      - name: Failure record
+        if: failure()
+        run: >-
+          python3 scripts/nightly-report.py record --job restart-soak
+          --arch "$ARCH" --libc "$LIBC" --run-url "$RUN_URL" --out failure.json soak.log
+        env:
+          ARCH: ${{ matrix.arch }}
+          LIBC: ${{ matrix.libc }}
+      - name: Upload the failure record
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-failure-restart-soak-${{ matrix.arch }}-${{ matrix.libc }}
+          path: failure.json
+          if-no-files-found: ignore
+      - name: Stop the container
+        if: always() && matrix.libc == 'musl'
+        run: docker rm -f alpine
+
   report:
     # A failing job files or updates a GitHub issue keyed by the
     # failure's fingerprint (NFR-TEST-08, scripts/nightly-report.py):
@@ -246,7 +383,7 @@ jobs:
     # jobs are reported too (`always()`: a run cancelled by hand files as
     # well; controller ruling 2026-11-02).
     name: report failures
-    needs: [long-runs, fuzz, older-glibc]
+    needs: [long-runs, fuzz, older-glibc, restart-soak]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

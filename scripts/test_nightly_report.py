@@ -281,6 +281,7 @@ class OlderGlibc(unittest.TestCase):
             "seccomp_kill_on_unlisted_call --exact",
             f["replay"],
         )
+        self.assertIn("DURCHLAUFERHITZER_REQUIRE_MIGRATE=1", f["replay"])
         fp, title = nr.describe("older-glibc", f)
         self.assertEqual(
             title,
@@ -291,6 +292,94 @@ class OlderGlibc(unittest.TestCase):
         (a,) = nr.record_older_glibc(DEBIAN_LOG, WS)
         (b,) = nr.record_older_glibc(DEBIAN_LOG.replace("211:5", "300:1").replace("37 ms", "5 ms"), WS)
         self.assertEqual(nr.describe("older-glibc", a), nr.describe("older-glibc", b))
+
+
+# The restart soak's log: the loop's run markers, then each run of the
+# restart test binary (`--nocapture`); one test fails in two of three runs.
+SOAK_LOG = """\
+== restart soak run 1 of 3
+running 2 tests
+test reload_under_load_loses_nothing ... ok
+test the_scripts_parse ... ok
+
+test result: ok. 2 passed; 0 failed
+== restart soak run 2 of 3
+running 2 tests
+
+thread 'reload_under_load_loses_nothing' (811) panicked at driver/tests/restart.rs:140:5:
+lost 1 of 4000 connections (conn 2817: reset)
+test reload_under_load_loses_nothing ... FAILED
+test the_scripts_parse ... ok
+
+failures:
+    reload_under_load_loses_nothing
+
+test result: FAILED. 1 passed; 1 failed
+== restart soak run 3 of 3
+running 2 tests
+
+thread 'reload_under_load_loses_nothing' (902) panicked at driver/tests/restart.rs:140:5:
+lost 2 of 4000 connections (conn 12: reset)
+test reload_under_load_loses_nothing ... FAILED
+test the_scripts_parse ... ok
+
+failures:
+    reload_under_load_loses_nothing
+
+test result: FAILED. 1 passed; 1 failed
+"""
+
+
+class RestartSoak(unittest.TestCase):
+    def test_one_failure_per_test_with_its_count(self):
+        (f,) = nr.record_restart_soak(SOAK_LOG, WS, "arm64", "musl")
+        self.assertEqual(f["kind"], "test")
+        self.assertEqual(f["test"], "restart::reload_under_load_loses_nothing")
+        self.assertEqual((f["arch"], f["libc"]), ("arm64", "musl"))
+        self.assertIn("failed in 2 of 3 runs", f["panic_text"])
+        self.assertIn("lost 2 of 4000 connections", f["panic_text"])
+        self.assertIn(
+            "cargo test -p durchlauferhitzer --locked --test restart -- "
+            "reload_under_load_loses_nothing --exact",
+            f["replay"],
+        )
+        self.assertIn("DURCHLAUFERHITZER_REQUIRE_MIGRATE=1", f["replay"])
+        self.assertIn("alpine", f["replay"])
+        fp, title = nr.describe("restart-soak", f)
+        self.assertEqual(
+            fp, nr.fingerprint("restart-soak|arm64|musl|restart::reload_under_load_loses_nothing")
+        )
+        self.assertEqual(
+            title,
+            f"nightly: restart soak (arm64, musl) — restart::reload_under_load_loses_nothing "
+            f"failed [{fp}]",
+        )
+
+    def test_the_fingerprint_keys_on_arch_libc_and_name_only(self):
+        (a,) = nr.record_restart_soak(SOAK_LOG, WS, "x86_64", "glibc")
+        (b,) = nr.record_restart_soak(SOAK_LOG.replace("140:5", "99:1").replace("conn 12", "conn 7"), WS, "x86_64", "glibc")
+        (c,) = nr.record_restart_soak(SOAK_LOG, WS, "x86_64", "musl")
+        self.assertEqual(nr.describe("restart-soak", a), nr.describe("restart-soak", b))
+        self.assertNotEqual(nr.describe("restart-soak", a)[0], nr.describe("restart-soak", c)[0])
+        self.assertIn("sudo", a["replay"])
+
+    def test_a_clean_or_missing_log_is_unrecognized(self):
+        clean = SOAK_LOG.split("== restart soak run 2")[0]
+        self.assertEqual(nr.record_restart_soak(clean, WS, "x86_64", "glibc")[0]["kind"], "unrecognized")
+        self.assertEqual(nr.record_restart_soak(None, WS, "x86_64", "glibc")[0]["kind"], "unrecognized")
+
+    def test_cli_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "soak.log")
+            with open(log, "w") as fh:
+                fh.write(SOAK_LOG)
+            out = os.path.join(d, "failure.json")
+            with contextlib.redirect_stdout(io.StringIO()):
+                nr.main(["record", "--job", "restart-soak", "--arch", "x86_64", "--libc", "musl",
+                         "--run-url", RUN, "--workspace", WS, "--out", out, log])
+            (rec,) = nr.load_records(d)
+            self.assertEqual(rec["job"], "restart-soak")
+            self.assertEqual(rec["failures"][0]["libc"], "musl")
 
 
 def _record(job, arch, failures):

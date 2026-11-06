@@ -21,6 +21,8 @@ jobs:
             runner: ubuntu-24.04-arm
     name: check (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    # About 3 min.
+    timeout-minutes: 45
     env:
       # The test files that run the server (the root step checks the
       # list against the files that include `support/child.rs`).
