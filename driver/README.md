@@ -428,7 +428,10 @@ tests/
                     no descriptor; alone in its binary
   free_port.rs      `free_port` against the race (CI, 2026-11-01): a
                     sample of ports the kernel hands out (bind 0, connect)
-                    lies in the ephemeral range, `free_port`'s lie outside it
+                    lies in the ephemeral range, `free_port`'s lie outside it;
+                    and the fork race (CI arm64, 2026-11-06): while a
+                    thread forks children with a long `pre_exec`, every
+                    port picked binds at once
   unsafe_confined.rs  NFR-MAINT-05: `allow(unsafe_code)` (or `expect`)
                     appears in `core/src` and `driver/src` (every file,
                     unit tests included) only on `pub mod sys;` in
@@ -471,9 +474,11 @@ tests/
   support/ipv6.rs   the IPv6 tests' skip rule (DURCHLAUFERHITZER_REQUIRE_IPV6)
   support/port.rs   ports below the ephemeral range, shared by `child.rs`
                     and `sys.rs` (neither a bind to 0 nor a connect's
-                    source port can get one): `free_port`, `free_listener`
-                    (bound at the pick: a child forked meanwhile keeps the
-                    closed probe listening until its exec), `refused_port`
+                    source port can get one): `free_port` (opens no
+                    socket: the first candidate no TCP socket uses in
+                    `/proc/net/tcp`/`tcp6`, since a probe's copy in a child
+                    forked meanwhile listens on until its exec),
+                    `free_listener` (bound at the pick), `refused_port`
                     (waits until a connect is refused; an ephemeral port
                     nothing listens on can connect to itself)
   support/running.rs `Running`: a guard that kills a running server on
