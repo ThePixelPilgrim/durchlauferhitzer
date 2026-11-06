@@ -25,6 +25,9 @@ cargo build --release --locked
 Build the musl binary on Alpine: on a glibc host, `--target *-musl` with
 `-crt-static` links the host's glibc dynamically; for a static musl binary
 there, override it with `RUSTFLAGS="-C target-feature=+crt-static"`.
+Packagers: `RUSTFLAGS` in the environment replaces `.cargo/config.toml`'s
+`rustflags`, so a musl build with `RUSTFLAGS` set must add
+`-C target-feature=-crt-static` itself to link the system musl.
 
 ## Command line
 
@@ -37,7 +40,9 @@ usage: durchlauferhitzer <config-path>
 `--ready-fd <n>` serves like the first form, beside a running server on
 the same ports, and writes `ready\n` to descriptor `n` (then closes it)
 once it accepts connections; a failed start closes it unwritten (exit
-2). See `SIGHUP` below.
+2). It is the join-and-take-over mode of a restart: do not point a
+supervisor's readiness descriptor (e.g. s6's `notification-fd`) at it
+for an ordinary start. See `SIGHUP` below.
 
 ## Check a config
 
@@ -215,9 +220,14 @@ It exits 0, or 1 with the reason. Notes:
 - A second `SIGTERM`, or `SIGINT` (Ctrl-C): fast shutdown; every connection is
   cut at once.
 - `SIGHUP`: restart drain — the listeners close, the connections held are
-  served with `Connection: close`, bounded by `restart_timeout`. The
-  server's own listeners set `SO_REUSEPORT`: a `--ready-fd` start shares
-  the ports; a second normal start still fails ("Address already in use").
+  served with `Connection: close`, bounded by `restart_timeout` (default
+  10m). A second `SIGHUP` is ignored; `SIGTERM` during it becomes the
+  graceful `SIGTERM` drain, bounded by `shutdown_timeout` from then;
+  `SIGINT` or a second `SIGTERM` cuts every connection. The server's own
+  listeners set `SO_REUSEPORT`: a `--ready-fd` start shares the ports; a
+  second normal start still fails ("Address already in use"). A server
+  binding as a non-root user logs so at startup: any process of that
+  user could join its ports.
   `SIGPIPE` is ignored.
 - Exit codes: 0 after any shutdown (and `--check` on a valid config), 1 for
   an invalid or unreadable config or bad arguments, 2 for a startup
