@@ -2132,8 +2132,10 @@ does not change stage 7's choices.
   overlap with sending; deadline index instead of the O(n) scan.
 - **NFR-PERF-07** [stage 7] N driver threads with `SO_REUSEPORT`; backend
   connection pooling. *(Owner decision 2026-11-06:)* the thread count is
-  a setting with a default of 1 (at the expected load one thread
-  suffices); more threads must start before the seccomp filter (musl's
+  a setting, a number or `auto` (the CPU count), with a default of 1: at
+  the expected load one thread suffices, and more threads raise
+  throughput, not efficiency per request; the benchmarks show whether
+  `auto` gains anything before the default changes; more threads must start before the seccomp filter (musl's
   `membarrier`, FR-PROC-06) and keep FR-PROC-07's steering lossless
   (its 0/1 indices assume one listener per process per port group).
   *(Owner decision 2026-11-06:)* the limits stay process-wide
