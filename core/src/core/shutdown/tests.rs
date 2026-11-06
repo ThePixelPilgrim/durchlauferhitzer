@@ -4,6 +4,7 @@
 use crate::core::test_support::{GET_F, PEER, accept, files_core, regular, secs, stamp};
 use crate::core::{Action, ConnId, Core, DrainTarget, Event};
 use crate::file::{FileId, RootId};
+use crate::http::conditional::Validators;
 use crate::http::request::{Method, Persistence};
 use crate::http::response::{BodyMode, render_file_head, render_fixed};
 use crate::http::status::Status;
@@ -64,7 +65,14 @@ fn send_all(core: &mut Core, now: Instant, conn: ConnId, file: FileId) -> Vec<Ac
 
 fn file_head(persistence: Persistence) -> Vec<u8> {
     let mut head = Vec::new();
-    render_file_head(TEXT, SIZE, persistence, None, &mut head);
+    render_file_head(
+        TEXT,
+        SIZE,
+        &Validators::of(stamp(SIZE)),
+        persistence,
+        None,
+        &mut head,
+    );
     head
 }
 

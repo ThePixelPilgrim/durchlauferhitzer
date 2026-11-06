@@ -158,6 +158,7 @@ fn deliver(config: &str, parts: &[&[u8]]) -> (Outcome, String) {
 
 mod admission;
 mod client;
+mod conditional;
 #[allow(dead_code, reason = "shared by all test binaries; each uses part")]
 #[path = "../support/model_http.rs"]
 mod fixed;
@@ -177,6 +178,7 @@ mod unanswered;
 
 use admission::*;
 use client::*;
+use conditional::*;
 use fixed::*;
 use generator::*;
 use model::*;

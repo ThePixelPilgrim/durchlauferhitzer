@@ -1,4 +1,5 @@
 use super::*;
+use crate::http::conditional::Conditional;
 use crate::http::status::Status;
 use proptest::prelude::*;
 
@@ -56,8 +57,50 @@ fn parses_simple_get() {
             body: BodyFraming::None,
             persistence: Persistence::KeepAlive,
             expect: Expect::None,
+            conditional: Conditional::NONE,
         }
     );
+}
+
+/// FR-STATIC-18: the conditional headers are read into the head, all
+/// `If-None-Match` lines as one list; malformed ones are ignored, never an
+/// error, and the headers stay as they were (a proxy forwards them).
+#[test]
+fn reads_the_conditional_headers() {
+    use crate::file::FileStamp;
+    use crate::http::conditional::IfNoneMatch;
+    let head = head_of(
+        b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"x\", W/\"3-1f\"\r\n\
+          if-none-match: \"0-0\"\r\nIf-Modified-Since: Sun, 06 Nov 1994 08:49:37 GMT\r\n\r\n",
+    );
+    assert_eq!(
+        head.conditional,
+        Conditional {
+            if_none_match: IfNoneMatch::Tags(vec![
+                FileStamp {
+                    size: 3,
+                    modified_ns: 0x1f,
+                },
+                FileStamp {
+                    size: 0,
+                    modified_ns: 0,
+                },
+            ]),
+            if_modified_since: Some(784_111_777),
+        }
+    );
+    assert_eq!(head.headers.len(), 4);
+    let head =
+        head_of(b"HEAD / HTTP/1.1\r\nHost: a\r\nIf-None-Match: *\r\nIf-Modified-Since: x\r\n\r\n");
+    assert_eq!(
+        head.conditional,
+        Conditional {
+            if_none_match: IfNoneMatch::Any,
+            if_modified_since: None,
+        }
+    );
+    let head = head_of(b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: x\r\n\r\n");
+    assert_eq!(head.conditional, Conditional::NONE);
 }
 
 #[test]

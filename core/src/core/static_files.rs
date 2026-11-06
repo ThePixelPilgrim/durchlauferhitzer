@@ -11,11 +11,12 @@ use crate::conn::{Conn, ConnState, OpenStep, SEND_CAPACITY, StaticRequest, Unrea
 use crate::file::{
     Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileStamp, Owner, RootId, check_stamp,
 };
+use crate::http::conditional::{Freshness, Validators};
 use crate::http::date::ImfFixdate;
 use crate::http::mime::content_type;
 use crate::http::request::{BodyFraming, Method, Persistence, RequestHead};
 use crate::http::response::{
-    BodyMode, redirect_len, render_file_head, render_fixed, render_redirect,
+    BodyMode, redirect_len, render_file_head, render_fixed, render_not_modified, render_redirect,
 };
 use crate::http::static_path::{TrailingSlash, relative_segments, trailing_slash};
 use crate::http::status::Status;
@@ -79,6 +80,34 @@ impl Core {
             ) => Opened::NotServed(NotServed::NotFound),
         };
         c.state = match outcome {
+            // FR-STATIC-18: judged on the stamp of the opened descriptor,
+            // so a file changed since the client's copy is sent anew.
+            Opened::Serve
+                if request.conditional.not_modified(meta.stamp, self.clock)
+                    == Freshness::NotModified =>
+            {
+                actions.push(Action::Log(Log::Response {
+                    conn,
+                    peer: c.peer,
+                    status: Status::NotModified,
+                    request: Some(request.summary),
+                }));
+                render_not_modified(
+                    &Validators::of(meta.stamp),
+                    persistence,
+                    self.date.as_ref(),
+                    &mut c.send,
+                );
+                // Like HEAD: the head is all; nothing is read.
+                self.files.release(file);
+                actions.push(Action::CloseFile { file });
+                ConnState::Responding {
+                    persistence,
+                    unread_body: UnreadBody::None,
+                    buffered,
+                    deadline,
+                }
+            }
             Opened::Serve => {
                 let size = meta.stamp.size;
                 let on_change = request.on_change;
@@ -93,6 +122,7 @@ impl Core {
                 render_file_head(
                     content_type,
                     size,
+                    &Validators::of(meta.stamp),
                     persistence,
                     self.date.as_ref(),
                     &mut c.send,
@@ -662,6 +692,7 @@ impl Core {
                 root,
                 on_change,
                 path,
+                conditional: head.conditional,
             },
         };
     }
@@ -669,3 +700,6 @@ impl Core {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod conditional_tests;

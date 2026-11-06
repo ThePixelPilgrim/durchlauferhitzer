@@ -156,7 +156,7 @@ fn head_on_405_path_and_proxy_502_is_head_only() {
     );
     expected.extend_from_slice(&head(
         "text/plain; charset=utf-8",
-        5,
+        sim_stamp(5, 1),
         Persistence::KeepAlive,
     ));
     assert_eq!(received, expected, "{}", sim.trace());
@@ -178,7 +178,11 @@ fn change_on_first_chunk_aborts_before_the_body() {
     };
     sim.change_during_send("/srv/www", "c.txt", 0, new);
     let (c, received) = exchange(&mut sim, &get("/c.txt"));
-    let full_head = head("text/plain; charset=utf-8", 5, Persistence::KeepAlive);
+    let full_head = head(
+        "text/plain; charset=utf-8",
+        sim_stamp(5, 1),
+        Persistence::KeepAlive,
+    );
     assert!(full_head.starts_with(&received), "{}", sim.trace());
     assert!(!sim.trace().contains("FileSent"), "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
@@ -354,7 +358,11 @@ fn orphaned_opens_hold_their_per_ip_slots() {
     let other = sim.connect(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)));
     sim.send(other, &get("/index.html"));
     sim.run_until_idle();
-    let mut expected = head("text/html; charset=utf-8", 5, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/html; charset=utf-8",
+        sim_stamp(5, 1),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"hello");
     assert_eq!(sim.take_received(other), expected, "{}", sim.trace());
     // Once the disk answers both orphans, both slots are back.
@@ -457,7 +465,11 @@ fn escaped_spellings_reach_the_specific_route() {
         ("/%C3%a4/x.txt", b"ae"),
     ] {
         let (c, received) = exchange(&mut sim, &get(path));
-        let mut expected = head("text/plain; charset=utf-8", 2, Persistence::KeepAlive);
+        let stamp = match body {
+            b"at" => sim.file_stamp("/srv/at", "x.txt"),
+            _ => sim.file_stamp("/srv/ae", "x.txt"),
+        };
+        let mut expected = head("text/plain; charset=utf-8", stamp, Persistence::KeepAlive);
         expected.extend_from_slice(body);
         assert_eq!(received, expected, "{path}\n{}", sim.trace());
         let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
@@ -503,7 +515,11 @@ fn encoded_semicolon_in_the_path_is_400() {
     assert_eq!(opens(sim.trace()), 0, "{}", sim.trace());
     sim.add_file("/srv/www", "q.txt", b"q");
     let (_, received) = exchange(&mut sim, &get("/q.txt?x=%3B"));
-    let mut expected = head("text/plain; charset=utf-8", 1, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/plain; charset=utf-8",
+        sim.file_stamp("/srv/www", "q.txt"),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"q");
     assert_eq!(received, expected, "{}", sim.trace());
 }

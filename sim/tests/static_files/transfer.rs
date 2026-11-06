@@ -10,7 +10,11 @@ fn serves_small_file() {
     let c = sim.connect(peer());
     sim.send(c, &get("/index.html"));
     sim.run_until_idle();
-    let mut expected = head("text/html; charset=utf-8", 5, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/html; charset=utf-8",
+        sim_stamp(5, 1),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"hello");
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
@@ -49,7 +53,7 @@ fn serves_file_larger_than_one_chunk() {
     sim.run_until_idle();
     let mut expected = head(
         "application/octet-stream",
-        bytes.len() as u64,
+        sim_stamp(bytes.len() as u64, 1),
         Persistence::KeepAlive,
     );
     expected.extend_from_slice(&bytes);
@@ -71,7 +75,11 @@ fn alias_semantics_strip_route_prefix() {
     let c = sim.connect(peer());
     sim.send(c, &get("/assets/a.css"));
     sim.run_until_idle();
-    let mut expected = head("text/css; charset=utf-8", 6, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/css; charset=utf-8",
+        sim_stamp(6, 1),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"body{}");
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
@@ -91,7 +99,7 @@ fn slow_disk_still_delivers() {
     sim.advance(Duration::from_secs(1));
     let mut expected = head(
         "text/plain; charset=utf-8",
-        bytes.len() as u64,
+        sim_stamp(bytes.len() as u64, 1),
         Persistence::KeepAlive,
     );
     expected.extend_from_slice(&bytes);
@@ -152,7 +160,7 @@ fn disk_slower_than_send_idle_timeout_closes() {
     sim.run_until_idle();
     let head_len = head(
         "application/octet-stream",
-        300 * 1024,
+        sim_stamp(300 * 1024, 1),
         Persistence::KeepAlive,
     )
     .len();
@@ -215,7 +223,7 @@ fn slow_disk_does_not_block_other_connections() {
     let mut expected = fixed(Status::NotFound, Persistence::KeepAlive, BodyMode::Full);
     expected.extend_from_slice(&head(
         "text/plain; charset=utf-8",
-        5,
+        sim.file_stamp("/srv/www", "small.txt"),
         Persistence::KeepAlive,
     ));
     expected.extend_from_slice(b"small");
@@ -224,7 +232,11 @@ fn slow_disk_does_not_block_other_connections() {
     assert!(sim.take_received(stalled).is_empty(), "{}", sim.trace());
     // The slow disk answers; the slow request is served.
     sim.advance(Duration::from_secs(10));
-    let mut expected = head("text/plain; charset=utf-8", 4, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/plain; charset=utf-8",
+        sim.file_stamp("/srv/www", "slow.txt"),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"slow");
     assert_eq!(sim.take_received(a), expected, "{}", sim.trace());
     assert_eq!(sim.state(a), SimConnState::Open, "{}", sim.trace());
@@ -240,7 +252,12 @@ fn stalled_client_with_open_file_times_out_and_closes_file() {
     sim.add_file("/srv/www", "big.bin", &vec![b'b'; 100_000]);
     let p = peer();
     let c = sim.connect(p);
-    let head_len = head("application/octet-stream", 100_000, Persistence::KeepAlive).len();
+    let head_len = head(
+        "application/octet-stream",
+        sim_stamp(100_000, 1),
+        Persistence::KeepAlive,
+    )
+    .len();
     sim.set_client_window(c, durchlauferhitzer_sim::Window::Budget(head_len + 10));
     sim.send(c, &get("/big.bin"));
     sim.run_until_idle();
@@ -277,7 +294,7 @@ fn slow_client_gets_the_whole_file() {
     sim.run_until_idle();
     let mut expected = head(
         "application/octet-stream",
-        bytes.len() as u64,
+        sim_stamp(bytes.len() as u64, 1),
         Persistence::Close,
     );
     expected.extend_from_slice(&bytes);
@@ -298,7 +315,11 @@ fn file_shrinking_mid_transfer_cuts_connection() {
     let c = sim.connect(peer());
     sim.send(c, &get("/s.bin"));
     sim.run_until_idle();
-    let mut expected = head("application/octet-stream", 1000, Persistence::KeepAlive);
+    let mut expected = head(
+        "application/octet-stream",
+        sim_stamp(1000, 1),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(&bytes[..400]);
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
@@ -333,7 +354,7 @@ pub(crate) fn changing_file(config: &str, new: FileStamp) -> (Sim, ConnId, Vec<u
     let (c, received) = exchange(&mut sim, &get("/c.bin"));
     let mut full = head(
         "application/octet-stream",
-        bytes.len() as u64,
+        sim_stamp(bytes.len() as u64, 1),
         Persistence::KeepAlive,
     );
     full.extend_from_slice(&bytes);
@@ -480,7 +501,11 @@ fn orphaned_opens_hold_connection_slots() {
     let c = sim.connect(peer());
     sim.send(c, &get("/index.html"));
     sim.run_until_idle();
-    let mut expected = head("text/html; charset=utf-8", 5, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/html; charset=utf-8",
+        sim_stamp(5, 1),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"hello");
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
 }
@@ -504,7 +529,12 @@ fn sendfile_reads_the_file_as_opened() {
     sim.add_file("/srv/www", "f.txt", b"WORLD");
     sim.set_client_window(c, durchlauferhitzer_sim::Window::Unlimited);
     sim.run_until_idle();
-    let mut expected = head("text/plain; charset=utf-8", 5, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/plain; charset=utf-8",
+        // The version that was opened: the sim's first file.
+        sim_stamp(5, 1),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"hello");
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
 }
@@ -555,7 +585,12 @@ fn reset_with_a_ready_segment_closes_the_file_once() {
     let mut sim = Sim::new(CONFIG);
     sim.add_file("/srv/www", "big.bin", &vec![b'b'; 100_000]);
     let c = sim.connect(peer());
-    let head_len = head("application/octet-stream", 100_000, Persistence::KeepAlive).len();
+    let head_len = head(
+        "application/octet-stream",
+        sim_stamp(100_000, 1),
+        Persistence::KeepAlive,
+    )
+    .len();
     sim.set_client_window(c, durchlauferhitzer_sim::Window::Budget(head_len + 10));
     sim.send(c, &get("/big.bin"));
     sim.run_until_idle();
@@ -579,9 +614,17 @@ fn pipelined_get_after_a_file_response() {
     both.extend_from_slice(&get("/assets/b.css"));
     sim.send(c, &both);
     sim.run_until_idle();
-    let mut expected = head("text/plain; charset=utf-8", 5, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/plain; charset=utf-8",
+        sim.file_stamp("/srv/www", "a.txt"),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"first");
-    expected.extend_from_slice(&head("text/css; charset=utf-8", 7, Persistence::KeepAlive));
+    expected.extend_from_slice(&head(
+        "text/css; charset=utf-8",
+        sim.file_stamp("/srv/assets", "b.css"),
+        Persistence::KeepAlive,
+    ));
     expected.extend_from_slice(b"second!");
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     assert_eq!(close_files(sim.trace(), 1), 1, "{}", sim.trace());

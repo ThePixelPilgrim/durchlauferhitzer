@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::config::{BodyLimit, OnFileChange};
 use crate::core::Interest;
 use crate::file::{Chunk, FileId, FileStamp, RootId};
+use crate::http::conditional::Conditional;
 use crate::http::request::{Expect, HeadParser, Persistence, Version};
 use crate::http::response::BodyMode;
 use crate::http::response_head::{RequestKind, ResponseParser};
@@ -358,6 +359,9 @@ pub(crate) struct StaticRequest {
     pub(crate) on_change: OnFileChange,
     /// The relative segments of the path being opened.
     pub(crate) path: Vec<Vec<u8>>,
+    /// The request's conditional headers, judged once the file is open
+    /// (FR-STATIC-18).
+    pub(crate) conditional: Conditional,
 }
 
 /// One open connection. Dropping it frees both buffers.

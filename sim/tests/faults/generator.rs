@@ -9,9 +9,10 @@ pub(crate) const SEEDS: u64 = 1500;
 
 /// Every status the core can send to these clients; each must be seen
 /// across the seeds. (These backends refuse every connect.)
-pub(crate) const STATUSES: [Status; 12] = [
+pub(crate) const STATUSES: [Status; 13] = [
     Status::Ok,
     Status::MovedPermanently,
+    Status::NotModified,
     Status::BadRequest,
     Status::NotFound,
     Status::MethodNotAllowed,
@@ -135,8 +136,12 @@ pub(crate) const MIB: u64 = 1024 * 1024;
 /// A static request: a path under `/` (abort on change), `/g` (allow
 /// growth) or `/.well-known` (abort), maybe with a query. Bodies only go to
 /// `up/` paths, so the expected status of every logged request follows
-/// from its method and path alone (and, for a redirect, the query).
-pub(crate) fn random_static_request(rng: &mut fastrand::Rng, long_dir: Option<&str>) -> Vec<u8> {
+/// from its method and path alone (and, for a redirect, the query), and
+/// for a file from its conditional lines (`conditional.rs`), which a `GET`
+/// or `HEAD` without a body may carry when the head stays within
+/// `tree.max_head`.
+pub(crate) fn random_static_request(rng: &mut fastrand::Rng, tree: &Tree) -> Vec<u8> {
+    let long_dir = tree.long_dir.as_deref();
     // One request in six asks to close, so closing 200s and 301s occur.
     let host = if rng.u8(0..6) == 0 {
         "Host: example.test\r\nConnection: close\r\n"
@@ -181,11 +186,24 @@ pub(crate) fn random_static_request(rng: &mut fastrand::Rng, long_dir: Option<&s
         ("", _) if rng.bool() => prefix.trim_end_matches('/').to_owned(),
         _ => format!("{prefix}{rel}"),
     };
+    let stamp = match tree.resolve(&path) {
+        Expect::File(f, _) => Some(f.stamp),
+        Expect::Redirect | Expect::NotFound => None,
+    };
     let query = rng.choice(QUERIES).copied().unwrap_or_default();
     let path = format!("{path}{query}");
+    let conditional = random_conditional(rng, stamp);
+    let bodiless = |method: &str| {
+        let with = format!("{method} {path} HTTP/1.1\r\n{host}{conditional}\r\n");
+        if with.len() <= tree.max_head - 8 {
+            with.into_bytes()
+        } else {
+            format!("{method} {path} HTTP/1.1\r\n{host}\r\n").into_bytes()
+        }
+    };
     match rng.u8(0..20) {
-        0..10 => format!("GET {path} HTTP/1.1\r\n{host}\r\n").into_bytes(),
-        10..15 => format!("HEAD {path} HTTP/1.1\r\n{host}\r\n").into_bytes(),
+        0..10 => bodiless("GET"),
+        10..15 => bodiless("HEAD"),
         15 => format!("POST {path} HTTP/1.1\r\n{host}\r\n").into_bytes(),
         16 => format!("POST {path} HTTP/1.1\r\n{host}Content-Length: 2\r\n\r\nhi").into_bytes(),
         17 | 18 => format!("GET {prefix}up/{rel} HTTP/1.1\r\n{host}Content-Length: 3\r\n\r\nabc")
@@ -195,9 +213,9 @@ pub(crate) fn random_static_request(rng: &mut fastrand::Rng, long_dir: Option<&s
     }
 }
 
-pub(crate) fn random_request(rng: &mut fastrand::Rng, long_dir: Option<&str>) -> Vec<u8> {
+pub(crate) fn random_request(rng: &mut fastrand::Rng, tree: &Tree) -> Vec<u8> {
     if rng.u8(0..10) < 7 {
-        random_static_request(rng, long_dir)
+        random_static_request(rng, tree)
     } else {
         rng.choice(REQUESTS)
             .map(|(r, _)| r.to_vec())
@@ -229,15 +247,10 @@ pub(crate) fn random_disk_delay(rng: &mut fastrand::Rng) -> Duration {
 }
 
 /// Send a random prefix of `client`'s queued templates.
-pub(crate) fn send_piece(
-    sim: &mut Sim,
-    client: &mut Client,
-    rng: &mut fastrand::Rng,
-    long_dir: Option<&str>,
-) {
+pub(crate) fn send_piece(sim: &mut Sim, client: &mut Client, rng: &mut fastrand::Rng, tree: &Tree) {
     if client.queue.is_empty() {
         for _ in 0..rng.usize(1..4) {
-            client.queue.push_back(random_request(rng, long_dir));
+            client.queue.push_back(random_request(rng, tree));
         }
     }
     let total: usize = client.queue.iter().map(Vec::len).sum();

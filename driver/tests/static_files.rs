@@ -216,6 +216,37 @@ fn head_gets_the_full_content_length_and_no_body() {
     server.stop();
 }
 
+/// FR-STATIC-18 on the real kernel: the 200 carries the file's `ETag`
+/// (its `fstat` size and mtime), and sending it back gets a bare 304,
+/// after which the connection serves on.
+#[test]
+fn a_matching_if_none_match_gets_a_304() {
+    let tree = Tree::new();
+    tree.file("small.txt", b"small");
+    let server = Server::start_static(&static_config(tree.path()), 2);
+    let mut client = server.connect();
+    get(&mut client, "GET", "/small.txt");
+    let response = read_response(&mut client);
+    let etag = text(&response)
+        .split("\r\n")
+        .find_map(|line| line.strip_prefix("ETag: ").map(str::to_owned))
+        .unwrap();
+    write!(
+        client,
+        "GET /small.txt HTTP/1.1\r\nHost: example.test\r\nIf-None-Match: {etag}\r\n\r\n"
+    )
+    .unwrap();
+    let head = read_head(&mut client);
+    assert_eq!(status_line(&head), "HTTP/1.1 304 Not Modified");
+    assert!(text(&head).contains(&format!("\r\nETag: {etag}\r\n")));
+    assert!(text(&head).contains("\r\nLast-Modified: "));
+    assert_eq!(content_length(&head), None, "{}", text(&head));
+    get(&mut client, "GET", "/small.txt");
+    let response = read_response(&mut client);
+    assert_eq!(body(&response), b"small", "{}", text(&response));
+    server.stop();
+}
+
 /// FR-STATIC-15, R7: a file that shrinks during the transfer cuts the
 /// connection; the client sees fewer bytes than `Content-Length`, all of
 /// them the file's own, never a complete-looking short body.

@@ -549,7 +549,8 @@ Core-generated responses:
   still 404.
 - **FR-STATIC-11** [done] `200 OK` heads are: status line, `Date` once the
   driver set the time (FR-HTTP-22a), `Content-Type`,
-  `Content-Length` = size at open, `X-Content-Type-Options: nosniff`,
+  `Content-Length` = size at open, `ETag` and `Last-Modified` of the
+  stamp at open (FR-STATIC-18; stage 7), `X-Content-Type-Options: nosniff`,
   `Connection: close` only when closing. Exactly that many body bytes
   follow, or the connection is cut (FR-STATIC-15).
 - **FR-STATIC-12** [done] `Content-Type` comes from the last `.` of the

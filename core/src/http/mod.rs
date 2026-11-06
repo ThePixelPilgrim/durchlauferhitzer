@@ -1,6 +1,7 @@
 //! HTTP-level logic.
 
 pub mod chunked;
+pub mod conditional;
 pub mod date;
 pub mod forward;
 mod head_line;

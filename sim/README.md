@@ -16,7 +16,9 @@ What it simulates:
   first, then the overdue `TimerFired` (default `TimerOrder::OnTime`).
 - **A file system** ([`src/fs.rs`](src/fs.rs)) — files, directories, symlinks,
   denied entries, special files, slow disks, files that shrink or change
-  while they are being sent.
+  while they are being sent. Each file has a stamp (size, mtime): `add_file`
+  gives distinct mtimes of 1, 2, ... ns, `set_modified` sets one, and
+  `file_stamp` reads what an open would report (`ETag`, FR-STATIC-18).
 - **Backends** ([`src/backend.rs`](src/backend.rs)) — scripted upstream
   servers: connects accepted, refused or left hanging per backend address
   (and a hanging one let through later, a slow accept);
@@ -53,8 +55,9 @@ src/
   tests.rs            unit tests of the sim's own invariant checks
 tests/
   support/
-    model_http.rs     the spec's fixed responses, file heads, redirects and
-                      parse-error statuses, shared by every test binary
+    model_http.rs     the spec's fixed responses, file heads (with `ETag`
+                      and `Last-Modified`), 304s, redirects, IMF-fixdates
+                      and parse-error statuses, shared by every test binary
   connections.rs      accepting, buffering, backpressure, resets
   date.rs             the `Date` header on every response the core renders,
                       none on `100 Continue`, the backend's kept
@@ -73,6 +76,8 @@ tests/
     transfer.rs         chunks, slow disks and clients, changing files, resets
     rules.rs            methods, bodies, 404s, redirects, index files, HEAD
     edge.rs             index opens in flight, long redirects, encodings
+    conditional.rs      conditional requests: `ETag`, `Last-Modified`,
+                        `If-None-Match`, `If-Modified-Since`, 304s
   proxy/              proxy routes end to end, with scripted backends
     main.rs             heads, failures, timeouts; shared helpers
     bodies.rs           request bodies, `100 Continue`, early responses
@@ -88,6 +93,8 @@ tests/
     split.rs            deterministic split, byte-by-byte and pipelined runs
     generator.rs        random requests and schedule steps
     model.rs            the model of the random file tree
+    conditional.rs      the model of conditional requests (RFC 9110), the
+                        conditional lines of random requests, coverage
     client.rs           a random or witness client, as the test sees it
     admission.rs        the peers of each seed and the spec's model of
                         what the connection limits admit
@@ -227,8 +234,17 @@ Both nets (the whole `faults` binary) run with a date set (`Sim::set_date`,
 the RFC 9110 example `Sun, 06 Nov 1994 08:49:37 GMT`), so every response
 they check carries `Date`; the other binaries leave it unset and see none.
 
+The static net's files have random mtimes around that date, and its
+clients add conditional lines (`faults/conditional.rs`) to about two in
+three `GET`s and `HEAD`s, while the head stays within `max_head`: the
+file's real `ETag`, strong, weak, in a list or on two lines, `*`, other
+and malformed tags, and dates equal to, before and after the mtime (also
+after the clock) in all three HTTP-date forms. Whether the answer is 200
+or 304 comes from a model of RFC 9110 written in the net, never from the
+core, and every kind of decision is gated in the coverage.
+
 Every test binary takes the bytes of the responses the core writes itself
-(fixed 4xx/5xx, file heads, redirects) and the status of each parse error
+(fixed 4xx/5xx, file heads, 304s, redirects) and the status of each parse error
 from a model written from the spec (`tests/support/model_http.rs`, included
 by `#[path]`), never from the core's renderers.
 

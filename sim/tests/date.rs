@@ -15,7 +15,7 @@ use durchlauferhitzer_sim::Sim;
 #[path = "support/model_http.rs"]
 mod model_http;
 
-use model_http::{RFC_DATE, model_file_head, model_fixed, model_redirect};
+use model_http::{RFC_DATE, model_file_head, model_fixed, model_redirect, sim_stamp};
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test {
@@ -49,7 +49,12 @@ const DATE: Option<&str> = Some(RFC_DATE.1);
 fn file_heads_redirects_and_fixed_responses_carry_date() {
     let mut sim = dated();
     let get = b"GET /f.txt HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n";
-    let mut expected = model_file_head("text/plain; charset=utf-8", 3, Persistence::Close, DATE);
+    let mut expected = model_file_head(
+        "text/plain; charset=utf-8",
+        sim_stamp(3, 1),
+        Persistence::Close,
+        DATE,
+    );
     expected.extend_from_slice(b"abc");
     assert_eq!(exchange(&mut sim, get), expected, "{}", sim.trace());
 

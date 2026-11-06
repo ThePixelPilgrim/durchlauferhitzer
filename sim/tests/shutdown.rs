@@ -17,7 +17,7 @@ use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
 #[path = "support/model_http.rs"]
 mod model_http;
 
-use model_http::{RFC_DATE, model_file_head, model_fixed};
+use model_http::{RFC_DATE, model_file_head, model_fixed, sim_stamp};
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test {
@@ -136,7 +136,7 @@ fn an_inflight_download_completes_then_closes() {
     assert_eq!(sim.open_files(), 1);
     sim.set_client_window(c, Window::Unlimited);
     sim.run_until_idle();
-    let mut expected = model_file_head(TEXT, 3000, Persistence::KeepAlive, None);
+    let mut expected = model_file_head(TEXT, sim_stamp(3000, 1), Persistence::KeepAlive, None);
     expected.extend_from_slice(&[b'x'; 3000]);
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
@@ -156,7 +156,7 @@ fn a_response_rendered_after_the_drain_began_says_close() {
     sim.run_until_idle();
     sim.begin_drain(DrainTarget::Shutdown);
     sim.advance(Duration::from_millis(50));
-    let mut expected = model_file_head(TEXT, 3000, Persistence::Close, None);
+    let mut expected = model_file_head(TEXT, sim_stamp(3000, 1), Persistence::Close, None);
     expected.extend_from_slice(&[b'x'; 3000]);
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
@@ -431,7 +431,7 @@ fn a_request_pipelined_behind_the_drain_gets_503() {
     let logs = sim.logs().len();
     sim.set_client_window(c, Window::Unlimited);
     sim.run_until_idle();
-    let mut expected = model_file_head(TEXT, 3000, Persistence::KeepAlive, None);
+    let mut expected = model_file_head(TEXT, sim_stamp(3000, 1), Persistence::KeepAlive, None);
     expected.extend_from_slice(&[b'x'; 3000]);
     expected.extend(model_fixed(
         Status::ServiceUnavailable,
@@ -631,7 +631,7 @@ fn a_request_pipelined_behind_an_open_in_flight_is_not_answered() {
     sim.run_until_idle();
     sim.begin_drain(DrainTarget::Shutdown);
     sim.advance(Duration::from_millis(50));
-    let mut expected = model_file_head(TEXT, 3000, Persistence::Close, None);
+    let mut expected = model_file_head(TEXT, sim_stamp(3000, 1), Persistence::Close, None);
     expected.extend_from_slice(&[b'x'; 3000]);
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     assert_eq!(
@@ -708,7 +708,7 @@ fn partial_pipelined_behind_a_download(sim: &mut Sim) -> durchlauferhitzer_core:
     sim.begin_drain(DrainTarget::Shutdown);
     sim.set_client_window(c, Window::Unlimited);
     sim.run_until_idle();
-    let mut expected = model_file_head(TEXT, 3000, Persistence::KeepAlive, None);
+    let mut expected = model_file_head(TEXT, sim_stamp(3000, 1), Persistence::KeepAlive, None);
     expected.extend_from_slice(&[b'x'; 3000]);
     assert_eq!(sim.take_received(c), expected, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());

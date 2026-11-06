@@ -1,9 +1,11 @@
 //! Response heads: fixed plain-text responses (status line plus short text
-//! body), `301` redirects and the head of a `200 OK` file response.
+//! body), `301` redirects, the head of a `200 OK` file response and the
+//! `304 Not Modified` of a conditional request.
 //!
 //! Each takes the core's current IMF-fixdate, if the driver has set one,
 //! and then carries `Date` right after the status line (FR-HTTP-22a).
 
+use super::conditional::Validators;
 use super::date::{IMF_FIXDATE_LEN, ImfFixdate};
 use super::request::{Method, Persistence};
 use super::status::Status;
@@ -38,6 +40,7 @@ impl BodyMode {
 }
 
 /// Appends a fixed response for `status` to `out` (existing bytes are kept).
+/// Never used for `304`, which has no body ([`render_not_modified`]).
 /// `Content-Length` always describes the full body, also for `HeadOnly`.
 /// A `405` names the allowed methods (`Allow: GET, HEAD`). `Date` follows
 /// the status line when `date` is set.
@@ -59,6 +62,7 @@ pub fn render_fixed(
         Status::MethodNotAllowed => head.push_str("Allow: GET, HEAD\r\n"),
         Status::Ok
         | Status::MovedPermanently
+        | Status::NotModified
         | Status::BadRequest
         | Status::NotFound
         | Status::RequestTimeout
@@ -158,33 +162,78 @@ pub fn redirect_len(
         .saturating_add(body)
 }
 
+/// Appends the `ETag` and `Last-Modified` lines of `validators`.
+fn put_validators(validators: &Validators, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"ETag: ");
+    out.extend_from_slice(validators.etag.as_bytes());
+    out.extend_from_slice(b"\r\nLast-Modified: ");
+    out.extend_from_slice(&validators.last_modified);
+    out.extend_from_slice(b"\r\n");
+}
+
 /// Appends the head of a `200 OK` response whose body is `len` bytes of a
-/// file of type `content_type` (existing bytes are kept). `Date` follows
-/// the status line when `date` is set.
+/// file of type `content_type` (existing bytes are kept), in the order of
+/// FR-STATIC-11: status line, `Date` (when `date` is set),
+/// `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`,
+/// `X-Content-Type-Options`, `Connection: close` (only when closing).
 pub fn render_file_head(
     content_type: &str,
     len: u64,
+    validators: &Validators,
     persistence: Persistence,
     date: Option<&ImfFixdate>,
     out: &mut Vec<u8>,
 ) {
     out.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
     put_date(date, out);
-    let mut head = format!(
-        "Content-Type: {content_type}\r\nContent-Length: {len}\r\nX-Content-Type-Options: nosniff\r\n"
+    out.extend_from_slice(
+        format!("Content-Type: {content_type}\r\nContent-Length: {len}\r\n").as_bytes(),
     );
+    put_validators(validators, out);
+    out.extend_from_slice(b"X-Content-Type-Options: nosniff\r\n");
     match persistence {
-        Persistence::Close => head.push_str("Connection: close\r\n"),
+        Persistence::Close => out.extend_from_slice(CONNECTION_CLOSE.as_bytes()),
         Persistence::KeepAlive => {}
     }
-    head.push_str("\r\n");
-    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(b"\r\n");
+}
+
+/// Appends a `304 Not Modified` (FR-STATIC-18): status line, `Date` (when
+/// `date` is set), `ETag`, `Last-Modified`, `Connection: close` (only when
+/// closing). No content headers and no body, for `GET` and `HEAD` alike.
+pub fn render_not_modified(
+    validators: &Validators,
+    persistence: Persistence,
+    date: Option<&ImfFixdate>,
+    out: &mut Vec<u8>,
+) {
+    out.extend_from_slice(b"HTTP/1.1 304 Not Modified\r\n");
+    put_date(date, out);
+    put_validators(validators, out);
+    match persistence {
+        Persistence::Close => out.extend_from_slice(CONNECTION_CLOSE.as_bytes()),
+        Persistence::KeepAlive => {}
+    }
+    out.extend_from_slice(b"\r\n");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file::FileStamp;
     use crate::http::date::imf_fixdate;
+
+    /// A file of `size` bytes last modified at the RFC's example second
+    /// (plus 5 ns): `ETag` `"<size hex>-ae1b981bc490a05"`.
+    fn validators(size: u64) -> Validators {
+        Validators::of(FileStamp {
+            size,
+            modified_ns: 784_111_777_000_000_005,
+        })
+    }
+
+    const VALIDATORS_1234: &str =
+        "ETag: \"4d2-ae1b981bc490a05\"\r\nLast-Modified: Sun, 06 Nov 1994 08:49:37 GMT\r\n";
 
     /// The example date of RFC 9110 section 5.6.7.
     fn rfc_date() -> ImfFixdate {
@@ -214,13 +263,14 @@ mod tests {
         let mut out = Vec::new();
         render_file_head(
             "image/png",
-            3,
+            0x4d2,
+            &validators(0x4d2),
             Persistence::KeepAlive,
             Some(&date),
             &mut out,
         );
         let expected = format!(
-            "HTTP/1.1 200 OK\r\n{DATE_LINE}Content-Type: image/png\r\nContent-Length: 3\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+            "HTTP/1.1 200 OK\r\n{DATE_LINE}Content-Type: image/png\r\nContent-Length: 1234\r\n{VALIDATORS_1234}X-Content-Type-Options: nosniff\r\n\r\n"
         );
         assert_eq!(String::from_utf8(out).unwrap(), expected);
 
@@ -314,24 +364,50 @@ mod tests {
         render_file_head(
             "text/css; charset=utf-8",
             1234,
+            &validators(1234),
             Persistence::KeepAlive,
             None,
             &mut out,
         );
-        assert_eq!(
-            out,
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=utf-8\r\nContent-Length: 1234\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+        let expected = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=utf-8\r\nContent-Length: 1234\r\n{VALIDATORS_1234}X-Content-Type-Options: nosniff\r\n\r\n"
         );
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
     }
 
     #[test]
     fn renders_file_head_close() {
         let mut out = b"x".to_vec();
-        render_file_head("image/png", 0, Persistence::Close, None, &mut out);
+        let zero = Validators::of(FileStamp {
+            size: 0,
+            modified_ns: 0,
+        });
+        render_file_head("image/png", 0, &zero, Persistence::Close, None, &mut out);
         assert_eq!(
             out,
-            b"xHTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 0\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+            b"xHTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 0\r\nETag: \"0-0\"\r\nLast-Modified: Thu, 01 Jan 1970 00:00:00 GMT\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
         );
+    }
+
+    /// FR-STATIC-18: a 304 carries `Date`, `ETag` and `Last-Modified`,
+    /// `Connection: close` only when closing, and nothing else.
+    #[test]
+    fn renders_not_modified() {
+        let date = rfc_date();
+        let mut out = b"x".to_vec();
+        render_not_modified(
+            &validators(1234),
+            Persistence::KeepAlive,
+            Some(&date),
+            &mut out,
+        );
+        let expected = format!("xHTTP/1.1 304 Not Modified\r\n{DATE_LINE}{VALIDATORS_1234}\r\n");
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+        let mut out = Vec::new();
+        render_not_modified(&validators(1234), Persistence::Close, None, &mut out);
+        let expected =
+            format!("HTTP/1.1 304 Not Modified\r\n{VALIDATORS_1234}Connection: close\r\n\r\n");
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
     }
 
     #[test]

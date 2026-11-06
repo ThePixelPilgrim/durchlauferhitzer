@@ -1,5 +1,5 @@
 //! The model of the responses the core writes itself, written from the
-//! spec (FR-HTTP-10, -19…-22a, -06, FR-STATIC-06, -11…-13) rather than taken
+//! spec (FR-HTTP-10, -19…-22a, -06, FR-STATIC-06, -11…-13, -18) rather than taken
 //! from the core's renderers, so a wrong status, reason, header or body in
 //! the core shows up in the tests. Shared by every test binary of the sim
 //! (`#[path]` include), which take their expected bytes from here.
@@ -19,6 +19,7 @@ fn date_line(date: Option<&str>) -> String {
     date.map(|d| format!("Date: {d}\r\n")).unwrap_or_default()
 }
 
+use durchlauferhitzer_core::FileStamp;
 use durchlauferhitzer_core::http::request::{HttpError, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
@@ -28,6 +29,7 @@ pub(crate) fn model_reason(status: Status) -> &'static str {
     match status {
         Status::Ok => "OK",
         Status::MovedPermanently => "Moved Permanently",
+        Status::NotModified => "Not Modified",
         Status::BadRequest => "Bad Request",
         Status::NotFound => "Not Found",
         Status::MethodNotAllowed => "Method Not Allowed",
@@ -48,6 +50,7 @@ pub(crate) fn model_code(status: Status) -> u16 {
     match status {
         Status::Ok => 200,
         Status::MovedPermanently => 301,
+        Status::NotModified => 304,
         Status::BadRequest => 400,
         Status::NotFound => 404,
         Status::MethodNotAllowed => 405,
@@ -125,21 +128,117 @@ pub(crate) fn model_fixed(
     out.into_bytes()
 }
 
+/// The IMF-fixdate of `secs` seconds after 1970-01-01 (RFC 9110 section
+/// 5.6.7), counted out year by year and month by month: a different way
+/// than the core's day arithmetic.
+pub(crate) fn model_imf_fixdate(secs: u64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut days = secs / 86_400;
+    let weekday = DAYS.get((days % 7) as usize).copied().unwrap_or_default();
+    let mut year = 1970;
+    loop {
+        let len = if model_leap(year) { 366 } else { 365 };
+        if days < len {
+            break;
+        }
+        days -= len;
+        year += 1;
+    }
+    let mut month = 0;
+    while days >= model_month_len(year, month) {
+        days -= model_month_len(year, month);
+        month += 1;
+    }
+    let of_day = secs % 86_400;
+    format!(
+        "{weekday}, {:02} {} {year} {:02}:{:02}:{:02} GMT",
+        days + 1,
+        MONTHS.get(month).copied().unwrap_or_default(),
+        of_day / 3600,
+        of_day / 60 % 60,
+        of_day % 60
+    )
+}
+
+pub(crate) fn model_leap(year: u64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// Days of `month` (0 = January) in `year`.
+pub(crate) fn model_month_len(year: u64, month: usize) -> u64 {
+    match month {
+        1 if model_leap(year) => 29,
+        1 => 28,
+        3 | 5 | 8 | 10 => 30,
+        _ => 31,
+    }
+}
+
+/// The stamp of a file of `size` bytes that was the `nth` file added to
+/// its `Sim` (`Sim::add_file` gives the files mtimes of 1, 2, ... ns).
+pub(crate) fn sim_stamp(size: u64, nth: u64) -> FileStamp {
+    FileStamp {
+        size,
+        modified_ns: nth,
+    }
+}
+
+/// A file's `ETag` (FR-STATIC-18): strong, size and mtime in nanoseconds
+/// as lowercase hex, `"<size>-<mtime>"`.
+pub(crate) fn model_etag(stamp: FileStamp) -> String {
+    format!("\"{:x}-{:x}\"", stamp.size, stamp.modified_ns)
+}
+
+/// `ETag` and `Last-Modified` (the mtime in whole seconds) lines.
+fn validator_lines(stamp: FileStamp) -> String {
+    format!(
+        "ETag: {}\r\nLast-Modified: {}\r\n",
+        model_etag(stamp),
+        model_imf_fixdate(stamp.modified_ns / 1_000_000_000)
+    )
+}
+
 /// The head of a `200 OK` file response (FR-STATIC-11): status line,
 /// `Date` (FR-HTTP-22a, once set), `Content-Type` (FR-STATIC-12, from the model's own table in
-/// `model.rs`), `Content-Length` = the size at open,
+/// `model.rs`), `Content-Length` = the size at open, `ETag` and
+/// `Last-Modified` of the stamp at open (FR-STATIC-18),
 /// `X-Content-Type-Options: nosniff`, `Connection: close` only when
 /// closing, blank line. A `HEAD` gets the same head (FR-STATIC-13).
 pub(crate) fn model_file_head(
     content_type: &str,
-    size: u64,
+    stamp: FileStamp,
     persistence: Persistence,
     date: Option<&str>,
 ) -> Vec<u8> {
     let mut out = format!(
-        "HTTP/1.1 200 OK\r\n{}Content-Type: {content_type}\r\nContent-Length: {size}\r\n\
-         X-Content-Type-Options: nosniff\r\n",
-        date_line(date)
+        "HTTP/1.1 200 OK\r\n{}Content-Type: {content_type}\r\nContent-Length: {}\r\n\
+         {}X-Content-Type-Options: nosniff\r\n",
+        date_line(date),
+        stamp.size,
+        validator_lines(stamp)
+    );
+    if persistence == Persistence::Close {
+        out.push_str("Connection: close\r\n");
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
+}
+
+/// A `304 Not Modified` (FR-STATIC-18): status line, `Date` (once set),
+/// `ETag`, `Last-Modified`, `Connection: close` only when closing; no
+/// other header and no body, for `GET` and `HEAD` alike.
+pub(crate) fn model_not_modified(
+    stamp: FileStamp,
+    persistence: Persistence,
+    date: Option<&str>,
+) -> Vec<u8> {
+    let mut out = format!(
+        "HTTP/1.1 304 Not Modified\r\n{}{}",
+        date_line(date),
+        validator_lines(stamp)
     );
     if persistence == Persistence::Close {
         out.push_str("Connection: close\r\n");

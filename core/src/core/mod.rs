@@ -74,6 +74,10 @@ pub struct Core {
     /// the IMF-fixdate of the second last passed to [`Core::set_date`];
     /// `None` until then, and no `Date` is sent.
     date: Option<ImfFixdate>,
+    /// The second last passed to [`Core::set_date`] (Unix seconds), which
+    /// an `If-Modified-Since` must not be after (FR-STATIC-18); `None`
+    /// until then.
+    clock: Option<u64>,
     /// Serving, or draining for a shutdown or a restart (FR-PROC-05).
     mode: Mode,
 }
@@ -140,6 +144,7 @@ impl Core {
             upstream_recv_capacity,
             head_capacity,
             date: None,
+            clock: None,
             mode: Mode::Serving,
         }
     }
@@ -149,9 +154,12 @@ impl Core {
     /// it as `Date` (its IMF-fixdate; beyond the year 9999 clamped to
     /// `Fri, 31 Dec 9999 23:59:59 GMT`). The driver calls it whenever the
     /// second changes, before the next [`Core::handle`]; until the first
-    /// call no `Date` is sent. It emits nothing.
+    /// call no `Date` is sent, and no `If-Modified-Since` is honoured
+    /// (FR-STATIC-18: a date after this second is invalid). It emits
+    /// nothing.
     pub fn set_date(&mut self, unix_secs: u64) {
         self.date = Some(imf_fixdate(unix_secs));
+        self.clock = Some(unix_secs);
     }
 
     /// Every distinct backend address (an IP literal and port) in config

@@ -64,6 +64,7 @@ use child::{
     Containment, PATIENCE, Running, Setup, TempDir, free_port, non_root_uid, refused_port,
     seccomp_kill, text,
 };
+use durchlauferhitzer_core::FileStamp;
 use durchlauferhitzer_core::http::request::Persistence;
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
@@ -310,14 +311,15 @@ fn client_request(kind: Kind) -> Vec<u8> {
 fn client_response(kind: Kind, date: Option<&str>) -> Vec<u8> {
     let keep = Persistence::KeepAlive;
     let date = || date.expect("a core-rendered response carries Date");
+    let stamps = STAMPS.get().expect("the files are written first");
     match kind {
         Kind::File => [
-            model_file_head(PAGE_TYPE, page().len() as u64, keep, Some(date())),
+            model_file_head(PAGE_TYPE, stamps.page, keep, Some(date())),
             page(),
         ]
         .concat(),
         Kind::Index => [
-            model_file_head(PAGE_TYPE, INDEX.len() as u64, keep, Some(date())),
+            model_file_head(PAGE_TYPE, stamps.index, keep, Some(date())),
             INDEX.to_vec(),
         ]
         .concat(),
@@ -629,6 +631,26 @@ fn write_file(path: &Path, bytes: &[u8]) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
 }
 
+/// The stamps of the two static files as written, for their `ETag` and
+/// `Last-Modified` (FR-STATIC-18).
+struct Stamps {
+    page: FileStamp,
+    index: FileStamp,
+}
+
+static STAMPS: OnceLock<Stamps> = OnceLock::new();
+
+/// Size and mtime in nanoseconds of the file at `path`, as `fstat` gives
+/// them.
+fn stamp_of(path: &Path) -> FileStamp {
+    let meta = fs::metadata(path).unwrap();
+    let mtime = meta.modified().unwrap().duration_since(UNIX_EPOCH).unwrap();
+    FileStamp {
+        size: meta.len(),
+        modified_ns: u64::try_from(mtime.as_nanos()).unwrap(),
+    }
+}
+
 /// The inode of the listening socket on `addr` (`/proc/net/tcp`, state
 /// `0A`).
 fn listener_inode(addr: SocketAddr) -> String {
@@ -708,6 +730,11 @@ fn smoke_static_and_proxy_in_parallel_then_sigterm() {
     fs::create_dir_all(www.join("dir")).unwrap();
     fs::set_permissions(www.join("dir"), fs::Permissions::from_mode(0o755)).unwrap();
     write_file(&www.join("dir").join("index.html"), INDEX);
+    let stamps = Stamps {
+        page: stamp_of(&www.join("page.html")),
+        index: stamp_of(&www.join("dir").join("index.html")),
+    };
+    assert!(STAMPS.set(stamps).is_ok(), "one smoke run per process");
 
     let backend_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let backend_addr = backend_listener.local_addr().unwrap();

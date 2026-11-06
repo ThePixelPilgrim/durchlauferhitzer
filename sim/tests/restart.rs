@@ -16,7 +16,7 @@ use durchlauferhitzer_sim::{Sim, SimConnState, Window};
 #[path = "support/model_http.rs"]
 mod model_http;
 
-use model_http::{model_file_head, model_fixed};
+use model_http::{model_file_head, model_fixed, sim_stamp};
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test { path / { static /srv/www; } }";
@@ -30,7 +30,7 @@ fn peer() -> IpAddr {
 }
 
 fn file(persistence: Persistence) -> Vec<u8> {
-    let mut bytes = model_file_head(TEXT, 3000, persistence, None);
+    let mut bytes = model_file_head(TEXT, sim_stamp(3000, 1), persistence, None);
     bytes.extend_from_slice(&[b'x'; 3000]);
     bytes
 }

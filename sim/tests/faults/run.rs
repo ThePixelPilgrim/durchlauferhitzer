@@ -64,7 +64,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
             match op {
                 25..60 => {
                     if !client.eof {
-                        send_piece(&mut sim, client, &mut rng, tree.long_dir.as_deref());
+                        send_piece(&mut sim, client, &mut rng, &tree);
                     }
                 }
                 60..68 => sim.set_client_window(client.id, random_window(&mut rng, big)),

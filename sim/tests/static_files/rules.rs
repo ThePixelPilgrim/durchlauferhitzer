@@ -262,7 +262,11 @@ fn directory_with_slash_serves_index() {
     sim.add_file("/srv/www", "docs/index.html", b"docs!");
     sim.add_file("/srv/www", "index.html", b"home");
     let (c, received) = exchange(&mut sim, &get("/docs/"));
-    let mut expected = head("text/html; charset=utf-8", 5, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/html; charset=utf-8",
+        sim.file_stamp("/srv/www", "docs/index.html"),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"docs!");
     assert_eq!(received, expected, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
@@ -286,7 +290,11 @@ fn directory_with_slash_serves_index() {
     assert!(close1 < open2, "{}", sim.trace());
     // The root itself.
     let (_, received) = exchange(&mut sim, &get("/"));
-    let mut expected = head("text/html; charset=utf-8", 4, Persistence::KeepAlive);
+    let mut expected = head(
+        "text/html; charset=utf-8",
+        sim.file_stamp("/srv/www", "index.html"),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"home");
     assert_eq!(received, expected, "{}", sim.trace());
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
@@ -319,7 +327,7 @@ fn head_on_large_file_sends_head_only() {
         received,
         head(
             "application/octet-stream",
-            size as u64,
+            sim_stamp(size as u64, 1),
             Persistence::KeepAlive
         ),
         "{}",
@@ -341,10 +349,11 @@ fn head_on_large_file_sends_head_only() {
     let mut both = head_req("/s.txt");
     both.extend_from_slice(&get("/s.txt"));
     let (_, received) = exchange(&mut sim, &both);
-    let mut expected = head("text/plain; charset=utf-8", 5, Persistence::KeepAlive);
+    let small = sim.file_stamp("/srv/www", "s.txt");
+    let mut expected = head("text/plain; charset=utf-8", small, Persistence::KeepAlive);
     expected.extend_from_slice(&head(
         "text/plain; charset=utf-8",
-        5,
+        small,
         Persistence::KeepAlive,
     ));
     expected.extend_from_slice(b"small");
@@ -354,7 +363,11 @@ fn head_on_large_file_sends_head_only() {
     let (_, received) = exchange(&mut sim, &head_req("/docs/"));
     assert_eq!(
         received,
-        head("text/html; charset=utf-8", 5, Persistence::KeepAlive),
+        head(
+            "text/html; charset=utf-8",
+            sim.file_stamp("/srv/www", "docs/index.html"),
+            Persistence::KeepAlive,
+        ),
         "{}",
         sim.trace()
     );
@@ -432,7 +445,11 @@ fn well_known_route_serves_files() {
     sim.add_file("/srv/well-known", "acme-challenge/abc", b"token");
     sim.add_file("/srv/well-known", ".secret", b"no");
     let (_, received) = exchange(&mut sim, &get("/.well-known/acme-challenge/abc"));
-    let mut expected = head("application/octet-stream", 5, Persistence::KeepAlive);
+    let mut expected = head(
+        "application/octet-stream",
+        sim_stamp(5, 1),
+        Persistence::KeepAlive,
+    );
     expected.extend_from_slice(b"token");
     assert_eq!(received, expected, "{}", sim.trace());
     assert_404(&mut sim, "/.well-known/.secret");

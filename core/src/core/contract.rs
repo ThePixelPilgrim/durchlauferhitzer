@@ -134,7 +134,11 @@
 //! - A connection holds at most one file id at a time: for a directory
 //!   requested with a trailing `/`, the core closes the directory before it
 //!   opens its `index.html` under a new id. A HEAD request's file is closed
-//!   right after its head is queued, without any `Readahead`.
+//!   right after its head is queued, without any `Readahead`, and so is
+//!   the file of a conditional request answered `304 Not Modified`
+//!   (FR-STATIC-18): the decision uses the stamp of the open descriptor,
+//!   and an `If-Modified-Since` counts only once [`Core::set_date`] gave
+//!   the core a time it is not after.
 //! - A file is open from its `FileOpened` until the core's `CloseFile`; a
 //!   failed open leaves nothing to close. `CloseFile` comes exactly once per
 //!   opened file, also when its connection closes.

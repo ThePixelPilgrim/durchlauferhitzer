@@ -26,6 +26,8 @@ pub(crate) enum Fault {
 #[derive(Debug)]
 pub(crate) struct ModelFile {
     pub(crate) bytes: Vec<u8>,
+    /// Size and mtime at open (FR-STATIC-18 validators).
+    pub(crate) stamp: FileStamp,
     pub(crate) content_type: &'static str,
     pub(crate) fault: Fault,
 }
@@ -87,6 +89,8 @@ pub(crate) struct Tree {
     /// Long seeds: a directory with a name long enough that its redirect
     /// may not fit the send buffer.
     pub(crate) long_dir: Option<String>,
+    /// The seed's `max_head`: generated heads stay within it.
+    pub(crate) max_head: usize,
 }
 
 /// Percent-decodes one path segment (escapes are well-formed: the path
@@ -249,7 +253,7 @@ pub(crate) fn random_fault(rng: &mut fastrand::Rng, size: u64) -> Fault {
                 2 => size,
                 _ => rng.u64(0..size),
             };
-            // Far above the sim's own modification times.
+            // Far from the tree's modification times.
             let new = FileStamp {
                 size: new_size,
                 modified_ns: 1_000_000 + rng.u64(0..1000),
@@ -315,6 +319,13 @@ impl Tree {
     ) {
         let bytes = file_bytes(rng, size);
         sim.add_file(ROOT, path, &bytes);
+        // An mtime up to a day before the net's clock, any nanoseconds.
+        let secs = NET_DATE.0 - rng.u64(0..86_400);
+        let stamp = FileStamp {
+            size,
+            modified_ns: secs * 1_000_000_000 + rng.u64(0..1_000_000_000),
+        };
+        sim.set_modified(ROOT, path, stamp.modified_ns);
         match fault {
             Fault::None => {}
             Fault::Shrink(at) => sim.shrink_on_send(ROOT, path, at),
@@ -329,6 +340,7 @@ impl Tree {
             path.to_owned(),
             Node::File(ModelFile {
                 bytes,
+                stamp,
                 content_type: content_type_of(name),
                 fault,
             }),
@@ -344,7 +356,10 @@ impl Tree {
     /// faults, directories with and without `index.html`, symlinks, a
     /// denied file, a denied directory, a special file and a dotfile.
     pub(crate) fn random(sim: &mut Sim, rng: &mut fastrand::Rng, big: bool, long: bool) -> Tree {
-        let mut tree = Tree::default();
+        let mut tree = Tree {
+            max_head: if long { 2200 } else { 160 },
+            ..Tree::default()
+        };
         tree.add_dir(sim, "d");
         tree.add_dir(sim, "f");
         tree.add_growing_file(sim, rng, "grow.txt", big);

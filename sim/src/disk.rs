@@ -63,6 +63,18 @@ impl Sim {
         self.fs.add_file(root, path, bytes);
     }
 
+    /// Set the modification time of the file `path` under `root` (its
+    /// size stays): later opens report it. `add_file` gives each file a
+    /// distinct small one (1, 2, ... ns).
+    pub fn set_modified(&mut self, root: &str, path: &str, modified_ns: u64) {
+        self.fs.set_modified(root, path, modified_ns);
+    }
+
+    /// The stamp an open of the file `path` under `root` reports now.
+    pub fn file_stamp(&self, root: &str, path: &str) -> FileStamp {
+        self.fs.stamp(root, path)
+    }
+
     /// A directory `path` under `root`.
     pub fn add_dir(&mut self, root: &str, path: &str) {
         self.fs.add_dir(root, path);

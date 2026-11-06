@@ -1,11 +1,14 @@
 use crate::conn::SEND_CAPACITY;
 use crate::core::test_support::{PEER, core};
 use crate::core::{ConnError, ConnId, Event};
+use crate::file::FileStamp;
+use crate::http::conditional::Validators;
 use crate::http::request::Persistence;
-use crate::http::response::{BodyMode, render_file_head, render_fixed};
+use crate::http::response::{BodyMode, render_file_head, render_fixed, render_not_modified};
 use crate::time::Instant;
 
-/// The send buffer bound: every fixed response and every file head, in
+/// The send buffer bound: every fixed response, every file head and every
+/// `304` (FR-STATIC-18), in
 /// every persistence and body mode, at its largest (longest content type,
 /// largest length), with and without its `Date` line (FR-HTTP-22a), fits
 /// `SEND_CAPACITY` even behind a queued `100 Continue` (the only bytes a
@@ -47,13 +50,28 @@ fn every_rendered_head_fits_the_send_buffer() {
             let mut out = CONTINUE.to_vec();
             // Far longer than any content type in the table.
             let content_type = "x".repeat(200);
-            render_file_head(&content_type, u64::MAX, persistence, date, &mut out);
+            // The longest validators: every hex digit used.
+            let validators = Validators::of(FileStamp {
+                size: u64::MAX,
+                modified_ns: u64::MAX,
+            });
+            render_file_head(
+                &content_type,
+                u64::MAX,
+                &validators,
+                persistence,
+                date,
+                &mut out,
+            );
             largest = largest.max(out.len());
+            assert!(out.len() <= SEND_CAPACITY);
+            let mut out = CONTINUE.to_vec();
+            render_not_modified(&validators, persistence, date, &mut out);
             assert!(out.len() <= SEND_CAPACITY);
         }
     }
     // The arithmetic of the report: well within the 1 KiB buffer.
-    assert!(largest <= 400, "{largest}");
+    assert!(largest <= 500, "{largest}");
 }
 
 #[test]

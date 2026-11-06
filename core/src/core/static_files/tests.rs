@@ -1,6 +1,7 @@
 use crate::core::test_support::{GET_F, PEER, files_core, regular, request, secs, stamp};
 use crate::core::{Action, ConnError, ConnId, Event, Interest};
 use crate::file::{FileError, FileId, FileKind, FileMeta, FileSegment, RootId};
+use crate::http::conditional::Validators;
 use crate::http::request::{Method, Persistence};
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::status::Status;
@@ -72,6 +73,7 @@ fn file_is_opened_read_sent_and_closed() {
     crate::http::response::render_file_head(
         "text/plain; charset=utf-8",
         3,
+        &Validators::of(stamp(3)),
         Persistence::KeepAlive,
         None,
         &mut head,
@@ -307,6 +309,7 @@ fn head_of_a_file_sends_the_head_and_closes_it() {
     crate::http::response::render_file_head(
         "text/plain; charset=utf-8",
         1 << 40,
+        &Validators::of(stamp(1 << 40)),
         Persistence::KeepAlive,
         None,
         &mut head,

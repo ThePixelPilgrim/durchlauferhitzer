@@ -1,7 +1,9 @@
-//! The `Date` header value (FR-HTTP-22a): an IMF-fixdate (RFC 9110
-//! section 5.6.7) rendered from the wall-clock second the driver supplies,
-//! with no time library: the civil date comes from days-from-civil
-//! arithmetic on the proleptic Gregorian calendar.
+//! HTTP dates (RFC 9110 section 5.6.7) with no time library: the
+//! IMF-fixdate of the `Date` header (FR-HTTP-22a) and of `Last-Modified`
+//! (FR-STATIC-18), rendered from Unix seconds, and the parser of a
+//! request's `If-Modified-Since`, which accepts all three HTTP-date forms.
+//! The civil date comes from days-from-civil arithmetic on the proleptic
+//! Gregorian calendar.
 
 /// Length of an IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`.
 pub const IMF_FIXDATE_LEN: usize = 29;
@@ -76,6 +78,213 @@ fn put(out: &mut ImfFixdate, at: usize, bytes: &[u8]) {
     }
 }
 
+/// The three-letter day names of an IMF-fixdate and of asctime.
+const DAY_NAMES: [&[u8]; 7] = [b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat", b"Sun"];
+
+/// The full day names of the obsolete RFC 850 form.
+const LONG_DAY_NAMES: [&[u8]; 7] = [
+    b"Monday",
+    b"Tuesday",
+    b"Wednesday",
+    b"Thursday",
+    b"Friday",
+    b"Saturday",
+    b"Sunday",
+];
+
+const MONTH_NAMES: [&[u8]; 12] = [
+    b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
+];
+
+/// The Unix seconds an HTTP-date names (RFC 9110 section 5.6.7), or
+/// `None` if `value` is none of its three forms:
+///
+/// - IMF-fixdate `Sun, 06 Nov 1994 08:49:37 GMT`;
+/// - RFC 850 `Sunday, 06-Nov-94 08:49:37 GMT`;
+/// - asctime `Sun Nov  6 08:49:37 1994` (day as two digits or space and
+///   digit).
+///
+/// Names are case-sensitive, as the grammar has them. The day name must be
+/// one of the seven but is not checked against the date (it is redundant).
+/// The date must exist (no 31 April, 29 February only in leap years); hour
+/// 00–23, minute 00–59, second 00–60 (a leap second counts as the next
+/// minute's first). Years before 1970 and after 9999 are `None`.
+///
+/// RFC 850's two-digit year is a fixed rule, 70–99 → 1970–1999 and
+/// 00–69 → 2000–2069: RFC 9110's "most recent year with those digits no
+/// more than 50 years ahead" at the year 2019, so it differs from the RFC
+/// only for years read as 1970s that the RFC, from 2020 on, would place in
+/// the 2070s, which are in the future and ignored there (FR-STATIC-18).
+pub fn parse_http_date(value: &[u8]) -> Option<u64> {
+    imf_fixdate_value(value)
+        .or_else(|| rfc850_value(value))
+        .or_else(|| asctime_value(value))
+}
+
+/// `Sun, 06 Nov 1994 08:49:37 GMT`.
+fn imf_fixdate_value(value: &[u8]) -> Option<u64> {
+    let [d0, d1, d2, b',', b' ', rest @ ..] = value else {
+        return None;
+    };
+    DAY_NAMES.contains(&&[*d0, *d1, *d2][..]).then_some(())?;
+    let [
+        a,
+        b,
+        b' ',
+        m0,
+        m1,
+        m2,
+        b' ',
+        y0,
+        y1,
+        y2,
+        y3,
+        b' ',
+        time @ ..,
+        b' ',
+        b'G',
+        b'M',
+        b'T',
+    ] = rest
+    else {
+        return None;
+    };
+    let day = number(&[*a, *b])?;
+    let month = month(&[*m0, *m1, *m2])?;
+    let year = number(&[*y0, *y1, *y2, *y3])?;
+    unix_secs(year, month, day, time_of_day(time)?)
+}
+
+/// `Sunday, 06-Nov-94 08:49:37 GMT`.
+fn rfc850_value(value: &[u8]) -> Option<u64> {
+    let comma = value.iter().position(|&b| b == b',')?;
+    let name = value.get(..comma)?;
+    LONG_DAY_NAMES.contains(&name).then_some(())?;
+    let rest = value.get(comma + 1..)?;
+    let [
+        b' ',
+        a,
+        b,
+        b'-',
+        m0,
+        m1,
+        m2,
+        b'-',
+        y0,
+        y1,
+        b' ',
+        time @ ..,
+        b' ',
+        b'G',
+        b'M',
+        b'T',
+    ] = rest
+    else {
+        return None;
+    };
+    let day = number(&[*a, *b])?;
+    let month = month(&[*m0, *m1, *m2])?;
+    let yy = number(&[*y0, *y1])?;
+    let year = if yy < 70 { 2000 + yy } else { 1900 + yy };
+    unix_secs(year, month, day, time_of_day(time)?)
+}
+
+/// `Sun Nov  6 08:49:37 1994`.
+fn asctime_value(value: &[u8]) -> Option<u64> {
+    let [
+        d0,
+        d1,
+        d2,
+        b' ',
+        m0,
+        m1,
+        m2,
+        b' ',
+        a,
+        b,
+        b' ',
+        time @ ..,
+        b' ',
+        y0,
+        y1,
+        y2,
+        y3,
+    ] = value
+    else {
+        return None;
+    };
+    DAY_NAMES.contains(&&[*d0, *d1, *d2][..]).then_some(())?;
+    let month = month(&[*m0, *m1, *m2])?;
+    let day = match a {
+        b' ' => number(&[*b])?,
+        _ => number(&[*a, *b])?,
+    };
+    let year = number(&[*y0, *y1, *y2, *y3])?;
+    unix_secs(year, month, day, time_of_day(time)?)
+}
+
+/// The decimal value of `digits` (ASCII digits only, at least one).
+fn number(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(
+        digits
+            .iter()
+            .fold(0, |n, d| n * 10 + u64::from(d.saturating_sub(b'0'))),
+    )
+}
+
+/// The month (1–12) a three-letter name names.
+fn month(name: &[u8]) -> Option<u64> {
+    let index = MONTH_NAMES.iter().position(|m| *m == name)?;
+    u64::try_from(index).ok().map(|i| i + 1)
+}
+
+/// The seconds into the day of `HH:MM:SS` (second 60 allowed).
+fn time_of_day(time: &[u8]) -> Option<u64> {
+    let [h0, h1, b':', m0, m1, b':', s0, s1] = time else {
+        return None;
+    };
+    let (hour, minute, second) = (
+        number(&[*h0, *h1])?,
+        number(&[*m0, *m1])?,
+        number(&[*s0, *s1])?,
+    );
+    (hour <= 23 && minute <= 59 && second <= 60).then_some(hour * 3600 + minute * 60 + second)
+}
+
+/// The Unix seconds of `of_day` seconds into the given civil date, if the
+/// date exists and lies in 1970–9999.
+fn unix_secs(year: u64, month: u64, day: u64, of_day: u64) -> Option<u64> {
+    if !(1970..=9999).contains(&year) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + of_day)
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Days after 1970-01-01 of a valid civil date from 1970 on (H. Hinnant's
+/// `days_from_civil`, the inverse of [`civil_from_days`]).
+fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if month > 2 { month - 3 } else { month + 9 }; // March first
+    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    (era * 146_097 + doe).saturating_sub(719_468)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +316,95 @@ mod tests {
         for secs in [MAX_UNIX_SECS + 1, 300_000_000_000, u64::MAX] {
             assert_eq!(text(secs), "Fri, 31 Dec 9999 23:59:59 GMT", "{secs}");
         }
+    }
+
+    #[test]
+    fn parses_the_three_forms_of_rfc_9110() {
+        for form in [
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+            "Sun Nov 06 08:49:37 1994",
+        ] {
+            assert_eq!(
+                parse_http_date(form.as_bytes()),
+                Some(784_111_777),
+                "{form}"
+            );
+        }
+    }
+
+    #[test]
+    fn rfc_850_years_70_to_99_are_1900s_and_00_to_69_are_2000s() {
+        let rows: [(&str, u64); 4] = [
+            ("Thursday, 01-Jan-70 00:00:00 GMT", 0),
+            ("Friday, 31-Dec-99 23:59:59 GMT", 946_684_799),
+            ("Saturday, 01-Jan-00 00:00:00 GMT", 946_684_800),
+            ("Monday, 31-Dec-69 23:59:59 GMT", 3_155_759_999),
+        ];
+        for (text, secs) in rows {
+            assert_eq!(parse_http_date(text.as_bytes()), Some(secs), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_leap_second_counts_as_the_next_minute() {
+        assert_eq!(
+            parse_http_date(b"Sun, 06 Nov 1994 08:49:60 GMT"),
+            Some(784_111_800)
+        );
+    }
+
+    #[test]
+    fn rejects_anything_else() {
+        for bad in [
+            "",
+            "784111777",
+            // Lowercase names, a wrong day name, a missing comma.
+            "sun, 06 Nov 1994 08:49:37 GMT",
+            "Sun, 06 nov 1994 08:49:37 GMT",
+            "Sum, 06 Nov 1994 08:49:37 GMT",
+            "Sun 06 Nov 1994 08:49:37 GMT",
+            // Not GMT, extra or missing spaces, a one-digit day.
+            "Sun, 06 Nov 1994 08:49:37 UTC",
+            "Sun, 06 Nov 1994 08:49:37 gmt",
+            "Sun, 06 Nov 1994 08:49:37 GMT ",
+            " Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sun,  6 Nov 1994 08:49:37 GMT",
+            "Sun, 6 Nov 1994 08:49:37 GMT",
+            // Out of range fields and days that do not exist.
+            "Sun, 06 Nov 1994 24:00:00 GMT",
+            "Sun, 06 Nov 1994 08:60:00 GMT",
+            "Sun, 06 Nov 1994 08:49:61 GMT",
+            "Sun, 00 Nov 1994 08:49:37 GMT",
+            "Sun, 31 Nov 1994 08:49:37 GMT",
+            "Tue, 29 Feb 2100 00:00:00 GMT",
+            "Sun, 06 Nov 1969 08:49:37 GMT",
+            "Sun, 06 Nov +994 08:49:37 GMT",
+            // RFC 850 with a short day name or a four-digit year.
+            "Sun, 06-Nov-94 08:49:37 GMT",
+            "Sunday, 06-Nov-1994 08:49:37 GMT",
+            "Sunday, 06 Nov 94 08:49:37 GMT",
+            // asctime with a zone, or the day padded with a zero and space.
+            "Sun Nov  6 08:49:37 1994 GMT",
+            "Sun Nov 6 08:49:37 1994",
+            "Sun Nov  6 08:49:37 94",
+        ] {
+            assert_eq!(parse_http_date(bad.as_bytes()), None, "{bad:?}");
+        }
+    }
+
+    /// Rendering and parsing agree on every day from 1970 to past 2100.
+    #[test]
+    fn parses_what_it_renders() {
+        for n in 0..(200 * 366) {
+            let secs = n * 86_400 + (n * 7919) % 86_400;
+            assert_eq!(parse_http_date(&imf_fixdate(secs)), Some(secs), "day {n}");
+        }
+        assert_eq!(
+            parse_http_date(&imf_fixdate(MAX_UNIX_SECS)),
+            Some(MAX_UNIX_SECS)
+        );
     }
 
     /// Every day from 1970 to well past 2100 (leap years, the skipped leap

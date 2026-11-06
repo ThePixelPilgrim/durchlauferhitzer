@@ -7,6 +7,9 @@ use super::request::HttpError;
 pub enum Status {
     Ok,
     MovedPermanently,
+    /// A conditional `GET` or `HEAD` whose file is unchanged
+    /// (FR-STATIC-18).
+    NotModified,
     BadRequest,
     NotFound,
     MethodNotAllowed,
@@ -27,6 +30,7 @@ impl Status {
             Status::Ok => 200,
             Status::BadRequest => 400,
             Status::MovedPermanently => 301,
+            Status::NotModified => 304,
             Status::NotFound => 404,
             Status::MethodNotAllowed => 405,
             Status::RequestTimeout => 408,
@@ -46,6 +50,7 @@ impl Status {
             Status::Ok => "OK",
             Status::BadRequest => "Bad Request",
             Status::MovedPermanently => "Moved Permanently",
+            Status::NotModified => "Not Modified",
             Status::NotFound => "Not Found",
             Status::MethodNotAllowed => "Method Not Allowed",
             Status::RequestTimeout => "Request Timeout",

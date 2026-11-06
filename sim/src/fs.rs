@@ -138,6 +138,20 @@ impl Fs {
         }
     }
 
+    pub(crate) fn set_modified(&mut self, root: &str, path: &str, modified_ns: u64) {
+        self.file_mut(root, path).stamp.modified_ns = modified_ns;
+    }
+
+    pub(crate) fn stamp(&self, root: &str, path: &str) -> FileStamp {
+        match self.roots.get(root).and_then(|r| r.get(&key(path))) {
+            Some(Entry {
+                node: Node::File(f),
+                ..
+            }) => f.stamp,
+            Some(_) | None => panic!("no file {path} in sim root {root}"),
+        }
+    }
+
     pub(crate) fn shrink_on_send(&mut self, root: &str, path: &str, at: u64) {
         self.file_mut(root, path).shrink_at = Some(at);
     }

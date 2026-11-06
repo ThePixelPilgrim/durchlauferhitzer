@@ -20,7 +20,7 @@ use durchlauferhitzer_sim::{Sim, TimerOrder};
 #[path = "support/model_http.rs"]
 mod model_http;
 
-use model_http::{model_file_head, model_fixed};
+use model_http::{model_file_head, model_fixed, sim_stamp};
 
 const ORDERS: [TimerOrder; 2] = [TimerOrder::OnTime, TimerOrder::Late];
 
@@ -140,7 +140,12 @@ fn due_disk_completions_come_before_an_overdue_timer() {
         assert_eq!(sim.take_received(slow), request_timeout(), "{order:?}");
         assert_eq!(
             sim.take_received(file),
-            model_file_head("text/plain; charset=utf-8", 5, Persistence::KeepAlive, None),
+            model_file_head(
+                "text/plain; charset=utf-8",
+                sim_stamp(5, 1),
+                Persistence::KeepAlive,
+                None
+            ),
             "{order:?}\n{}",
             sim.trace()
         );
@@ -427,7 +432,12 @@ fn file_opened_with_its_disk_timeout() {
             TimerOrder::Late => {
                 assert_eq!(
                     sim.take_received(c),
-                    model_file_head("text/plain; charset=utf-8", 5, Persistence::KeepAlive, None),
+                    model_file_head(
+                        "text/plain; charset=utf-8",
+                        sim_stamp(5, 1),
+                        Persistence::KeepAlive,
+                        None
+                    ),
                     "{}",
                     sim.trace()
                 );

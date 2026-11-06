@@ -40,6 +40,8 @@ pub(crate) struct Coverage {
     pub(crate) respelled_route: usize,
     /// The drains and aborts (`shutdown.rs`).
     pub(crate) shutdown: ShutdownCoverage,
+    /// Conditional requests (`conditional.rs`).
+    pub(crate) conditional: ConditionalCoverage,
     /// Peer groups (`admission.rs`).
     pub(crate) admission: AdmissionCoverage,
 }
@@ -106,6 +108,7 @@ impl Coverage {
             assert!(n > 0, "no {what} in any seed");
         }
         self.shutdown.check();
+        self.conditional.check();
     }
 }
 
@@ -134,6 +137,8 @@ pub(crate) struct Announced<'t> {
     pub(crate) renderings: Vec<Rendering>,
     /// For a 200: the file and its route's policy.
     pub(crate) file: Option<(&'t ModelFile, Policy)>,
+    /// For a 200 or a 304: the file's stamp at open.
+    pub(crate) stamp: Option<FileStamp>,
 }
 
 pub(crate) fn fixed_renderings(
@@ -198,7 +203,9 @@ pub(crate) enum Refusable {
 
 /// The response `log` (written in `phase`) announces, if it announces
 /// one, with the exact bytes it may be sent as. A logged request status
-/// that does not follow from the tree is an error; during a shutdown's
+/// that does not follow from the tree (and, for a file, from the
+/// conditional lines of `head`, the request it answers if it answers one:
+/// `conditional.rs`) is an error; during a shutdown's
 /// drain a request may be answered `503` with close instead (FR-PROC-05),
 /// unless it was parsed before the drain (`refusable`). Nothing else in
 /// this net answers a request `503` (refusals are `Rejected`), so any
@@ -208,6 +215,7 @@ pub(crate) fn announced<'t>(
     tree: &'t Tree,
     phase: Phase,
     refusable: Refusable,
+    head: Option<&[u8]>,
 ) -> Result<Option<Announced<'t>>, String> {
     let (status, request) = match log {
         Log::Response {
@@ -240,6 +248,7 @@ pub(crate) fn announced<'t>(
                 body: BodyMode::Full,
                 renderings: fixed_renderings(status, &[Persistence::Close], BodyMode::Full),
                 file: None,
+                stamp: None,
             }));
         }
         // The 502 that follows announces the response.
@@ -269,6 +278,7 @@ pub(crate) fn announced<'t>(
             body,
             renderings: fixed_renderings(status, &[Persistence::Close], body),
             file: None,
+            stamp: None,
         }));
     }
     let Some(request) = request.filter(|r| r.host.as_deref() == Some("example.test")) else {
@@ -277,13 +287,19 @@ pub(crate) fn announced<'t>(
             body,
             renderings: fixed_renderings(status, &BOTH, body),
             file: None,
+            stamp: None,
         }));
     };
     let path = request.path.as_str();
     if has_encoded_unreserved(path) {
         return Err(format!("{path} answered, but it must be rejected (400)"));
     }
-    let expected = tree.expected_status(&request.method, path);
+    let mut expected = tree.expected_status(&request.method, path);
+    if let (Status::Ok, Expect::File(f, _), Some(head)) = (expected, tree.resolve(path), head) {
+        if model_verdict(head, f.stamp, NET_DATE.0) == ModelFreshness::NotModified {
+            expected = Status::NotModified;
+        }
+    }
     // A redirect too long for the send buffer is answered 414 instead.
     let redirect_too_long = expected == Status::MovedPermanently && status == Status::UriTooLong;
     if status != expected && !redirect_too_long {
@@ -300,7 +316,7 @@ pub(crate) fn announced<'t>(
                 .iter()
                 .map(|&persistence| {
                     let mut bytes =
-                        model_file_head(f.content_type, f.size(), persistence, Some(NET_DATE.1));
+                        model_file_head(f.content_type, f.stamp, persistence, Some(NET_DATE.1));
                     let head_len = bytes.len();
                     match body {
                         BodyMode::Full => bytes.extend_from_slice(&f.bytes),
@@ -319,6 +335,29 @@ pub(crate) fn announced<'t>(
                 body,
                 renderings,
                 file: Some((f, policy)),
+                stamp: Some(f.stamp),
+            }
+        }
+        // FR-STATIC-18: a 304 is the head alone, the file unread.
+        (Status::NotModified, Expect::File(f, _)) => {
+            let renderings = BOTH
+                .iter()
+                .map(|&persistence| {
+                    let bytes = model_not_modified(f.stamp, persistence, Some(NET_DATE.1));
+                    Rendering {
+                        persistence,
+                        with_query: false,
+                        head_len: bytes.len(),
+                        bytes,
+                    }
+                })
+                .collect();
+            Announced {
+                status,
+                body,
+                renderings,
+                file: None,
+                stamp: Some(f.stamp),
             }
         }
         (Status::MovedPermanently, _) => {
@@ -331,6 +370,7 @@ pub(crate) fn announced<'t>(
                 body,
                 renderings,
                 file: None,
+                stamp: None,
             }
         }
         (Status::UriTooLong, _) => {
@@ -343,6 +383,7 @@ pub(crate) fn announced<'t>(
                 body,
                 renderings: fixed_renderings(status, &BOTH, body),
                 file: None,
+                stamp: None,
             }
         }
         _ => Announced {
@@ -350,6 +391,7 @@ pub(crate) fn announced<'t>(
             body,
             renderings: fixed_renderings(status, &BOTH, body),
             file: None,
+            stamp: None,
         },
     };
     Ok(Some(announced))
@@ -455,6 +497,8 @@ pub(crate) fn check_client(
     let mut expected = Vec::new();
     // The phase each announced response was logged in.
     let mut expected_phase = Vec::new();
+    // The request head each announced response answers, if any.
+    let mut expected_head: Vec<Option<&[u8]>> = Vec::new();
     // Every announced response but a connection refusal answers the next
     // request template: its persistence follows from that request.
     // Two templates may form one head (`heads`); `consumed` counts templates.
@@ -475,8 +519,11 @@ pub(crate) fn check_client(
         } else {
             Refusable::Yes
         };
-        match announced(log, tree, phase, refusable) {
+        // The head this log answers, unless it is a refusal (checked below).
+        let next_head = templates.clone().next().map(|(t, _)| t.as_slice());
+        match announced(log, tree, phase, refusable, next_head) {
             Ok(Some(mut a)) => {
+                let mut answers = None;
                 if refusal(log, phase) {
                     if matches!(
                         log,
@@ -491,6 +538,7 @@ pub(crate) fn check_client(
                     let Some((template, last)) = templates.next() else {
                         fail(format!("{log:?} answers no request sent"));
                     };
+                    answers = Some(template.as_slice());
                     let joined = if *last > consumed {
                         Joined::Joined
                     } else {
@@ -539,6 +587,7 @@ pub(crate) fn check_client(
                 }
                 expected.push(a);
                 expected_phase.push(phase);
+                expected_head.push(answers);
             }
             Ok(None) => {}
             Err(e) => fail(e),
@@ -595,11 +644,17 @@ pub(crate) fn check_client(
             if a.status == Status::Ok && a.body == BodyMode::HeadOnly {
                 coverage.head_ok += 1;
             }
+            if let (Some(stamp), Some(Some(head))) = (a.stamp, expected_head.get(index)) {
+                coverage
+                    .conditional
+                    .count(head, stamp, a.status, r.persistence);
+            }
             if r.persistence == Persistence::Close {
                 match a.status {
                     Status::Ok => coverage.close_ok += 1,
                     Status::MovedPermanently => coverage.close_redirect += 1,
-                    Status::BadRequest
+                    Status::NotModified
+                    | Status::BadRequest
                     | Status::NotFound
                     | Status::MethodNotAllowed
                     | Status::RequestTimeout

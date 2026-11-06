@@ -29,15 +29,18 @@ fn peer() -> IpAddr {
 #[path = "../support/model_http.rs"]
 mod model_http;
 
+use model_http::sim_stamp;
+
 /// A file head, by the spec-written model, not the core's renderer.
-fn head(content_type: &str, len: u64, persistence: Persistence) -> Vec<u8> {
-    model_http::model_file_head(content_type, len, persistence, None)
+fn head(content_type: &str, stamp: FileStamp, persistence: Persistence) -> Vec<u8> {
+    model_http::model_file_head(content_type, stamp, persistence, None)
 }
 
 fn get(path: &str) -> Vec<u8> {
     format!("GET {path} HTTP/1.1\r\nHost: example.test\r\n\r\n").into_bytes()
 }
 
+mod conditional;
 mod edge;
 mod rules;
 mod transfer;

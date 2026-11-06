@@ -12,6 +12,7 @@
 //! stateless form for a buffer parsed in one go.
 
 use crate::config::model::Limits;
+use crate::http::conditional::Conditional;
 use crate::http::head_line::{
     ConnectionNamesFraming, DeclaredFraming, FramingError, LineError, LineScanner, Position,
     check_connection, check_line, check_unterminated, connection_tokens, declared_framing,
@@ -90,6 +91,10 @@ pub struct RequestHead {
     pub body: BodyFraming,
     pub persistence: Persistence,
     pub expect: Expect,
+    /// `If-None-Match` and `If-Modified-Since` (FR-STATIC-18), read
+    /// leniently: a malformed one is ignored, never an error. Only a
+    /// static route evaluates them.
+    pub conditional: Conditional,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +352,7 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
     let body = check_framing(&headers, version)?;
     let expect = check_expect(&headers, version)?;
     let persistence = persistence(&headers, version);
+    let conditional = Conditional::of(&headers);
     Ok(RequestHead {
         method,
         target,
@@ -356,6 +362,7 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
         body,
         persistence,
         expect,
+        conditional,
     })
 }
 
