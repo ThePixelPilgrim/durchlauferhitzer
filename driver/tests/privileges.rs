@@ -31,7 +31,7 @@ use std::net::SocketAddr;
 
 use child::{
     CAP_NET_BIND_SERVICE, Caps, Containment, NOBODY, PROXY_ROUTE, Running, Setup, TempDir,
-    assert_exit, config, free_port, get, is_root, run, run_program, text,
+    assert_exit, config, free_port, get, is_root, non_root_uid, run, run_program, text,
 };
 
 fn loopback(port: u16) -> SocketAddr {
@@ -83,11 +83,15 @@ fn as_non_root_with_a_user_nothing_is_dropped_and_that_is_logged() {
     let addr = loopback(free_port());
     let path = static_config(&dir, addr, "user nobody;");
     let server = Running::start(&[&path], Setup::non_root(), addr);
+    let uid = non_root_uid();
     let response = get(addr, "/index.html");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let stderr = server.kill();
+    // Owner decision 2026-11-06: it bound its own listeners as non-root.
     assert!(
-        stderr.starts_with("kind=privileges action=kept reason=not_root\n"),
+        stderr.starts_with(&format!(
+            "kind=privileges action=kept reason=not_root\nkind=shared_ports uid={uid}\n"
+        )),
         "{stderr}"
     );
 }
@@ -206,6 +210,8 @@ fn as_root_the_server_drops_to_the_user() {
     assert_eq!(field("Groups:"), [NOBODY], "{status}");
     let stderr = server.kill();
     assert!(!stderr.contains("kind=privileges"), "{stderr}");
+    // Bound as root: only root can join its ports.
+    assert!(!stderr.contains("kind=shared_ports"), "{stderr}");
 }
 
 /// The capability sets of every thread of `pid` (the main thread and
@@ -334,6 +340,8 @@ fn a_systemd_socket_below_1024_needs_no_root() {
         stderr.starts_with("kind=privileges action=kept reason=not_root\n"),
         "{stderr}"
     );
+    // systemd bound it, not the server.
+    assert!(!stderr.contains("kind=shared_ports"), "{stderr}");
 }
 
 /// Owner decision 2026-10-28 (O3, FR-PROC-03): root with a socket from

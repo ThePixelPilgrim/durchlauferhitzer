@@ -1120,13 +1120,17 @@ Failures, persistence, timeouts:
       `kind=privileges action reason` (FR-PROC-03: `action=kept
       reason=not_root`, the only values so far), `kind=shutdown phase
       [detached]` (FR-PROC-05: `phase=draining`, `phase=aborting`,
-      `phase=done detached=N`; FR-PROC-07: `phase=restarting`),
+      `phase=done detached=N`; FR-PROC-07: `phase=restarting`, and
+      `phase=draining` after it when a SIGTERM turns the restart drain
+      into the SIGTERM drain),
       `kind=ready_failed errno` (FR-PROC-07: writing `ready\n` to the
       `--ready-fd` descriptor failed; errno 0 for a write of 0 bytes;
       the server serves on), `kind=steer_failed errno` (FR-PROC-07
       "Steering": attaching a reuseport steering program to a listener
       failed in a `--ready-fd` start; startup goes on),
-      `kind=containment layer state [abi |
+      `kind=shared_ports uid` (FR-PROC-07: the server bound its own
+      listeners, which share their ports, as the non-root effective uid
+      `uid`), `kind=containment layer state [abi |
       action log] [gaps covered_by] [uncovered]` (FR-PROC-06, below).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
     `192.0.2.7`); `status` the three-digit code; `backend` the backend's
@@ -1216,6 +1220,9 @@ Failures, persistence, timeouts:
   (FR-PROC-05): `kind=shutdown phase=draining` once the first SIGTERM
   has closed the listeners, before the drain begins; `kind=shutdown
   phase=restarting` likewise for SIGHUP's restart drain (FR-PROC-07);
+  `kind=shutdown phase=draining` after it when a SIGTERM during the
+  restart drain turns it into the SIGTERM drain (owner decision
+  2026-11-06), before the core's drain is escalated;
   `kind=shutdown phase=aborting` before `abort_all` (a SIGTERM or SIGINT
   during a drain, a SIGINT, `shutdown_timeout` or `restart_timeout`), so the `rejected ... reason=shutting_down`
   lines of the cut exchanges follow it; `kind=shutdown phase=done
@@ -1234,7 +1241,14 @@ Failures, persistence, timeouts:
   (FR-PROC-07 "Steering"): the one steering to the running server after
   each `listen` (written with the startup notes, before `privileges`) or
   the one steering to itself before the seccomp filter; startup goes
-  on.
+  on. *(Stage 6 final review, owner decision 2026-11-06:)*
+  `shared_ports uid` is logged once at startup, after `privileges`, when
+  the server bound its own listeners (not systemd's) as a non-root
+  effective uid: any process of that uid can join their port groups
+  (FR-PROC-07 builder calls). A root bind logs nothing (only root can
+  join). Like `privileges`, it is written with the startup notes, so a
+  startup that fails later (the seccomp filter) prints it before its
+  error line.
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
@@ -1427,7 +1441,10 @@ Failures, persistence, timeouts:
     loop at once, without waiting for orphaned opens (DRV-14). SIGPIPE is
     read and ignored. SIGHUP starts the restart drain (FR-PROC-07); it
     is blocked and read, so its default action can never end the
-    server. Then, in this order: the disk pool
+    server. A SIGTERM during the restart drain logs `phase=draining`,
+    calls `begin_drain` for the shutdown and moves the deadline to now
+    plus `shutdown_timeout` (FR-PROC-07, owner decision 2026-11-06);
+    from then on it is the SIGTERM drain above. Then, in this order: the disk pool
     is shut down, waiting at most 1 s for its workers, the ones still
     running (stuck in the kernel) are detached and counted (caveat: a
     worker in uninterruptible sleep, a hung disk's D state, still delays
@@ -1709,8 +1726,9 @@ Failures, persistence, timeouts:
       only root, so the README recommends binding as root and dropping
       to `user`. *(Owner decision 2026-11-06, stage 6 review:)* a server
       that binds its own listeners as a non-root uid logs it at startup
-      (any process of that uid could join its ports and take their
-      connections); `SO_REUSEPORT` stays on, since a non-root server's
+      (`kind=shared_ports uid=N`, FR-LOG-05; any process of that uid
+      could join its ports and take their connections); `SO_REUSEPORT`
+      stays on, since a non-root server's
       reload needs it.
     - Upgrading from a stage 5 binary, whose listeners lack
       `SO_REUSEPORT`, needs one full stop and start (README).

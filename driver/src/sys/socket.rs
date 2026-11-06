@@ -467,7 +467,7 @@ fn from_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
 mod ipv6;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, TcpStream};
     use std::os::fd::{AsFd, AsRawFd, OwnedFd};
     use std::time::{Duration, Instant};
@@ -547,7 +547,7 @@ mod tests {
 
     /// Connects `n` times to `addr`, then counts the connections each of
     /// `listeners` accepts, until all `n` are accepted (at most 5 s).
-    fn spread(addr: SocketAddr, n: usize, listeners: &[&OwnedFd]) -> Vec<usize> {
+    pub(crate) fn spread(addr: SocketAddr, n: usize, listeners: &[&OwnedFd]) -> Vec<usize> {
         let held: Vec<TcpStream> = (0..n).map(|_| TcpStream::connect(addr).unwrap()).collect();
         let mut counts = vec![0; listeners.len()];
         let deadline = Instant::now() + Duration::from_secs(5);

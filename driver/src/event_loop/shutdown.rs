@@ -8,9 +8,14 @@
 //!   drain, with its deadline at now plus `restart_timeout` (a
 //!   driver-owned deadline, folded into the wait's timeout like the
 //!   accept retry, DRV-16).
-//! - Draining (either target): SIGTERM, SIGINT or the deadline aborts;
-//!   SIGHUP is ignored (a second restart, or a shutdown's drain, which
-//!   is final). The loop leaves once the core is drained.
+//! - Restart drain: SIGTERM turns it into the shutdown drain, with the
+//!   deadline moved to now plus `shutdown_timeout` (owner decision
+//!   2026-11-06: `stop` after a reload still drains gracefully).
+//! - Shutdown drain (from the start or after a restart drain): SIGTERM
+//!   aborts.
+//! - Draining (either target): SIGINT or the deadline aborts; SIGHUP is
+//!   ignored (a second restart, or a shutdown's drain, which is final).
+//!   The loop leaves once the core is drained.
 //! - SIGINT while running aborts at once, without a drain.
 //! - Aborted: the loop leaves at once (DRV-14: no wait for orphaned
 //!   opens); nothing is asked of it any more.
@@ -85,8 +90,22 @@ impl ShutdownGate {
             | (Phase::Aborted, Signal::Term | Signal::Int | Signal::Hup) => Step::Ignore,
             (Phase::Running, Signal::Term) => self.drain(DrainTarget::Shutdown, now),
             (Phase::Running, Signal::Hup) => self.drain(DrainTarget::Restart, now),
+            (
+                Phase::Draining {
+                    target: DrainTarget::Restart,
+                    ..
+                },
+                Signal::Term,
+            ) => self.drain(DrainTarget::Shutdown, now),
             (Phase::Running, Signal::Int)
-            | (Phase::Draining { .. }, Signal::Term | Signal::Int) => {
+            | (
+                Phase::Draining {
+                    target: DrainTarget::Shutdown,
+                    ..
+                },
+                Signal::Term,
+            )
+            | (Phase::Draining { .. }, Signal::Int) => {
                 self.phase = Phase::Aborted;
                 Step::Abort
             }
@@ -180,13 +199,54 @@ mod tests {
     }
 
     #[test]
-    fn sigterm_or_sigint_aborts_the_restart_drain() {
+    fn sigint_aborts_the_restart_drain() {
+        let mut gate = gate();
+        gate.signal(Signal::Hup, at(0));
+        assert_eq!(gate.signal(Signal::Int, at(10)), Step::Abort);
+        assert_eq!(gate.phase(), Phase::Aborted);
+        assert_eq!(gate.deadline(), None);
+    }
+
+    /// Owner decision 2026-11-06: SIGTERM during the restart drain turns
+    /// it into the shutdown drain, its deadline now plus
+    /// `shutdown_timeout` (here earlier than the restart's).
+    #[test]
+    fn sigterm_turns_the_restart_drain_into_the_shutdown_drain() {
+        let mut gate = gate();
+        gate.signal(Signal::Hup, at(0));
+        assert_eq!(
+            gate.signal(Signal::Term, at(100)),
+            Step::Drain(DrainTarget::Shutdown)
+        );
+        assert_eq!(gate.phase(), draining_until(600));
+        assert_eq!(gate.deadline(), Some(at(600)));
+    }
+
+    /// The deadline is the SIGTERM's own, also when it lies past the
+    /// restart's.
+    #[test]
+    fn the_shutdown_deadline_after_a_restart_drain_is_the_sigterms() {
+        let mut gate = gate();
+        gate.signal(Signal::Hup, at(0));
+        gate.signal(Signal::Term, at(1900));
+        assert_eq!(gate.tick(at(2000)), Step::Ignore);
+        assert_eq!(gate.tick(at(2399)), Step::Ignore);
+        assert_eq!(gate.tick(at(2400)), Step::Abort);
+        assert_eq!(gate.phase(), Phase::Aborted);
+    }
+
+    /// After the turn, it is a shutdown drain: a second SIGTERM or a
+    /// SIGINT aborts, SIGHUP is ignored.
+    #[test]
+    fn after_the_turn_sigterm_or_sigint_aborts_and_sighup_is_ignored() {
         for signal in [Signal::Term, Signal::Int] {
             let mut gate = gate();
             gate.signal(Signal::Hup, at(0));
-            assert_eq!(gate.signal(signal, at(10)), Step::Abort, "{signal:?}");
+            gate.signal(Signal::Term, at(10));
+            assert_eq!(gate.signal(Signal::Hup, at(20)), Step::Ignore);
+            assert_eq!(gate.phase(), draining_until(510));
+            assert_eq!(gate.signal(signal, at(30)), Step::Abort, "{signal:?}");
             assert_eq!(gate.phase(), Phase::Aborted);
-            assert_eq!(gate.deadline(), None);
         }
     }
 

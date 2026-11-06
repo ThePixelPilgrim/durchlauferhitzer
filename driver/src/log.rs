@@ -90,6 +90,12 @@ pub enum DriverLog {
     /// startup goes on without it (FR-PROC-07 "Steering"). The steering
     /// back after a failed seccomp filter is not logged.
     SteerFailed { errno: i32 },
+    /// The server bound its own listeners (`SO_REUSEPORT`) as the
+    /// non-root effective uid `uid`: any process of that uid can join
+    /// their port groups and take connections from them (owner decision
+    /// 2026-11-06, FR-PROC-07). Logged once at startup, after
+    /// `privileges`.
+    SharedPorts { uid: u32 },
 }
 
 /// The steps of a shutdown the log reports (FR-PROC-05, FR-PROC-07, A9).

@@ -25,6 +25,7 @@ use crate::log::{DriverLog, LogEntry, LogSink};
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
 use crate::sys::signal::{Signal, SignalFd};
 use crate::sys::socket::{Probe, steer_reuseport, tcp_listen};
+use crate::sys::user::euid;
 use crate::systemd::{Activation, take_sockets};
 
 mod budget;
@@ -222,9 +223,10 @@ struct Ready {
 /// A11 steps 3 to 7a: the `openat2` probe, the static roots, the
 /// listeners (systemd's, A7, or bound here with `probe`, A6; a
 /// `--ready-fd` start steers each, right after its `listen`, to the
-/// running server, FR-PROC-07), the descriptor budget (NFR-RES-05), the privilege
-/// drop (A8), then Landlock (FR-PROC-06), while the process has one
-/// thread and before anything else opens a path.
+/// running server, FR-PROC-07; bound as a non-root euid, a
+/// `shared_ports` note), the descriptor budget (NFR-RES-05), the
+/// privilege drop (A8), then Landlock (FR-PROC-06), while the process
+/// has one thread and before anything else opens a path.
 fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let containment = config.containment;
     let listen = config.listen.clone();
@@ -235,15 +237,15 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let restart_timeout = config.limits.restart_timeout;
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
-    let (listeners, steering, mut notes) = match take_sockets(&listen).map_err(Failure)? {
-        Activation::Sockets(sockets) => (sockets, Steering::Off, Vec::new()),
+    let (listeners, steering, mut notes, shared) = match take_sockets(&listen).map_err(Failure)? {
+        Activation::Sockets(sockets) => (sockets, Steering::Off, Vec::new(), None),
         Activation::None => {
             let steering = match probe {
                 Probe::First => Steering::Off,
                 Probe::Skip => Steering::On,
             };
             let (listeners, notes) = bind(&listen, probe, steering)?;
-            (listeners, steering, notes)
+            (listeners, steering, notes, shared_ports(euid()))
         }
     };
     budget::ensure(budget::needed(budget::Descriptors {
@@ -254,6 +256,7 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
         backends: core.backends().len(),
     }))?;
     notes.extend(privileges::drop_privileges(user.as_deref())?);
+    notes.extend(shared);
     let landlock = containment::restrict_files(&containment, &roots)?;
     Ok(Ready {
         core,
@@ -267,6 +270,13 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
         landlock,
         steering,
     })
+}
+
+/// The note for listeners bound as the effective uid `uid`: none for
+/// root, whose port groups only root can join; `shared_ports` for any
+/// other uid (owner decision 2026-11-06, FR-PROC-07).
+fn shared_ports(uid: u32) -> Option<DriverLog> {
+    (uid != 0).then_some(DriverLog::SharedPorts { uid })
 }
 
 /// With [`Steering::On`], attaches the program returning `index` to each
@@ -381,12 +391,11 @@ fn overlap(listen: &[SocketAddr]) -> Option<(SocketAddr, SocketAddr)> {
 /// (FR-PROC-06, step 10a: once the disk workers run, right before the
 /// loop) and the containment lines, readiness on the `--ready-fd`
 /// descriptor (FR-PROC-07; a failed write is logged, `kind=ready_failed`),
-/// then the loop. A failure
-/// before that closes the descriptor unwritten. Every message is printed
-/// while no sink lives:
-/// before it is created, or after the driver holding it is gone. Every
-/// ending of the loop exits 0, a drain, an abort or a stop (A9); a
-/// failure of the loop itself, or of a containment layer, exits 2.
+/// then the loop. A failure before that closes the descriptor unwritten.
+/// Every message is printed while no sink lives: before it is created, or
+/// after the driver holding it is gone. Every ending of the loop exits 0,
+/// a drain, an abort or a stop (A9); a failure of the loop itself, or of
+/// a containment layer, exits 2.
 fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
     let Ready {
         core,
@@ -496,12 +505,11 @@ mod tests {
     use std::path::PathBuf;
 
     use std::net::SocketAddr;
-
-    use std::net::TcpStream;
-    use std::os::fd::{AsFd, OwnedFd};
+    use std::os::fd::AsFd;
 
     use super::{Command, Probe, ReadyFd, Steering, bind, overlap, parse_args};
-    use crate::sys::socket::{accept_nonblocking, local_addr, tcp_listen};
+    use crate::sys::socket::tests::spread;
+    use crate::sys::socket::{local_addr, tcp_listen};
 
     fn parse(args: &[&str]) -> Option<Command> {
         parse_args(args.iter().map(OsString::from))
@@ -581,23 +589,6 @@ mod tests {
         }
     }
 
-    /// How many of `n` connects to `addr` each listener accepts.
-    fn accepted(addr: SocketAddr, n: usize, listeners: &[&OwnedFd]) -> Vec<usize> {
-        let held: Vec<TcpStream> = (0..n).map(|_| TcpStream::connect(addr).unwrap()).collect();
-        let mut counts = vec![0; listeners.len()];
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while counts.iter().sum::<usize>() < n {
-            assert!(std::time::Instant::now() < deadline, "{counts:?} of {n}");
-            for (count, listener) in counts.iter_mut().zip(listeners) {
-                while accept_nonblocking(listener.as_fd()).unwrap().is_some() {
-                    *count += 1;
-                }
-            }
-        }
-        drop(held);
-        counts
-    }
-
     /// FR-PROC-07 "Steering": a `--ready-fd` start that has bound but is
     /// not ready gets no connection; the running server (index 0) gets
     /// them all.
@@ -607,6 +598,6 @@ mod tests {
         let addr = local_addr(running.as_fd()).unwrap();
         let (starting, notes) = bind(&[addr], Probe::Skip, Steering::On).unwrap();
         assert_eq!(notes, []);
-        assert_eq!(accepted(addr, 64, &[&running, &starting[0]]), [64, 0]);
+        assert_eq!(spread(addr, 64, &[&running, &starting[0]]), [64, 0]);
     }
 }

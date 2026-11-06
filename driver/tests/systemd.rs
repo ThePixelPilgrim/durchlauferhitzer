@@ -62,7 +62,9 @@ fn the_server_serves_on_the_socket_systemd_passed() {
         response.starts_with("HTTP/1.1 404 Not Found\r\n"),
         "{response}"
     );
-    drop(server);
+    // systemd bound it: no `shared_ports` line, though not root.
+    let stderr = server.kill();
+    assert!(!stderr.contains("kind=shared_ports"), "{stderr}");
 }
 
 #[test]

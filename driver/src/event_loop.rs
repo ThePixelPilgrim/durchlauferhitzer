@@ -305,13 +305,15 @@ impl Driver {
     }
 
     /// Reads `signals` (blocked by [`SignalFd::new`] before
-    /// [`Driver::new`]) from the loop from now on (A9). The first SIGTERM
-    /// starts the shutdown drain, bounded by `shutdown_timeout`
-    /// (FR-PROC-05); SIGHUP the restart drain, bounded by
-    /// `restart_timeout` (FR-PROC-07). During either, SIGTERM, SIGINT or
-    /// the timeout abort and SIGHUP is ignored; SIGINT while running
-    /// aborts; SIGPIPE is ignored (DRV-14). A failed registration is the
-    /// loop's own failure.
+    /// [`Driver::new`]) from the loop from now on (A9). While running,
+    /// SIGTERM starts the shutdown drain, bounded by `shutdown_timeout`
+    /// (FR-PROC-05), SIGHUP the restart drain, bounded by
+    /// `restart_timeout` (FR-PROC-07), and SIGINT aborts. During the
+    /// restart drain, SIGTERM turns it into the shutdown drain, bounded by
+    /// `shutdown_timeout` from then on (owner decision 2026-11-06). During
+    /// the shutdown drain, SIGTERM aborts. During either drain, SIGINT or
+    /// its deadline aborts and SIGHUP is ignored. SIGPIPE is always
+    /// ignored (DRV-14). A failed registration is the loop's own failure.
     pub fn watch_signals(
         &mut self,
         fd: SignalFd,
@@ -423,11 +425,12 @@ impl Driver {
         }
     }
 
-    /// The first SIGTERM or SIGHUP (DRV-14, FR-PROC-07): the listeners
-    /// are closed (this process's copies, systemd's included: a new
-    /// connect is refused from now on, or goes to the process sharing
-    /// the port), the line is logged (`draining` or `restarting`), then
-    /// `begin_drain` with `target` and its actions.
+    /// The first SIGTERM or SIGHUP, or a SIGTERM during the restart drain
+    /// (DRV-14, FR-PROC-07): the listeners are closed (this process's
+    /// copies, systemd's included: a new connect is refused from now on,
+    /// or goes to the process sharing the port; after a restart drain
+    /// they are closed already), the line is logged (`draining` or
+    /// `restarting`), then `begin_drain` with `target` and its actions.
     fn begin_drain(&mut self, target: DrainTarget) -> io::Result<()> {
         self.listeners.clear();
         self.log_shutdown(match target {

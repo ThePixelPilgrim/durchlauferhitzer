@@ -90,7 +90,8 @@ src/
                       DRV-14): `ShutdownGate` (`Running | Draining {
                       deadline, target } | Aborted`; each signal and the
                       deadline to a `Step`: drain for a target, abort or
-                      ignore)
+                      ignore; SIGTERM turns a restart drain into the
+                      shutdown drain)
     tests.rs          unit tests of the loop's decisions on a driver that
                       is built but not run
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
@@ -231,7 +232,8 @@ tests/
                     an unusable `--ready-fd` (0-2, closed, listening,
                     systemd's) exit 2 before the config is read
   startup.rs        the startup sequence of the binary, run as non-root
-                    (as `nobody` when the tests run as root): it serves; a
+                    (as `nobody` when the tests run as root): it serves,
+                    logging `shared_ports` with its uid first; a
                     missing or non-directory root, a port in use and
                     overlapping listen addresses are exit 2 naming them;
                     every thread blocks SIGTERM/SIGINT/SIGPIPE/SIGHUP;
@@ -241,8 +243,8 @@ tests/
                     ENOSYS (NFR-PORT-03) the probe is exit 2 with its message;
                     `--ready-fd` (a pipe as fd 3) gets `ready\n` then EOF,
                     or EOF alone when startup fails before or after
-                    binding; a failed write (EPIPE) is logged and the
-                    server serves on; a second normal start is `EADDRINUSE`, a
+                    binding; a failed write (EPIPE) is logged, after the
+                    `containment` lines, and the server serves on; a second normal start is `EADDRINUSE`, a
                     `--ready-fd` start shares the port and, once ready,
                     gets every new connection (the old one none);
                     overlapping addresses fail at the second in both modes
@@ -251,7 +253,8 @@ tests/
                     address not configured, a configured address without a
                     socket, a foreign `LISTEN_PID`, a file, a connected
                     socket and a dual-stack IPv6 socket are exit 2; an
-                    IPv6-only one is served (IPv6 cases: CI); SIGHUP
+                    IPv6-only one is served (IPv6 cases: CI), without a
+                    `shared_ports` line; SIGHUP
                     drains it like a self-bound listener (closed, the
                     idle connection's next request answered with close)
   shutdown.rs       signals in the binary (Review Focus 4): SIGTERM
@@ -273,8 +276,12 @@ tests/
                     download was queued keep-alive get 200 + close
                     (never 503), the listener is
                     closed, an idle keep-alive is kept and its next
-                    request gets 200 + close, SIGTERM during it cuts,
-                    `restart_timeout 1s` cuts a stalled download, an idle
+                    request gets 200 + close; SIGTERM during it turns it
+                    into the SIGTERM drain (`draining` after
+                    `restarting`, the idle connection closed, a pipelined
+                    request 503 + close, the download finishes, exit 0),
+                    a second SIGTERM or SIGINT then cuts, SIGINT during
+                    it cuts; `restart_timeout 1s` cuts a stalled download, an idle
                     server logs `restarting` then `done`. Each waits for
                     the server's `phase=draining` or `phase=restarting`
                     line, so the order is deterministic
@@ -342,12 +349,13 @@ tests/
                     EMFILE on accept pauses and the 1 s retry serves,
                     on open and on the upstream socket it is logged
   privileges.rs     A8 in the binary: as non-root `user` is kept and
-                    logged, a refused bind below 1024 is exit 2 naming it; as root (else
+                    logged (then `shared_ports`), a refused bind below 1024 is exit 2 naming it; as root (else
                     skipped with a printed reason, or a failure with
                     DURCHLAUFERHITZER_REQUIRE_ROOT=1) no `user`, an unknown
                     user and a user whose primary gid is 0 (OA3) are
                     exit 2, `user nobody` drops every id
-                    (`drop_to` in the server's process) and serves, and a
+                    (`drop_to` in the server's process) and serves (no
+                    `shared_ports` line), and a
                     systemd socket below 1024 serves as nobody, root with
                     a systemd socket and no `user` is exit 2; a real
                     uid of 0 under an effective nobody counts as root

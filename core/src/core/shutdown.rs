@@ -76,11 +76,13 @@ impl Core {
     /// unchanged, so `now` is not needed yet; it is taken for symmetry
     /// with `handle`.
     ///
-    /// A second call is a driver mistake the core tolerates: a restart
-    /// during a shutdown's drain is ignored (no change, no action), since
-    /// a shutdown is final; a second restart changes nothing; a shutdown
-    /// during a restart's drain escalates it as if it came first (idle and
-    /// fresh connections close, requests and connections are refused).
+    /// A shutdown during a restart's drain escalates it as if it came
+    /// first (idle and fresh connections close, requests and connections
+    /// are refused): the driver calls it on a SIGTERM during the restart
+    /// drain (owner decision 2026-11-06, FR-PROC-07). Any other second
+    /// call is a driver mistake the core tolerates: a restart during a
+    /// shutdown's drain is ignored (no change, no action), since a
+    /// shutdown is final; a second restart changes nothing.
     pub fn begin_drain(&mut self, _now: Instant, target: DrainTarget, actions: &mut Vec<Action>) {
         // A shutdown is final: a restart cannot reopen what it refuses.
         if (self.mode, target) == (Mode::Draining(DrainTarget::Shutdown), DrainTarget::Restart) {

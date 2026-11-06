@@ -61,7 +61,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use child::{
-    Containment, PATIENCE, Running, Setup, TempDir, free_port, refused_port, seccomp_kill, text,
+    Containment, PATIENCE, Running, Setup, TempDir, free_port, non_root_uid, refused_port,
+    seccomp_kill, text,
 };
 use durchlauferhitzer_core::http::request::Persistence;
 use durchlauferhitzer_core::http::response::BodyMode;
@@ -395,7 +396,8 @@ fn log_lines(kind: Kind, backend: SocketAddr, down: SocketAddr) -> Vec<String> {
 
 /// A line without its ` conn=<digits>` field, which must be there for a
 /// core entry (`response`, `proxied_response`, `backend_failed`, ...)
-/// and absent for a driver one (`privileges`, `shutdown`, `containment`).
+/// and absent for a driver one (`privileges`, `shared_ports`, `shutdown`,
+/// `containment`).
 fn without_conn(line: &str) -> String {
     let fields: Vec<&str> = line.split(' ').collect();
     let conn = fields
@@ -405,9 +407,14 @@ fn without_conn(line: &str) -> String {
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
         .count();
-    let driver = ["kind=privileges ", "kind=shutdown ", "kind=containment "]
-        .iter()
-        .any(|kind| line.starts_with(kind));
+    let driver = [
+        "kind=privileges ",
+        "kind=shared_ports ",
+        "kind=shutdown ",
+        "kind=containment ",
+    ]
+    .iter()
+    .any(|kind| line.starts_with(kind));
     assert_eq!(conn, usize::from(!driver), "conn field in {line:?}");
     fields
         .into_iter()
@@ -780,7 +787,13 @@ host proxy.test {{
     assert!(results.try_recv().is_err(), "a backend connection too many");
 
     let mut got: Vec<String> = lines.all().iter().map(|l| without_conn(l)).collect();
-    // The containment lines come first, one per layer (their values are
+    // Bound as non-root: the `shared_ports` line comes first (owner
+    // decision 2026-11-06).
+    assert_eq!(
+        got.remove(0),
+        format!("kind=shared_ports uid={}", non_root_uid())
+    );
+    // The containment lines come next, one per layer (their values are
     // pinned in `containment.rs`).
     let layers: Vec<String> = got.drain(..2).collect();
     assert!(

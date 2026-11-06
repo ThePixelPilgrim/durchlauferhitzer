@@ -27,7 +27,7 @@ use std::sync::mpsc;
 
 use child::{
     Containment, Filter, PATIENCE, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, command,
-    config, fd_target, free_port, get, run, text, threads,
+    config, fd_target, free_port, get, non_root_uid, run, text, threads,
 };
 use durchlauferhitzer::sys::fd::pipe;
 
@@ -54,6 +54,12 @@ fn the_server_serves_a_static_file() {
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     assert!(response.ends_with("\r\n\r\nhello\n"), "{response}");
     let stderr = server.kill();
+    // Owner decision 2026-11-06: bound as non-root, the ports can be
+    // joined by any process of that uid; logged first (no `user`).
+    assert!(
+        stderr.starts_with(&format!("kind=shared_ports uid={}\n", non_root_uid())),
+        "{stderr}"
+    );
     // Conn 1 was the readiness probe's empty connection.
     assert!(
         stderr.contains(
@@ -383,7 +389,9 @@ fn a_ready_fd_start_shares_the_port_and_takes_its_new_connections() {
 }
 
 /// A failed `ready\n` write (the reader is gone: `EPIPE`, SIGPIPE being
-/// blocked) is logged, and the server serves on.
+/// blocked) is logged, and the server serves on. It comes after the
+/// `containment` lines: readiness is reported once the seccomp filter is
+/// installed (FR-PROC-07 step 3), never before.
 #[test]
 fn a_failed_ready_write_is_logged_and_the_server_serves_on() {
     let dir = TempDir::new();
@@ -395,5 +403,14 @@ fn a_failed_ready_write_is_logged_and_the_server_serves_on() {
     let response = get(addr, "/index.html");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let stderr = server.kill();
-    assert!(stderr.contains("kind=ready_failed errno=32\n"), "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let ready_failed = lines
+        .iter()
+        .position(|line| *line == "kind=ready_failed errno=32")
+        .unwrap_or_else(|| panic!("{stderr}"));
+    let last_containment = lines
+        .iter()
+        .rposition(|line| line.starts_with("kind=containment layer=seccomp "))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    assert!(last_containment < ready_failed, "{stderr}");
 }

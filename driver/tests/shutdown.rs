@@ -7,8 +7,9 @@
 //! 0 at once; SIGPIPE is ignored. SIGHUP starts the restart drain
 //! (FR-PROC-07): the listeners close, every request the server still
 //! gets is served with `Connection: close`, idle connections stay until
-//! their next request, `restart_timeout` bounds it, and SIGTERM or
-//! SIGINT during it takes the fast path.
+//! their next request, `restart_timeout` bounds it; SIGTERM during it
+//! turns it into the SIGTERM drain (owner decision 2026-11-06), SIGINT
+//! takes the fast path.
 //!
 //! Every test first gets a response, so startup has passed the signal
 //! mask (A11 step 8) before a signal is sent; each waits for the server's
@@ -663,10 +664,83 @@ fn sighup_keeps_an_idle_connection_until_its_next_request() {
     assert!(!lines.iter().any(|l| l == ABORTING), "{lines:?}");
 }
 
-/// SIGTERM during the restart drain takes the fast path: the download is
-/// cut and the server exits 0 at once (FR-PROC-07).
+/// SIGTERM during the restart drain turns it into the SIGTERM drain
+/// (owner decision 2026-11-06, FR-PROC-07): `phase=draining` follows
+/// `phase=restarting`; the idle keep-alive connection the restart drain
+/// kept is closed; the download finishes byte-exact, and a head pipelined
+/// behind it, half received before the signals and completed after the
+/// SIGTERM, gets 503 with `Connection: close` (not the restart drain's
+/// 200); then the server exits 0 without aborting.
 #[test]
-fn sighup_then_sigterm_aborts() {
+fn sighup_then_sigterm_drains_as_for_a_shutdown() {
+    let StaticServer {
+        _dir,
+        addr,
+        mut server,
+        big,
+    } = static_server(
+        "restart_timeout 20s; shutdown_timeout 20s; send_idle_timeout 20s; header_timeout 20s;",
+    );
+    let mut lines = server.lines();
+    let mut idle = idle_connection(addr);
+    let (half, rest) = SMALL.split_at(20);
+    let mut download = start_download_with(addr, half);
+    server.signal("HUP");
+    lines.wait_for(RESTARTING);
+    server.signal("TERM");
+    lines.wait_for(DRAINING);
+    assert_eq!(read_rest(&mut idle), b"", "the idle connection was kept");
+    download.write_all(rest).unwrap();
+    assert!(read_body(&mut download, BIG) == big, "the download differs");
+    let refused = text(&read_rest(&mut download));
+    assert!(
+        refused.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+        "{refused}"
+    );
+    assert!(refused.contains("\r\nConnection: close\r\n"), "{refused}");
+    drop((download, idle));
+    let status = server.wait_exit(PATIENCE);
+    assert_eq!(status.code(), Some(0), "{status}");
+    let all = lines.all();
+    let restarting = all.iter().position(|l| l == RESTARTING).unwrap();
+    let draining = all.iter().position(|l| l == DRAINING).unwrap();
+    assert!(restarting < draining, "{all:?}");
+    assert_eq!(all.last().map(String::as_str), Some(DONE), "{all:?}");
+    assert!(!all.iter().any(|l| l == ABORTING), "{all:?}");
+}
+
+/// After that turn, a second SIGTERM or a SIGINT takes the fast path:
+/// the download is cut and the server exits 0 at once.
+#[test]
+fn sighup_then_sigterm_then_sigterm_or_sigint_aborts() {
+    for second in ["TERM", "INT"] {
+        let StaticServer {
+            _dir,
+            addr,
+            mut server,
+            big: _,
+        } = static_server("restart_timeout 20s; shutdown_timeout 20s; send_idle_timeout 20s;");
+        let mut lines = server.lines();
+        let mut download = start_download(addr);
+        server.signal("HUP");
+        lines.wait_for(RESTARTING);
+        server.signal("TERM");
+        lines.wait_for(DRAINING);
+        server.signal(second);
+        let sent = Instant::now();
+        let status = server.wait_exit(FAST_EXIT);
+        assert_eq!(status.code(), Some(0), "{second}: {status}");
+        let elapsed = sent.elapsed();
+        assert!(elapsed < FAST_EXIT, "{second}: {elapsed:?}");
+        let got = read_rest(&mut download).len();
+        assert!(got < BIG, "{second}: the download was not cut: {got} bytes");
+        assert_aborted(&lines.all());
+    }
+}
+
+/// SIGINT during the restart drain takes the fast path at once.
+#[test]
+fn sighup_then_sigint_aborts() {
     let StaticServer {
         _dir,
         addr,
@@ -677,12 +751,11 @@ fn sighup_then_sigterm_aborts() {
     let mut download = start_download(addr);
     server.signal("HUP");
     lines.wait_for(RESTARTING);
-    server.signal("TERM");
+    server.signal("INT");
     let sent = Instant::now();
     let status = server.wait_exit(FAST_EXIT);
     assert_eq!(status.code(), Some(0), "{status}");
-    let elapsed = sent.elapsed();
-    assert!(elapsed < FAST_EXIT, "{elapsed:?}");
+    assert!(sent.elapsed() < FAST_EXIT, "{:?}", sent.elapsed());
     let got = read_rest(&mut download).len();
     assert!(got < BIG, "the download was not cut: {got} bytes");
     let all = lines.all();

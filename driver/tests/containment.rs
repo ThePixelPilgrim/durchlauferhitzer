@@ -22,10 +22,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use child::{
-    Containment, Filter, Lines, Running, Setup, TempDir, assert_exit, free_port, get, run,
-    run_program, text, threads,
+    Containment, Filter, Lines, Running, Setup, TempDir, assert_exit, free_port, get, non_root_uid,
+    run, run_program, text, threads,
 };
 use durchlauferhitzer::sys::landlock::{Abi, abi};
+
+/// The stderr of a non-root server that fails at the seccomp filter: the
+/// startup notes are written by then (its `shared_ports` line, owner
+/// decision 2026-11-06), then the error.
+fn after_notes(error: &str) -> String {
+    format!("kind=shared_ports uid={}\n{error}", non_root_uid())
+}
 
 const SECCOMP_ACTIVE: &str = "kind=containment layer=seccomp state=active action=fail log=kernel";
 const SECCOMP_OFF: &str = "kind=containment layer=seccomp state=off";
@@ -242,7 +249,7 @@ fn a_required_seccomp_the_kernel_lacks_is_exit_2() {
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
-        "durchlauferhitzer: seccomp is required but the kernel has none\n"
+        after_notes("durchlauferhitzer: seccomp is required but the kernel has none\n")
     );
 }
 
@@ -322,7 +329,7 @@ fn a_seccomp_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
-        "durchlauferhitzer: seccomp: Invalid argument (os error 22)\n"
+        after_notes("durchlauferhitzer: seccomp: Invalid argument (os error 22)\n")
     );
 }
 
@@ -417,8 +424,10 @@ fn read_implies_exec_fails_a_required_seccomp() {
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
-        "durchlauferhitzer: seccomp is required but the personality has \
-         READ_IMPLIES_EXEC, which defeats its PROT_EXEC check\n"
+        after_notes(
+            "durchlauferhitzer: seccomp is required but the personality has \
+             READ_IMPLIES_EXEC, which defeats its PROT_EXEC check\n"
+        )
     );
 }
 

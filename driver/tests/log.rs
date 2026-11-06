@@ -241,6 +241,10 @@ fn driver_kinds() {
             },
             "kind=steer_failed errno=22\n",
         ),
+        (
+            DriverLog::SharedPorts { uid: 65534 },
+            "kind=shared_ports uid=65534\n",
+        ),
         (DriverLog::Dropped { count: 17 }, "kind=dropped count=17\n"),
         (
             DriverLog::PrivilegesKept {

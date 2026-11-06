@@ -67,6 +67,16 @@ pub fn is_root() -> bool {
     durchlauferhitzer::sys::user::euid() == 0
 }
 
+/// The uid a [`Setup::non_root`] server runs as: `nobody` when the tests
+/// run as root, else this process's own.
+pub fn non_root_uid() -> u32 {
+    if is_root() {
+        NOBODY
+    } else {
+        durchlauferhitzer::sys::user::euid()
+    }
+}
+
 /// How the child is set up before `exec`.
 #[derive(Default)]
 pub struct Setup {
