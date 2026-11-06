@@ -38,14 +38,21 @@ CSV, one row per scenario and run:
   backend run in this process and are not counted.
 - `syscalls_per_req`: the total of `strace -c -f -p <pid>` (through `sudo
   -n` unless root) over the strace pass, per that pass's requests. Never
-  used for CPU.
+  used for CPU. The strace window has about 6 s without load around the
+  load (attach and settle); the idle server's few calls there are
+  negligible against the requests.
 - `rss_kib`: the server's `VmRSS` after the measured window.
 - `commit` and `runner`: `BENCH_COMMIT` (else `git rev-parse --short=7
-  HEAD`) and `BENCH_RUNNER` (else `local`).
+  HEAD`) and `BENCH_RUNNER` (else `local`). Outside a git checkout the
+  commit is `unknown`, and `scripts/bench-chart.py` drops such a row (it
+  takes hex commits only).
 
 A failure prints `bench failed: scenario=<s> reason=<r> (<detail>)` (the
 nightly issue's fingerprint is `bench|<s>|<r>`) and exits 1; rows with
-errors are still written. `scripts/bench-chart.py` renders the CSV.
+errors are still written. `scripts/bench-chart.py` renders the CSV: each
+runner label is its own series. The nightly publishes to the `benchmarks`
+branch only from the default branch; a dispatch from another branch keeps
+its rows as the run's `bench-results` artifact.
 
 ```
 src/

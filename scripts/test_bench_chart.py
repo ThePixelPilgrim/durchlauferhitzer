@@ -6,6 +6,7 @@ Run with `python3 -m unittest discover -s scripts -p 'test_*.py'`.
 """
 
 import contextlib
+import csv
 import importlib.util
 import io
 import os
@@ -41,6 +42,12 @@ CSV = "\n".join(
         row("2026-11-07", "proxy-small", 29.0, 39.0, commit="def5678"),
     ]
 ) + "\n"
+
+
+def _csv_line(fields):
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\n").writerow(fields)
+    return out.getvalue()
 
 
 def blocks(md):
@@ -79,13 +86,31 @@ class Validation(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(dropped, len(bad))
 
+    def test_line_breaks_and_non_ascii_digits_drop_the_row(self):
+        # Python's `$` matches before a final newline and `\d` matches any
+        # Unicode digit: every field is checked whole and in ASCII.
+        good = ["2026-11-06", "abc1234", "local", "static-small", "1000", "0", "10.0",
+                "1.5", "2.5", "2048"]
+        for i in range(len(good)):
+            for bad in (good[i] + "\n", good[i] + "\r", "\n" + good[i], good[i] + "\r\n"):
+                fields = list(good)
+                fields[i] = bad
+                rows, dropped = bc.parse(HEADER + "\n" + _csv_line(fields))
+                self.assertEqual((rows, dropped), ([], 1), (i, bad))
+        arabic = "\u0661\u0662"  # Arabic-Indic 12
+        for i in (0, 4, 5, 6, 7, 8, 9):
+            fields = list(good)
+            fields[i] = arabic if i else "2026-11-\u0660\u0666"
+            rows, dropped = bc.parse(HEADER + "\n" + _csv_line(fields))
+            self.assertEqual((rows, dropped), ([], 1), i)
+
     def test_empty_per_request_values_are_allowed_but_never_charted(self):
         # A run with no complete request has no per-request numbers.
         text = HEADER + "\n2026-11-06,abc1234,local,static-small,0,5,10.0,,,\n"
         rows, dropped = bc.parse(text)
         self.assertEqual(dropped, 0)
         self.assertIsNone(rows[0]["cpu_us_per_req"])
-        self.assertNotIn("static-small", bc.medians(rows, "cpu_us_per_req"))
+        self.assertEqual(bc.medians(rows, "cpu_us_per_req"), {})
 
     def test_a_wrong_header_is_refused(self):
         with self.assertRaises(ValueError):
@@ -96,8 +121,9 @@ class Medians(unittest.TestCase):
     def test_medians_per_date_and_scenario_without_error_runs(self):
         rows, _ = bc.parse(CSV)
         cpu = bc.medians(rows, "cpu_us_per_req")
-        self.assertEqual(cpu["static-small"], [("2026-11-06", 11.0), ("2026-11-07", 9.25)])
-        self.assertEqual(cpu["proxy-small"], [("2026-11-06", 30.5), ("2026-11-07", 29.0)])
+        gha = "gha-ubuntu-24.04-x86_64"
+        self.assertEqual(cpu[("static-small", gha)], [("2026-11-06", 11.0), ("2026-11-07", 9.25)])
+        self.assertEqual(cpu[("proxy-small", gha)], [("2026-11-06", 30.5), ("2026-11-07", 29.0)])
 
 
 class Page(unittest.TestCase):
@@ -116,12 +142,23 @@ class Page(unittest.TestCase):
         sys_proxy = next(c for c in charts if "proxy-small" in c and "system calls" in c)
         self.assertIn("line [40.50, 39.00]", sys_proxy)
 
+    def test_each_runner_is_its_own_series(self):
+        other = CSV + row("2026-11-07", "static-small", 99.0, 99.0, runner="local") + "\n"
+        rows, _ = bc.parse(other)
+        cpu = bc.medians(rows, "cpu_us_per_req")
+        self.assertEqual(cpu[("static-small", "gha-ubuntu-24.04-x86_64")],
+                         [("2026-11-06", 11.0), ("2026-11-07", 9.25)])
+        self.assertEqual(cpu[("static-small", "local")], [("2026-11-07", 99.0)])
+        md = bc.render(rows)
+        self.assertEqual(len(blocks(md)), 6)
+        self.assertIn("| `static-small` | `local` | 2026-11-07 | `abc1234` | 99.00 | 99.00 |", md)
+
     def test_the_error_run_never_reaches_the_page(self):
         self.assertNotIn("0.37", self.md)
 
     def test_latest_values_table(self):
-        self.assertIn("| `static-small` | 2026-11-07 | `def5678` | `gha-ubuntu-24.04-x86_64` | 9.25 | 19.25 |", self.md)
-        self.assertIn("| `proxy-small` | 2026-11-07 | `def5678` | `gha-ubuntu-24.04-x86_64` | 29.00 | 39.00 |", self.md)
+        self.assertIn("| `static-small` | `gha-ubuntu-24.04-x86_64` | 2026-11-07 | `def5678` | 9.25 | 19.25 |", self.md)
+        self.assertIn("| `proxy-small` | `gha-ubuntu-24.04-x86_64` | 2026-11-07 | `def5678` | 29.00 | 39.00 |", self.md)
 
     def test_the_method_is_stated(self):
         self.assertIn("utime+stime", self.md)
@@ -159,6 +196,21 @@ class Append(unittest.TestCase):
             self.assertEqual(len(text.splitlines()), 19)
             with open(page) as fh:
                 self.assertEqual(len(blocks(fh.read())), 4)
+
+    def test_a_smuggled_line_break_never_splits_results(self):
+        with tempfile.TemporaryDirectory() as d:
+            new = os.path.join(d, "bench.csv")
+            results = os.path.join(d, "results.csv")
+            fields = ["2026-11-06", "abc1234", "gha\n", "static-small", "100\n",
+                      "0", "10.0", "1.0", "1.0", "1"]
+            with open(new, "w", newline="") as fh:
+                fh.write(HEADER + "\n" + _csv_line(fields) + row("2026-11-06", "static-small", 1, 1) + "\n")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                bc.main(["--append", new, results, os.path.join(d, "B.md")])
+            self.assertIn("appended 1 rows, dropped 1", out.getvalue())
+            with open(results, newline="") as fh:
+                lines = fh.read().split("\n")
+            self.assertEqual(lines, [HEADER, row("2026-11-06", "static-small", 1, 1), ""])
 
     def test_an_artifact_with_a_wrong_header_appends_nothing(self):
         with tempfile.TemporaryDirectory() as d:

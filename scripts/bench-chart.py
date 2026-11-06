@@ -61,11 +61,13 @@ MAX_NEW_ROWS = 10000
 # Longest numeric field.
 MAX_NUMBER = 32
 
-_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
-_RUNNER = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_INT = re.compile(r"^\d{1,15}$")
-_FLOAT = re.compile(r"^\d{1,15}(\.\d{1,9})?$")
+# Matched whole (fullmatch: `$` would accept a final newline) and in
+# ASCII ([0-9], not `\d`, which takes any Unicode digit).
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
+_COMMIT = re.compile(r"[0-9a-f]{7,40}", re.ASCII)
+_RUNNER = re.compile(r"[A-Za-z0-9._-]{1,64}", re.ASCII)
+_INT = re.compile(r"[0-9]{1,15}", re.ASCII)
+_FLOAT = re.compile(r"[0-9]{1,15}(\.[0-9]{1,9})?", re.ASCII)
 
 
 def _number(text, optional):
@@ -73,7 +75,7 @@ def _number(text, optional):
     raises ValueError otherwise (no exponents, nan or inf)."""
     if text == "" and optional:
         return None
-    if len(text) > MAX_NUMBER or not _FLOAT.match(text):
+    if len(text) > MAX_NUMBER or not _FLOAT.fullmatch(text):
         raise ValueError(text)
     value = float(text)
     if not math.isfinite(value):
@@ -85,19 +87,21 @@ def validate(fields):
     """The typed row of one CSV record (a list of strings), or None."""
     if len(fields) != len(HEADER):
         return None
+    if any("\r" in f or "\n" in f for f in fields):
+        return None
     raw = dict(zip(HEADER, fields))
     try:
-        if not _DATE.match(raw["date"]):
+        if not _DATE.fullmatch(raw["date"]):
             return None
         _date.fromisoformat(raw["date"])
-        if not _COMMIT.match(raw["commit"]) or not _RUNNER.match(raw["runner"]):
+        if not _COMMIT.fullmatch(raw["commit"]) or not _RUNNER.fullmatch(raw["runner"]):
             return None
         if raw["scenario"] not in SCENARIOS:
             return None
-        if not _INT.match(raw["requests"]) or not _INT.match(raw["errors"]):
+        if not _INT.fullmatch(raw["requests"]) or not _INT.fullmatch(raw["errors"]):
             return None
         rss = raw["rss_kib"]
-        if rss and not _INT.match(rss):
+        if rss and not _INT.fullmatch(rss):
             return None
         return {
             "date": raw["date"],
@@ -110,7 +114,7 @@ def validate(fields):
             "cpu_us_per_req": _number(raw["cpu_us_per_req"], True),
             "syscalls_per_req": _number(raw["syscalls_per_req"], True),
             "rss_kib": int(rss) if rss else None,
-            "line": ",".join(fields),
+            "fields": list(fields),
         }
     except ValueError:
         return None
@@ -140,12 +144,14 @@ def _charted(r, metric):
 
 
 def medians(rows, metric):
-    """{scenario: [(date, median)]} over the rows without errors, dates
-    ascending, the newest MAX_DATES."""
+    """{(scenario, runner): [(date, median)]} over the rows without
+    errors, dates ascending, the newest MAX_DATES. Each runner is its own
+    series: machines are never blended."""
     by = {}
     for r in rows:
         if _charted(r, metric):
-            by.setdefault(r["scenario"], {}).setdefault(r["date"], []).append(r[metric])
+            key = (r["scenario"], r["runner"])
+            by.setdefault(key, {}).setdefault(r["date"], []).append(r[metric])
     return {
         s: [(d, statistics.median(v)) for d, v in sorted(dates.items())][-MAX_DATES:]
         for s, dates in by.items()
@@ -179,12 +185,20 @@ def _median_of(rows, key):
     return statistics.median(vals) if vals else None
 
 
+def _runners(rows):
+    """The runner labels, in order of first appearance."""
+    return list(dict.fromkeys(r["runner"] for r in rows))
+
+
 def _latest(rows):
-    """Per scenario: the newest date with charted runs, its medians, and
-    the commit and runner of its last row."""
+    """Per scenario and runner: the newest date with charted runs, its
+    medians, and the commit of its last row."""
     out = []
-    for s in SCENARIOS:
-        mine = [r for r in rows if r["scenario"] == s and r["errors"] == 0 and r["requests"] > 0]
+    for s, runner in ((s, k) for s in SCENARIOS for k in _runners(rows)):
+        mine = [
+            r for r in rows
+            if r["scenario"] == s and r["runner"] == runner and r["errors"] == 0 and r["requests"] > 0
+        ]
         if not mine:
             continue
         day = max(r["date"] for r in mine)
@@ -194,7 +208,7 @@ def _latest(rows):
         rate = statistics.median(rates) if rates else None
         rss = _median_of(today, "rss_kib")
         out.append(
-            f"| `{s}` | {day} | `{last['commit']}` | `{last['runner']}` | "
+            f"| `{s}` | `{runner}` | {day} | `{last['commit']}` | "
             f"{_fmt(_median_of(today, 'cpu_us_per_req'))} | "
             f"{_fmt(_median_of(today, 'syscalls_per_req'))} | "
             f"{'–' if rate is None else f'{rate:.0f}'} | "
@@ -216,8 +230,9 @@ def render(rows):
         "the measured window after a warm-up, divided by the complete, correct responses; "
         "system calls come from a separate `strace -c -f` pass, divided by that pass's "
         "responses.",
-        "Each point is the median of a date's runs; runs with errors are left out (they stay "
-        "in the CSV). Runner noise is expected: compare trends, not single points.",
+        "Each point is the median of a date's runs on one runner (each runner label is its "
+        "own series); runs with errors are left out (they stay in the CSV). Runner noise is "
+        "expected: compare trends, not single points.",
         "",
     ]
     if not rows:
@@ -226,7 +241,7 @@ def render(rows):
     lines += [
         "## Latest",
         "",
-        "| Scenario | Date | Commit | Runner | CPU µs/req | Syscalls/req | Req/s | RSS KiB |",
+        "| Scenario | Runner | Date | Commit | CPU µs/req | Syscalls/req | Req/s | RSS KiB |",
         "|---|---|---|---|---:|---:|---:|---:|",
     ]
     lines += _latest(rows)
@@ -234,10 +249,16 @@ def render(rows):
     for metric, heading, axis in METRICS:
         lines += [f"## {heading}", ""]
         series = medians(rows, metric)
-        for s in SCENARIOS:
-            if s not in series:
+        for key in ((s, k) for s in SCENARIOS for k in _runners(rows)):
+            if key not in series:
                 continue
-            lines += [f"### `{s}`", "", _chart(f"{s}: {axis}", axis, series[s]), ""]
+            s, runner = key
+            lines += [
+                f"### `{s}` on `{runner}`",
+                "",
+                _chart(f"{s} on {runner}: {axis}", axis, series[key]),
+                "",
+            ]
     return "\n".join(lines)
 
 
@@ -255,10 +276,11 @@ def append(new_path, results_path):
         rows = rows[:MAX_NEW_ROWS]
     fresh = not os.path.exists(results_path)
     with open(results_path, "a", encoding="utf-8", newline="") as fh:
+        out = csv.writer(fh, lineterminator="\n")
         if fresh:
-            fh.write(",".join(HEADER) + "\n")
+            out.writerow(HEADER)
         for r in rows:
-            fh.write(r["line"] + "\n")
+            out.writerow(r["fields"])
     return len(rows), dropped
 
 

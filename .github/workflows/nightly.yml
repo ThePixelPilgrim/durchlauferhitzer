@@ -445,12 +445,25 @@ jobs:
     # under test: only the `benchmarks` branch is checked out, plus
     # scripts/bench-chart.py (stdlib Python) from the run's commit; the
     # artifact's rows are untrusted and the script checks every field
-    # before it enters the CSV or the page. Rows with errors are
-    # published too (never charted), so it also runs after a failing
-    # `bench`. One publish at a time (`concurrency`).
+    # before it enters the CSV or the page. The token is passed only to
+    # the git commands that fetch and push (`-c`), never stored on disk
+    # while the script runs. Rows with errors are published too (never
+    # charted), so it also runs after a failing `bench`.
+    # Only runs of the default branch publish (a schedule always is one;
+    # a manual run's ref is checked): a dispatch from another branch
+    # keeps its rows as the `bench-results` artifact only, so
+    # experiments never mix into the daily medians.
+    # One publish at a time (`concurrency`): GitHub keeps one pending run
+    # per group, so a newer pending publish replaces an older pending one
+    # (its rows are lost). Harmless with one nightly a day; avoid
+    # starting several manual runs back to back.
     name: bench publish
     needs: bench
-    if: ${{ always() && (needs.bench.result == 'success' || needs.bench.result == 'failure') }}
+    if: >-
+      ${{ always()
+      && (needs.bench.result == 'success' || needs.bench.result == 'failure')
+      && (github.event_name == 'schedule'
+      || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -472,19 +485,14 @@ jobs:
           pattern: bench-results
           path: artifact
       - name: Check out the benchmarks branch
-        # The token goes into this repository's config only for the
-        # fetch and push here, as actions/checkout does.
         run: |
           set -euo pipefail
+          auth="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git init -q pages
           cd pages
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config http.https://github.com/.extraheader \
-            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git remote add origin "https://github.com/$GH_REPO"
-          if git ls-remote --exit-code --heads origin benchmarks >/dev/null; then
-            git fetch -q --depth=1 origin benchmarks
+          if git -c "$auth" ls-remote --exit-code --heads origin benchmarks >/dev/null; then
+            git -c "$auth" fetch -q --depth=1 origin benchmarks
             git checkout -q -b benchmarks FETCH_HEAD
           else
             git checkout -q --orphan benchmarks
@@ -500,6 +508,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
       - name: Append the rows and render the page
+        # No token here: the script runs without one.
+        id: render
         run: |
           set -euo pipefail
           csv=$(find artifact -type f -name bench.csv | head -n 1)
@@ -514,11 +524,22 @@ jobs:
             echo "nothing new to publish"
             exit 0
           fi
-          git commit -q -m "Benchmarks: ${GITHUB_SHA::7} on $(date -u +%F) (run $RUN_ID)"
-          git push -q origin HEAD:refs/heads/benchmarks
-          git log -1 --format='pushed %H'
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Benchmarks: ${GITHUB_SHA::7} on $(date -u +%F) (run $RUN_ID)"
+          echo "commit=true" >> "$GITHUB_OUTPUT"
         env:
           RUN_ID: ${{ github.run_id }}
+      - name: Push
+        if: steps.render.outputs.commit == 'true'
+        working-directory: pages
+        run: |
+          set -euo pipefail
+          auth="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "$auth" push -q origin HEAD:refs/heads/benchmarks
+          git log -1 --format='pushed %H'
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   report:
     # A failing job files or updates a GitHub issue keyed by the

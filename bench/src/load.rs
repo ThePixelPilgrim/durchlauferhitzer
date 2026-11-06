@@ -139,18 +139,24 @@ fn check(head: &Head, expect: Expect) -> Result<(), String> {
             head.status, expect.status
         ));
     }
-    let body = if head.status == 304 {
-        0
-    } else {
-        expect.body_len
-    };
-    if head.content_length != Some(body) {
+    // A 1xx, 204 or 304 has no body, whatever its Content-Length says
+    // (a 304 may omit it or give the representation's length, RFC 9110
+    // §8.6); `Conn::response` reads none.
+    if bodyless(head.status) {
+        return Ok(());
+    }
+    if head.content_length != Some(expect.body_len) {
         return Err(format!(
-            "content-length {:?} (expected {body})",
-            head.content_length
+            "content-length {:?} (expected {})",
+            head.content_length, expect.body_len
         ));
     }
     Ok(())
+}
+
+/// Whether a response with this status never has a body.
+fn bodyless(status: u16) -> bool {
+    matches!(status, 100..=199 | 204 | 304)
 }
 
 /// A parsed response head.
@@ -206,11 +212,11 @@ impl Conn {
             self.fill(scratch)?;
         };
         let head = parse_head(self.buf.get(..end).unwrap_or_default())?;
-        let body = match head.status {
-            100..=199 | 204 | 304 => 0,
-            _ => head
-                .content_length
-                .ok_or_else(|| "no content-length".to_string())?,
+        let body = if bodyless(head.status) {
+            0
+        } else {
+            head.content_length
+                .ok_or_else(|| "no content-length".to_string())?
         };
         let have = (self.buf.len() - end) as u64;
         if have > body {
@@ -377,6 +383,30 @@ mod tests {
         assert_eq!(t.requests, 0, "{t:?}");
         assert!(t.errors > 0, "{t:?}");
         assert!(t.first_error.unwrap().contains("503"));
+    }
+
+    #[test]
+    fn a_304_needs_no_content_length_and_has_no_body() {
+        // RFC 9110 §8.6: a 304 may omit Content-Length or carry the
+        // representation's length; either way no body follows.
+        for response in [
+            &b"HTTP/1.1 304 Not Modified\r\nETag: \"1-2\"\r\n\r\n"[..],
+            &b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n"[..],
+        ] {
+            let response: &'static [u8] = response;
+            let addr = fixed_server(response);
+            let mut t = target(addr, Reuse::KeepAlive);
+            t.request = request(
+                "bench.test",
+                "/",
+                "If-None-Match: \"1-2\"\r\n",
+                Reuse::KeepAlive,
+            );
+            t.expect.status = 304;
+            let tally = drive(&t, 1, Duration::from_millis(100));
+            assert!(tally.requests > 10, "{tally:?}");
+            assert_eq!(tally.errors, 0, "{tally:?}");
+        }
     }
 
     #[test]
