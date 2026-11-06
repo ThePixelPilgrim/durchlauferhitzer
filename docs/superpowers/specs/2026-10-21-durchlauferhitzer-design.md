@@ -2102,7 +2102,8 @@ does not change stage 7's choices.
   check:)* the data and the chart page live on a separate `benchmarks`
   branch, written by a small job with write access that only takes the
   benchmark job's artifact and runs no code under test (`main` stays
-  fast-forward only); the README links the page. Measure, then decide:
+  fast-forward only); the README on `main` links the chart page on
+  that branch (a stable URL, so the link never goes stale). Measure, then decide:
   the targets of NFR-PERF-01…05 are proposed from the first numbers for
   the owner's approval, and each optimisation is kept only if it
   measurably saves CPU or system calls per request at the expected load
