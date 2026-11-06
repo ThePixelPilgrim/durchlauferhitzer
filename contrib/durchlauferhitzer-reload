@@ -261,7 +261,10 @@ if ! err=$(mkdir "$lock" 2>&1); then
 	fi
 	printf '%s: taking over the stale lock %s (pid %s is not running)\n' "$me" "$lock" "$holder" >&2
 	stale=$lock.stale.$$
-	mv "$lock" "$stale" 2>/dev/null || fail "cannot take over the stale lock $lock"
+	if ! err=$(mv "$lock" "$stale" 2>&1); then
+		rmdir "$lock/takeover" 2>/dev/null
+		fail "cannot take over the stale lock $lock: ${err#mv: }"
+	fi
 	rm -rf "$stale"
 	mkdir "$lock" 2>/dev/null || fail "another reload took the lock $lock first"
 fi
