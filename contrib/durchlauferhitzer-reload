@@ -5,11 +5,12 @@
 # usage: durchlauferhitzer-reload <binary> <config> <pidfile> <logfile>
 #        [ready-timeout-seconds [grace-seconds]]
 #
-#  0. Take the lock <pidfile>.lock (a directory holding the helper's pid
-#     and start time): one reload at a time. A lock whose pid no longer
-#     runs with that start time is stale: it is taken over, with a note
-#     on stderr, under a guard (<pidfile>.lock/takeover), so that of
-#     helpers finding it at once one at most proceeds.
+#  0. Take the lock <pidfile>.lock (a directory; the file pid in it,
+#     created exclusively, holds the helper's pid and start time): one
+#     reload at a time. A lock whose pid no longer runs with that start
+#     time is stale: it is taken over, with a note on stderr, under a
+#     guard (<pidfile>.lock/takeover), so that of helpers finding it at
+#     once one at most proceeds.
 #  1. <binary> --check <config>; on an error, print it and stop.
 #  2. net.ipv4.tcp_migrate_req must be 1 (written if 0, never restored):
 #     the old process's queued connections then move to the new one.
@@ -160,7 +161,7 @@ past() {
 	[ $(($(now) - $1)) -gt "$2" ]
 }
 
-lock=$pidfile.lock locked='' dir='' new='' reader='' handed_over=''
+lock=$pidfile.lock locked='' guarded='' dir='' new='' reader='' handed_over=''
 draining=$pidfile.draining
 
 # Rewrites the draining list ("<pid> <start time>" lines): the entries
@@ -225,25 +226,48 @@ cleanup() {
 	[ -n "$reader" ] && kill "$reader" 2>/dev/null
 	[ -n "$new" ] && [ -z "$handed_over" ] && stop_new
 	[ -n "$dir" ] && rm -rf "$dir"
-	# Its whole directory: a guard another helper made in it to check
-	# for a stale lock goes too (that helper then finds no lock).
-	[ -n "$locked" ] && rm -rf "$lock"
+	[ -n "$guarded" ] && rm -f "$lock/takeover"
+	# The directory goes with the pid file unless another helper's guard
+	# is in it.
+	[ -n "$locked" ] && rm -f "$lock/pid" && rmdir "$lock" 2>/dev/null
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-# 0. One reload at a time. A stale lock (its holder not running with its
-# start time) is taken over under the guard $lock/takeover: one helper
-# makes it; under it the holder is read again and must be the same
-# stale one (else another helper took the lock meanwhile); the lock
-# directory is renamed away with the guard in it, then taken as usual
-# (a helper that took it in between wins). So a helper never removes a
-# lock that another one holds, and of helpers finding a stale lock at
-# once one at most proceeds.
-# A lock that vanishes between the failed mkdir and the check (another
-# helper moving a stale one away) is tried once more.
-if ! err=$(mkdir "$lock" 2>&1) && { [ -d "$lock" ] || ! err=$(mkdir "$lock" 2>&1); }; then
+# 0. One reload at a time. The lock is the file <pidfile>.lock/pid,
+# created by this shell itself with noclobber (O_EXCL: one creator wins),
+# so it does not rest on mkdir failing for an existing directory (uutils
+# coreutils' mkdir does not reliably when two run at once). A stale lock
+# (its holder not running with its start time) is taken over under the
+# guard <pidfile>.lock/takeover, made the same way: its maker reads the
+# holder again (the same stale one, else it refuses), removes the pid
+# file and creates its own (a helper that took the lock in between
+# wins). So no helper removes a lock another holds, and of helpers
+# finding a stale lock at once one at most proceeds.
+own_start=$(start_time $$)
+
+# Creates $1 holding this shell's pid and start time, if it does not
+# exist: 0 created, 1 not.
+create_excl() {
+	(
+		set -C
+		printf '%s %s\n' $$ "$own_start" >"$1"
+	) 2>/dev/null
+}
+
+# Takes the free lock: 0 taken, 1 not (held, or the directory cannot be
+# made). The directory may have just gone with its last holder: then it
+# is made again once.
+take_lock() {
+	err=$(mkdir "$lock" 2>&1)
 	[ -d "$lock" ] || fail "cannot create the lock $lock: ${err#mkdir: }"
+	create_excl "$lock/pid" && return 0
+	[ -e "$lock/pid" ] && return 1
+	mkdir "$lock" 2>/dev/null
+	create_excl "$lock/pid"
+}
+
+if ! take_lock; then
 	holder='' holder_start=''
 	{ read -r holder holder_start <"$lock/pid"; } 2>/dev/null
 	case $holder in
@@ -253,27 +277,20 @@ if ! err=$(mkdir "$lock" 2>&1) && { [ -d "$lock" ] || ! err=$(mkdir "$lock" 2>&1
 	esac
 	runs_as "$holder" "$holder_start" &&
 		fail "another reload is running (pid $holder; remove $lock if none is)"
-	mkdir "$lock/takeover" 2>/dev/null ||
-		fail "another reload is running (it is taking over the stale lock $lock)"
+	create_excl "$lock/takeover" ||
+		fail "another reload is running (it is taking over the stale lock $lock; remove $lock if none is)"
+	guarded=yes
 	again='' again_start=''
 	{ read -r again again_start <"$lock/pid"; } 2>/dev/null
-	if [ "$again $again_start" != "$holder $holder_start" ]; then
-		rmdir "$lock/takeover" 2>/dev/null
+	[ "$again $again_start" = "$holder $holder_start" ] ||
 		fail "another reload is running (it took over the stale lock $lock)"
-	fi
 	printf '%s: taking over the stale lock %s (pid %s is not running)\n' "$me" "$lock" "$holder" >&2
-	stale=$lock.stale.$$
-	if ! err=$(mv "$lock" "$stale" 2>&1); then
-		rmdir "$lock/takeover" 2>/dev/null
-		fail "cannot take over the stale lock $lock: ${err#mv: }"
-	fi
-	rm -rf "$stale"
-	mkdir "$lock" 2>/dev/null || fail "another reload took the lock $lock first"
+	rm -f "$lock/pid"
+	create_excl "$lock/pid" || fail "another reload took the lock $lock first"
+	rm -f "$lock/takeover"
+	guarded=''
 fi
 locked=yes
-# The holder: this shell's pid and start time, written whole (temp file,
-# then rename) so a reader never sees half of it.
-printf '%s %s\n' $$ "$(start_time $$)" >"$lock/pid.new" && mv -f "$lock/pid.new" "$lock/pid"
 
 # 1. The config.
 if ! out=$("$binary" --check "$config" 2>&1); then

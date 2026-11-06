@@ -60,7 +60,7 @@ use std::io::{self, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -876,8 +876,22 @@ fn a_reload_may_add_a_listen_address_and_change_user() {
 /// How many times two helpers race for one stale lock.
 const LOCK_RACES: usize = 30;
 
+/// A `mkdir` that checks, waits, then creates with `-p`: two run at once
+/// both succeed, as uutils coreutils' (0.10, the CI runner's
+/// `/usr/bin/mkdir`) did. The lock must not rest on it.
+const NON_ATOMIC_MKDIR: &str = r#"#!/bin/sh
+for last; do :; done
+if [ -e "$last" ]; then
+	echo "mkdir: $last: File exists" >&2
+	exit 1
+fi
+sleep 0.02
+exec /bin/mkdir -p "$@"
+"#;
+
 /// Review M4 follow-up: two helpers that find the same stale lock at
-/// once never both hold it. A holder blocks in `--check` on a FIFO
+/// once never both hold it, also with a `mkdir` that is not atomic
+/// ([`NON_ATOMIC_MKDIR`] first on their `PATH`). A holder blocks in `--check` on a FIFO
 /// config; the race has settled once every helper still running is in
 /// its `--check` (a process of the site's binary). Two such processes at
 /// once would be two holders. Then the FIFO gets an invalid config for
@@ -896,7 +910,28 @@ fn two_helpers_racing_for_a_stale_lock_never_both_hold_it() {
         fs::create_dir(&lock).unwrap();
         // Above any pid_max: not running.
         fs::write(lock.join("pid"), "4194304\n").unwrap();
-        let mut helpers = [site.spawn_reload(&conf, &[]), site.spawn_reload(&conf, &[])];
+        let bin_dir = site.dir.dir("fake-bin");
+        let fake = bin_dir.join("mkdir");
+        fs::write(&fake, NON_ATOMIC_MKDIR).unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let spawn = || {
+            Command::new("sh")
+                .arg(HELPER)
+                .args([&site.bin, &conf, &site.pidfile, &site.log])
+                .env("TMPDIR", site.tmp())
+                .env("PATH", &path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let mut helpers = [spawn(), spawn()];
         let deadline = Instant::now() + Duration::from_secs(15);
         let checking = loop {
             let running = helpers

@@ -1738,11 +1738,15 @@ Failures, persistence, timeouts:
     written before the pid file names the new one, or the script stops
     there. *(M4, wave A review:)* the lock records the script's pid and
     start time; a lock whose pid no longer runs with that start time is
-    stale and taken over, with a note on stderr, under a guard directory
-    inside it: the guard's maker reads the holder again, renames the
-    stale lock away and takes the lock as usual, so of scripts finding a
-    stale lock at once one at most proceeds, and none removes a lock
-    another holds.
+    stale and taken over, with a note on stderr, under a guard file
+    inside it: the guard's maker reads the holder again (the same stale
+    one, else it refuses), removes the stale pid file and creates its
+    own, so of scripts finding a stale lock at once one at most
+    proceeds, and none removes a lock another holds. The lock and the
+    guard are files the shell creates with noclobber (`set -C`,
+    O_EXCL), not directories made by `mkdir`: uutils coreutils' `mkdir`
+    (0.10, Ubuntu's default on the CI runners) let two concurrent
+    `mkdir`s of one path both succeed.
   - *Init script:* the repository ships an OpenRC script (Alpine's init
     system, the most used Linux without systemd; also Gentoo's and
     Artix's) with `start`, `stop`, `checkconfig` and `reload` (the
