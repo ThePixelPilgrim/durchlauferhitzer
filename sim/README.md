@@ -238,8 +238,10 @@ The static net's files have random mtimes around that date, and its
 clients add conditional lines (`faults/conditional.rs`) to about two in
 three `GET`s and `HEAD`s, while the head stays within `max_head`: the
 file's real `ETag`, strong, weak, in a list or on two lines, `*`, other
-and malformed tags, and dates equal to, before and after the mtime (also
-after the clock) in all three HTTP-date forms. Whether the answer is 200
+and malformed tags, an empty list, `*` beside a tag, and dates equal to,
+before and after the mtime, equal to the clock and after it, in all
+three HTTP-date forms (a malformed `If-None-Match` is present and matches
+nothing, so the date is ignored). Whether the answer is 200
 or 304 comes from a model of RFC 9110 written in the net, never from the
 core, and every kind of decision is gated in the coverage.
 

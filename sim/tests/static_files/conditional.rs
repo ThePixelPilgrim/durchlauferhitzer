@@ -179,6 +179,45 @@ fn if_none_match_decides_over_if_modified_since() {
         Method::Get,
         &format!("If-Modified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\nIf-None-Match: {TAG}\r\n"),
     );
+    // A malformed or empty If-None-Match is present all the same: the
+    // date that would match is ignored (RFC 9110 section 13.1.3).
+    for inm in ["x", ",", "*, \"x\""] {
+        assert_200(
+            &mut sim,
+            &format!("If-None-Match: {inm}\r\nIf-Modified-Since: {LAST_MODIFIED}\r\n"),
+        );
+    }
+}
+
+/// A directory's `index.html` is judged like any file once it is open:
+/// its own `ETag` gives a 304, and both opens are closed unread.
+#[test]
+fn a_directory_index_gets_a_304() {
+    let mut sim = dated_sim();
+    sim.add_file("/srv/www", "d/index.html", b"index");
+    let stamp = sim.file_stamp("/srv/www", "d/index.html");
+    let tag = model_http::model_etag(stamp);
+    let get = format!("GET /d/ HTTP/1.1\r\nHost: example.test\r\nIf-None-Match: {tag}\r\n\r\n");
+    let (c, received) = exchange(&mut sim, get.as_bytes());
+    assert_eq!(
+        String::from_utf8_lossy(&received),
+        String::from_utf8_lossy(&model_http::model_not_modified(
+            stamp,
+            Persistence::KeepAlive,
+            Some(NOW.1)
+        )),
+        "{}",
+        sim.trace()
+    );
+    let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+    assert_eq!(
+        logs,
+        [&response_log(c, Status::NotModified, Method::Get, "/d/")],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+    assert!(!sim.trace().contains("Readahead"), "{}", sim.trace());
 }
 
 /// Review focus 2: the file changes after the client got its tag, and

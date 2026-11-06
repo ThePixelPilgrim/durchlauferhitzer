@@ -92,7 +92,7 @@ pub struct RequestHead {
     pub persistence: Persistence,
     pub expect: Expect,
     /// `If-None-Match` and `If-Modified-Since` (FR-STATIC-18), read
-    /// leniently: a malformed one is ignored, never an error. Only a
+    /// leniently: a malformed one is never an error (FR-STATIC-18). Only a
     /// static route evaluates them.
     pub conditional: Conditional,
 }

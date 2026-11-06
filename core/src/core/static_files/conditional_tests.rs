@@ -218,7 +218,12 @@ fn if_none_match_decides_over_if_modified_since() {
     assert_ok(&get("GET", &headers), STAMP, Some(NOW));
     let headers =
         format!("If-Modified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\nIf-None-Match: {TAG}\r\n");
-    assert_not_modified(&get("GET", &headers), Method::Get);
+    assert_not_modified(&get("GET", &headers), Method::Get); // A malformed or empty If-None-Match is present too: the date that
+    // would match is ignored (RFC 9110 section 13.1.3).
+    for inm in ["x", ",", "*, \"x\""] {
+        let headers = format!("If-None-Match: {inm}\r\nIf-Modified-Since: {LAST_MODIFIED}\r\n");
+        assert_ok(&get("GET", &headers), STAMP, Some(NOW));
+    }
 }
 
 /// Review focus 2: the decision uses the stamp of the opened descriptor.

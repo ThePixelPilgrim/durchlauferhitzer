@@ -88,9 +88,12 @@ fn mtime_secs(stamp: FileStamp) -> u64 {
 /// read as one list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IfNoneMatch {
-    /// No `If-None-Match` line, or a malformed one: a malformed field is
-    /// ignored as a whole, as if it were absent.
+    /// No `If-None-Match` line.
     Absent,
+    /// Present but not of the grammar: it matches nothing, and the
+    /// request still "contains" it (RFC 9110 section 13.1.3), so
+    /// `If-Modified-Since` is ignored (controller ruling 2026-11-06).
+    Malformed,
     /// `*`: matches any file that exists.
     Any,
     /// A list of entity tags (possibly empty). Only the stamps of the tags
@@ -133,7 +136,8 @@ impl Conditional {
 
     /// Whether a file with `stamp` is answered `304 Not Modified` (RFC
     /// 9110 section 13.2.2, `GET` and `HEAD` only; the caller checks the
-    /// method). A present `If-None-Match` decides alone: `*`, or a tag
+    /// method). A present `If-None-Match`, even a malformed one, decides
+    /// alone: `*`, or a tag
     /// that matches the file's `ETag` by weak comparison, gives 304.
     /// Without it, `If-Modified-Since` gives 304 when the file's mtime in
     /// whole seconds is not after its date. That date counts only if it is
@@ -144,6 +148,7 @@ impl Conditional {
         let not_modified = match &self.if_none_match {
             IfNoneMatch::Any => true,
             IfNoneMatch::Tags(stamps) => stamps.contains(&stamp),
+            IfNoneMatch::Malformed => false,
             IfNoneMatch::Absent => match (self.if_modified_since, now) {
                 (Some(date), Some(now)) if date <= now => mtime_secs(stamp) <= date,
                 (Some(_), Some(_)) | (Some(_), None) | (None, _) => false,
@@ -169,14 +174,14 @@ pub enum Freshness {
 /// Reads every `If-None-Match` line as one list: `*` alone (one line,
 /// nothing else), or entity tags `[W/]"<etagc>*"` separated by commas with
 /// optional whitespace (empty elements allowed, RFC 9110 section 5.6.1).
-/// Anything else is malformed: the field is ignored.
+/// Anything else is malformed: it matches nothing.
 fn if_none_match(headers: &[Header]) -> IfNoneMatch {
     let lines = || values(headers, "if-none-match");
     let mut count = lines();
     match (count.next(), count.next()) {
         (None, _) => return IfNoneMatch::Absent,
         (Some(b"*"), None) => return IfNoneMatch::Any,
-        (Some(_), _) if lines().any(|line| line == b"*") => return IfNoneMatch::Absent,
+        (Some(_), _) if lines().any(|line| line == b"*") => return IfNoneMatch::Malformed,
         (Some(_), _) => {}
     }
     // Only tags in this server's form are kept: no allocation unless the
@@ -195,7 +200,7 @@ fn if_none_match(headers: &[Header]) -> IfNoneMatch {
                 _ => {}
             }
             let Some((opaque, tail)) = entity_tag(rest) else {
-                return IfNoneMatch::Absent;
+                return IfNoneMatch::Malformed;
             };
             if let Some(stamp) = own_stamp(opaque) {
                 stamps.push(stamp);
@@ -204,7 +209,7 @@ fn if_none_match(headers: &[Header]) -> IfNoneMatch {
             match rest {
                 [] => break,
                 [b',', tail @ ..] => rest = tail,
-                _ => return IfNoneMatch::Absent,
+                _ => return IfNoneMatch::Malformed,
             }
         }
     }

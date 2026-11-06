@@ -47,7 +47,9 @@ fn named(head: &[u8], name: &str) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelInm {
     Absent,
-    /// Present but not of that grammar: ignored as a whole.
+    /// Present but not of that grammar: matches nothing, and still makes
+    /// `If-Modified-Since` ignored (RFC 9110 section 13.1.3, "contains";
+    /// controller ruling 2026-11-06).
     Malformed,
     Any,
     /// The opaque tags (quotes kept), each with whether it was weak.
@@ -221,7 +223,10 @@ pub(crate) fn model_verdict(head: &[u8], stamp: FileStamp, now: u64) -> ModelFre
     let not_modified = match model_inm(head) {
         ModelInm::Any => true,
         ModelInm::Tags(tags) => tags.iter().any(|(tag, _)| *tag == etag),
-        ModelInm::Absent | ModelInm::Malformed => {
+        // Present but malformed: matches nothing, and the request still
+        // contains it, so the date is ignored (section 13.1.3).
+        ModelInm::Malformed => false,
+        ModelInm::Absent => {
             model_ims(head, now).is_some_and(|date| stamp.modified_ns / 1_000_000_000 <= date)
         }
     };
@@ -275,7 +280,7 @@ pub(crate) fn random_conditional(rng: &mut fastrand::Rng, stamp: Option<FileStam
         modified_ns: rng.u64(0..=NET_DATE.0) * 1_000_000_000,
     });
     let etag = model_etag(stamp);
-    let inm = match rng.u8(0..10) {
+    let inm = match rng.u8(0..12) {
         0 | 1 => format!("If-None-Match: {etag}\r\n"),
         2 => format!("If-None-Match: W/{etag}\r\n"),
         3 => format!("If-None-Match: \"a,b\", {etag}\r\n"),
@@ -290,13 +295,19 @@ pub(crate) fn random_conditional(rng: &mut fastrand::Rng, stamp: Option<FileStam
         }
         7 => "If-None-Match: \"x\"\r\n".to_owned(),
         8 => format!("If-None-Match: {}\r\n", etag.trim_matches('"')),
+        // A well-formed empty list: present, matching nothing.
+        9 => "If-None-Match: ,\r\n".to_owned(),
+        // `*` on one line, a tag on another: malformed.
+        10 => format!("If-None-Match: *\r\nIf-None-Match: {etag}\r\n"),
         _ => "If-None-Match: *, \"x\"\r\n".to_owned(),
     };
     let mtime = stamp.modified_ns / 1_000_000_000;
-    let secs = match rng.u8(0..5) {
+    let secs = match rng.u8(0..6) {
         0 | 1 => mtime,
         2 => mtime.saturating_sub(rng.u64(1..100_000)),
         3 => mtime + rng.u64(1..100),
+        // Exactly the server's clock: still valid.
+        4 => NET_DATE.0,
         _ => NET_DATE.0 + rng.u64(1..1000),
     };
     let forms = date_forms(secs);
@@ -309,11 +320,15 @@ pub(crate) fn random_conditional(rng: &mut fastrand::Rng, stamp: Option<FileStam
     match rng.u8(0..4) {
         0 => inm,
         1 => ims,
-        // A tag that does not match against a date that would.
-        2 => format!(
-            "If-Modified-Since: {}\r\nIf-None-Match: \"x\"\r\n",
-            forms[0]
-        ),
+        // A tag that does not match, an empty or a malformed list: each
+        // present, so the date (which would match) is ignored.
+        2 => {
+            let other = rng.choice(["\"x\"", ",", "x"]).unwrap_or_default();
+            format!(
+                "If-Modified-Since: {}\r\nIf-None-Match: {other}\r\n",
+                forms[0]
+            )
+        }
         _ => format!("{ims}{inm}"),
     }
 }
@@ -340,6 +355,14 @@ pub(crate) struct ConditionalCoverage {
     /// Both headers, `If-None-Match` deciding against what the date alone
     /// would give.
     pub(crate) tag_over_date: usize,
+    /// Of those, a malformed `If-None-Match` (present, matching nothing).
+    pub(crate) malformed_over_date: usize,
+    /// 200s for a well-formed empty list (`If-None-Match: ,`).
+    pub(crate) empty_list: usize,
+    /// Responses to `*` on one line and tags on another (malformed).
+    pub(crate) star_with_tags: usize,
+    /// 304s by an `If-Modified-Since` equal to the server's clock.
+    pub(crate) date_at_clock: usize,
 }
 
 impl ConditionalCoverage {
@@ -353,56 +376,62 @@ impl ConditionalCoverage {
         persistence: Persistence,
     ) {
         let inm = model_inm(head);
+        let inm_lines = named(head, "if-none-match");
         let dates = named(head, "if-modified-since");
         let date = dates.first().map(String::as_str).unwrap_or_default();
         let parsed = model_parse_date(date, NET_DATE.0);
         let mtime = stamp.modified_ns / 1_000_000_000;
         let date_alone = parsed.filter(|d| *d <= NET_DATE.0 && dates.len() == 1);
-        if matches!(inm, ModelInm::Any | ModelInm::Tags(_)) {
-            let by_date = date_alone.is_some_and(|d| mtime <= d);
-            let by_tag = status == Status::NotModified;
-            if !dates.is_empty() && by_date != by_tag {
-                self.tag_over_date += 1;
+        let by_date = date_alone.is_some_and(|d| mtime <= d);
+        let not_modified = status == Status::NotModified;
+        // A present If-None-Match (even malformed) decides alone.
+        if inm != ModelInm::Absent && !dates.is_empty() && by_date != not_modified {
+            self.tag_over_date += 1;
+            if inm == ModelInm::Malformed {
+                self.malformed_over_date += 1;
             }
         }
-        if status == Status::NotModified {
-            {
-                match &inm {
-                    ModelInm::Any => self.by_star += 1,
-                    ModelInm::Tags(tags) if tags.iter().any(|(_, weak)| *weak) => {
-                        self.by_weak_tag += 1;
-                    }
-                    ModelInm::Tags(_) => self.by_tag += 1,
-                    ModelInm::Absent | ModelInm::Malformed => {
-                        self.by_date += 1;
-                        if date.contains('-') {
-                            self.by_rfc850_date += 1;
-                        } else if !date.contains(',') {
-                            self.by_asctime_date += 1;
-                        }
-                    }
+        if inm_lines.len() > 1 && inm_lines.iter().any(|l| l == "*") {
+            self.star_with_tags += 1;
+        }
+        if not_modified {
+            match &inm {
+                ModelInm::Any => self.by_star += 1,
+                ModelInm::Tags(tags) if tags.iter().any(|(_, weak)| *weak) => {
+                    self.by_weak_tag += 1;
                 }
-                if head.starts_with(b"HEAD ") {
-                    self.head_304 += 1;
-                }
-                if persistence == Persistence::Close {
-                    self.closing_304 += 1;
+                ModelInm::Tags(_) => self.by_tag += 1,
+                ModelInm::Absent | ModelInm::Malformed => {
+                    self.by_date += 1;
+                    if date_alone == Some(NET_DATE.0) {
+                        self.date_at_clock += 1;
+                    }
+                    if date.contains('-') {
+                        self.by_rfc850_date += 1;
+                    } else if !date.contains(',') {
+                        self.by_asctime_date += 1;
+                    }
                 }
             }
-        } else {
-            {
-                match &inm {
-                    ModelInm::Tags(_) => self.tag_mismatch += 1,
-                    ModelInm::Malformed => self.malformed_ignored += 1,
-                    ModelInm::Absent | ModelInm::Any => {}
-                }
-                if !dates.is_empty() && (parsed.is_none() || dates.len() > 1) {
-                    self.malformed_ignored += 1;
-                }
-                if inm == ModelInm::Absent && parsed.is_some_and(|d| d > NET_DATE.0) {
-                    self.future_ignored += 1;
-                }
+            if head.starts_with(b"HEAD ") {
+                self.head_304 += 1;
             }
+            if persistence == Persistence::Close {
+                self.closing_304 += 1;
+            }
+            return;
+        }
+        match &inm {
+            ModelInm::Tags(tags) if tags.is_empty() => self.empty_list += 1,
+            ModelInm::Tags(_) => self.tag_mismatch += 1,
+            ModelInm::Malformed => self.malformed_ignored += 1,
+            ModelInm::Absent | ModelInm::Any => {}
+        }
+        if !dates.is_empty() && (parsed.is_none() || dates.len() > 1) {
+            self.malformed_ignored += 1;
+        }
+        if inm == ModelInm::Absent && parsed.is_some_and(|d| d > NET_DATE.0) {
+            self.future_ignored += 1;
         }
     }
 
@@ -429,6 +458,13 @@ impl ConditionalCoverage {
                 "If-None-Match deciding against the date",
                 self.tag_over_date,
             ),
+            (
+                "a malformed If-None-Match deciding against the date",
+                self.malformed_over_date,
+            ),
+            ("200 for an empty If-None-Match list", self.empty_list),
+            ("* on one line and tags on another", self.star_with_tags),
+            ("304 by a date equal to the clock", self.date_at_clock),
         ] {
             assert!(n > 0, "no {what} in any seed");
         }

@@ -107,9 +107,11 @@ fn other_tags_are_modified() {
     }
 }
 
-/// RFC 9110 section 13.1.2's grammar, or the field is ignored.
+/// Not RFC 9110 section 13.1.2's grammar: the field is present but
+/// matches nothing (section 13.1.3: the request "contains" it, so
+/// `If-Modified-Since` is ignored; controller ruling 2026-11-06).
 #[test]
-fn a_malformed_if_none_match_is_ignored() {
+fn a_malformed_if_none_match_matches_nothing() {
     let bare = TAG.trim_matches('"');
     let unclosed = format!("{TAG}, \"x");
     let joined = format!("{TAG}\"x\"");
@@ -127,7 +129,7 @@ fn a_malformed_if_none_match_is_ignored() {
         vec![TAG, "x"],
     ] {
         let c = inm(&values);
-        assert_eq!(c.if_none_match, IfNoneMatch::Absent, "{values:?}");
+        assert_eq!(c.if_none_match, IfNoneMatch::Malformed, "{values:?}");
         assert_eq!(
             c.not_modified(STAMP, None),
             Freshness::Modified,
@@ -195,7 +197,9 @@ fn if_none_match_decides_when_present() {
     };
     assert_eq!(both(TAG, old), Freshness::NotModified);
     assert_eq!(both("\"x\"", new), Freshness::Modified);
-    // A malformed If-None-Match is ignored: the date decides.
-    assert_eq!(both("x", new), Freshness::NotModified);
+    // A malformed If-None-Match is still present: the date is ignored.
+    assert_eq!(both("x", new), Freshness::Modified);
     assert_eq!(both("x", old), Freshness::Modified);
+    // So is an empty list.
+    assert_eq!(both(",", new), Freshness::Modified);
 }

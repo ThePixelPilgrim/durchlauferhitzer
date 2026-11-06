@@ -82,78 +82,23 @@ impl Core {
         c.state = match outcome {
             // FR-STATIC-18: judged on the stamp of the opened descriptor,
             // so a file changed since the client's copy is sent anew.
-            Opened::Serve
-                if request.conditional.not_modified(meta.stamp, self.clock)
-                    == Freshness::NotModified =>
-            {
-                actions.push(Action::Log(Log::Response {
-                    conn,
-                    peer: c.peer,
-                    status: Status::NotModified,
-                    request: Some(request.summary),
-                }));
-                render_not_modified(
-                    &Validators::of(meta.stamp),
-                    persistence,
-                    self.date.as_ref(),
-                    &mut c.send,
-                );
-                // Like HEAD: the head is all; nothing is read.
-                self.files.release(file);
-                actions.push(Action::CloseFile { file });
-                ConnState::Responding {
-                    persistence,
-                    unread_body: UnreadBody::None,
-                    buffered,
-                    deadline,
-                }
-            }
             Opened::Serve => {
-                let size = meta.stamp.size;
-                let on_change = request.on_change;
-                let name = request.path.last().map(Vec::as_slice).unwrap_or_default();
-                let content_type = content_type(name);
-                actions.push(Action::Log(Log::Response {
-                    conn,
-                    peer: c.peer,
-                    status: Status::Ok,
-                    request: Some(request.summary),
-                }));
-                render_file_head(
-                    content_type,
-                    size,
-                    &Validators::of(meta.stamp),
-                    persistence,
-                    self.date.as_ref(),
-                    &mut c.send,
-                );
-                match body {
-                    BodyMode::Full => {
-                        let chunk = if size == 0 {
-                            Chunk::Done
-                        } else {
-                            let end = size.min(FILE_CHUNK);
-                            actions.push(Action::Readahead {
-                                file,
-                                offset: 0,
-                                len: end,
-                            });
-                            Chunk::Reading { end }
-                        };
-                        ConnState::SendingFile {
-                            file,
-                            size,
-                            opened: meta.stamp,
-                            on_change,
-                            offset: 0,
-                            chunk,
+                let validators = Validators::of(meta.stamp);
+                match request.conditional.not_modified(meta.stamp, self.clock) {
+                    Freshness::NotModified => {
+                        actions.push(Action::Log(Log::Response {
+                            conn,
+                            peer: c.peer,
+                            status: Status::NotModified,
+                            request: Some(request.summary),
+                        }));
+                        render_not_modified(
+                            &validators,
                             persistence,
-                            buffered,
-                            deadline,
-                        }
-                    }
-                    // HEAD: the head is all; nothing is read.
-                    BodyMode::HeadOnly => {
+                            self.date.as_ref(),
+                            &mut c.send,
+                        );
+                        // Like HEAD: the head is all; nothing is read.
                         self.files.release(file);
                         actions.push(Action::CloseFile { file });
                         ConnState::Responding {
@@ -161,6 +106,63 @@ impl Core {
                             unread_body: UnreadBody::None,
                             buffered,
                             deadline,
+                        }
+                    }
+                    Freshness::Modified => {
+                        let size = meta.stamp.size;
+                        let on_change = request.on_change;
+                        let name = request.path.last().map(Vec::as_slice).unwrap_or_default();
+                        let content_type = content_type(name);
+                        actions.push(Action::Log(Log::Response {
+                            conn,
+                            peer: c.peer,
+                            status: Status::Ok,
+                            request: Some(request.summary),
+                        }));
+                        render_file_head(
+                            content_type,
+                            size,
+                            &validators,
+                            persistence,
+                            self.date.as_ref(),
+                            &mut c.send,
+                        );
+                        match body {
+                            BodyMode::Full => {
+                                let chunk = if size == 0 {
+                                    Chunk::Done
+                                } else {
+                                    let end = size.min(FILE_CHUNK);
+                                    actions.push(Action::Readahead {
+                                        file,
+                                        offset: 0,
+                                        len: end,
+                                    });
+                                    Chunk::Reading { end }
+                                };
+                                ConnState::SendingFile {
+                                    file,
+                                    size,
+                                    opened: meta.stamp,
+                                    on_change,
+                                    offset: 0,
+                                    chunk,
+                                    persistence,
+                                    buffered,
+                                    deadline,
+                                }
+                            }
+                            // HEAD: the head is all; nothing is read.
+                            BodyMode::HeadOnly => {
+                                self.files.release(file);
+                                actions.push(Action::CloseFile { file });
+                                ConnState::Responding {
+                                    persistence,
+                                    unread_body: UnreadBody::None,
+                                    buffered,
+                                    deadline,
+                                }
+                            }
                         }
                     }
                 }

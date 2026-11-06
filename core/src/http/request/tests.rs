@@ -100,7 +100,13 @@ fn reads_the_conditional_headers() {
         }
     );
     let head = head_of(b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: x\r\n\r\n");
-    assert_eq!(head.conditional, Conditional::NONE);
+    assert_eq!(
+        head.conditional,
+        Conditional {
+            if_none_match: IfNoneMatch::Malformed,
+            if_modified_since: None,
+        }
+    );
 }
 
 #[test]
