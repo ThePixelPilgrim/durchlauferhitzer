@@ -1580,6 +1580,8 @@ Failures, persistence, timeouts:
     the intended effect — with one accepted exception: under musl, an
     abort on a worker thread still ends the process, but by `SIGSEGV`
     (musl's `a_crash`) or, under `kill`, `SIGSYS` instead of `SIGABRT`.
+    *(Stage 6 review:)* every thread starts before the filter: musl's
+    first `pthread_create` calls `membarrier`, which is not listed.
   - (owner decision 2026-10-29, stage 5 builder check) Stage 5 sandboxes strictly: no `execve`, no reading
     outside the roots. Stage 6's restart (FR-PROC-07) must therefore not
     rely on exec-ing the new binary from inside the sandbox; it adapts its
@@ -2070,7 +2072,12 @@ Targets are set in stage 7 from measurements; none are invented here.
   `.github/workflows/nightly.yml` ("Nightly"): jobs `long runs` (x86_64,
   arm64; `SIM_SEEDS`, default `0..200000`), `fuzz` (x86_64; seconds per
   target, default 600) and `older glibc` (Debian 12, glibc 2.36: the
-  driver tests under the seccomp kill switch, NFR-PORT-01).
+  driver tests under the seccomp kill switch, NFR-PORT-01). *(Owner
+  decisions 2026-11-06, stage 6 review:)* the older-glibc job also runs
+  the restart tests (FR-PROC-07; its container may set
+  `tcp_migrate_req`); a `restart soak` job loops the restart tests about
+  20 times on glibc and on Alpine (musl), so a rare lost connection is
+  caught and filed like any nightly failure.
 
   *(Owner decision 2026-11-02:)* a failing nightly job files or updates a
   GitHub issue, keyed by a stable fingerprint of the failure, not of the
