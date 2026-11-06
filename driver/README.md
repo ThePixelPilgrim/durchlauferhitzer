@@ -481,6 +481,10 @@ tests/
                     `free_listener` (bound at the pick), `refused_port`
                     (waits until a connect is refused; an ephemeral port
                     nothing listens on can connect to itself)
+  support/read.rs   `read_some`: a socket `read` retried on EINTR (the
+                    tests' read timeouts make a SIGCHLD from a spawned
+                    child interrupt a blocked read; included by
+                    `child.rs` and `server.rs`)
   support/running.rs `Running`: a guard that kills a running server on
                     drop (a server ended by SIGSYS fails its test);
                     signals by the shell's `kill` (`signal_pid`), stderr

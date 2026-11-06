@@ -38,7 +38,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use child::{Containment, PATIENCE, Running, Setup, TempDir, config, free_port, get, text};
+use child::{
+    Containment, PATIENCE, Running, Setup, TempDir, config, free_port, get, read_some, text,
+};
 
 /// The size of the slow download: far more than loopback's socket
 /// buffers hold, so the response is still in flight at the signal.
@@ -115,7 +117,7 @@ fn read_head(stream: &mut TcpStream) -> String {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        let n = stream.read(&mut byte).unwrap();
+        let n = read_some(stream, &mut byte).unwrap();
         assert_eq!(n, 1, "stream ended inside a head: {:?}", text(&head));
         head.push(byte[0]);
     }
@@ -158,7 +160,7 @@ fn read_rest(stream: &mut TcpStream) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        match stream.read(&mut buf) {
+        match read_some(stream, &mut buf) {
             Ok(0) => return out,
             Ok(n) => out.extend_from_slice(&buf[..n]),
             Err(err) if err.kind() == io::ErrorKind::ConnectionReset => return out,
@@ -517,7 +519,7 @@ fn a_stalled_log_reader_neither_stops_serving_nor_holds_the_exit() {
     // answer split across two reads may start in.
     let mut answers = 0;
     while answers < N {
-        let n = conn.read(&mut buf).unwrap();
+        let n = read_some(&mut conn, &mut buf).unwrap();
         assert!(n > 0, "the connection ended after {} bytes", got.len());
         let from = got.len().saturating_sub(answer.len() - 1);
         got.extend_from_slice(&buf[..n]);

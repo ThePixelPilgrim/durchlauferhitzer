@@ -5,12 +5,14 @@
 //! each ([`queue`], [`collect`]). Every failure is kept as text.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+use crate::child::read_some;
 
 /// How long a read may block: longer than any stop of the old process.
 const READ_PATIENCE: Duration = Duration::from_secs(15);
@@ -37,7 +39,7 @@ pub fn read_response(stream: &mut TcpStream) -> Result<Response, String> {
         if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break at + 4;
         }
-        match stream.read(&mut chunk) {
+        match read_some(stream, &mut chunk) {
             Ok(0) => return Err(format!("EOF in the head after {} bytes", buf.len())),
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(err) => return Err(format!("reading the head: {err}")),
@@ -62,7 +64,7 @@ pub fn read_response(stream: &mut TcpStream) -> Result<Response, String> {
     let length = length.ok_or_else(|| format!("no Content-Length: {head:?}"))?;
     let mut body = buf[head_end..].to_vec();
     while body.len() < length {
-        match stream.read(&mut chunk) {
+        match read_some(stream, &mut chunk) {
             Ok(0) => return Err(format!("EOF in the body after {} bytes", body.len())),
             Ok(n) => body.extend_from_slice(&chunk[..n]),
             Err(err) => return Err(format!("reading the body: {err}")),
@@ -106,7 +108,7 @@ pub fn fresh_request(addr: SocketAddr, answers: &[&str]) -> Result<String, Strin
         .write_all(REQUEST_CLOSE)
         .map_err(|err| format!("write: {err}"))?;
     let got = answer(read_response(&mut stream), answers)?;
-    match stream.read(&mut [0u8; 1]) {
+    match read_some(&mut stream, &mut [0u8; 1]) {
         Ok(0) => Ok(got),
         other => Err(format!("no EOF after a close response: {other:?}")),
     }

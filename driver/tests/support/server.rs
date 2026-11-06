@@ -26,6 +26,12 @@ use durchlauferhitzer::{Driver, Exit, LogEntry, LogSink, StopHandle};
 use durchlauferhitzer_core::Core;
 use durchlauferhitzer_core::config::load;
 
+#[path = "read.rs"]
+mod read;
+
+#[allow(unused_imports, reason = "each test binary uses part")]
+pub use read::read_some;
+
 /// How long any single wait in these tests may take before it fails.
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
@@ -116,7 +122,7 @@ pub fn read_head(stream: &mut TcpStream) -> Vec<u8> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        let n = stream.read(&mut byte).unwrap();
+        let n = read_some(stream, &mut byte).unwrap();
         assert_eq!(n, 1, "stream ended inside a head: {:?}", text(&head));
         head.push(byte[0]);
     }

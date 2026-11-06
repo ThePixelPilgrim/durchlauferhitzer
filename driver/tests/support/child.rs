@@ -52,6 +52,12 @@ mod port;
 #[allow(unused_imports, reason = "each test binary uses part")]
 pub use port::{free_listener, free_port, refused_port};
 
+#[path = "read.rs"]
+mod read;
+
+#[allow(unused_imports, reason = "each test binary uses part")]
+pub use read::read_some;
+
 #[path = "running.rs"]
 mod running;
 

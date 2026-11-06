@@ -61,8 +61,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use child::{
-    Containment, PATIENCE, Running, Setup, TempDir, free_port, non_root_uid, refused_port,
-    seccomp_kill, text,
+    Containment, PATIENCE, Running, Setup, TempDir, free_port, non_root_uid, read_some,
+    refused_port, seccomp_kill, text,
 };
 use durchlauferhitzer_core::FileStamp;
 use durchlauferhitzer_core::http::request::Persistence;
@@ -437,7 +437,7 @@ fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        if stream.read(&mut byte)? == 0 {
+        if read_some(stream, &mut byte)? == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!("stream ended inside a head: {:?}", text(&head)),

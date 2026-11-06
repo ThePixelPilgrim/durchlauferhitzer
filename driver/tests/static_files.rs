@@ -26,7 +26,7 @@ mod server;
 #[path = "support/tree.rs"]
 mod tree;
 
-use server::{Server, content_length, read_head, read_response, read_to_eof, text};
+use server::{Server, content_length, read_head, read_response, read_some, read_to_eof, text};
 use tree::{Tree, pattern, static_config};
 
 const MIB: usize = 1024 * 1024;
@@ -81,7 +81,7 @@ fn a_10_mib_file_reaches_a_slow_reader_byte_exact() {
     let mut reads = 0u32;
     while received.len() < content.len() {
         let want = piece.len().min(content.len() - received.len());
-        let n = client.read(&mut piece[..want]).unwrap();
+        let n = read_some(&mut client, &mut piece[..want]).unwrap();
         assert_ne!(n, 0, "cut after {} bytes", received.len());
         received.extend_from_slice(&piece[..n]);
         reads += 1;

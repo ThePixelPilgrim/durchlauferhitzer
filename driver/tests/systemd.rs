@@ -27,7 +27,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use child::{
     Containment, PATIENCE, PROXY_ROUTE, Running, Setup, TempDir, assert_exit, config,
-    free_listener, free_port, get, run, text,
+    free_listener, free_port, get, read_some, run, text,
 };
 
 /// A listener as systemd would pass it, on a port below the ephemeral
@@ -268,7 +268,7 @@ fn sighup_with_systemd_sockets_drains_the_same() {
     let mut first = Vec::new();
     while !text(&first).ends_with(ANSWER) {
         let mut buf = [0u8; 1024];
-        let n = idle.read(&mut buf).unwrap();
+        let n = read_some(&mut idle, &mut buf).unwrap();
         assert!(n > 0, "the connection ended: {:?}", text(&first));
         first.extend_from_slice(&buf[..n]);
     }
