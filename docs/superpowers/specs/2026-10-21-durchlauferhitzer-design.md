@@ -591,6 +591,14 @@ Core-generated responses:
   `If-Modified-Since` give 304 per RFC 9110 (`If-None-Match` wins), a
   malformed one is ignored as the RFC requires; `If-Match`,
   `If-Unmodified-Since` and `If-Range` are ignored (no 412, no ranges).
+  *(Stage 7 Task 2, builder calls and controller ruling:)* a malformed
+  `If-None-Match` counts as present and matches nothing, so
+  `If-Modified-Since` is then ignored (RFC 9110 §13.1.3 "contains"); a
+  well-formed empty list does the same. `If-Modified-Since` is ignored
+  until the driver has set the clock (a future date cannot be told
+  apart before). RFC 850 two-digit years read 70–99 as 19xx and 00–69 as
+  20xx, a fixed rule instead of RFC 9110's 50-year window; it differs
+  only for years the RFC places in the 2070s.
 
 ### FR-PROXY — Proxy routes
 

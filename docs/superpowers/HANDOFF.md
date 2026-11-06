@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-06, after stage 7 Task 1b landed on `main`.
+Last updated 2026-11-06, after stage 7 Task 2 landed on `main`.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -13,7 +13,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
 | 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
 | 6 Restart | done (`22fd0ce..` this handoff) — record: `docs/superpowers/reviews/2026-11-06-stage-6-review.md` |
-| 7 Efficiency | **in progress** — plan `docs/superpowers/plans/2026-11-06-stage-7-efficiency.md` (owner-approved `71d3867`). Task 1 ✅ (`bench/` tool, nightly `bench` + `bench publish` to the `benchmarks` branch, chart page linked from README; baseline in the task report); targets set (NFR-PERF-01…03, ratchet, owner-approved exceptions; security trumps performance); Task 1b ✅ (`bench/bisect.sh` for `git bisect run`); **next: Task 2** (conditional requests). The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
+| 7 Efficiency | **in progress** — plan `docs/superpowers/plans/2026-11-06-stage-7-efficiency.md` (owner-approved `71d3867`). Task 1 ✅ (`bench/` tool, nightly `bench` + `bench publish` to the `benchmarks` branch, chart page linked from README; baseline in the task report); targets set (NFR-PERF-01…03, ratchet, owner-approved exceptions; security trumps performance); Task 1b ✅ (`bench/bisect.sh` for `git bisect run`); Task 2 ✅ (conditional requests: `ETag`/`Last-Modified` on every static 200, 304 per RFC 9110; conditional-hit 18.9 → 12.6 syscalls and 64 → 41 µs per request; test sockets retry `EINTR` from `SIGCHLD`); **next: Task 3** (`MSG_MORE`). The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
