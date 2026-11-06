@@ -10,6 +10,7 @@ record  In a failing nightly job: read its logs, write a small failure
                 --run-url URL --out failure.json long-runs.log
             nightly-report.py record --job fuzz ... logs/request_head.log ...
             nightly-report.py record --job older-glibc ... driver-tests.log
+            nightly-report.py record --job restart-soak --libc musl ... soak.log
 
 report  In the reporting job: read every record, group the failures by
         fingerprint and, with `gh` (GH_TOKEN, GH_REPO), comment on the open
@@ -26,6 +27,9 @@ normalized text, which names the failure, not the seed or input:
   fuzz         job, target, and the same panic location and message, or
                the kind (oom, timeout, leak, crash);
   older glibc  job and the failing test's name;
+  restart soak job, architecture, libc and the failing test's name (each
+               failing test once, however many of the looped runs it
+               failed);
   a job that timed out or was cancelled (no record): `<job>|timeout-or-cancelled`.
 Limit: a panic located in the standard library or a dependency (a
 location starting `rustc/` or `registry/`) is keyed on that location
@@ -59,7 +63,12 @@ MAX_TEXT = 4000
 MAX_BLOCKS = 40000
 MAX_REASON = 150
 
-JOBS = {"long-runs": "long runs", "fuzz": "fuzz", "older-glibc": "older glibc"}
+JOBS = {
+    "long-runs": "long runs",
+    "fuzz": "fuzz",
+    "older-glibc": "older glibc",
+    "restart-soak": "restart soak",
+}
 
 # Replay prefixes: the environment each job runs its tests with.
 LONG_RUNS_ENV = (
@@ -67,11 +76,22 @@ LONG_RUNS_ENV = (
 )
 LONG_RUNS_CMD = "cargo test --release --locked -p durchlauferhitzer-sim"
 OLDER_GLIBC_ENV = (
-    "DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 "
-    "DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1"
+    "DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 "
+    "DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1"
 )
 OLDER_GLIBC_CMD = "cargo test -p durchlauferhitzer --locked"
-OLDER_GLIBC_WHERE = "as root in debian:12, as the older glibc job runs it"
+OLDER_GLIBC_WHERE = (
+    "as root in debian:12 with net.ipv4.tcp_migrate_req=1, as the older glibc job runs it"
+)
+RESTART_SOAK_ENV = (
+    "DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 "
+    "DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 DURCHLAUFERHITZER_REQUIRE_IPV6=1"
+)
+RESTART_SOAK_CMD = "cargo test -p durchlauferhitzer --locked --test restart"
+RESTART_SOAK_WHERE = {
+    "glibc": "the test binary run with sudo, as the restart soak job runs it on ubuntu",
+    "musl": "as root in alpine:3.24.3, as the restart soak job runs it",
+}
 
 _PANIC = re.compile(
     r"^thread '(?P<thread>[^']*)'(?: \(\d+\))? panicked at (?P<loc>.+:\d+:\d+):$"
@@ -82,6 +102,7 @@ _MESSAGE_END = re.compile(
     r"\s+Running )"
 )
 _RUNNING = re.compile(r"^\s+Running (?:unittests )?(?P<src>\S+)")
+_SOAK_RUN = re.compile(r"^== restart soak run (?P<n>\d+) of (?P<of>\d+)$")
 _FAILED = re.compile(r"^test (?P<name>\S+) \.\.\. FAILED")
 _SIM_SEED = re.compile(r"^SIM_SEED=(?P<seed>\d+) failed \((?P<plan>.*?)\): (?P<rest>.*)$")
 _TEST_UNIT = re.compile(r"Test unit written to (?P<path>\S+)")
@@ -159,6 +180,8 @@ def describe(job, f):
     test = f.get("test", "")
     if job == "fuzz" and test:
         label = f"fuzz {test}"
+    if job == "restart-soak":
+        label = f"restart soak ({f.get('arch', '')}, {f.get('libc', '')})"
     if kind == "unrecognized":
         key = f"{job}|unrecognized"
         reason = "failed without a recognized failure"
@@ -167,6 +190,9 @@ def describe(job, f):
         reason = "timed out or was cancelled, no failure record"
     elif job == "older-glibc":
         key = f"{job}|{test}"
+        reason = f"{test} failed"
+    elif job == "restart-soak":
+        key = f"{job}|{f.get('arch', '')}|{f.get('libc', '')}|{test}"
         reason = f"{test} failed"
     elif kind == "panic":
         target = test if job == "fuzz" else ""
@@ -377,6 +403,39 @@ def record_older_glibc(text, workspace):
     return failures or [_unrecognized("No failed test found in the log; see the run.")]
 
 
+def record_restart_soak(text, workspace, arch, libc):
+    """The failures of a restart soak log (restart.rs looped, each run
+    after a `== restart soak run <n> of <runs>` line): one per failing
+    test, with how many runs it failed and its last panic."""
+    if text is None:
+        return [_unrecognized("The job left no log; see the run.")]
+    runs = [m for m in map(_SOAK_RUN.match, text.splitlines()) if m]
+    of = runs[-1].group("of") if runs else "?"
+    panics = parse_panics(text)
+    counts = {}
+    for _, test in parse_failed_tests(text):
+        counts[test] = counts.get(test, 0) + 1
+    where = RESTART_SOAK_WHERE.get(libc, f"as the restart soak job runs it ({libc})")
+    failures = []
+    for test, count in counts.items():
+        mine = [p for p in panics if p["thread"] == test]
+        lines = [f"{test} failed in {count} of {of} runs; the last panic:"]
+        if mine:
+            lines += [mine[-1]["header"]] + mine[-1]["lines"]
+        replay = f"{RESTART_SOAK_ENV} {RESTART_SOAK_CMD} -- {test} --exact --nocapture"
+        failures.append(
+            _failure(
+                kind="test",
+                test=f"restart::{test}",
+                arch=arch,
+                libc=libc,
+                panic_text=_cap("\n".join(lines)),
+                replay=f"{replay}  # {where}, looped",
+            )
+        )
+    return failures or [_unrecognized("No failed test found in the log; see the run.")]
+
+
 # --- records -------------------------------------------------------------
 
 
@@ -493,6 +552,8 @@ def _occurrence(o, run_url):
     name = JOBS.get(o["job"], o["job"])
     if o["job"] == "fuzz" and f.get("test"):
         name = f"fuzz {f['test']}"
+    if o["job"] == "restart-soak" and f.get("libc"):
+        name = f"restart soak {f['libc']}"
     head = f"{name} ({o['arch']})" if o["arch"] else name
     lines = [f"#### {_code(head, 200)}", "", f"Run: {run_url}"]
     if f.get("seed"):
@@ -606,6 +667,7 @@ def main(argv=None):
     r.add_argument("--out", required=True)
     r.add_argument("--workspace", default=os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
     r.add_argument("--toolchain", default="nightly", help="fuzz: the nightly toolchain")
+    r.add_argument("--libc", default="", help="restart soak: glibc or musl")
     r.add_argument("--seeds", default=os.environ.get("SIM_SEEDS"), help="long runs: SIM_SEEDS")
     r.add_argument("logs", nargs="*")
     s = sub.add_parser("report", help="file or update issues from the records")
@@ -624,6 +686,8 @@ def main(argv=None):
             text = _read(args.logs[0]) if args.logs else None
             if args.job == "long-runs":
                 failures = record_long_runs(text, args.workspace, args.seeds)
+            elif args.job == "restart-soak":
+                failures = record_restart_soak(text, args.workspace, args.arch, args.libc)
             else:
                 failures = record_older_glibc(text, args.workspace)
         with open(args.out, "w", encoding="utf-8") as fh:
