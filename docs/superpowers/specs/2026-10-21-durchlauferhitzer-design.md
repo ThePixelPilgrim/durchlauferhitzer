@@ -2062,6 +2062,29 @@ Failures, persistence, timeouts:
 
 Targets are set in stage 7 from measurements; none are invented here.
 
+*(Owner decisions 2026-11-06, stage 7 brainstorm:)* the first real
+deployment is a small VPS (2–6 cores, at most 2 GiB) serving a mix of
+static files and proxied requests, about 50 requests per second at the
+start. Stage 7 optimizes CPU and I/O per request, not peak throughput:
+the server should do as little work as possible per request. Order:
+measure first, then the changes that save work on every request
+(conditional requests FR-STATIC-18, backend connection pooling,
+`MSG_MORE`, `splice`, the deadline index), then N driver threads as an
+option. TLS termination is later (not stage 7); in-process TLS would
+disable `sendfile` and `splice` unless the kernel encrypts (kTLS), which
+does not change stage 7's choices.
+
+- **NFR-PERF-08** [stage 7] *(Owner decisions 2026-11-06:)* benchmarks
+  run nightly on GitHub's runners (NFR-TEST-08's workflow) and record,
+  per scenario (static, proxy, conditional hit, keep-alive and fresh
+  connections), CPU time per request and system calls per request (the
+  charted metrics; throughput and memory recorded too). The results are
+  kept in the repository as plain data (CSV), and a page of charts
+  generated from it (Mermaid `xychart-beta` in Markdown, or SVG where
+  Mermaid cannot draw it) renders on GitHub with no server-side
+  component. Runner noise is expected; CPU time and system calls per
+  request are the stable signals.
+
 - **NFR-PERF-01** [stage 7] Static-file throughput per core: target to be
   set in stage 7.
 - **NFR-PERF-02** [stage 7] Proxy throughput and added latency: target to
@@ -2083,7 +2106,11 @@ Targets are set in stage 7 from measurements; none are invented here.
   `splice` for proxied bodies with a known `Content-Length`; readahead
   overlap with sending; deadline index instead of the O(n) scan.
 - **NFR-PERF-07** [stage 7] N driver threads with `SO_REUSEPORT`; backend
-  connection pooling.
+  connection pooling. *(Owner decision 2026-11-06:)* the thread count is
+  a setting with a default of 1 (at the expected load one thread
+  suffices); more threads must start before the seccomp filter (musl's
+  `membarrier`, FR-PROC-06) and keep FR-PROC-07's steering lossless
+  (its 0/1 indices assume one listener per process per port group).
 
 ### NFR-TEST — Verification
 
