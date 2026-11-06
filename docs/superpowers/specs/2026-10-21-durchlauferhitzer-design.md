@@ -584,7 +584,12 @@ Core-generated responses:
   256 KiB): the next chunk is read ahead only after the previous one was
   fully accepted by the client socket. A connection holds at most one file.
 - **FR-STATIC-18** [stage 7] Conditional requests (ETag / Last-Modified).
-  Range requests and compression are non-goals.
+  Range requests and compression are non-goals. *(Owner decision
+  2026-11-06:)* every static 200 carries `ETag` (strong, from size and
+  mtime, no inode) and `Last-Modified`; `If-None-Match` and
+  `If-Modified-Since` give 304 per RFC 9110 (`If-None-Match` wins), a
+  malformed one is ignored as the RFC requires; `If-Match`,
+  `If-Unmodified-Since` and `If-Range` are ignored (no 412, no ranges).
 
 ### FR-PROXY — Proxy routes
 
@@ -598,7 +603,17 @@ Forwarding and identity:
 - **FR-PROXY-01** [done] Any method token is forwarded.
 - **FR-PROXY-02** [done] One fresh backend connection per request, with
   `Connection: close` toward the backend; a client has at most one upstream
-  at a time. (Pooling: stage 7.)
+  at a time. (Pooling: stage 7.) *[stage 7, owner decisions 2026-11-06:]*
+  backend connections are pooled for every proxy route, shared across
+  clients (an idle connection to a backend may carry any client's next
+  request); a per-route switch turns it off for backends that keep
+  per-connection state. `limits` gain an idle timeout and a per-backend
+  idle cap; idle pooled sockets count against `max_connections`,
+  `memory_limit` and the descriptor budget. Idle connections close well
+  before a typical backend keep-alive timeout; a reused connection that
+  fails before any response byte is retried once on a fresh connection
+  for a GET or HEAD without a body, and answered 502 as today
+  (FR-PROXY-26) for anything else.
 - **FR-PROXY-03** [done] `Core::backends()` lists the distinct backend
   addresses (IP and port, FR-CFG-16) in config order (`BackendId` =
   index); the driver connects by id to the address as it is, with no
@@ -2083,7 +2098,16 @@ does not change stage 7's choices.
   generated from it (Mermaid `xychart-beta` in Markdown, or SVG where
   Mermaid cannot draw it) renders on GitHub with no server-side
   component. Runner noise is expected; CPU time and system calls per
-  request are the stable signals.
+  request are the stable signals. *(Owner decisions 2026-11-06, builder
+  check:)* the data and the chart page live on a separate `benchmarks`
+  branch, written by a small job with write access that only takes the
+  benchmark job's artifact and runs no code under test (`main` stays
+  fast-forward only); the README links the page. Measure, then decide:
+  the targets of NFR-PERF-01…05 are proposed from the first numbers for
+  the owner's approval, and each optimisation is kept only if it
+  measurably saves CPU or system calls per request at the expected load
+  (N threads or `splice` may be dropped); results are charted, with no
+  regression alarm yet.
 
 - **NFR-PERF-01** [stage 7] Static-file throughput per core: target to be
   set in stage 7.
@@ -2111,6 +2135,10 @@ does not change stage 7's choices.
   suffices); more threads must start before the seccomp filter (musl's
   `membarrier`, FR-PROC-06) and keep FR-PROC-07's steering lossless
   (its 0/1 indices assume one listener per process per port group).
+  *(Owner decision 2026-11-06:)* the limits stay process-wide
+  (`max_connections`, per-IP caps, the refused pool, `memory_limit`):
+  shared counters across threads; with systemd's single socket the
+  threads share it.
 
 ### NFR-TEST — Verification
 
