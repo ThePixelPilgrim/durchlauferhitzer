@@ -11,6 +11,7 @@ record  In a failing nightly job: read its logs, write a small failure
             nightly-report.py record --job fuzz ... logs/request_head.log ...
             nightly-report.py record --job older-glibc ... driver-tests.log
             nightly-report.py record --job restart-soak --libc musl ... soak.log
+            nightly-report.py record --job bench ... bench.log
 
 report  In the reporting job: read every record, group the failures by
         fingerprint and, with `gh` (GH_TOKEN, GH_REPO), comment on the open
@@ -36,6 +37,8 @@ normalized text, which names the failure, not the seed or input:
   restart soak job, architecture, libc and the failing test's name (each
                failing test once, however many of the looped runs it
                failed);
+  bench        job, scenario and reason from bench's `bench failed:`
+               lines (each scenario and reason once, however many runs);
   a job that timed out or was cancelled (no record): `<job>|timeout-or-cancelled`.
 Limit: a panic located in the standard library or a dependency (a
 location starting `rustc/` or `registry/`) is keyed on that location
@@ -74,6 +77,8 @@ JOBS = {
     "fuzz": "fuzz",
     "older-glibc": "older glibc",
     "restart-soak": "restart soak",
+    "bench": "bench",
+    "bench-publish": "bench publish",
 }
 
 # Replay prefixes: the environment each job runs its tests with.
@@ -108,6 +113,14 @@ _MESSAGE_END = re.compile(
     r"\s+Running )"
 )
 _RUNNING = re.compile(r"^\s+Running (?:unittests )?(?P<src>\S+)")
+_BENCH_FAILED = re.compile(
+    r"^bench failed: scenario=(?P<scenario>\S+) reason=(?P<reason>\S+)(?: (?P<detail>.*))?$"
+)
+BENCH_CMD = (
+    "cargo build --release --locked -p durchlauferhitzer && "
+    "cargo run --release --manifest-path bench/Cargo.toml --locked -- "
+    "--binary target/release/durchlauferhitzer --out bench.csv --runs 1"
+)
 _SOAK_RUN = re.compile(r"^== restart soak run (?P<n>\d+) of (?P<of>\d+)$")
 _FAILED = re.compile(r"^test (?P<name>\S+) \.\.\. FAILED")
 _SIM_SEED = re.compile(r"^SIM_SEED=(?P<seed>\d+) failed \((?P<plan>.*?)\): (?P<rest>.*)$")
@@ -200,6 +213,10 @@ def describe(job, f):
     elif job == "restart-soak":
         key = f"{job}|{f.get('arch', '')}|{f.get('libc', '')}|{test}"
         reason = f"{test} failed"
+    elif job == "bench" and kind == "bench":
+        label = f"bench {test}"
+        key = f"{job}|{test}|{f.get('detail', '')}"
+        reason = f.get("detail", "")
     elif kind == "panic":
         target = test if job == "fuzz" else ""
         key = f"{job}|{target}|{f.get('location', '')}|{normalize_message(f.get('message', ''))}"
@@ -442,6 +459,31 @@ def record_restart_soak(text, workspace, arch, libc):
     return failures or [_unrecognized("No failed test found in the log; see the run.")]
 
 
+def record_bench(text):
+    """The failures of a bench log: one per scenario and reason of its
+    `bench failed: scenario=<s> reason=<r> [detail]` lines, with every
+    such line as the text."""
+    if text is None:
+        return [_unrecognized("The job left no log; see the run.")]
+    seen = {}
+    for line in text.splitlines():
+        m = _BENCH_FAILED.match(line)
+        if m:
+            seen.setdefault((m.group("scenario"), m.group("reason")), []).append(line)
+    failures = []
+    for (scenario, reason), lines in seen.items():
+        failures.append(
+            _failure(
+                kind="bench",
+                test=scenario,
+                detail=reason,
+                panic_text=_cap("\n".join(lines)),
+                replay=f"{BENCH_CMD} --scenarios {scenario}",
+            )
+        )
+    return failures or [_unrecognized("No `bench failed:` line in the log; see the run.")]
+
+
 # --- records -------------------------------------------------------------
 
 
@@ -491,7 +533,12 @@ def load_records(directory):
 
 # A leg's display name (nightly.yml's `name:`) -> (job, arch, libc).
 _LEG = re.compile(r"^(?P<label>[a-z ]+?)(?: \((?P<args>[^()]*)\))?$")
-_SINGLE_ARCH = {"fuzz": "x86_64", "older-glibc": "x86_64"}
+_SINGLE_ARCH = {
+    "fuzz": "x86_64",
+    "older-glibc": "x86_64",
+    "bench": "x86_64",
+    "bench-publish": "x86_64",
+}
 
 
 def parse_leg(name):
@@ -617,6 +664,8 @@ def _occurrence(o, run_url):
         name = f"fuzz {f['test']}"
     if o["job"] == "restart-soak" and f.get("libc"):
         name = f"restart soak {f['libc']}"
+    if o["job"] == "bench" and f.get("test"):
+        name = f"bench {f['test']}"
     head = f"{name} ({o['arch']})" if o["arch"] else name
     lines = [f"#### {_code(head, 200)}", "", f"Run: {run_url}"]
     if f.get("seed"):
@@ -750,6 +799,8 @@ def main(argv=None):
             text = _read(args.logs[0]) if args.logs else None
             if args.job == "long-runs":
                 failures = record_long_runs(text, args.workspace, args.seeds)
+            elif args.job == "bench":
+                failures = record_bench(text)
             elif args.job == "restart-soak":
                 failures = record_restart_soak(text, args.workspace, args.arch, args.libc)
             else:

@@ -262,16 +262,21 @@ crash replay are in [`fuzz/README.md`](fuzz/README.md).
 A failing (or timed-out) nightly job files or updates a GitHub issue labelled `nightly`,
 keyed by a fingerprint of the failure (`scripts/nightly-report.py`).
 
+## Benchmarks
+
+CPU time and system calls per request, measured nightly: [BENCHMARKS.md](https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/benchmarks/BENCHMARKS.md) (on the `benchmarks` branch; the tool is [`bench/`](bench)).
+
 ## Repository layout
 
 - [`core/`](core) — the product: a sans-IO HTTP core with zero dependencies (config, parsing, routing, static files, proxying).
 - [`driver/`](driver) — the `durchlauferhitzer` binary: the Linux `epoll` driver that runs the core over real sockets, files, threads and signals.
 - [`sim/`](sim) — test-only simulation driver: simulated network, clock, file system and backends, with contract checks and randomized runs.
 - [`fuzz/`](fuzz) — test-only fuzz targets for the parsers and the config (outside the workspace).
+- [`bench/`](bench) — test-only benchmark tool: CPU time and system calls per request (outside the workspace).
 - [`examples/`](examples) — documented example configuration.
 - [`contrib/`](contrib) — the reload helper and the OpenRC script.
 - [`docs/superpowers/`](docs/superpowers) — design spec, implementation plans per stage, and review records.
-- [`scripts/`](scripts) — CI helpers (product dependency check, nightly failure issues).
+- [`scripts/`](scripts) — CI helpers (product dependency check, nightly failure issues, the benchmark page).
 
 ## License
 

@@ -1,0 +1,16 @@
+# The benchmark tool (NFR-PERF-08): drives the release binary through
+# fixed scenarios and writes CPU time and system calls per request as CSV.
+# Test-only tooling (NFR-MAINT-02): outside the workspace and the product
+# tree, std only (see README.md).
+[package]
+name = "durchlauferhitzer-bench"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]

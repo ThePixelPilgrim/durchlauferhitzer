@@ -1,8 +1,8 @@
 name: Nightly
 
-# Long randomized runs, fuzzing, an older glibc and the restart soak
-# (NFR-TEST-08, NFR-SEC-13, NFR-PORT-01, FR-PROC-07): daily, and by hand
-# with smaller or larger budgets.
+# Long randomized runs, fuzzing, an older glibc, the restart soak and the
+# benchmarks (NFR-TEST-08, NFR-SEC-13, NFR-PORT-01, FR-PROC-07,
+# NFR-PERF-08): daily, and by hand with smaller or larger budgets.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -20,8 +20,17 @@ on:
         description: "Runs of the restart tests (driver/tests/restart.rs) per restart soak job"
         type: number
         default: 20
+      bench_runs:
+        description: "Benchmark runs (bench --runs)"
+        type: number
+        default: 5
+      bench_seconds:
+        description: "Seconds of each measured benchmark window (bench --duration)"
+        type: number
+        default: 10
 
-# The jobs only read the repository; only `report` writes issues.
+# The jobs only read the repository; only `report` writes issues, and
+# only `bench-publish` writes (the `benchmarks` branch).
 permissions:
   contents: read
 
@@ -30,6 +39,8 @@ env:
   SIM_SEEDS: ${{ inputs.seeds || '0..200000' }}
   FUZZ_SECONDS: ${{ inputs.fuzz_seconds || 600 }}
   RESTART_RUNS: ${{ inputs.restart_runs || 20 }}
+  BENCH_RUNS: ${{ inputs.bench_runs || 5 }}
+  BENCH_SECONDS: ${{ inputs.bench_seconds || 10 }}
   # The failure records link the run.
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
@@ -375,6 +386,140 @@ jobs:
         if: always() && matrix.libc == 'musl'
         run: docker rm -f alpine
 
+  bench:
+    # The benchmarks (NFR-PERF-08, bench/README.md): the release binary
+    # through the fixed scenarios, one CSV row per scenario and run,
+    # uploaded for `bench-publish`. A pinned image, so the runner label
+    # in the rows stays true. The bench runs as the runner user; only
+    # its strace pass runs as root (`sudo -n`).
+    name: bench
+    runs-on: ubuntu-24.04
+    # Full budget: 5 runs x 6 scenarios x about 27 s, plus the builds.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+      - name: Install strace
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends strace
+          strace -V | sed -n 1p
+      - name: Build the release binary and the bench
+        run: |
+          cargo build --release --locked -p durchlauferhitzer
+          cargo build --release --locked --manifest-path bench/Cargo.toml
+      - name: Benchmarks
+        run: |
+          set -euo pipefail
+          export BENCH_COMMIT="${GITHUB_SHA::7}"
+          export BENCH_RUNNER="gha-ubuntu-24.04-$(uname -m)"
+          bench/target/release/bench --binary target/release/durchlauferhitzer \
+            --out bench.csv --runs "$BENCH_RUNS" --duration "$BENCH_SECONDS" 2>&1 | tee bench.log
+      - name: Upload the results
+        # Rows with errors too: they are kept, marked, and never charted.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-results
+          path: bench.csv
+          if-no-files-found: ignore
+      - name: Failure record
+        if: failure()
+        run: >-
+          python3 scripts/nightly-report.py record --job bench --arch x86_64
+          --run-url "$RUN_URL" --out failure.json bench.log
+      - name: Upload the failure record
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-failure-bench
+          path: failure.json
+          if-no-files-found: ignore
+
+  bench-publish:
+    # Appends the `bench` artifact's rows to results.csv on the
+    # `benchmarks` branch (created as an orphan branch if missing) and
+    # renders BENCHMARKS.md (NFR-PERF-08). The only job that writes the
+    # repository (the built-in token, no other secret). It runs no code
+    # under test: only the `benchmarks` branch is checked out, plus
+    # scripts/bench-chart.py (stdlib Python) from the run's commit; the
+    # artifact's rows are untrusted and the script checks every field
+    # before it enters the CSV or the page. Rows with errors are
+    # published too (never charted), so it also runs after a failing
+    # `bench`. One publish at a time (`concurrency`).
+    name: bench publish
+    needs: bench
+    if: ${{ always() && (needs.bench.result == 'success' || needs.bench.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: bench-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          sparse-checkout: scripts/bench-chart.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      # A pattern: no artifact (a `bench` that failed before writing
+      # one) downloads nothing and succeeds.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bench-results
+          path: artifact
+      - name: Check out the benchmarks branch
+        # The token goes into this repository's config only for the
+        # fetch and push here, as actions/checkout does.
+        run: |
+          set -euo pipefail
+          git init -q pages
+          cd pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config http.https://github.com/.extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git remote add origin "https://github.com/$GH_REPO"
+          if git ls-remote --exit-code --heads origin benchmarks >/dev/null; then
+            git fetch -q --depth=1 origin benchmarks
+            git checkout -q -b benchmarks FETCH_HEAD
+          else
+            git checkout -q --orphan benchmarks
+            {
+              echo "# Benchmarks"
+              echo
+              echo "Written by the nightly workflow's \`bench publish\` job (NFR-PERF-08):"
+              echo "[BENCHMARKS.md](BENCHMARKS.md) charts [results.csv](results.csv)."
+              echo "The tool and the scripts are on \`main\` (\`bench/\`, \`scripts/bench-chart.py\`)."
+            } > README.md
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+      - name: Append the rows and render the page
+        run: |
+          set -euo pipefail
+          csv=$(find artifact -type f -name bench.csv | head -n 1)
+          if [ -z "$csv" ]; then
+            echo "no bench artifact: nothing to publish"
+            exit 0
+          fi
+          python3 -I tools/scripts/bench-chart.py --append "$csv" pages/results.csv pages/BENCHMARKS.md
+          cd pages
+          git add -A
+          if git diff --cached --quiet; then
+            echo "nothing new to publish"
+            exit 0
+          fi
+          git commit -q -m "Benchmarks: ${GITHUB_SHA::7} on $(date -u +%F) (run $RUN_ID)"
+          git push -q origin HEAD:refs/heads/benchmarks
+          git log -1 --format='pushed %H'
+        env:
+          RUN_ID: ${{ github.run_id }}
+
   report:
     # A failing job files or updates a GitHub issue keyed by the
     # failure's fingerprint (NFR-TEST-08, scripts/nightly-report.py):
@@ -386,7 +531,7 @@ jobs:
     # jobs are reported too (`always()`: a run cancelled by hand files as
     # well; controller ruling 2026-11-02).
     name: report failures
-    needs: [long-runs, fuzz, older-glibc, restart-soak]
+    needs: [long-runs, fuzz, older-glibc, restart-soak, bench, bench-publish]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

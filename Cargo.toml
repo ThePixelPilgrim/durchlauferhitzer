@@ -2,8 +2,9 @@
 resolver = "3"
 members = ["core", "sim", "driver"]
 # Test-only fuzz targets (NFR-SEC-13): their own crate and lock file,
-# built with nightly Rust by `cargo fuzz`, never by the gate.
-exclude = ["fuzz"]
+# built with nightly Rust by `cargo fuzz`, never by the gate. The
+# benchmark tool (`bench`, NFR-PERF-08): its own crate and lock file too.
+exclude = ["fuzz", "bench"]
 
 [workspace.package]
 edition = "2024"

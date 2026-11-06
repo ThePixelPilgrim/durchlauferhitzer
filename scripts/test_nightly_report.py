@@ -400,6 +400,68 @@ def _legs(*pairs):
     return {"jobs": [{"name": n, "conclusion": c} for n, c in pairs]}
 
 
+BENCH_LOG = """\
+bench: run 1 of 3
+bench: static-small requests=81234 errors=0 cpu_us_per_req=11.2 syscalls_per_req=4.1
+bench failed: scenario=proxy-fresh reason=errors (17 errors in run 1)
+bench: run 2 of 3
+bench failed: scenario=proxy-fresh reason=errors (9 errors in run 2)
+bench failed: scenario=static-large reason=strace (strace never attached)
+"""
+
+
+class Bench(unittest.TestCase):
+    def test_one_failure_per_scenario_and_reason(self):
+        fs = nr.record_bench(BENCH_LOG)
+        self.assertEqual([(f["test"], f["detail"]) for f in fs],
+                         [("proxy-fresh", "errors"), ("static-large", "strace")])
+        self.assertIn("17 errors in run 1", fs[0]["panic_text"])
+        self.assertIn("9 errors in run 2", fs[0]["panic_text"])
+        self.assertIn("--scenarios proxy-fresh", fs[0]["replay"])
+
+    def test_the_fingerprint_is_bench_scenario_reason(self):
+        f = nr.record_bench(BENCH_LOG)[0]
+        fp, title = nr.describe("bench", f)
+        self.assertEqual(fp, nr.fingerprint("bench|proxy-fresh|errors"))
+        self.assertEqual(title, f"nightly: bench proxy-fresh — errors [{fp}]")
+        # The counts in the detail never reach the fingerprint.
+        other = nr.record_bench(BENCH_LOG.replace("17 errors", "3 errors"))[0]
+        self.assertEqual(nr.describe("bench", other)[0], fp)
+
+    def test_untrusted_scenario_and_reason_stay_plain(self):
+        log = "bench failed: scenario=x[y](https://evil) reason=@someone\n"
+        (f,) = nr.record_bench(log)
+        _, title = nr.describe("bench", f)
+        self.assertNotIn("https://", title)
+        self.assertNotIn("@", title)
+        self.assertNotIn("[y]", title)
+
+    def test_a_clean_or_missing_log_is_unrecognized(self):
+        self.assertEqual(nr.record_bench("bench: run 1 of 1\n")[0]["kind"], "unrecognized")
+        self.assertEqual(nr.record_bench(None)[0]["kind"], "unrecognized")
+
+    def test_cli_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "bench.log")
+            with open(log, "w") as fh:
+                fh.write(BENCH_LOG)
+            out = os.path.join(d, "failure.json")
+            with contextlib.redirect_stdout(io.StringIO()):
+                nr.main(["record", "--job", "bench", "--arch", "x86_64", "--run-url", RUN,
+                         "--out", out, log])
+            with open(out) as fh:
+                rec = json.load(fh)
+            self.assertEqual(rec["job"], "bench")
+            self.assertEqual(len(rec["failures"]), 2)
+
+    def test_legs(self):
+        self.assertEqual(nr.parse_leg("bench"), ("bench", "x86_64", ""))
+        self.assertEqual(nr.parse_leg("bench publish"), ("bench-publish", "x86_64", ""))
+        (rec,) = nr.add_missing([], {}, RUN, _legs(("bench publish", "failure")))
+        fp, _ = nr.describe("bench-publish", rec["failures"][0])
+        self.assertEqual(fp, nr.fingerprint("bench-publish|unrecognized"))
+
+
 class Legs(unittest.TestCase):
     """A matrix leg that timed out or was cancelled is reported even when
     a sibling leg of the same job wrote a record (`needs` gives one result

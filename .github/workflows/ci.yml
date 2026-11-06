@@ -107,6 +107,13 @@ jobs:
         # a core API change cannot silently break the targets; running
         # them needs nightly (nightly.yml).
         run: cargo check --manifest-path fuzz/Cargo.toml --locked
+      - name: Benchmark tool
+        # The bench crate (outside the workspace, test-only; nightly.yml
+        # runs it): compiles, lints clean, and its unit tests pass.
+        run: |
+          cargo check --manifest-path bench/Cargo.toml --locked
+          cargo clippy --manifest-path bench/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path bench/Cargo.toml --locked
       - name: The binary links the system glibc and nothing else
         # Its NEEDED entries are exactly the system runtime: glibc and
         # libgcc_s (std's unwinder, owner decision 2026-11-05), so a new
@@ -128,9 +135,10 @@ jobs:
         run: scripts/check-product-deps.sh
       - name: Product dependency check self-test
         run: scripts/test-check-product-deps.sh
-      - name: Nightly report script tests
+      - name: Nightly report and bench chart script tests
         # The fingerprint and issue decision of nightly.yml's `report`
-        # job (NFR-TEST-08); once per workflow.
+        # job (NFR-TEST-08) and the benchmark page (NFR-PERF-08); once
+        # per workflow.
         if: matrix.arch == 'x86_64'
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Docs (warnings are errors)
