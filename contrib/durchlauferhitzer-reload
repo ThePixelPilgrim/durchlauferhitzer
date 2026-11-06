@@ -240,7 +240,9 @@ trap 'exit 1' HUP INT TERM
 # (a helper that took it in between wins). So a helper never removes a
 # lock that another one holds, and of helpers finding a stale lock at
 # once one at most proceeds.
-if ! err=$(mkdir "$lock" 2>&1); then
+# A lock that vanishes between the failed mkdir and the check (another
+# helper moving a stale one away) is tried once more.
+if ! err=$(mkdir "$lock" 2>&1) && { [ -d "$lock" ] || ! err=$(mkdir "$lock" 2>&1); }; then
 	[ -d "$lock" ] || fail "cannot create the lock $lock: ${err#mkdir: }"
 	holder='' holder_start=''
 	{ read -r holder holder_start <"$lock/pid"; } 2>/dev/null

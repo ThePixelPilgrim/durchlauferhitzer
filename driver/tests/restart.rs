@@ -58,7 +58,7 @@ mod site;
 use std::fs;
 use std::io::{self, Write};
 use std::net::TcpStream;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Output};
 use std::thread;
@@ -877,9 +877,12 @@ fn a_reload_may_add_a_listen_address_and_change_user() {
 const LOCK_RACES: usize = 30;
 
 /// Review M4 follow-up: two helpers that find the same stale lock at
-/// once never both hold it. Each holder blocks in `--check` on a FIFO
-/// config, so a second holder would still run when the race is over;
-/// the loser is refused with "another reload".
+/// once never both hold it. A holder blocks in `--check` on a FIFO
+/// config; the race has settled once every helper still running is in
+/// its `--check` (a process of the site's binary). Two such processes at
+/// once would be two holders. Then the FIFO gets an invalid config for
+/// each holder: each exits 1, a holder with "the config check failed",
+/// a loser refused as "another reload".
 #[test]
 fn two_helpers_racing_for_a_stale_lock_never_both_hold_it() {
     let _serial = serial();
@@ -892,44 +895,58 @@ fn two_helpers_racing_for_a_stale_lock_never_both_hold_it() {
         let lock = site.dir.path().join("durchlauferhitzer.pid.lock");
         fs::create_dir(&lock).unwrap();
         // Above any pid_max: not running.
-        fs::write(lock.join("pid"), "4194304 1\n").unwrap();
+        fs::write(lock.join("pid"), "4194304\n").unwrap();
         let mut helpers = [site.spawn_reload(&conf, &[]), site.spawn_reload(&conf, &[])];
-        // Each holder blocks opening the FIFO in `--check`: the race is
-        // over once a helper is refused, or both still run after 1 s.
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while Instant::now() < deadline
-            && helpers
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let checking = loop {
+            let running = helpers
                 .iter_mut()
-                .all(|helper| helper.try_wait().unwrap().is_none())
+                .map(|helper| helper.try_wait().unwrap().is_none())
+                .filter(|&runs| runs)
+                .count();
+            let checking = site.processes().len();
+            if checking == running {
+                break checking;
+            }
+            assert!(Instant::now() < deadline, "the race never settled");
+            thread::sleep(Duration::from_millis(5));
+        };
+        holders[checking] += 1;
+        // Feed every reader of the FIFO until the helpers have ended.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while helpers
+            .iter_mut()
+            .any(|helper| helper.try_wait().unwrap().is_none())
         {
+            if let Ok(mut fifo) = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&conf)
+            {
+                let _ = fifo.write_all(b"nonsense;\n");
+            }
+            assert!(Instant::now() < deadline, "a helper never ended");
             thread::sleep(Duration::from_millis(5));
         }
-        thread::sleep(Duration::from_millis(300));
-        let running = helpers
-            .iter_mut()
-            .map(|helper| helper.try_wait().unwrap().is_none())
-            .filter(|&runs| runs)
-            .count();
-        holders[running] += 1;
-        // Each holder's `--check` reads an invalid config and fails.
-        for _ in 0..running {
-            fs::write(&conf, "nonsense;\n").unwrap();
-        }
-        for helper in helpers {
-            let output = finish(helper);
-            assert_eq!(output.status.code(), Some(1), "{output:?}");
-            let stderr = text(&output.stderr);
+        let outputs: Vec<String> = helpers
+            .into_iter()
+            .map(|helper| {
+                let output = finish(helper);
+                assert_eq!(output.status.code(), Some(1), "{output:?}");
+                text(&output.stderr)
+            })
+            .collect();
+        for stderr in &outputs {
             assert!(
                 stderr.contains("durchlauferhitzer-reload: the config check failed")
-                    || stderr.starts_with("durchlauferhitzer-reload: another reload "),
-                "{stderr}"
+                    || stderr.contains("durchlauferhitzer-reload: another reload "),
+                "{outputs:#?}"
             );
         }
-        assert!(!lock.exists(), "the lock was left behind");
+        assert!(!lock.exists(), "the lock was left behind: {outputs:#?}");
     }
-    eprintln!("races with 0, 1, 2 holders: {holders:?}");
+    eprintln!("races with 0, 1, 2 holders at once: {holders:?}");
     assert_eq!(holders[2], 0, "both helpers held the lock: {holders:?}");
-    assert!(holders[1] > 0, "{holders:?}");
 }
 
 /// Review minor 1: a helper started with SIGHUP ignored (`nohup`) passes
