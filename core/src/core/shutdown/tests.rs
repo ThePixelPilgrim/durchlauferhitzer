@@ -366,3 +366,52 @@ fn a_shutdown_drain_escalates_a_restart_drain() {
         "{actions:?}"
     );
 }
+
+/// One request, its 200 queued keep-alive; the drain begins while it is
+/// still being sent, nothing pipelined behind it. Returns the actions
+/// from the end of that 200 on.
+fn lone_keep_alive(core: &mut Core, target: DrainTarget) -> Vec<Action> {
+    let conn = ConnId(1);
+    accept(core, secs(0), 1, PEER);
+    assert!(opens(&deliver(core, secs(0), conn, GET_F), FileId(1)));
+    assert!(logged(&opened(core, secs(0), FileId(1)), Status::Ok));
+    assert_eq!(core.send_buffer(conn), file_head(Persistence::KeepAlive));
+    assert!(drain(core, target).is_empty());
+    send_all(core, secs(1), conn, FileId(1))
+}
+
+/// FR-PROC-07: in the restart drain the connection stays, idle, once
+/// the response it was promised keep-alive is written; its next request
+/// is served with close, or its keep-alive deadline ends it.
+#[test]
+fn restart_drain_keeps_a_lone_keep_alive_connection_idle_after_its_response() {
+    let mut core = files_core();
+    let conn = ConnId(1);
+    let actions = lone_keep_alive(&mut core, DrainTarget::Restart);
+    assert!(actions.contains(&Action::CloseFile { file: FileId(1) }));
+    assert!(
+        !actions.contains(&Action::ShutdownWrite { conn }),
+        "{actions:?}"
+    );
+    assert!(!closes(&actions, conn), "{actions:?}");
+    assert!(!core.is_drained());
+    // Idle: its keep-alive deadline (60 s after the response) ends it.
+    let actions = handle(&mut core, secs(60), Event::TimerFired);
+    assert!(!closes(&actions, conn), "{actions:?}");
+    let actions = handle(&mut core, secs(61), Event::TimerFired);
+    assert_eq!(actions, [Action::Close { conn }]);
+    assert!(core.is_drained());
+}
+
+/// Its shutdown twin: the connection takes the normal close path once
+/// the response is written (stage 4).
+#[test]
+fn shutdown_drain_closes_a_lone_keep_alive_connection_after_its_response() {
+    let mut core = files_core();
+    let conn = ConnId(1);
+    let actions = lone_keep_alive(&mut core, DrainTarget::Shutdown);
+    assert!(
+        actions.contains(&Action::ShutdownWrite { conn }),
+        "{actions:?}"
+    );
+}
