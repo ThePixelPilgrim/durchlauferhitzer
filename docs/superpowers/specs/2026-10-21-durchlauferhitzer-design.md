@@ -1115,7 +1115,9 @@ Failures, persistence, timeouts:
     is empty, holds a byte outside visible ASCII, a `?`, an empty, `.` or
     `..` segment, or a header given more than once is the backend
     misbehaving: `502`, logged as `BackendFailed` with its own kind, the
-    upstream closed.
+    upstream closed. *Controller call:* a trailing `/` and an empty rest
+    (the root or prefix alone) are not bad paths: they are served as a
+    static route serves them, so a 404 (FR-STATIC-02, -08).
   - **Missing file → 404.** Whatever a static route answers 404 is a
     `404` here (FR-STATIC-09), logged like any `Response`.
   - **The client's response** is the file as a static route sends it
@@ -1126,7 +1128,20 @@ Failures, persistence, timeouts:
     The backend's other headers are kept (after FR-PROXY-12), its
     `Content-Length`, `Transfer-Encoding`, `ETag` and `Last-Modified`
     replaced. A request of any method (a `POST` answered with a file too)
-    gets the file.
+    gets the file. *Controller calls (stage 8 builder check):* a `304`
+    keeps the backend's headers as the `200` would (RFC 9110 §15.4.5:
+    `Cache-Control`, `Vary` and the like belong on it); a `404` is the
+    plain static one, the backend's headers dropped (they described a
+    file that is not there). `max_response_body` does not apply to the
+    file (a static route has no cap either) nor to the discarded backend
+    body, and a chunked backend head toward an HTTP/1.0 client is no
+    error here (its `Transfer-Encoding` is replaced). The backend head
+    is kept until the open finishes, so the per-connection worst case
+    (NFR-RES-01) grows by the file headers the core adds; a merged head
+    that would not fit the send buffer is a `502` (NFR-RES-03).
+    A served file (`200` or `304`) is logged once, as its own kind with
+    the client's status, the backend and the request summary
+    (FR-LOG-02, -03).
   - **The backend's body** is never read. The file starts as soon as the
     backend head is complete. The backend connection is pooled only after
     `Content-Length: 0` (FR-PROXY-02), else closed.
