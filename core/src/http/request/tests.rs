@@ -1,5 +1,6 @@
 use super::*;
 use crate::http::conditional::Conditional;
+use crate::http::range::RangeRequest;
 use crate::http::status::Status;
 use proptest::prelude::*;
 
@@ -58,6 +59,7 @@ fn parses_simple_get() {
             persistence: Persistence::KeepAlive,
             expect: Expect::None,
             conditional: Conditional::NONE,
+            range: RangeRequest::NONE,
         }
     );
 }

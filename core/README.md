@@ -37,7 +37,9 @@ src/
     request.rs          reading request heads, routing, fixed responses,
                         keep-alive, pipelining, lingering close
     static_files.rs     static routes: open, index.html, the 304 of a
-                        conditional request, send, abort
+                        conditional request, the 206 or 416 of a range
+                        request, send (a whole file or one range),
+                        abort
     proxy.rs            proxy routes: plan, connect, `100 Continue`, judge
                         the response head (interim heads dropped), 502/504
                         before it, timeouts (`expire_proxy` decides 408 vs
@@ -89,6 +91,8 @@ src/
     chunked.rs          strict, streaming chunked-body framing validator
     conditional.rs      conditional requests: ETag, Last-Modified,
                         If-None-Match, If-Modified-Since, the 304 decision
+    range.rs            range requests: one `bytes` range and `If-Range`,
+                        whole, 206 or 416 (FR-STATIC-19)
     date.rs             HTTP dates: the IMF-fixdate of `Date` and
                         `Last-Modified`, the parser of all three forms (no
                         time library: days-from-civil arithmetic)
@@ -96,8 +100,8 @@ src/
                         response head to the client, hop-by-hop rules
     target.rs           request-target validation (traversal, encodings)
     static_path.rs      decoding paths to file-system segments
-    response.rs         rendering fixed responses, file heads, 304s,
-                        redirects
+    response.rs         rendering fixed responses, file heads (200 and
+                        206), 416s, 304s, redirects
     status.rs           status codes
     mime.rs             content types
 ```

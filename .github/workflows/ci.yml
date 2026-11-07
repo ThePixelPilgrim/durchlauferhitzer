@@ -26,7 +26,7 @@ jobs:
     env:
       # The test files that run the server (the root step checks the
       # list against the files that include `support/child.rs`).
-      SERVER_TESTS: budget cli containment pool privileges restart shutdown smoke startup systemd
+      SERVER_TESTS: budget cli containment file_ranges pool privileges restart shutdown smoke startup systemd
     steps:
       # Pinned by commit: the v7.0.1 tag (Node 24) as of 2026-11-01.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

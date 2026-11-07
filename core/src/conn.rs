@@ -8,6 +8,7 @@ use crate::config::{BodyLimit, OnFileChange};
 use crate::core::Interest;
 use crate::file::{Chunk, FileId, FileStamp, RootId};
 use crate::http::conditional::Conditional;
+use crate::http::range::RangeRequest;
 use crate::http::request::{Expect, HeadParser, Persistence, Version};
 use crate::http::response::BodyMode;
 use crate::http::response_head::{RequestKind, ResponseParser};
@@ -100,13 +101,15 @@ pub(crate) enum ConnState {
         request: StaticRequest,
     },
     /// A file response: the head is in `Conn::send`, then the open `file`'s
-    /// bytes from `offset` up to `size` (its size at open) follow chunk by
-    /// chunk. Every chunk's stamp is checked against `opened` (the stamp at
-    /// open) under the route's `on_change`. `deadline` is the send idle
-    /// deadline, reset on progress (of the socket or the disk).
+    /// bytes from `offset` up to `end` (exclusive: the size at open for a
+    /// whole file, one past the last byte of a range, FR-STATIC-19) follow
+    /// chunk by chunk. Every chunk's stamp is checked against `opened` (the
+    /// whole file's stamp at open) under the route's `on_change`.
+    /// `deadline` is the send idle deadline, reset on progress (of the
+    /// socket or the disk).
     SendingFile {
         file: FileId,
-        size: u64,
+        end: u64,
         opened: FileStamp,
         on_change: OnFileChange,
         offset: u64,
@@ -402,6 +405,9 @@ pub(crate) struct StaticRequest {
     /// The request's conditional headers, judged once the file is open
     /// (FR-STATIC-18).
     pub(crate) conditional: Conditional,
+    /// The request's `Range` and `If-Range`, judged after the conditional
+    /// headers (FR-STATIC-19).
+    pub(crate) range: RangeRequest,
 }
 
 /// One open connection. Dropping it frees both buffers.

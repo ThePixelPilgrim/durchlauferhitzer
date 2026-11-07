@@ -6,6 +6,7 @@ pub mod date;
 pub mod forward;
 mod head_line;
 pub mod mime;
+pub mod range;
 pub mod request;
 pub mod response;
 pub mod response_head;

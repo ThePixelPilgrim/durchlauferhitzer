@@ -99,7 +99,7 @@ fn a_200_carries_etag_and_last_modified() {
     let expected = format!(
         "HTTP/1.1 200 OK\r\nDate: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\
          Content-Length: 3\r\nETag: {TAG}\r\nLast-Modified: {LAST_MODIFIED}\r\n\
-         X-Content-Type-Options: nosniff\r\n\r\nabc",
+         Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\nabc",
         NOW.1
     );
     assert_eq!(String::from_utf8_lossy(&received), expected);

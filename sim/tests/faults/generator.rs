@@ -9,8 +9,9 @@ pub(crate) const SEEDS: u64 = 1500;
 
 /// Every status the core can send to these clients; each must be seen
 /// across the seeds. (These backends refuse every connect.)
-pub(crate) const STATUSES: [Status; 13] = [
+pub(crate) const STATUSES: [Status; 15] = [
     Status::Ok,
+    Status::PartialContent,
     Status::MovedPermanently,
     Status::NotModified,
     Status::BadRequest,
@@ -19,6 +20,7 @@ pub(crate) const STATUSES: [Status; 13] = [
     Status::RequestTimeout,
     Status::ContentTooLarge,
     Status::UriTooLong,
+    Status::RangeNotSatisfiable,
     Status::RequestHeaderFieldsTooLarge,
     Status::BadGateway,
     Status::ServiceUnavailable,
@@ -133,6 +135,9 @@ pub(crate) const ROOT: &str = "/srv/www";
 pub(crate) const CHUNK: u64 = 256 * 1024;
 pub(crate) const MIB: u64 = 1024 * 1024;
 
+/// Mixed into the generator's state to seed the range lines' stream.
+const RANGE_STREAM: u64 = 0x5241_4e47_4553_2121;
+
 /// A static request: a path under `/` (abort on change), `/g` (allow
 /// growth) or `/.well-known` (abort), maybe with a query. Bodies only go to
 /// `up/` paths, so the expected status of every logged request follows
@@ -193,13 +198,26 @@ pub(crate) fn random_static_request(rng: &mut fastrand::Rng, tree: &Tree) -> Vec
     let query = rng.choice(QUERIES).copied().unwrap_or_default();
     let path = format!("{path}{query}");
     let conditional = random_conditional(rng, stamp);
+    // From a stream of its own, so the other draws stay what they were
+    // before ranges (and with them the coverage they reach).
+    let mut range_rng = fastrand::Rng::with_seed(rng.get_seed() ^ RANGE_STREAM);
+    let range = random_range(&mut range_rng, stamp);
+    // The conditional and range lines both if they fit `max_head`, else
+    // one kind alone (each first half the time), else neither.
+    let alone = if range_rng.bool() {
+        [&conditional, &range]
+    } else {
+        [&range, &conditional]
+    };
     let bodiless = |method: &str| {
-        let with = format!("{method} {path} HTTP/1.1\r\n{host}{conditional}\r\n");
-        if with.len() <= tree.max_head - 8 {
-            with.into_bytes()
-        } else {
-            format!("{method} {path} HTTP/1.1\r\n{host}\r\n").into_bytes()
-        }
+        let both = format!("{conditional}{range}");
+        let head = |lines: &str| format!("{method} {path} HTTP/1.1\r\n{host}{lines}\r\n");
+        [&both, alone[0], alone[1]]
+            .iter()
+            .map(|lines| head(lines))
+            .find(|with| with.len() <= tree.max_head - 8)
+            .unwrap_or_else(|| head(""))
+            .into_bytes()
     };
     match rng.u8(0..20) {
         0..10 => bodiless("GET"),

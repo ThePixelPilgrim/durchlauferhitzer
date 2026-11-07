@@ -1,6 +1,7 @@
 //! Response heads: fixed plain-text responses (status line plus short text
-//! body), `301` redirects, the head of a `200 OK` file response and the
-//! `304 Not Modified` of a conditional request.
+//! body), `301` redirects, the head of a `200 OK` or `206 Partial Content`
+//! file response, the `416 Range Not Satisfiable` of a range request and
+//! the `304 Not Modified` of a conditional request.
 //!
 //! Each takes the core's current IMF-fixdate, if the driver has set one,
 //! and then carries `Date` right after the status line (FR-HTTP-22a).
@@ -12,6 +13,10 @@ use super::status::Status;
 
 /// Length of a `Date: <IMF-fixdate>\r\n` line: 37 bytes.
 pub const DATE_LINE_LEN: usize = "Date: \r\n".len() + IMF_FIXDATE_LEN;
+
+/// The line every file response but a `304` carries (FR-STATIC-19): the
+/// server serves single byte ranges.
+pub const ACCEPT_RANGES: &str = "Accept-Ranges: bytes\r\n";
 
 /// Appends the `Date` line for `date`, if there is one.
 fn put_date(date: Option<&ImfFixdate>, out: &mut Vec<u8>) {
@@ -40,7 +45,9 @@ impl BodyMode {
 }
 
 /// Appends a fixed response for `status` to `out` (existing bytes are kept).
-/// Never used for `304`, which has no body ([`render_not_modified`]).
+/// Never used for `304`, which has no body ([`render_not_modified`]), nor
+/// for `416`, which names the file's size
+/// ([`render_range_not_satisfiable`]).
 /// `Content-Length` always describes the full body, also for `HeadOnly`.
 /// A `405` names the allowed methods (`Allow: GET, HEAD`). `Date` follows
 /// the status line when `date` is set.
@@ -51,16 +58,53 @@ pub fn render_fixed(
     date: Option<&ImfFixdate>,
     out: &mut Vec<u8>,
 ) {
+    render_plain(status, "", persistence, body, date, out);
+}
+
+/// Appends the `416 Range Not Satisfiable` of a `GET` whose one range
+/// does not overlap a file of `size` bytes (FR-STATIC-19): the form of
+/// [`render_fixed`] with body `"416 Range Not Satisfiable\n"`, plus
+/// `Content-Range: bytes */<size>` and `Accept-Ranges: bytes` right after
+/// `Content-Length`.
+pub fn render_range_not_satisfiable(
+    size: u64,
+    persistence: Persistence,
+    body: BodyMode,
+    date: Option<&ImfFixdate>,
+    out: &mut Vec<u8>,
+) {
+    let extra = format!("Content-Range: bytes */{size}\r\n{ACCEPT_RANGES}");
+    render_plain(
+        Status::RangeNotSatisfiable,
+        &extra,
+        persistence,
+        body,
+        date,
+        out,
+    );
+}
+
+/// A fixed response for `status`, with the `extra` header lines right
+/// after `Content-Length`.
+fn render_plain(
+    status: Status,
+    extra: &str,
+    persistence: Persistence,
+    body: BodyMode,
+    date: Option<&ImfFixdate>,
+    out: &mut Vec<u8>,
+) {
     let text = format!("{} {}\n", status.code(), status.reason());
     out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status.code(), status.reason()).as_bytes());
     put_date(date, out);
     let mut head = format!(
-        "Content-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n{extra}X-Content-Type-Options: nosniff\r\n",
         text.len()
     );
     match status {
         Status::MethodNotAllowed => head.push_str("Allow: GET, HEAD\r\n"),
         Status::Ok
+        | Status::PartialContent
         | Status::MovedPermanently
         | Status::NotModified
         | Status::BadRequest
@@ -68,6 +112,7 @@ pub fn render_fixed(
         | Status::RequestTimeout
         | Status::ContentTooLarge
         | Status::UriTooLong
+        | Status::RangeNotSatisfiable
         | Status::ExpectationFailed
         | Status::RequestHeaderFieldsTooLarge
         | Status::BadGateway
@@ -171,25 +216,53 @@ fn put_validators(validators: &Validators, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\r\n");
 }
 
-/// Appends the head of a `200 OK` response whose body is `len` bytes of a
-/// file of type `content_type` (existing bytes are kept), in the order of
-/// FR-STATIC-11: status line, `Date` (when `date` is set),
-/// `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`,
+/// What of a file a file response carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// All `size` bytes (`200 OK`).
+    Whole { size: u64 },
+    /// Bytes `first` to `last` (inclusive, `first <= last < size`) of a
+    /// file of `size` bytes (`206 Partial Content`, FR-STATIC-19).
+    Range { first: u64, last: u64, size: u64 },
+}
+
+/// Appends the head of a file response of type `content_type` carrying
+/// `part` (existing bytes are kept), in the order of FR-STATIC-11 and
+/// FR-STATIC-19: status line (`200 OK` or `206 Partial Content`), `Date`
+/// (when `date` is set), `Content-Type`, `Content-Length`,
+/// `Content-Range` (206 only), `ETag`, `Last-Modified`, `Accept-Ranges`,
 /// `X-Content-Type-Options`, `Connection: close` (only when closing).
 pub fn render_file_head(
     content_type: &str,
-    len: u64,
+    part: Part,
     validators: &Validators,
     persistence: Persistence,
     date: Option<&ImfFixdate>,
     out: &mut Vec<u8>,
 ) {
-    out.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
-    put_date(date, out);
-    out.extend_from_slice(
-        format!("Content-Type: {content_type}\r\nContent-Length: {len}\r\n").as_bytes(),
-    );
+    match part {
+        Part::Whole { size } => {
+            out.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
+            put_date(date, out);
+            out.extend_from_slice(
+                format!("Content-Type: {content_type}\r\nContent-Length: {size}\r\n").as_bytes(),
+            );
+        }
+        Part::Range { first, last, size } => {
+            out.extend_from_slice(b"HTTP/1.1 206 Partial Content\r\n");
+            put_date(date, out);
+            let len = last.saturating_sub(first).saturating_add(1);
+            out.extend_from_slice(
+                format!(
+                    "Content-Type: {content_type}\r\nContent-Length: {len}\r\n\
+                     Content-Range: bytes {first}-{last}/{size}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+    }
     put_validators(validators, out);
+    out.extend_from_slice(ACCEPT_RANGES.as_bytes());
     out.extend_from_slice(b"X-Content-Type-Options: nosniff\r\n");
     match persistence {
         Persistence::Close => out.extend_from_slice(CONNECTION_CLOSE.as_bytes()),
@@ -263,14 +336,14 @@ mod tests {
         let mut out = Vec::new();
         render_file_head(
             "image/png",
-            0x4d2,
+            Part::Whole { size: 0x4d2 },
             &validators(0x4d2),
             Persistence::KeepAlive,
             Some(&date),
             &mut out,
         );
         let expected = format!(
-            "HTTP/1.1 200 OK\r\n{DATE_LINE}Content-Type: image/png\r\nContent-Length: 1234\r\n{VALIDATORS_1234}X-Content-Type-Options: nosniff\r\n\r\n"
+            "HTTP/1.1 200 OK\r\n{DATE_LINE}Content-Type: image/png\r\nContent-Length: 1234\r\n{VALIDATORS_1234}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n"
         );
         assert_eq!(String::from_utf8(out).unwrap(), expected);
 
@@ -363,16 +436,67 @@ mod tests {
         let mut out = Vec::new();
         render_file_head(
             "text/css; charset=utf-8",
-            1234,
+            Part::Whole { size: 1234 },
             &validators(1234),
             Persistence::KeepAlive,
             None,
             &mut out,
         );
         let expected = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=utf-8\r\nContent-Length: 1234\r\n{VALIDATORS_1234}X-Content-Type-Options: nosniff\r\n\r\n"
+            "HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=utf-8\r\nContent-Length: 1234\r\n{VALIDATORS_1234}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n"
         );
         assert_eq!(String::from_utf8(out).unwrap(), expected);
+    }
+
+    /// FR-STATIC-19: a 206 names its part's length and `Content-Range`
+    /// right after `Content-Length`, in the order of FR-STATIC-11.
+    #[test]
+    fn renders_partial_content_head() {
+        let date = rfc_date();
+        let mut out = b"x".to_vec();
+        let part = Part::Range {
+            first: 10,
+            last: 19,
+            size: 1234,
+        };
+        render_file_head(
+            "image/png",
+            part,
+            &validators(1234),
+            Persistence::Close,
+            Some(&date),
+            &mut out,
+        );
+        let expected = format!(
+            "xHTTP/1.1 206 Partial Content\r\n{DATE_LINE}Content-Type: image/png\r\nContent-Length: 10\r\nContent-Range: bytes 10-19/1234\r\n{VALIDATORS_1234}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+    }
+
+    /// FR-STATIC-19: a 416 is a fixed response naming the file's size.
+    #[test]
+    fn renders_range_not_satisfiable() {
+        let mut out = Vec::new();
+        render_range_not_satisfiable(1234, Persistence::KeepAlive, BodyMode::Full, None, &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 26\r\nContent-Range: bytes */1234\r\nAccept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n416 Range Not Satisfiable\n"
+        );
+        let date = rfc_date();
+        let mut out = Vec::new();
+        render_range_not_satisfiable(
+            0,
+            Persistence::Close,
+            BodyMode::HeadOnly,
+            Some(&date),
+            &mut out,
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                "HTTP/1.1 416 Range Not Satisfiable\r\n{DATE_LINE}Content-Type: text/plain; charset=utf-8\r\nContent-Length: 26\r\nContent-Range: bytes */0\r\nAccept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+            )
+        );
     }
 
     #[test]
@@ -382,10 +506,17 @@ mod tests {
             size: 0,
             modified_ns: 0,
         });
-        render_file_head("image/png", 0, &zero, Persistence::Close, None, &mut out);
+        render_file_head(
+            "image/png",
+            Part::Whole { size: 0 },
+            &zero,
+            Persistence::Close,
+            None,
+            &mut out,
+        );
         assert_eq!(
             out,
-            b"xHTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 0\r\nETag: \"0-0\"\r\nLast-Modified: Thu, 01 Jan 1970 00:00:00 GMT\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+            b"xHTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 0\r\nETag: \"0-0\"\r\nLast-Modified: Thu, 01 Jan 1970 00:00:00 GMT\r\nAccept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
         );
     }
 

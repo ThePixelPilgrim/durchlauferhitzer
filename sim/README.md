@@ -59,9 +59,10 @@ src/
   tests.rs            unit tests of the sim's own invariant checks
 tests/
   support/
-    model_http.rs     the spec's fixed responses, file heads (with `ETag`
-                      and `Last-Modified`), 304s, redirects, IMF-fixdates
-                      and parse-error statuses, shared by every test binary
+    model_http.rs     the spec's fixed responses, file heads (with `ETag`,
+                      `Last-Modified` and `Accept-Ranges`; 200 and 206),
+                      416s, 304s, redirects, IMF-fixdates and parse-error
+                      statuses, shared by every test binary
   connections.rs      accepting, buffering, backpressure, resets
   date.rs             the `Date` header on every response the core renders,
                       none on `100 Continue`, the backend's kept
@@ -82,6 +83,9 @@ tests/
     edge.rs             index opens in flight, long redirects, encodings
     conditional.rs      conditional requests: `ETag`, `Last-Modified`,
                         `If-None-Match`, `If-Modified-Since`, 304s
+    range.rs            range requests: 206s across chunks (slow disk,
+                        slow client), suffixes, 416s, `If-Range`, the
+                        whole file for unserved ranges, a cut range
   proxy/              proxy routes end to end, with scripted backends
     main.rs             heads, failures, timeouts; shared helpers
     bodies.rs           request bodies, `100 Continue`, early responses
@@ -102,6 +106,9 @@ tests/
     model.rs            the model of the random file tree
     conditional.rs      the model of conditional requests (RFC 9110), the
                         conditional lines of random requests, coverage
+    range.rs            the model of range requests (FR-STATIC-19), the
+                        `Range` and `If-Range` lines of random requests,
+                        the 200, 206 or 416 they announce, coverage
     client.rs           a random or witness client, as the test sees it
     admission.rs        the peers of each seed and the spec's model of
                         what the connection limits admit
@@ -284,8 +291,21 @@ nothing, so the date is ignored). Whether the answer is 200
 or 304 comes from a model of RFC 9110 written in the net, never from the
 core, and every kind of decision is gated in the coverage.
 
+About two in three random static requests also carry `Range` lines
+(`faults/range.rs`, drawn from a stream of their own so the other draws
+stay as they were): ranges inside, past and longer than a chunk of the
+file, open ends, suffixes, unsatisfiable ones, several ranges, malformed
+ones, another unit, two lines, and an `If-Range` with the file's tag, a
+stale or weak one, its exact `Last-Modified`, a second later or in RFC
+850 form. Both kinds of lines go in when they fit `max_head`, else one
+kind. Whether the answer is a 304, 206, 416 or 200 comes from a model of
+FR-STATIC-19 written in the net (the 304 first), the body of a 206 must
+be exactly its bytes of the file, a fault cuts it where it strikes
+within the range, and each kind of answer is gated in the coverage
+(`range-206` ... `range-across-chunk`).
+
 Every test binary takes the bytes of the responses the core writes itself
-(fixed 4xx/5xx, file heads, 304s, redirects) and the status of each parse error
+(fixed 4xx/5xx, file heads, 206s, 416s, 304s, redirects) and the status of each parse error
 from a model written from the spec (`tests/support/model_http.rs`, included
 by `#[path]`), never from the core's renderers.
 

@@ -6,7 +6,7 @@ use crate::core::{Action, ConnId, Core, DrainTarget, Event};
 use crate::file::{FileId, RootId};
 use crate::http::conditional::Validators;
 use crate::http::request::{Method, Persistence};
-use crate::http::response::{BodyMode, render_file_head, render_fixed};
+use crate::http::response::{BodyMode, Part, render_file_head, render_fixed};
 use crate::http::status::Status;
 use crate::log::{Log, RejectReason, RequestSummary};
 use crate::time::Instant;
@@ -67,7 +67,7 @@ fn file_head(persistence: Persistence) -> Vec<u8> {
     let mut head = Vec::new();
     render_file_head(
         TEXT,
-        SIZE,
+        Part::Whole { size: SIZE },
         &Validators::of(stamp(SIZE)),
         persistence,
         None,

@@ -32,22 +32,57 @@ pub(crate) struct ModelFile {
     pub(crate) fault: Fault,
 }
 
+/// The bytes of a file a response sends: from `first` up to `end`
+/// (exclusive); the whole file, or one range (FR-STATIC-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Span {
+    pub(crate) first: u64,
+    pub(crate) end: u64,
+}
+
+impl Span {
+    pub(crate) fn whole(size: u64) -> Span {
+        Span {
+            first: 0,
+            end: size,
+        }
+    }
+
+    pub(crate) fn len(self) -> u64 {
+        self.end - self.first
+    }
+
+    /// The chunks it is read in, from its first byte (FR-STATIC-17).
+    pub(crate) fn chunks(self) -> u64 {
+        self.len().div_ceil(CHUNK)
+    }
+}
+
 impl ModelFile {
     pub(crate) fn size(&self) -> u64 {
         self.bytes.len() as u64
     }
 
-    /// How a `GET` of this file under `policy` must end if nothing else
-    /// (a timeout or reset) cuts it first: `None` when the whole body is
-    /// sent, otherwise the abort error and the body bytes received at the
-    /// cut (`None` when the cut comes before the head is necessarily out).
-    pub(crate) fn expected_abort(&self, policy: Policy) -> Option<(FileError, Option<u64>)> {
+    /// How a `GET` of `span` of this file under `policy` must end if
+    /// nothing else (a timeout or reset) cuts it first: `None` when all of
+    /// it is sent, otherwise the abort error and the body bytes received at
+    /// the cut (`None` when the cut comes before the head is necessarily
+    /// out). The stamp check compares whole-file stamps, whatever the span
+    /// (FR-STATIC-19).
+    pub(crate) fn expected_abort(
+        &self,
+        policy: Policy,
+        span: Span,
+    ) -> Option<(FileError, Option<u64>)> {
         let size = self.size();
         match self.fault {
             Fault::None => None,
-            Fault::Shrink(at) => Some((FileError::Truncated, Some(at))),
+            // `sendfile` hits the end at `at`: what of the span lies
+            // before it is sent.
+            Fault::Shrink(at) if at >= span.end => None,
+            Fault::Shrink(at) => Some((FileError::Truncated, Some(at.saturating_sub(span.first)))),
             Fault::Change { after, new } => {
-                if after >= size.div_ceil(CHUNK) {
+                if after >= span.chunks() {
                     return None;
                 }
                 let error = match policy {

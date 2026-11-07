@@ -14,9 +14,11 @@ use crate::file::{
 use crate::http::conditional::{Freshness, Validators};
 use crate::http::date::ImfFixdate;
 use crate::http::mime::content_type;
+use crate::http::range::Ranged;
 use crate::http::request::{BodyFraming, Method, Persistence, RequestHead};
 use crate::http::response::{
-    BodyMode, redirect_len, render_file_head, render_fixed, render_not_modified, render_redirect,
+    BodyMode, Part, redirect_len, render_file_head, render_fixed, render_not_modified,
+    render_range_not_satisfiable, render_redirect,
 };
 use crate::http::static_path::{TrailingSlash, relative_segments, trailing_slash};
 use crate::http::status::Status;
@@ -108,52 +110,84 @@ impl Core {
                             deadline,
                         }
                     }
+                    // FR-STATIC-19: then the range, if any.
                     Freshness::Modified => {
                         let size = meta.stamp.size;
-                        let on_change = request.on_change;
-                        let name = request.path.last().map(Vec::as_slice).unwrap_or_default();
-                        let content_type = content_type(name);
+                        let ranged =
+                            request
+                                .range
+                                .judge(&request.summary.method, &validators, size);
+                        let part = match ranged {
+                            Ranged::Whole => Some(Part::Whole { size }),
+                            Ranged::Part { first, last } => Some(Part::Range { first, last, size }),
+                            Ranged::Unsatisfiable => None,
+                        };
+                        let status = match part {
+                            Some(Part::Whole { .. }) => Status::Ok,
+                            Some(Part::Range { .. }) => Status::PartialContent,
+                            None => Status::RangeNotSatisfiable,
+                        };
                         actions.push(Action::Log(Log::Response {
                             conn,
                             peer: c.peer,
-                            status: Status::Ok,
+                            status,
                             request: Some(request.summary),
                         }));
-                        render_file_head(
-                            content_type,
-                            size,
-                            &validators,
-                            persistence,
-                            self.date.as_ref(),
-                            &mut c.send,
-                        );
-                        match body {
-                            BodyMode::Full => {
-                                let chunk = if size == 0 {
+                        let date = self.date.as_ref();
+                        match part {
+                            Some(part) => {
+                                let name =
+                                    request.path.last().map(Vec::as_slice).unwrap_or_default();
+                                render_file_head(
+                                    content_type(name),
+                                    part,
+                                    &validators,
+                                    persistence,
+                                    date,
+                                    &mut c.send,
+                                );
+                            }
+                            None => render_range_not_satisfiable(
+                                size,
+                                persistence,
+                                body,
+                                date,
+                                &mut c.send,
+                            ),
+                        }
+                        // A HEAD (never ranged) and a 416 are the head
+                        // alone, like a 304: nothing is read.
+                        match (part, body) {
+                            (Some(part), BodyMode::Full) => {
+                                let (offset, end) = match part {
+                                    Part::Whole { size } => (0, size),
+                                    Part::Range { first, last, .. } => {
+                                        (first, last.saturating_add(1))
+                                    }
+                                };
+                                let chunk = if offset >= end {
                                     Chunk::Done
                                 } else {
-                                    let end = size.min(FILE_CHUNK);
-                                    actions.push(Action::Readahead {
-                                        file,
-                                        offset: 0,
-                                        len: end,
-                                    });
-                                    Chunk::Reading { end }
+                                    let len = end.saturating_sub(offset).min(FILE_CHUNK);
+                                    actions.push(Action::Readahead { file, offset, len });
+                                    Chunk::Reading {
+                                        end: offset.saturating_add(len),
+                                    }
                                 };
                                 ConnState::SendingFile {
                                     file,
-                                    size,
+                                    end,
                                     opened: meta.stamp,
-                                    on_change,
-                                    offset: 0,
+                                    on_change: request.on_change,
+                                    offset,
                                     chunk,
                                     persistence,
                                     buffered,
                                     deadline,
                                 }
                             }
-                            // HEAD: the head is all; nothing is read.
-                            BodyMode::HeadOnly => {
+                            (None, BodyMode::Full | BodyMode::HeadOnly)
+                            | (Some(_), BodyMode::HeadOnly) => {
                                 self.files.release(file);
                                 actions.push(Action::CloseFile { file });
                                 ConnState::Responding {
@@ -370,9 +404,9 @@ impl Core {
         };
         let ConnState::SendingFile {
             file,
-            size,
+            end,
             offset,
-            chunk: Chunk::Ready { end },
+            chunk: Chunk::Ready { end: chunk_end },
             persistence,
             buffered,
             ..
@@ -384,20 +418,20 @@ impl Core {
         if !c.send.is_empty() {
             return;
         }
-        let len = len.min(end.saturating_sub(offset));
+        let len = len.min(chunk_end.saturating_sub(offset));
         if len == 0 {
             return;
         }
         let offset = offset.saturating_add(len);
         let deadline = now.saturating_add(limits.send_idle_timeout);
-        let next_chunk = if offset < end {
-            Chunk::Ready { end }
-        } else if end < size {
-            let next = size.min(end.saturating_add(FILE_CHUNK));
+        let next_chunk = if offset < chunk_end {
+            Chunk::Ready { end: chunk_end }
+        } else if chunk_end < end {
+            let next = end.min(chunk_end.saturating_add(FILE_CHUNK));
             actions.push(Action::Readahead {
                 file,
-                offset: end,
-                len: next.saturating_sub(end),
+                offset: chunk_end,
+                len: next.saturating_sub(chunk_end),
             });
             Chunk::Reading { end: next }
         } else {
@@ -695,6 +729,7 @@ impl Core {
                 on_change,
                 path,
                 conditional: head.conditional,
+                range: head.range,
             },
         };
     }
@@ -705,3 +740,6 @@ mod tests;
 
 #[cfg(test)]
 mod conditional_tests;
+
+#[cfg(test)]
+mod range_tests;

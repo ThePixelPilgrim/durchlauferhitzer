@@ -171,6 +171,7 @@ mod parse;
     reason = "the proxy net indexes its own generated exchanges and buffers; an out-of-range index is a bug in the net, reported with its seed like any failure"
 )]
 mod proxy;
+mod range;
 mod run;
 mod shutdown;
 mod split;
@@ -184,6 +185,7 @@ use generator::*;
 use model::*;
 use oracle::*;
 use parse::*;
+use range::*;
 use run::{assert_clock_done, replay_seed, run_reporting, seed_range};
 use shutdown::*;
 use unanswered::*;

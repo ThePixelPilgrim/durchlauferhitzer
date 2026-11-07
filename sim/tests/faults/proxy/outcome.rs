@@ -179,12 +179,14 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
                 }
                 Status::ContentTooLarge => tags.push("413 Content-Length over the proxy limit"),
                 Status::Ok
+                | Status::PartialContent
                 | Status::MovedPermanently
                 | Status::NotModified
                 | Status::NotFound
                 | Status::MethodNotAllowed
                 | Status::RequestTimeout
                 | Status::UriTooLong
+                | Status::RangeNotSatisfiable
                 | Status::ExpectationFailed
                 | Status::RequestHeaderFieldsTooLarge
                 | Status::BadGateway

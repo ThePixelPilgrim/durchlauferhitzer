@@ -436,6 +436,7 @@ fn random_fault_schedules() {
             );
             eprintln!("SHUTDOWN COVERAGE {:?}", coverage.shutdown);
             eprintln!("ADMISSION COVERAGE {:?}", coverage.admission);
+            eprintln!("RANGE COVERAGE {:?}", coverage.range);
             coverage.check();
         }
     }

@@ -34,7 +34,7 @@ fn header_lines(head: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
-fn named(head: &[u8], name: &str) -> Vec<String> {
+pub(crate) fn named(head: &[u8], name: &str) -> Vec<String> {
     header_lines(head)
         .into_iter()
         .filter(|(n, _)| n == name)

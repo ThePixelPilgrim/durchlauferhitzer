@@ -138,7 +138,10 @@
 //!   the file of a conditional request answered `304 Not Modified`
 //!   (FR-STATIC-18): the decision uses the stamp of the open descriptor,
 //!   and an `If-Modified-Since` counts only once [`Core::set_date`] gave
-//!   the core a time it is not after.
+//!   the core a time it is not after. So is the file of a range request
+//!   answered `416 Range Not Satisfiable` (FR-STATIC-19). A `206` reads
+//!   and sends only its range: its first `Readahead` starts at the range's
+//!   first byte, and the chunks follow up to its last.
 //! - A file is open from its `FileOpened` until the core's `CloseFile`; a
 //!   failed open leaves nothing to close. `CloseFile` comes exactly once per
 //!   opened file, also when its connection closes.

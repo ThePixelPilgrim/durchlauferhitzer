@@ -18,6 +18,7 @@ use crate::http::head_line::{
     check_connection, check_line, check_unterminated, connection_tokens, declared_framing,
     head_lines, is_token, parse_headers, split_header, to_string, values,
 };
+use crate::http::range::RangeRequest;
 // The work counters are shared by both head parsers; tests elsewhere reach
 // them through this module.
 #[cfg(test)]
@@ -95,6 +96,9 @@ pub struct RequestHead {
     /// leniently: a malformed one is never an error (FR-STATIC-18). Only a
     /// static route evaluates them.
     pub conditional: Conditional,
+    /// `Range` and `If-Range` (FR-STATIC-19), read leniently like the
+    /// conditional headers. Only a static route evaluates them.
+    pub range: RangeRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +181,10 @@ impl From<&Limits> for HeadLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a head is moved out once per request; boxing it would allocate per request"
+)]
 pub enum ParseStatus {
     Incomplete,
     Complete { head: RequestHead, consumed: usize },
@@ -353,6 +361,7 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
     let expect = check_expect(&headers, version)?;
     let persistence = persistence(&headers, version);
     let conditional = Conditional::of(&headers);
+    let range = RangeRequest::of(&headers);
     Ok(RequestHead {
         method,
         target,
@@ -363,6 +372,7 @@ fn build_head(head: &[u8]) -> Result<RequestHead, HttpError> {
         persistence,
         expect,
         conditional,
+        range,
     })
 }
 

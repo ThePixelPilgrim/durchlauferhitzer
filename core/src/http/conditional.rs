@@ -3,8 +3,9 @@
 //! (`ETag`, `Last-Modified`), what a request's `If-None-Match` and
 //! `If-Modified-Since` say, and whether they make the answer a `304`.
 //!
-//! `If-Match`, `If-Unmodified-Since` and `If-Range` are ignored (owner
-//! decision 2026-11-06): no `412`, no ranges.
+//! `If-Match` and `If-Unmodified-Since` are ignored (owner decision
+//! 2026-11-06): no `412`. `If-Range` belongs to the range request
+//! (FR-STATIC-19, [`super::range`]), judged after these.
 
 use super::date::{ImfFixdate, imf_fixdate, parse_http_date};
 use super::head_line::{trim_ows, values};
@@ -237,7 +238,7 @@ fn if_none_match(headers: &[Header]) -> IfNoneMatch {
 /// Splits one entity tag off the front of `bytes`: its opaque tag between
 /// the quotes (the `W/` prefix dropped: weak comparison ignores it) and
 /// what follows the closing quote.
-fn entity_tag(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+pub(super) fn entity_tag(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     let bytes = bytes.strip_prefix(b"W/").unwrap_or(bytes);
     let inner = bytes.strip_prefix(b"\"")?;
     let close = inner.iter().position(|&b| b == b'"')?;
@@ -256,7 +257,7 @@ fn entity_tag(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
 /// The stamp an opaque tag names if it is written exactly as
 /// [`EntityTag::of`] writes one (lowercase hex, no leading zeros), so that
 /// equal stamps mean equal tags.
-fn own_stamp(opaque: &[u8]) -> Option<FileStamp> {
+pub(super) fn own_stamp(opaque: &[u8]) -> Option<FileStamp> {
     let dash = opaque.iter().position(|&b| b == b'-')?;
     let size = canonical_hex(opaque.get(..dash)?)?;
     let modified_ns = canonical_hex(opaque.get(dash + 1..)?)?;

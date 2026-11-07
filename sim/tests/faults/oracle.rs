@@ -42,6 +42,8 @@ pub(crate) struct Coverage {
     pub(crate) shutdown: ShutdownCoverage,
     /// Conditional requests (`conditional.rs`).
     pub(crate) conditional: ConditionalCoverage,
+    /// Range requests (`range.rs`).
+    pub(crate) range: RangeCoverage,
     /// Peer groups (`admission.rs`).
     pub(crate) admission: AdmissionCoverage,
 }
@@ -109,6 +111,7 @@ impl Coverage {
         }
         self.shutdown.check();
         self.conditional.check();
+        self.range.check();
     }
 }
 
@@ -135,9 +138,10 @@ pub(crate) struct Announced<'t> {
     pub(crate) status: Status,
     pub(crate) body: BodyMode,
     pub(crate) renderings: Vec<Rendering>,
-    /// For a 200: the file and its route's policy.
-    pub(crate) file: Option<(&'t ModelFile, Policy)>,
-    /// For a 200 or a 304: the file's stamp at open.
+    /// For a 200 or 206: the file, its route's policy and what of it is
+    /// sent.
+    pub(crate) file: Option<(&'t ModelFile, Policy, Span)>,
+    /// For a 200, 206, 304 or 416: the file's stamp at open.
     pub(crate) stamp: Option<FileStamp>,
 }
 
@@ -299,10 +303,9 @@ pub(crate) fn announced<'t>(
         return Err(format!("{path} answered, but it must be rejected (400)"));
     }
     let mut expected = tree.expected_status(&request.method, path);
+    // A 304, 206 or 416 by the request's conditional and range lines.
     if let (Status::Ok, Expect::File(f, _), Some(head)) = (expected, tree.resolve(path), head) {
-        if model_verdict(head, f.stamp, NET_DATE.0) == ModelFreshness::NotModified {
-            expected = Status::NotModified;
-        }
+        expected = model_file_status(head, f);
     }
     // A redirect too long for the send buffer is answered 414 instead.
     let redirect_too_long = expected == Status::MovedPermanently && status == Status::UriTooLong;
@@ -315,33 +318,10 @@ pub(crate) fn announced<'t>(
         ));
     }
     let announced = match (status, tree.resolve(path)) {
-        (Status::Ok, Expect::File(f, policy)) => {
-            let renderings = BOTH
-                .iter()
-                .map(|&persistence| {
-                    let mut bytes =
-                        model_file_head(f.content_type, f.stamp, persistence, Some(NET_DATE.1));
-                    let head_len = bytes.len();
-                    match body {
-                        BodyMode::Full => bytes.extend_from_slice(&f.bytes),
-                        BodyMode::HeadOnly => {}
-                    }
-                    Rendering {
-                        persistence,
-                        with_query: false,
-                        head_len,
-                        bytes,
-                    }
-                })
-                .collect();
-            Announced {
-                status,
-                body,
-                renderings,
-                file: Some((f, policy)),
-                stamp: Some(f.stamp),
-            }
-        }
+        (
+            Status::Ok | Status::PartialContent | Status::RangeNotSatisfiable,
+            Expect::File(f, policy),
+        ) => file_announced(status, f, policy, body, head),
         // FR-STATIC-18: a 304 is the head alone, the file unread.
         (Status::NotModified, Expect::File(f, _)) => {
             let renderings = BOTH
@@ -632,19 +612,19 @@ pub(crate) fn check_client(
                 }
             }
             rest = rest.get(r.bytes.len()..).unwrap_or_default();
-            if let (Some((f, policy)), BodyMode::Full) = (a.file, a.body) {
-                if f.expected_abort(policy).is_some() {
+            if let (Some((f, policy, span)), BodyMode::Full) = (a.file, a.body) {
+                if f.expected_abort(policy, span).is_some() {
                     fail(format!(
-                        "complete {} byte body of a file that must abort ({:?})",
+                        "complete {} byte body ({span:?}) of a file that must abort ({:?})",
                         f.size(),
                         f.fault
                     ));
                 }
-                if f.size() > CHUNK {
+                if span.len() > CHUNK {
                     coverage.multi_chunk += 1;
                 }
                 if let (Policy::AllowGrowth, Fault::Change { after, new }) = (policy, f.fault) {
-                    if new.size > f.size() && after < f.size().div_ceil(CHUNK) {
+                    if new.size > f.size() && after < span.chunks() {
                         coverage.grown += 1;
                     }
                 }
@@ -656,12 +636,14 @@ pub(crate) fn check_client(
                 coverage
                     .conditional
                     .count(head, stamp, a.status, r.persistence);
+                coverage.range.count(head, stamp, a.status);
             }
             if r.persistence == Persistence::Close {
                 match a.status {
-                    Status::Ok => coverage.close_ok += 1,
+                    Status::Ok | Status::PartialContent => coverage.close_ok += 1,
                     Status::MovedPermanently => coverage.close_redirect += 1,
-                    Status::NotModified
+                    Status::RangeNotSatisfiable
+                    | Status::NotModified
                     | Status::BadRequest
                     | Status::NotFound
                     | Status::MethodNotAllowed
@@ -750,14 +732,14 @@ pub(crate) fn check_client(
         let Some(a) = last.and_then(|i| expected.get(i)) else {
             fail("FileAborted without a 200".to_owned());
         };
-        let Some((f, policy)) = a.file.filter(|_| a.body == BodyMode::Full) else {
+        let Some((f, policy, span)) = a.file.filter(|_| a.body == BodyMode::Full) else {
             fail(format!(
                 "FileAborted after a {} {:?}",
                 model_code(a.status),
                 a.body
             ));
         };
-        let Some((want, body_at)) = f.expected_abort(policy) else {
+        let Some((want, body_at)) = f.expected_abort(policy, span) else {
             fail(format!(
                 "FileAborted({error:?}) for a file with {:?}",
                 f.fault

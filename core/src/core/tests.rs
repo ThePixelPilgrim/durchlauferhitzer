@@ -4,10 +4,14 @@ use crate::core::{ConnError, ConnId, Event};
 use crate::file::FileStamp;
 use crate::http::conditional::Validators;
 use crate::http::request::Persistence;
-use crate::http::response::{BodyMode, render_file_head, render_fixed, render_not_modified};
+use crate::http::response::{
+    BodyMode, Part, render_file_head, render_fixed, render_not_modified,
+    render_range_not_satisfiable,
+};
 use crate::time::Instant;
 
-/// The send buffer bound: every fixed response, every file head and every
+/// The send buffer bound: every fixed response, every file head (200 and
+/// 206, FR-STATIC-19), every 416 and every
 /// `304` (FR-STATIC-18), in
 /// every persistence and body mode, at its largest (longest content type,
 /// largest length), with and without its `Date` line (FR-HTTP-22a), fits
@@ -47,7 +51,6 @@ fn every_rendered_head_fits_the_send_buffer() {
                     assert!(out.len() <= SEND_CAPACITY, "{status:?}");
                 }
             }
-            let mut out = CONTINUE.to_vec();
             // Far longer than any content type in the table.
             let content_type = "x".repeat(200);
             // The longest validators: every hex digit used.
@@ -55,24 +58,45 @@ fn every_rendered_head_fits_the_send_buffer() {
                 size: u64::MAX,
                 modified_ns: u64::MAX,
             });
-            render_file_head(
-                &content_type,
-                u64::MAX,
-                &validators,
-                persistence,
-                date,
-                &mut out,
-            );
-            largest = largest.max(out.len());
-            assert!(out.len() <= SEND_CAPACITY);
+            // The longest `Content-Range` too (FR-STATIC-19): three 20-digit
+            // numbers (and a 19-digit length).
+            let range = Part::Range {
+                first: 10_000_000_000_000_000_000,
+                last: u64::MAX - 1,
+                size: u64::MAX,
+            };
+            for part in [Part::Whole { size: u64::MAX }, range] {
+                let mut out = CONTINUE.to_vec();
+                render_file_head(
+                    &content_type,
+                    part,
+                    &validators,
+                    persistence,
+                    date,
+                    &mut out,
+                );
+                largest = largest.max(out.len());
+                assert!(out.len() <= SEND_CAPACITY, "{part:?}");
+            }
+            for body in [BodyMode::Full, BodyMode::HeadOnly] {
+                let mut out = CONTINUE.to_vec();
+                render_range_not_satisfiable(u64::MAX, persistence, body, date, &mut out);
+                largest = largest.max(out.len());
+                assert!(out.len() <= SEND_CAPACITY);
+            }
             let mut out = CONTINUE.to_vec();
             render_not_modified(&validators, persistence, date, &mut out);
             assert!(out.len() <= SEND_CAPACITY);
         }
     }
-    // The arithmetic of the report: well within the 1 KiB buffer.
-    assert!(largest <= 500, "{largest}");
+    // The arithmetic of NFR-RES-01: well within the 1 KiB buffer.
+    assert_eq!(largest, LARGEST_HEAD + CONTINUE.len());
 }
+
+/// The largest head the core renders into the send buffer (NFR-RES-01):
+/// a `206` with `Date`, a 200-byte content type, the longest
+/// `Content-Range`, `ETag` and `Last-Modified`, and `Connection: close`.
+const LARGEST_HEAD: usize = 570;
 
 #[test]
 fn capacities_are_reported_per_connection() {

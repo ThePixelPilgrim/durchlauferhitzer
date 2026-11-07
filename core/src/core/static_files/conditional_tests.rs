@@ -54,7 +54,7 @@ fn not_modified(stamp: FileStamp, close: bool) -> String {
 fn ok_head(stamp: FileStamp) -> String {
     format!(
         "HTTP/1.1 200 OK\r\nDate: {DATE}\r\nContent-Type: text/plain; charset=utf-8\r\n\
-         Content-Length: {}\r\n{}X-Content-Type-Options: nosniff\r\n\r\n",
+         Content-Length: {}\r\n{}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n",
         stamp.size,
         validators(stamp)
     )

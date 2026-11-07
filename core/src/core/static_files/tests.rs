@@ -72,7 +72,7 @@ fn file_is_opened_read_sent_and_closed() {
     let mut head = Vec::new();
     crate::http::response::render_file_head(
         "text/plain; charset=utf-8",
-        3,
+        crate::http::response::Part::Whole { size: 3 },
         &Validators::of(stamp(3)),
         Persistence::KeepAlive,
         None,
@@ -308,7 +308,7 @@ fn head_of_a_file_sends_the_head_and_closes_it() {
     let mut head = Vec::new();
     crate::http::response::render_file_head(
         "text/plain; charset=utf-8",
-        1 << 40,
+        crate::http::response::Part::Whole { size: 1 << 40 },
         &Validators::of(stamp(1 << 40)),
         Persistence::KeepAlive,
         None,

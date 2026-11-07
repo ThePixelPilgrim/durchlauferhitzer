@@ -6,6 +6,8 @@ use super::request::HttpError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Ok,
+    /// A `GET` of one satisfiable byte range of a file (FR-STATIC-19).
+    PartialContent,
     MovedPermanently,
     /// A conditional `GET` or `HEAD` whose file is unchanged
     /// (FR-STATIC-18).
@@ -16,6 +18,9 @@ pub enum Status {
     RequestTimeout,
     ContentTooLarge,
     UriTooLong,
+    /// A `GET` of one byte range that does not overlap the file
+    /// (FR-STATIC-19).
+    RangeNotSatisfiable,
     ExpectationFailed,
     RequestHeaderFieldsTooLarge,
     BadGateway,
@@ -28,6 +33,7 @@ impl Status {
     pub fn code(self) -> u16 {
         match self {
             Status::Ok => 200,
+            Status::PartialContent => 206,
             Status::BadRequest => 400,
             Status::MovedPermanently => 301,
             Status::NotModified => 304,
@@ -36,6 +42,7 @@ impl Status {
             Status::RequestTimeout => 408,
             Status::ContentTooLarge => 413,
             Status::UriTooLong => 414,
+            Status::RangeNotSatisfiable => 416,
             Status::ExpectationFailed => 417,
             Status::RequestHeaderFieldsTooLarge => 431,
             Status::BadGateway => 502,
@@ -48,6 +55,7 @@ impl Status {
     pub fn reason(self) -> &'static str {
         match self {
             Status::Ok => "OK",
+            Status::PartialContent => "Partial Content",
             Status::BadRequest => "Bad Request",
             Status::MovedPermanently => "Moved Permanently",
             Status::NotModified => "Not Modified",
@@ -56,6 +64,7 @@ impl Status {
             Status::RequestTimeout => "Request Timeout",
             Status::ContentTooLarge => "Content Too Large",
             Status::UriTooLong => "URI Too Long",
+            Status::RangeNotSatisfiable => "Range Not Satisfiable",
             Status::ExpectationFailed => "Expectation Failed",
             Status::RequestHeaderFieldsTooLarge => "Request Header Fields Too Large",
             Status::BadGateway => "Bad Gateway",
@@ -114,6 +123,7 @@ mod tests {
     fn status_codes_and_reasons() {
         let all = [
             (Status::Ok, 200, "OK"),
+            (Status::PartialContent, 206, "Partial Content"),
             (Status::BadRequest, 400, "Bad Request"),
             (Status::MovedPermanently, 301, "Moved Permanently"),
             (Status::NotFound, 404, "Not Found"),
@@ -121,6 +131,7 @@ mod tests {
             (Status::RequestTimeout, 408, "Request Timeout"),
             (Status::ContentTooLarge, 413, "Content Too Large"),
             (Status::UriTooLong, 414, "URI Too Long"),
+            (Status::RangeNotSatisfiable, 416, "Range Not Satisfiable"),
             (Status::ExpectationFailed, 417, "Expectation Failed"),
             (
                 Status::RequestHeaderFieldsTooLarge,

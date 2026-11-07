@@ -1,5 +1,5 @@
 //! The model of the responses the core writes itself, written from the
-//! spec (FR-HTTP-10, -19…-22a, -06, FR-STATIC-06, -11…-13, -18) rather than taken
+//! spec (FR-HTTP-10, -19…-22a, -06, FR-STATIC-06, -11…-13, -18, -19) rather than taken
 //! from the core's renderers, so a wrong status, reason, header or body in
 //! the core shows up in the tests. Shared by every test binary of the sim
 //! (`#[path]` include), which take their expected bytes from here.
@@ -28,6 +28,7 @@ use durchlauferhitzer_core::http::status::Status;
 pub(crate) fn model_reason(status: Status) -> &'static str {
     match status {
         Status::Ok => "OK",
+        Status::PartialContent => "Partial Content",
         Status::MovedPermanently => "Moved Permanently",
         Status::NotModified => "Not Modified",
         Status::BadRequest => "Bad Request",
@@ -36,6 +37,7 @@ pub(crate) fn model_reason(status: Status) -> &'static str {
         Status::RequestTimeout => "Request Timeout",
         Status::ContentTooLarge => "Content Too Large",
         Status::UriTooLong => "URI Too Long",
+        Status::RangeNotSatisfiable => "Range Not Satisfiable",
         Status::ExpectationFailed => "Expectation Failed",
         Status::RequestHeaderFieldsTooLarge => "Request Header Fields Too Large",
         Status::BadGateway => "Bad Gateway",
@@ -49,6 +51,7 @@ pub(crate) fn model_reason(status: Status) -> &'static str {
 pub(crate) fn model_code(status: Status) -> u16 {
     match status {
         Status::Ok => 200,
+        Status::PartialContent => 206,
         Status::MovedPermanently => 301,
         Status::NotModified => 304,
         Status::BadRequest => 400,
@@ -57,6 +60,7 @@ pub(crate) fn model_code(status: Status) -> u16 {
         Status::RequestTimeout => 408,
         Status::ContentTooLarge => 413,
         Status::UriTooLong => 414,
+        Status::RangeNotSatisfiable => 416,
         Status::ExpectationFailed => 417,
         Status::RequestHeaderFieldsTooLarge => 431,
         Status::BadGateway => 502,
@@ -205,19 +209,62 @@ fn validator_lines(stamp: FileStamp) -> String {
 /// `Date` (FR-HTTP-22a, once set), `Content-Type` (FR-STATIC-12, from the model's own table in
 /// `model.rs`), `Content-Length` = the size at open, `ETag` and
 /// `Last-Modified` of the stamp at open (FR-STATIC-18),
-/// `X-Content-Type-Options: nosniff`, `Connection: close` only when
-/// closing, blank line. A `HEAD` gets the same head (FR-STATIC-13).
+/// `Accept-Ranges: bytes` (FR-STATIC-19), `X-Content-Type-Options:
+/// nosniff`, `Connection: close` only when closing, blank line. A `HEAD`
+/// gets the same head (FR-STATIC-13).
 pub(crate) fn model_file_head(
     content_type: &str,
     stamp: FileStamp,
     persistence: Persistence,
     date: Option<&str>,
 ) -> Vec<u8> {
-    let mut out = format!(
-        "HTTP/1.1 200 OK\r\n{}Content-Type: {content_type}\r\nContent-Length: {}\r\n\
-         {}X-Content-Type-Options: nosniff\r\n",
-        date_line(date),
+    model_head(
+        "200 OK",
+        content_type,
         stamp.size,
+        "",
+        stamp,
+        persistence,
+        date,
+    )
+}
+
+/// The head of a `206 Partial Content` for bytes `first` to `last`
+/// (inclusive) of a file with `stamp` (FR-STATIC-19): a 200's head
+/// (FR-STATIC-11) with `Content-Length` = the part's length and
+/// `Content-Range: bytes <first>-<last>/<size>` right after it.
+pub(crate) fn model_partial_head(
+    content_type: &str,
+    stamp: FileStamp,
+    (first, last): (u64, u64),
+    persistence: Persistence,
+    date: Option<&str>,
+) -> Vec<u8> {
+    let range = format!("Content-Range: bytes {first}-{last}/{}\r\n", stamp.size);
+    model_head(
+        "206 Partial Content",
+        content_type,
+        last - first + 1,
+        &range,
+        stamp,
+        persistence,
+        date,
+    )
+}
+
+fn model_head(
+    status: &str,
+    content_type: &str,
+    length: u64,
+    range: &str,
+    stamp: FileStamp,
+    persistence: Persistence,
+    date: Option<&str>,
+) -> Vec<u8> {
+    let mut out = format!(
+        "HTTP/1.1 {status}\r\n{}Content-Type: {content_type}\r\nContent-Length: {length}\r\n\
+         {range}{}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n",
+        date_line(date),
         validator_lines(stamp)
     );
     if persistence == Persistence::Close {
@@ -225,6 +272,33 @@ pub(crate) fn model_file_head(
     }
     out.push_str("\r\n");
     out.into_bytes()
+}
+
+/// The `416 Range Not Satisfiable` for a file of `size` bytes
+/// (FR-STATIC-19): a fixed response (FR-HTTP-19) with
+/// `Content-Range: bytes */<size>` and `Accept-Ranges: bytes` right after
+/// `Content-Length`.
+pub(crate) fn model_range_not_satisfiable(
+    size: u64,
+    persistence: Persistence,
+    date: Option<&str>,
+) -> Vec<u8> {
+    let fixed = String::from_utf8(model_fixed(
+        Status::RangeNotSatisfiable,
+        persistence,
+        BodyMode::Full,
+        date,
+    ))
+    .unwrap_or_default();
+    fixed
+        .replacen(
+            "Content-Length: 26\r\n",
+            &format!(
+                "Content-Length: 26\r\nContent-Range: bytes */{size}\r\nAccept-Ranges: bytes\r\n"
+            ),
+            1,
+        )
+        .into_bytes()
 }
 
 /// A `304 Not Modified` (FR-STATIC-18): status line, `Date` (once set),

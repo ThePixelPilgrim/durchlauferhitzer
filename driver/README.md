@@ -346,6 +346,12 @@ tests/
                     is not reused, a GET on a reused connection that dies
                     is retried and logged (`kind=backend_retried`), a
                     backend's late body to a HEAD reaches no client
+  file_ranges.rs    range requests through the binary (FR-STATIC-19,
+                    under the kill switch when it is on): a 600 KiB
+                    pattern file, a range across the 256 KiB chunk
+                    boundary gets exactly its bytes, a suffix range the
+                    last ones, a range past the end the 416; each head
+                    byte-exact by the sim's model
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process

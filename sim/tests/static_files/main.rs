@@ -42,6 +42,7 @@ fn get(path: &str) -> Vec<u8> {
 
 mod conditional;
 mod edge;
+mod range;
 mod rules;
 mod transfer;
 

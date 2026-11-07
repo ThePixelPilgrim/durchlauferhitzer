@@ -497,9 +497,11 @@ Core-generated responses:
     simulation's default; tests that check `Date` set one).
   - The 37 bytes of the line (`Date: ` + 29 + CRLF) fit both bounds of
     NFR-RES-01: the largest rendered fixed response or file head (a
-    200-byte content type, a 20-digit length and the longest `ETag` and
-    `Last-Modified`) is 451 bytes, 476 behind a queued `100 Continue`
-    (stage 7 review: 362 and 387 before the validators), within the 1 KiB
+    `206` with a 200-byte content type, the longest `Content-Range`, a
+    19-digit length and the longest `ETag` and `Last-Modified`) is 570
+    bytes, 595 behind a queued `100 Continue` (stage 8: 451 and 476 for a
+    200 before `Accept-Ranges` and ranges; stage 7 review: 362 and 387
+    before the validators), within the 1 KiB
     send buffer; toward the
     client a relayed head grows by at most one byte per header line plus
     `connection: close` (19), the `date` line (37) and a substituted
@@ -565,10 +567,14 @@ Core-generated responses:
   route whose prefix names them, e.g. `path /.well-known { static
   /srv/well-known; }` (ACME, security.txt); dotfiles below that route are
   still 404.
-- **FR-STATIC-11** [done] `200 OK` heads are: status line, `Date` once the
+- **FR-STATIC-11** [done] `200 OK` (and `206 Partial Content`,
+  FR-STATIC-19) heads are: status line, `Date` once the
   driver set the time (FR-HTTP-22a), `Content-Type`,
-  `Content-Length` = size at open, `ETag` and `Last-Modified` of the
-  stamp at open (FR-STATIC-18; stage 7), `X-Content-Type-Options: nosniff`,
+  `Content-Length` = size at open (a 206: the range's length),
+  `Content-Range: bytes a-b/size` (206 only; stage 8), `ETag` and
+  `Last-Modified` of the
+  stamp at open (FR-STATIC-18; stage 7), `Accept-Ranges: bytes`
+  (FR-STATIC-19; stage 8), `X-Content-Type-Options: nosniff`,
   `Connection: close` only when closing. Exactly that many body bytes
   follow, or the connection is cut (FR-STATIC-15).
 - **FR-STATIC-12** [done] `Content-Type` comes from the last `.` of the
@@ -641,6 +647,33 @@ Core-generated responses:
   served; a request with several ranges (no `multipart/byteranges`), a
   malformed `Range` or another unit gets the whole file with `200`, as
   RFC 9110 allows.
+  *Planner calls (stage 8 plan):*
+  - `Accept-Ranges: bytes` is on every 200, 206 and 416, not on a 304.
+  - Heads of a 200 and a 206 are ordered: status line, `Date`,
+    `Content-Type`, `Content-Length`, `Content-Range` (206 only), `ETag`,
+    `Last-Modified`, `Accept-Ranges`, `X-Content-Type-Options`,
+    `Connection: close` (only when closing) (FR-STATIC-11).
+  - A 416 is the fixed response form (FR-HTTP-19) with body
+    `416 Range Not Satisfiable\n` (26 bytes), `Content-Range: bytes
+    */size` and `Accept-Ranges: bytes` right after `Content-Length`; its
+    file is closed at once (nothing is read) and the connection's
+    persistence is kept.
+  - An empty file: every range is 416 (taking "does not overlap"
+    literally; RFC 9110 section 14.1.3 would serve a suffix range of an
+    empty file).
+  - `If-Range` with a date means exactly the bytes of the file's
+    `Last-Modified` IMF-fixdate; RFC 9110 section 13.1.5's check that a
+    date modified within the `Date` second is weak is not applied. A
+    strong tag in this server's `ETag` form matches when it names the
+    file's stamp; a weak tag, another tag or several `If-Range` lines
+    never match; `If-Range` without `Range` is ignored.
+  - Several `Range` lines are treated like several ranges (200).
+  - The unit `bytes` is ASCII case-insensitive; empty list elements and
+    whitespace around elements are allowed (RFC 9110 section 5.6.1);
+    `a-b` with `b < a`, anything but digits, or a number over 64 bits is
+    malformed (200). A last position past the end is clamped to the
+    file's last byte; a suffix `-n` with `n` at least the size is the
+    whole file as `0-(size-1)` (a 206).
 
 ### FR-PROXY — Proxy routes
 
