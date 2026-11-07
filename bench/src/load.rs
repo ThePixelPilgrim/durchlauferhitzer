@@ -280,6 +280,42 @@ fn parse_head(bytes: &[u8]) -> Result<Head, String> {
     Ok(head)
 }
 
+/// `n` idle keep-alive connections: each made one correct request
+/// (`target`'s), read its whole response and now waits, sending nothing.
+pub fn hold_idle(target: &Target, n: usize) -> Result<Vec<TcpStream>, String> {
+    let mut scratch = vec![0u8; 64 * 1024];
+    (0..n)
+        .map(|i| {
+            let mut c = Conn::open(target.addr)?;
+            c.stream
+                .write_all(&target.request)
+                .map_err(|e| format!("write: {e}"))?;
+            let head = c.response(&mut scratch)?;
+            check(&head, target.expect)?;
+            if head.close {
+                return Err(format!("idle connection {i}: the server closes it"));
+            }
+            Ok(c.stream)
+        })
+        .collect()
+}
+
+/// How many of `idle` the server closed (or sent bytes on): a read that
+/// would block means still open and silent.
+pub fn closed_idle(idle: &[TcpStream]) -> usize {
+    let mut byte = [0u8; 1];
+    idle.iter()
+        .filter(|s| {
+            let open = s.set_nonblocking(true).is_ok()
+                && matches!(
+                    (&**s).read(&mut byte),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                );
+            !open
+        })
+        .count()
+}
+
 /// One request on a new connection: the value of response header `name`
 /// (case-insensitive), if the response had it.
 pub fn header_of(addr: SocketAddr, request: &[u8], name: &str) -> Option<String> {
@@ -430,6 +466,31 @@ mod tests {
         let t = drive(&target(addr, Reuse::Fresh), 2, Duration::from_millis(100));
         assert_eq!(t.requests, 0, "{t:?}");
         assert!(t.errors > 0, "{t:?}");
+    }
+
+    #[test]
+    fn idle_connections_are_held_and_their_closing_is_seen() {
+        let addr = fixed_server(OK);
+        let idle = hold_idle(&target(addr, Reuse::KeepAlive), 3).unwrap();
+        assert_eq!(idle.len(), 3);
+        assert_eq!(closed_idle(&idle), 0);
+        // A server that closes after one response, without saying so.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let closing = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                stream.write_all(OK).unwrap();
+            }
+        });
+        let idle = hold_idle(&target(closing, Reuse::KeepAlive), 2).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(closed_idle(&idle), 2);
+        let addr = fixed_server(UNAVAILABLE);
+        let err = hold_idle(&target(addr, Reuse::KeepAlive), 2).unwrap_err();
+        assert!(err.contains("503"), "{err}");
     }
 
     #[test]

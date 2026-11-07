@@ -19,7 +19,8 @@ empty.
 
 Per run a fresh server: a temp static root with a 1 KiB and a 1 MiB file,
 one proxy route to the in-process stub backend (1 KiB body, keep-alive),
-default limits and containment, `user nobody` when run as root. Per
+default limits (except `max_connections_per_ip 1024`, as every client
+shares 127.0.0.1) and containment, `user nobody` when run as root. Per
 scenario: a warm-up (at most 1 s), the measured window (`duration`, 8
 client threads), then the strace pass (another `duration`).
 
@@ -31,6 +32,14 @@ client threads), then the strace pass (another `duration`).
 | `proxy-small` | 1 KiB response, keep-alive client |
 | `proxy-fresh` | as `proxy-small`, a new connection per request |
 | `conditional-hit` | `If-None-Match` with the file's `ETag`: 304 expected; 200 while the server sends none |
+| `static-small-1k-idle` | as `static-small`, with 1 000 idle keep-alive connections held open (on demand only) |
+
+Without `--scenarios` all but `static-small-1k-idle` run (the nightly's
+set). That one opens its 1 000 connections before the warm-up (each makes
+one request, then sends nothing) and holds them through the measured
+window and the strace pass (NFR-PERF-03, NFR-PERF-06); its `rss_kib` is
+the server with them open. Each idle connection the server closed by
+then counts as an error.
 
 CSV, one row per scenario and run:
 `date,commit,runner,scenario,requests,errors,seconds,cpu_us_per_req,syscalls_per_req,rss_kib`.

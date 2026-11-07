@@ -18,10 +18,27 @@ pub enum Scenario {
     ProxySmall,
     ProxyFresh,
     ConditionalHit,
+    StaticSmall1kIdle,
 }
 
+/// The idle keep-alive connections `static-small-1k-idle` holds open.
+pub const IDLE: usize = 1000;
+
 impl Scenario {
-    pub const ALL: [Scenario; 6] = [
+    /// Every scenario.
+    pub const ALL: [Scenario; 7] = [
+        Scenario::StaticSmall,
+        Scenario::StaticLarge,
+        Scenario::StaticFresh,
+        Scenario::ProxySmall,
+        Scenario::ProxyFresh,
+        Scenario::ConditionalHit,
+        Scenario::StaticSmall1kIdle,
+    ];
+
+    /// The scenarios run without `--scenarios` (the nightly's set):
+    /// all but `static-small-1k-idle`, which is run on demand.
+    pub const DEFAULT: [Scenario; 6] = [
         Scenario::StaticSmall,
         Scenario::StaticLarge,
         Scenario::StaticFresh,
@@ -38,6 +55,7 @@ impl Scenario {
             Scenario::ProxySmall => "proxy-small",
             Scenario::ProxyFresh => "proxy-fresh",
             Scenario::ConditionalHit => "conditional-hit",
+            Scenario::StaticSmall1kIdle => "static-small-1k-idle",
         }
     }
 
@@ -48,9 +66,10 @@ impl Scenario {
     /// The request path.
     pub fn path(self) -> &'static str {
         match self {
-            Scenario::StaticSmall | Scenario::StaticFresh | Scenario::ConditionalHit => {
-                "/small.bin"
-            }
+            Scenario::StaticSmall
+            | Scenario::StaticFresh
+            | Scenario::ConditionalHit
+            | Scenario::StaticSmall1kIdle => "/small.bin",
             Scenario::StaticLarge => "/large.bin",
             Scenario::ProxySmall | Scenario::ProxyFresh => "/proxy/small",
         }
@@ -62,7 +81,22 @@ impl Scenario {
             Scenario::StaticSmall
             | Scenario::StaticLarge
             | Scenario::ProxySmall
-            | Scenario::ConditionalHit => Reuse::KeepAlive,
+            | Scenario::ConditionalHit
+            | Scenario::StaticSmall1kIdle => Reuse::KeepAlive,
+        }
+    }
+
+    /// Idle keep-alive connections held open (each after one request)
+    /// while the scenario runs, its measured window and strace pass.
+    pub fn idle(self) -> usize {
+        match self {
+            Scenario::StaticSmall1kIdle => IDLE,
+            Scenario::StaticSmall
+            | Scenario::StaticLarge
+            | Scenario::StaticFresh
+            | Scenario::ProxySmall
+            | Scenario::ProxyFresh
+            | Scenario::ConditionalHit => 0,
         }
     }
 
@@ -81,7 +115,8 @@ impl Scenario {
             | Scenario::StaticFresh
             | Scenario::ProxySmall
             | Scenario::ProxyFresh
-            | Scenario::ConditionalHit => SMALL,
+            | Scenario::ConditionalHit
+            | Scenario::StaticSmall1kIdle => SMALL,
         };
         Expect { status, body_len }
     }
@@ -96,7 +131,8 @@ impl Scenario {
             | Scenario::StaticLarge
             | Scenario::StaticFresh
             | Scenario::ProxySmall
-            | Scenario::ProxyFresh => String::new(),
+            | Scenario::ProxyFresh
+            | Scenario::StaticSmall1kIdle => String::new(),
         }
     }
 }
@@ -111,6 +147,22 @@ mod tests {
             assert_eq!(Scenario::from_name(s.name()), Some(s));
         }
         assert_eq!(Scenario::from_name("static"), None);
+    }
+
+    #[test]
+    fn only_the_idle_scenario_holds_connections_and_it_is_on_demand() {
+        for s in Scenario::ALL {
+            let expected = match s {
+                Scenario::StaticSmall1kIdle => IDLE,
+                _ => 0,
+            };
+            assert_eq!(s.idle(), expected, "{}", s.name());
+            assert_eq!(Scenario::DEFAULT.contains(&s), s.idle() == 0);
+        }
+        let s = Scenario::StaticSmall1kIdle;
+        assert_eq!(s.path(), Scenario::StaticSmall.path());
+        assert_eq!(s.reuse(), Reuse::KeepAlive);
+        assert_eq!(s.expect(None), Scenario::StaticSmall.expect(None));
     }
 
     #[test]

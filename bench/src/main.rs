@@ -115,7 +115,8 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
         | Scenario::StaticLarge
         | Scenario::StaticFresh
         | Scenario::ProxySmall
-        | Scenario::ProxyFresh => None,
+        | Scenario::ProxyFresh
+        | Scenario::StaticSmall1kIdle => None,
     };
     let etag = etag.as_deref();
     let target = Target {
@@ -128,6 +129,14 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
         ),
         reuse: scenario.reuse(),
         expect: scenario.expect(etag),
+    };
+    // Held open through the measured window and the strace pass.
+    let idle = match load::hold_idle(&target, scenario.idle()) {
+        Ok(idle) => idle,
+        Err(e) => {
+            fail(name, Reason::Errors, &format!("idle connections: {e}"));
+            return None;
+        }
     };
     load::drive(&target, CONCURRENCY, ctx.duration.min(WARM_UP));
 
@@ -191,6 +200,17 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
             (None, 0)
         }
     };
+    // An idle connection the server dropped would make the window
+    // measure fewer: each one counts as an error.
+    let dropped = load::closed_idle(&idle) as u64;
+    drop(idle);
+    if dropped > 0 {
+        fail(
+            name,
+            Reason::Errors,
+            &format!("{dropped} idle connections closed in run {}", ctx.run),
+        );
+    }
     if tally.errors > 0 {
         fail(
             name,
@@ -211,7 +231,7 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
         runner: ctx.runner.clone(),
         scenario: name,
         requests: tally.requests,
-        errors: tally.errors + strace_errors,
+        errors: tally.errors + strace_errors + dropped,
         seconds,
         cpu_us_per_req: cpu,
         syscalls_per_req: syscalls,

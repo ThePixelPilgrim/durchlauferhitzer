@@ -26,7 +26,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut out = None;
     let mut runs = 5;
     let mut duration = Duration::from_secs(10);
-    let mut scenarios = Scenario::ALL.to_vec();
+    let mut scenarios = Scenario::DEFAULT.to_vec();
     let mut syscalls_only = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -87,7 +87,7 @@ mod tests {
         let a = args("--binary b --out o.csv").unwrap();
         assert_eq!(a.runs, 5);
         assert_eq!(a.duration, Duration::from_secs(10));
-        assert_eq!(a.scenarios, Scenario::ALL.to_vec());
+        assert_eq!(a.scenarios, Scenario::DEFAULT.to_vec());
         assert!(!a.syscalls_only);
     }
 
@@ -102,14 +102,18 @@ mod tests {
     #[test]
     fn every_option() {
         let a = args(
-            "--binary b --out o.csv --runs 2 --duration 0.5 --scenarios proxy-fresh,static-small",
+            "--binary b --out o.csv --runs 2 --duration 0.5 --scenarios proxy-fresh,static-small,static-small-1k-idle",
         )
         .unwrap();
         assert_eq!(a.runs, 2);
         assert_eq!(a.duration, Duration::from_millis(500));
         assert_eq!(
             a.scenarios,
-            vec![Scenario::ProxyFresh, Scenario::StaticSmall]
+            vec![
+                Scenario::ProxyFresh,
+                Scenario::StaticSmall,
+                Scenario::StaticSmall1kIdle
+            ]
         );
     }
 

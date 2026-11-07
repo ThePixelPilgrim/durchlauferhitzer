@@ -1,6 +1,7 @@
 //! The server under test: a temp dir with the two files and the config
 //! (one static root, one proxy route to the stub backend, default limits
-//! and containment, `user nobody` when run as root), the binary started
+//! but the per-IP one, default containment, `user nobody` when run as
+//! root), the binary started
 //! on a free loopback port, its stderr drained in a thread (the bench's
 //! CPU, not the server's), and its `/proc` numbers.
 
@@ -54,11 +55,13 @@ fn write_world_readable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o644))
 }
 
-/// The bench config.
+/// The bench config. Every client shares 127.0.0.1, so the per-IP limit
+/// is raised to `max_connections` (1024, the default) for
+/// `static-small-1k-idle`.
 pub fn config(addr: SocketAddr, root: &Path, backend: SocketAddr, as_root: bool) -> String {
     let user = if as_root { "user nobody;\n" } else { "" };
     format!(
-        "listen {addr};\n{user}host {HOST} {{\n  path / {{ static {root}; }}\n  path /proxy {{ proxy {backend}; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }}\n}}\n",
+        "listen {addr};\n{user}limits {{\n  max_connections_per_ip 1024;\n}}\nhost {HOST} {{\n  path / {{ static {root}; }}\n  path /proxy {{ proxy {backend}; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }}\n}}\n",
         root = root.display()
     )
 }
@@ -196,7 +199,7 @@ mod tests {
         let text = config(addr, Path::new("/tmp/x/www"), backend, true);
         assert_eq!(
             text,
-            "listen 127.0.0.1:8080;\nuser nobody;\nhost bench.test {\n  path / { static /tmp/x/www; }\n  path /proxy { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }\n}\n"
+            "listen 127.0.0.1:8080;\nuser nobody;\nlimits {\n  max_connections_per_ip 1024;\n}\nhost bench.test {\n  path / { static /tmp/x/www; }\n  path /proxy { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }\n}\n"
         );
         assert!(!config(addr, Path::new("/w"), backend, false).contains("user"));
     }
