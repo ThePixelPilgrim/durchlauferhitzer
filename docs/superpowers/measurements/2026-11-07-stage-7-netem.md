@@ -105,6 +105,28 @@ No run had errors.
 - **Recovery is TCP's retransmit backoff.** Retransmits come at about 0.2, 0.6, 1.4 and 3.0 s after the first loss, so a 2 s pause ends with about 1 s more to wait. Static and proxied traffic match, and buffer size makes no difference.
 - **What the larger buffer changes is work per request:** proxied syscalls fall about 3× under every setting.
 
+### NFR-PERF-05 check at the 32 KiB product build (`999724c`)
+
+Nightly dispatch on `main` with `bench_netem=true`, run 42398454271 (job `bench netem`, success), same method as above: 3 runs × 10 s per setting, medians.
+
+| Setting | Scenario | req/s | syscalls/req | CPU µs/req |
+|---|---|---|---|---|
+| delay 50 ms each way | static-large | 73 | 41.6 | 229 |
+| | proxy-small | 39 | 12.0 | 75* |
+| | proxy-large | 36 | 78.3 | 549 |
+| loss 1 % | static-large | 940 | 41.1 | 279 |
+| | proxy-small | 1 272 | 11.4 | 56 |
+| | proxy-large | 533 | 77.2 | 685 |
+| 2 s pause (loss 100 %) | static-large | 2 949 | 37.5 | 281 |
+| | proxy-small | 17 096 | 10.3 | 39 |
+| | proxy-large | 1 078 | 75.0 | 639 |
+
+\* About 400 requests per window: CPU quantized to 10 ms ticks (runs 50, 75, 100).
+
+Recovery after the 2 s pause: static-large 1000 ×3 ms (longest gap 3.11 s), proxy-small 1250 ×3 ms (3.33 s), proxy-large 1000, 1050, 1050 ms (3.15 s).
+
+**The target holds:** no run had errors under any setting, and every recovery is within 1.5 s (at most 1.25 s). Throughput matches the 16 and 64 KiB runs (TCP-bound), and proxy-large syscalls sit between them (78 under delay, against 144.5 and 44.6), as the local 32 KiB numbers predicted.
+
 ## Recommendations
 
 1. **A (kept):** eager I/O and deferred registrations. This drops per-request work in every proxy scenario and in static-large, with no contract change.
