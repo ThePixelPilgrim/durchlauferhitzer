@@ -534,10 +534,13 @@ jobs:
     # the git commands that fetch and push (`-c`), never stored on disk
     # while the script runs. Rows with errors are published too (never
     # charted), so it also runs after a failing `bench`.
-    # Only runs of the default branch publish (a schedule always is one;
-    # a manual run's ref is checked): a dispatch from another branch
-    # keeps its rows as the `bench-results` artifact only, so
-    # experiments never mix into the daily medians.
+    # Only runs of the default branch with the default bench budget
+    # publish (NFR-PERF-08): a schedule always is one (it has no inputs);
+    # a manual run's ref is checked, and its `bench_runs` and
+    # `bench_seconds` must be the defaults above (5 and 10; keep the two
+    # in step). A dispatch from another branch, or one with a lowered or
+    # raised budget, keeps its rows as the `bench-results` artifact only,
+    # so experiments never mix into the daily medians.
     # One publish at a time (`concurrency`): GitHub keeps one pending run
     # per group, so a newer pending publish replaces an older pending one
     # (its rows are lost). Harmless with one nightly a day; avoid
@@ -548,7 +551,8 @@ jobs:
       ${{ always()
       && (needs.bench.result == 'success' || needs.bench.result == 'failure')
       && (github.event_name == 'schedule'
-      || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+      || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      && inputs.bench_runs == 5 && inputs.bench_seconds == 10)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
