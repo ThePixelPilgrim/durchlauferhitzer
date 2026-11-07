@@ -26,7 +26,7 @@ use durchlauferhitzer_core::{
     BackendFailure, BackendId, ConnId, Interest, Log, RejectReason, RequestSummary, TimeoutKind,
     UpstreamHolder, UpstreamId,
 };
-use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
+use durchlauferhitzer_sim::{ConnectBehaviour, IdleClose, Sim, SimConnState, Window};
 
 const BACKEND: &str = "127.0.0.1:3000";
 

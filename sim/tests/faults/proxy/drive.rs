@@ -116,10 +116,12 @@ impl Story {
         let count = rng.usize(1..6);
         // A timed exchange sits anywhere among untimed ones.
         let timed_at = draw.timed.then(|| rng.usize(0..count));
+        let pooly = rng.u8(0..5) == 0;
         for i in 0..count {
             let d = Draw {
                 connect: draw.connect,
                 timed: timed_at == Some(i),
+                pooly,
             };
             let mut ex = random_exchange(rng, net, &who, &peer_text, &d);
             // A dead pooled connection may close a client whose body it
@@ -743,6 +745,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
                 let draw = Draw {
                     connect,
                     timed: solo && i == 0,
+                    pooly: false,
                 };
                 let mut story = Story::new(&mut sim, &mut rng, &net, n, &draw, slow);
                 story.paused = solo && i == 0;
@@ -761,7 +764,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         }
         // Now and then the idle watch lags: only the silence check before
         // a reuse sees what a backend sent to an idle connection.
-        assign.hold = rng.u8(0..3) == 0;
+        assign.hold = rng.bool();
         sim.hold_idle_reads(assign.hold);
         used_peer = stories.first().map_or(used_peer, |s| s.peer);
         run_round(

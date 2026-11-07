@@ -143,7 +143,7 @@ impl NetConfig {
         let body_idle = secs(rng, 2, 8);
         let send_idle = secs(rng, 3, 10);
         let idle = secs(rng, 1, 4);
-        let idle_max = rng.u8(1..=2);
+        let idle_max = if rng.u8(0..3) == 0 { 2 } else { 1 };
         let max_connections = 8;
         let max_connections_per_ip = 4;
         let route = |r: &RouteConfig| {
@@ -341,6 +341,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "pool: idle close by a drain",
     "pool: not silent at reuse",
     "retry: replayed, relayed",
+    "retry: replayed, failed again",
     "retry: refused, 502",
     "retry: none after a response byte",
     // Restart (FR-PROC-07, `drain.rs`).

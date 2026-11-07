@@ -3,6 +3,7 @@
 //! idle timeout and the safe retry, with the sim's contract checks on.
 
 use super::*;
+use durchlauferhitzer_core::DrainTarget;
 
 /// One pooled route, one `pool off` route to the same backend.
 const POOLED: &str = "listen 127.0.0.1:8080;
@@ -248,4 +249,104 @@ fn stray_bytes_fail_the_silence_check() {
     sim.run_until_idle();
     assert_eq!(sim.take_received(b), RELAYED, "{}", sim.trace());
     assert_eq!(sim.logs(), &[proxied(a), proxied(b)], "{}", sim.trace());
+}
+
+/// One idle connection to `up`'s backend, after a first exchange of `c`.
+fn idle_after_one(sim: &mut Sim) -> (ConnId, UpstreamId) {
+    let a = request(sim, GET);
+    let up = only_upstream(sim);
+    sim.backend_send(up, OK);
+    sim.run_until_idle();
+    assert_eq!(sim.take_received(a), RELAYED, "{}", sim.trace());
+    (a, up)
+}
+
+/// FR-PROXY-26: the replay goes out on a fresh connection, which is never
+/// retried: when it dies too, the client gets the 502.
+#[test]
+fn a_replay_that_fails_again_is_a_502() {
+    let mut sim = Sim::new(POOLED);
+    let (a, up) = idle_after_one(&mut sim);
+    sim.send(a, GET);
+    sim.run_until_idle();
+    sim.backend_eof(up);
+    sim.run_until_idle();
+    let fresh = UpstreamId(2);
+    assert_eq!(
+        sim.take_backend_request(fresh),
+        FORWARDED,
+        "{}",
+        sim.trace()
+    );
+    sim.backend_reset(fresh);
+    sim.run_until_idle();
+    assert_eq!(
+        sim.upstreams(),
+        [up, fresh],
+        "no second retry\n{}",
+        sim.trace()
+    );
+    assert!(
+        sim.take_received(a)
+            .starts_with(b"HTTP/1.1 502 Bad Gateway\r\n"),
+        "{}",
+        sim.trace()
+    );
+    let tail: Vec<&Log> = sim.logs().iter().skip(1).collect();
+    assert!(
+        matches!(
+            tail.as_slice(),
+            [
+                Log::BackendRetried {
+                    kind: BackendFailure::ClosedEarly,
+                    ..
+                },
+                Log::BackendFailed {
+                    kind: BackendFailure::Reset,
+                    ..
+                },
+                Log::Response {
+                    status: Status::BadGateway,
+                    ..
+                },
+            ]
+        ),
+        "{}",
+        sim.trace()
+    );
+}
+
+/// FR-PROXY-02: at most `backend_idle_max` idle per backend; a park
+/// beyond it closes the oldest idle connection.
+#[test]
+fn the_idle_cap_closes_the_oldest() {
+    let mut sim = Sim::new(&POOLED.replace(
+        "limits { backend_idle_timeout 3s; }",
+        "limits { backend_idle_timeout 3s; backend_idle_max 1; }",
+    ));
+    let a = request(&mut sim, GET);
+    let b = request(&mut sim, GET);
+    let (ua, ub) = (UpstreamId(1), UpstreamId(2));
+    assert_eq!(sim.upstreams(), [ua, ub], "{}", sim.trace());
+    sim.backend_send(ua, OK);
+    sim.run_until_idle();
+    sim.backend_send(ub, OK);
+    sim.run_until_idle();
+    assert_eq!(sim.take_received(a), RELAYED);
+    assert_eq!(sim.take_received(b), RELAYED);
+    assert_eq!(sim.upstream_holder(ua), None, "{}", sim.trace());
+    assert_eq!(sim.upstream_holder(ub), Some(UpstreamHolder::Pool));
+    assert_eq!(sim.idle_closes().get(&IdleClose::Room), Some(&1));
+}
+
+/// Review Focus 5: a drain closes the idle pool at once (both kinds).
+#[test]
+fn a_drain_closes_the_pool() {
+    for target in [DrainTarget::Shutdown, DrainTarget::Restart] {
+        let mut sim = Sim::new(POOLED);
+        let (_, up) = idle_after_one(&mut sim);
+        sim.begin_drain(target);
+        assert_eq!(sim.upstream_holder(up), None, "{target:?}\n{}", sim.trace());
+        assert_eq!(sim.idle_closes().get(&IdleClose::Drain), Some(&1));
+    }
 }

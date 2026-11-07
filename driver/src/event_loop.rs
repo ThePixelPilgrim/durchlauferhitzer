@@ -569,6 +569,9 @@ impl Driver {
             if let Some(up) = self.answers.pop_front() {
                 if let Some(answer) = self.take_answer(up)? {
                     self.call(answer)?;
+                    // A connected answer's registration is brought in line
+                    // now, if the core's actions did not already.
+                    self.sync_upstream(up)?;
                 }
             } else if let Some(broken) = self.broken.pop_front() {
                 if let Some(failed) = self.broken_event(broken) {

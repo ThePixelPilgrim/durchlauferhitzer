@@ -44,12 +44,15 @@ pub(crate) enum Stale {
     /// response head, then reset or closed: never replayed.
     HalfReset,
     HalfEof,
+    /// As `Reset`, and the replay's fresh connection is reset too once
+    /// its backend has the request head (a 502, never a second retry).
+    Twice,
 }
 
 impl Stale {
     pub(crate) fn kind(self) -> BackendFailure {
         match self {
-            Stale::Reset | Stale::HalfReset => BackendFailure::Reset,
+            Stale::Reset | Stale::HalfReset | Stale::Twice => BackendFailure::Reset,
             Stale::Eof | Stale::HalfEof => BackendFailure::ClosedEarly,
         }
     }
@@ -246,7 +249,7 @@ fn reuse(
     }
     run.stale_done = true;
     match stale {
-        Stale::Reset | Stale::HalfReset => sim.backend_reset(up),
+        Stale::Reset | Stale::HalfReset | Stale::Twice => sim.backend_reset(up),
         Stale::Eof | Stale::HalfEof => sim.backend_eof(up),
     }
     sim.run_until_idle();
@@ -270,10 +273,13 @@ fn half_stale(sim: &mut Sim, stories: &mut [Story]) -> bool {
                 continue;
             }
             run.stale_done = true;
-            sim.backend_send(up, HALF_HEAD);
-            sim.run_until_idle();
+            // The replay's connection dies too, before any byte.
+            if stale != Stale::Twice {
+                sim.backend_send(up, HALF_HEAD);
+                sim.run_until_idle();
+            }
             match stale {
-                Stale::Reset | Stale::HalfReset => sim.backend_reset(up),
+                Stale::Reset | Stale::HalfReset | Stale::Twice => sim.backend_reset(up),
                 Stale::Eof | Stale::HalfEof => sim.backend_eof(up),
             }
             sim.run_until_idle();
@@ -306,8 +312,14 @@ pub(crate) fn sync(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) {
                     }
                     run.retried = Some(kind);
                     run.sent = 0;
-                    run.ended = false;
                     run.accepted = false;
+                    // `Twice`: its backend kills the replay too
+                    // (`half_stale`), never sending the script.
+                    if run.stale == Some(Stale::Twice) {
+                        run.stale_done = false;
+                    } else {
+                        run.ended = false;
+                    }
                     i
                 }
                 None => match busy_check(sim, story) {
@@ -591,7 +603,13 @@ fn fails_first(ex: &Exchange, run: &Run) -> Option<BackendFailure> {
 
 /// The 502 a stale connection gives a request that may not be replayed:
 /// whatever the backend got of it, the body maybe unread (FR-PROXY-26).
-fn stale_fail(ex: &Exchange, who: &Who, net: &NetConfig, kind: BackendFailure) -> Vec<Alt> {
+fn stale_fail(
+    ex: &Exchange,
+    who: &Who,
+    net: &NetConfig,
+    kind: BackendFailure,
+    draining: bool,
+) -> Vec<Alt> {
     let fwd = match &ex.req.verdict {
         Verdict::Forward(fwd) | Verdict::BadBody { fwd, .. } => fwd,
         Verdict::Parse(_) | Verdict::Answer(..) => return Vec::new(),
@@ -603,7 +621,8 @@ fn stale_fail(ex: &Exchange, who: &Who, net: &NetConfig, kind: BackendFailure) -
         BodyMode::Full
     };
     let mut persistences = vec![ex.req.persistence];
-    if fwd.bytes.len() > fwd.head_len {
+    // A body maybe unread, or a head rendered during a drain: close.
+    if fwd.bytes.len() > fwd.head_len || draining {
         persistences.push(Persistence::Close);
     }
     persistences.dedup();
@@ -671,7 +690,7 @@ pub(crate) fn reuse_alts(
                 "retried after {k:?}, but a response byte came first ({stale:?})"
             ));
         }
-        let mut alts = stale_fail(ex, who, net, stale.kind());
+        let mut alts = stale_fail(ex, who, net, stale.kind(), draining);
         for alt in &mut alts {
             alt.tags = vec!["retry: none after a response byte"];
         }
@@ -682,6 +701,25 @@ pub(crate) fn reuse_alts(
     }
     let first = fails_first(ex, run);
     match (first, replayable(ex), run.retried) {
+        // The replay's fresh connection died too: its 502, no second retry.
+        (Some(kind), true, Some(k)) if k == kind && run.stale == Some(Stale::Twice) => {
+            Ok(stale_fail(ex, who, net, BackendFailure::Reset, draining)
+                .into_iter()
+                .map(|mut alt| {
+                    alt.logs.insert(
+                        0,
+                        Log::BackendRetried {
+                            conn: who.conn,
+                            peer: who.peer,
+                            backend: route_backend(ex, net),
+                            kind,
+                        },
+                    );
+                    alt.tags = vec!["retry: replayed, failed again"];
+                    alt
+                })
+                .collect())
+        }
         (Some(kind), true, Some(k)) if k == kind => Ok(base
             .into_iter()
             .map(|mut alt| {
@@ -706,7 +744,7 @@ pub(crate) fn reuse_alts(
         }
         // Only a drain may have stopped the retry (FR-PROXY-26).
         (Some(kind), true, None) if draining => Ok(match run.stale {
-            Some(_) => stale_fail(ex, who, net, kind),
+            Some(_) => stale_fail(ex, who, net, kind, draining),
             None => base,
         }),
         (Some(kind), true, None) => Err(format!(
@@ -716,12 +754,12 @@ pub(crate) fn reuse_alts(
         (Some(kind), false, None) => Ok(match (run.stale, &ex.req.verdict) {
             // A body defect may be judged first (`BadBody`'s outcomes).
             (Some(_), Verdict::BadBody { .. }) => {
-                let mut alts = stale_fail(ex, who, net, kind);
+                let mut alts = stale_fail(ex, who, net, kind, draining);
                 alts.extend(base);
                 alts
             }
             (Some(_), Verdict::Forward(_) | Verdict::Parse(_) | Verdict::Answer(..)) => {
-                stale_fail(ex, who, net, kind)
+                stale_fail(ex, who, net, kind, draining)
             }
             (None, _) => base,
         }),

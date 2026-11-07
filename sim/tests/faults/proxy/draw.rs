@@ -11,6 +11,9 @@ pub(crate) struct Draw {
     pub(crate) connect: [ConnectBehaviour; 2],
     /// A timed scenario (solo rounds only).
     pub(crate) timed: bool,
+    /// A story that keeps forwarding well-formed requests and gets clean
+    /// responses, so its connections are pooled and reused (FR-PROXY-02).
+    pub(crate) pooly: bool,
 }
 
 /// A random exchange on `who`'s connection.
@@ -30,7 +33,7 @@ pub(crate) fn random_exchange(
     }
     let allow = Allow {
         body_defects: draw.connect.iter().all(|c| *c == ConnectBehaviour::Accept),
-        forward_only: false,
+        forward_only: draw.pooly,
         need_body: false,
     };
     let req = random_proxy_request(rng, net, peer_text, &allow);
@@ -60,7 +63,7 @@ pub(crate) fn random_exchange(
             limit: net.routes[fwd.route].max_response_body,
             max_head: net.max_head,
             valid_only: false,
-            clean: rng.u8(0..3) != 0,
+            clean: draw.pooly || rng.bool(),
             exact: (rng.u8(0..12) == 0).then(|| net.upstream_recv_capacity()),
             need_body: false,
             large: rng.u8(0..3) == 0,
@@ -85,8 +88,9 @@ pub(crate) fn random_exchange(
     let stale = match rng.u8(0..10) {
         0 | 1 => Some(Stale::Reset),
         2 => Some(Stale::Eof),
-        3 | 4 => Some(Stale::HalfReset),
-        5 | 6 => Some(Stale::HalfEof),
+        3 | 7 => Some(Stale::Twice),
+        4 | 5 => Some(Stale::HalfReset),
+        6 => Some(Stale::HalfEof),
         _ => None,
     };
     let mut ex = Exchange {
@@ -101,7 +105,7 @@ pub(crate) fn random_exchange(
             0 => Some(Poke::Byte),
             1 => Some(Poke::Eof),
             2 => Some(Poke::Reset),
-            3 => Some(Poke::Stray),
+            3 | 4 => Some(Poke::Stray),
             _ => None,
         },
     };

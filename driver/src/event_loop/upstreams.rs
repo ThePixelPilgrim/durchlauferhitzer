@@ -121,6 +121,9 @@ impl Driver {
         };
         let phase = std::mem::replace(&mut upstream.phase, Phase::Failed);
         let mut freed = Freed::Nothing;
+        // A silent socket keeps its epoll registration through the answer
+        // (`sync_upstream`); the interest the core sets after
+        // `UpstreamConnected` modifies it once.
         upstream.phase = match phase {
             Phase::Open {
                 fd,
@@ -162,7 +165,10 @@ impl Driver {
                     writes: Writes::Open,
                     eof: Eof::NotYet,
                 };
-                Event::UpstreamConnected { up }
+                // Synced once the core acted on it (`flush_queued`): a
+                // registration kept through a silence check is modified
+                // once, by the interest the core sets.
+                return Ok(Some(Event::UpstreamConnected { up }));
             }
             Phase::Answering(Answer::Failed) => Event::UpstreamFailed {
                 up,
@@ -428,6 +434,17 @@ impl Driver {
         };
         let wanted = upstream.wanted();
         if wanted == upstream.registered {
+            return Ok(());
+        }
+        // A reused socket answering its silence check keeps its
+        // registration until the answer is delivered and the core set the
+        // interest that follows (`flush_queued` syncs then): one
+        // `epoll_ctl` per reuse, not a delete and an add. Its events
+        // meanwhile are ignored (`upstream_event`), and the answer is
+        // delivered before the loop waits again.
+        if matches!(upstream.phase, Phase::Answering(Answer::Connected(_)))
+            && upstream.registered.is_some()
+        {
             return Ok(());
         }
         let fd = match &upstream.phase {

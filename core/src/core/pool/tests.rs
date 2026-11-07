@@ -407,6 +407,48 @@ fn a_connection_that_is_not_silent_is_replaced_by_a_fresh_one() {
     }
 }
 
+/// The fresh connection after a failed silence check is never checked,
+/// reconnected or retried again: its own failure is FR-PROXY-26's 502.
+#[test]
+fn the_fresh_connection_after_a_failed_check_is_never_replaced_again() {
+    for second in [
+        Event::UpstreamFailed {
+            up: UpstreamId(2),
+            error: ConnError::Other,
+        },
+        Event::UpstreamReadClosed { up: UpstreamId(2) },
+    ] {
+        let (mut core, _, up) = with_idle();
+        let b = conn(&mut core, 2);
+        client_sends(&mut core, 1, b, GET);
+        let actions = handle(
+            &mut core,
+            1,
+            Event::UpstreamFailed {
+                up,
+                error: ConnError::Other,
+            },
+        );
+        assert_eq!(connects(&actions), [UpstreamId(2)], "{actions:?}");
+        // The connect itself fails: refused. Or connected, the request
+        // written, the backend closes before any response byte: no retry
+        // on a fresh connection.
+        let expected = if matches!(second, Event::UpstreamFailed { .. }) {
+            BackendFailure::Refused
+        } else {
+            handle(&mut core, 1, Event::UpstreamConnected { up: UpstreamId(2) });
+            backend_takes(&mut core, 1, UpstreamId(2));
+            BackendFailure::ClosedEarly
+        };
+        let actions = handle(&mut core, 1, second.clone());
+        assert!(connects(&actions).is_empty(), "{actions:?}");
+        assert!(checks(&actions).is_empty(), "{actions:?}");
+        assert!(retried(&actions).is_empty(), "{actions:?}");
+        assert_eq!(failed(&actions), [expected], "{actions:?}");
+        assert!(client_takes(&mut core, 1, b).starts_with(b"HTTP/1.1 502 "));
+    }
+}
+
 /// A response the backend sent before the whole request body was
 /// written leaves the backend with a partial request: no reuse.
 #[test]
