@@ -615,9 +615,11 @@ Each requirement carries its status.
 Forwarding and identity:
 
 - **FR-PROXY-01** [done] Any method token is forwarded.
-- **FR-PROXY-02** [done] One fresh backend connection per request, with
-  `Connection: close` toward the backend; a client has at most one upstream
-  at a time. (Pooling: stage 7.) *[stage 7, owner decisions 2026-11-06:]*
+- **FR-PROXY-02** [done] A client has at most one upstream at a time.
+  *(Stages 3–6, superseded by pooling for pooled routes:)* one fresh
+  backend connection per request, with `Connection: close` toward the
+  backend — still so on a `pool off` route and for HTTP/1.0 clients.
+  *[Stage 7, owner decisions 2026-11-06:]*
   backend connections are pooled for every proxy route, shared across
   clients (an idle connection to a backend may carry any client's next
   request); a per-route switch turns it off for backends that keep
