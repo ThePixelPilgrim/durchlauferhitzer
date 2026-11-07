@@ -656,13 +656,19 @@ Forwarding and identity:
   close the idle pool at once; while draining nothing is parked or taken
   from it, and nothing is retried (a stale connection is a 502 then). An
   exchange in flight on a pooled connection finishes or is cut as
-  before. *Known limit:* a backend that sends bytes after a complete
-  response, so late that they arrive only after the core reused the
-  connection, has them parsed as the next request's response (every
-  pooling proxy shares this; the idle watch closes the connection when
-  they arrive first). An end of stream or reset that arrives late is
-  harmless: the reusing request fails before any response byte, which the
-  retry rule handles. The retry (FR-PROXY-26) is logged as `BackendRetried`
+  before. *(Owner decision 2026-11-07, stage 7 Task 5 review; security
+  trumps performance:)* a buggy backend's stray bytes after a complete
+  response (a body on a HEAD response, more than its `Content-Length`)
+  must not reach the next client. So right before a request is written
+  on a reused connection, the connection must be silent (one
+  non-blocking peek; any byte, end of stream or error closes it and the
+  request connects fresh — safe for every method, since nothing was sent
+  yet), and a connection is never pooled after a response to HEAD or a
+  204 or 304. *Residual limit, inherent to HTTP/1.1 pooling:* stray bytes
+  that arrive only after the next request was written are parsed as its
+  response. An end of stream or reset that arrives late is harmless: the
+  reusing request fails before any response byte, which the retry rule
+  handles. The retry (FR-PROXY-26) is logged as `BackendRetried`
   (FR-LOG-02).
 - **FR-PROXY-03** [done] `Core::backends()` lists the distinct backend
   addresses (IP and port, FR-CFG-16) in config order (`BackendId` =
