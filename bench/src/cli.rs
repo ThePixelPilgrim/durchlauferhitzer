@@ -46,12 +46,31 @@ fn commit_sha(value: &str) -> Result<String, String> {
 }
 
 /// The rows' commit label: it names the measured binary, so it comes
-/// from `--commit`, else `BENCH_COMMIT` (`env`), else `local`; never
-/// from the checkout the bench runs in, which need not be the binary's.
-pub fn commit_label(flag: Option<&str>, env: Option<&str>) -> String {
-    flag.or(env.filter(|c| !c.is_empty()))
-        .unwrap_or("local")
-        .to_string()
+/// from `--commit` (checked), else it is `local`; never from the checkout
+/// the bench runs in, which need not be the binary's.
+pub fn commit_label(flag: Option<&str>) -> String {
+    flag.unwrap_or("local").to_string()
+}
+
+/// The rows' runner label: `BENCH_RUNNER` (`env`), else `local`. A
+/// plain label of 1 to 64 letters, digits, `.`, `_` and `-` (what
+/// `scripts/bench-chart.py` charts); anything else is refused, so it
+/// can never add a CSV column.
+pub fn runner_label(env: Option<&str>) -> Result<String, String> {
+    let Some(value) = env else {
+        return Ok("local".to_string());
+    };
+    let ok = (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if ok {
+        Ok(value.to_string())
+    } else {
+        Err(format!(
+            "BENCH_RUNNER {value:?}: 1 to 64 letters, digits, '.', '_' or '-'"
+        ))
+    }
 }
 
 /// A netem spec: words of letters, digits, `.` and `%` (`delay 50ms`,
@@ -214,13 +233,29 @@ mod tests {
     }
 
     /// The label names the measured binary: the flag, else
-    /// `BENCH_COMMIT`, else `local` (never the bench's own checkout).
+    /// `local` (never the bench's own checkout, never an unchecked
+    /// environment variable).
     #[test]
     fn the_commit_label() {
-        assert_eq!(commit_label(Some("abc1234"), Some("def5678")), "abc1234");
-        assert_eq!(commit_label(None, Some("def5678")), "def5678");
-        assert_eq!(commit_label(None, Some("")), "local");
-        assert_eq!(commit_label(None, None), "local");
+        assert_eq!(commit_label(Some("abc1234")), "abc1234");
+        assert_eq!(commit_label(None), "local");
+    }
+
+    /// `BENCH_RUNNER`: a plain label (letters, digits, `.`, `_`, `-`; 1
+    /// to 64), so it can never add a CSV column or markup; unset is
+    /// `local`, anything else is refused.
+    #[test]
+    fn the_runner_label() {
+        assert_eq!(runner_label(None).unwrap(), "local");
+        assert_eq!(
+            runner_label(Some("gha-ubuntu-24.04-x86_64-netem-loss1pct")).unwrap(),
+            "gha-ubuntu-24.04-x86_64-netem-loss1pct"
+        );
+        let long = "x".repeat(65);
+        for bad in ["", "a,b", "a b", "gha\n", "<img>", "[x](y)", "ü", &long] {
+            assert!(runner_label(Some(bad)).is_err(), "{bad:?}");
+        }
+        assert_eq!(runner_label(Some(&long[..64])).unwrap().len(), 64);
     }
 
     #[test]

@@ -57,7 +57,7 @@ client threads), then the strace pass (another `duration`).
 | `static-fresh` | 1 KiB file, a new connection per request |
 | `proxy-small` | 1 KiB response, keep-alive client |
 | `proxy-fresh` | as `proxy-small`, a new connection per request |
-| `conditional-hit` | `If-None-Match` with the file's `ETag`: 304 expected (the server sends an `ETag` for every file since FR-STATIC-18; only a binary from before it, e.g. in a bisect, answers 200, which then counts as correct) |
+| `conditional-hit` | `If-None-Match` with the file's `ETag`: 304 expected (an `ETag` for every file since FR-STATIC-18; a pre-FR-STATIC-18 binary answers 200, counted correct) |
 | `static-small-1k-idle` | as `static-small`, with 1 000 idle keep-alive connections held open (nightly: one run) |
 | `proxy-medium` | as `proxy-small`, a 64 KiB response (on demand) |
 | `proxy-large` | as `proxy-small`, a 1 MiB response (nightly: one run) |
@@ -91,11 +91,13 @@ CSV, one row per scenario and run:
 - `rss_kib`: the server's `VmRSS` after the measured window.
 - `commit` and `runner`: the commit `--binary` was built from, from
   `--commit <sha>` (7 to 40 lowercase hex digits; the nightly passes
-  the run's commit) or else `BENCH_COMMIT`, else `local`; and
-  `BENCH_RUNNER` (else `local`). The label never comes from the checkout
-  the bench runs in, so a local A/B run of two builds must name each
-  build's commit, or its rows say `local`. `scripts/bench-chart.py`
-  drops a row whose commit is not hex (`local` included).
+  the run's commit), else `local`; and `BENCH_RUNNER` (else `local`):
+  1 to 64 letters, digits, `.`, `_` or `-`, any other value refused at
+  startup (exit 2). The commit label never comes from the checkout the
+  bench runs in or from the environment, so a local A/B run of two
+  builds must name each build's commit, or its rows say `local`.
+  `scripts/bench-chart.py` drops a row whose commit is not hex (`local`
+  included).
 
 ## Finding the commit
 

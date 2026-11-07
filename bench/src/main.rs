@@ -287,6 +287,18 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A value that is not UTF-8 is refused like any other bad label.
+    let runner_env = std::env::var_os("BENCH_RUNNER");
+    let runner_env = runner_env
+        .as_ref()
+        .map(|v| v.to_str().unwrap_or("\u{fffd}"));
+    let runner = match cli::runner_label(runner_env) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("bench: {e}");
+            return ExitCode::from(2);
+        }
+    };
     // `--netem`: the server behind the veth pair; the backend on our end.
     let (net, place, backend_ip) = match &args.netem {
         None => (
@@ -317,11 +329,8 @@ fn main() -> ExitCode {
     };
     let mut ctx = Context {
         date: row::today(),
-        commit: cli::commit_label(
-            args.commit.as_deref(),
-            std::env::var("BENCH_COMMIT").ok().as_deref(),
-        ),
-        runner: std::env::var("BENCH_RUNNER").unwrap_or_else(|_| "local".to_string()),
+        commit: cli::commit_label(args.commit.as_deref()),
+        runner,
         duration: args.duration,
         run: 0,
         syscalls_only: args.syscalls_only,
