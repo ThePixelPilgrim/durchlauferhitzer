@@ -16,14 +16,12 @@ impl Core {
     pub(super) fn timer_fired(&mut self, now: Instant, actions: &mut Vec<Action>) {
         // Each pass closes a connection or moves it from reading a head or
         // waiting on a backend to responding (which can only expire once
-        // more), so this terminates.
+        // more), so this terminates. The deadline index yields only the
+        // connections due (NFR-PERF-06); each pass first re-keys those the
+        // previous one changed.
         loop {
-            let expired: Vec<ConnId> = self
-                .conns
-                .iter()
-                .filter(|(_, c)| c.state.deadline() <= now)
-                .map(|(id, _)| *id)
-                .collect();
+            self.conns.rekey();
+            let expired = self.conns.due(now);
             if expired.is_empty() {
                 return;
             }

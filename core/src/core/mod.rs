@@ -5,6 +5,7 @@
 //! module documentation of `contract.rs`, next to its vocabulary
 //! ([`Event`], [`Action`], [`Interest`], [`ConnId`], [`ConnError`]).
 
+mod conns;
 mod contract;
 mod limits;
 mod proxy;
@@ -24,7 +25,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use crate::config::{Config, Limits, RouteAction};
-use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY};
+use crate::conn::{ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 #[cfg(doc)]
 use crate::file::RootId;
 use crate::file::{Chunk, FileFollows, FileSegment, FileTable};
@@ -37,6 +38,7 @@ use crate::time::Instant;
 #[cfg(doc)]
 use crate::upstream::BackendId;
 use crate::upstream::{UpstreamId, UpstreamTable, head_capacity, recv_capacity};
+use conns::Conns;
 
 pub use contract::{Action, ConnError, ConnId, Event, Interest};
 pub use shutdown::DrainTarget;
@@ -47,7 +49,7 @@ pub struct Core {
     config: Config,
     router: Router,
     head_limits: HeadLimits,
-    conns: BTreeMap<ConnId, Conn>,
+    conns: Conns,
     /// Open connections that count toward the limits.
     counted: u32,
     /// Counted connections per peer group (`limits::peer_group`,
@@ -131,7 +133,7 @@ impl Core {
             router: Router::new(&config.hosts),
             head_limits: HeadLimits::from(&config.limits),
             config,
-            conns: BTreeMap::new(),
+            conns: Conns::new(),
             counted: 0,
             counted_per_ip: BTreeMap::new(),
             refused: 0,
@@ -183,6 +185,11 @@ impl Core {
 
     /// Process one event at time `now`, appending the resulting actions.
     pub fn handle(&mut self, now: Instant, event: Event, actions: &mut Vec<Action>) {
+        self.dispatch(now, event, actions);
+        self.conns.rekey();
+    }
+
+    fn dispatch(&mut self, now: Instant, event: Event, actions: &mut Vec<Action>) {
         match event {
             Event::Accepted { conn, peer } => self.accepted(now, conn, peer, actions),
             Event::Received { conn, len } => self.received(now, conn, len, actions),
@@ -532,7 +539,8 @@ impl Core {
 
     /// The earliest instant at which the core wants [`Event::TimerFired`],
     /// or `None` if it has no connections (every connection has a deadline).
+    /// Read from the deadline index (`conns.rs`), not a scan.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.conns.values().map(|c| c.state.deadline()).min()
+        self.conns.next_deadline()
     }
 }

@@ -125,6 +125,7 @@ impl Core {
                 }
             }
         }
+        self.conns.rekey();
     }
 
     /// The fast path: close every connection at once, each open upstream
@@ -166,6 +167,7 @@ impl Core {
                 actions.push(Action::Close { conn });
             }
         }
+        self.conns.rekey();
     }
 
     /// Whether the core holds nothing any more: no connection (lingering

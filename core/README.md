@@ -29,6 +29,8 @@ src/
   lib.rs              crate root and re-exports
   core/               the state machine behind `Core::handle`
     mod.rs              Core, buffers API, event dispatch
+    conns.rs            the open connections and their deadline index
+                        (next_deadline and TimerFired without a scan)
     contract.rs         the driver contract (module docs); Event, Action,
                         Interest, ConnId, ConnError (client, file and
                         upstream events and actions)
