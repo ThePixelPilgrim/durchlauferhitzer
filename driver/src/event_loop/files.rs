@@ -13,7 +13,7 @@ use durchlauferhitzer_core::{
     ConnError, ConnId, Event, FileError, FileId, FileMeta, FileStamp, RootId,
 };
 
-use super::{Driver, FileFailure, Freed};
+use super::{Direction, Driver, FileFailure, Freed};
 use crate::log::{DriverLog, LogEntry};
 use crate::pool::{Cancel, Job, JobResult};
 use crate::sys::fd::Io;
@@ -368,7 +368,8 @@ impl Driver {
     /// segment of a file the driver does not hold open cannot come from
     /// the core; it fails the transfer rather than leave the connection
     /// waiting for a writability it would never use.
-    pub(super) fn sendfile_segment(&self, conn: ConnId) -> Option<Event> {
+    /// What the `sendfile` did is the client's write hint (eager I/O).
+    pub(super) fn sendfile_segment(&mut self, conn: ConnId) -> Option<Event> {
         let segment = self.core.send_file(conn)?;
         let client = self.clients.get(&conn)?;
         let Some(fd) = self.files.fd(segment.file) else {
@@ -378,6 +379,8 @@ impl Driver {
             });
         };
         let io = sendfile(client.fd.as_fd(), fd.as_fd(), segment.offset, segment.len);
+        let offered = usize::try_from(segment.len).unwrap_or(usize::MAX);
+        self.client_hint(conn, &io, offered, Direction::Write);
         sendfile_event(conn, segment.file, io)
     }
 }

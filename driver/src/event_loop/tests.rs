@@ -18,7 +18,7 @@ use durchlauferhitzer_core::{
 use super::accept::Accepting;
 use super::upstreams::{WriteMode, write_mode};
 use super::{Broken, Driver, FileFailure};
-use crate::conns::{Answer, Client, Eof, Phase, Token, Upstream, Writes};
+use crate::conns::{Answer, Client, Eof, Hints, Phase, Token, Upstream, Writes};
 use crate::log::{Buffered, DriverLog, LogEntry, LogSink};
 use crate::pool::JobResult;
 use crate::sys::epoll::{EpollEvent, Readiness};
@@ -235,8 +235,9 @@ const REGISTER_FAILED: LogEntry =
     LogEntry::Driver(DriverLog::RegisterFailed { errno: libc::EPERM });
 
 /// DRV-15: a client whose registration fails is that client's failure:
-/// the driver logs it, the core gets `Failed` after the actions of the
-/// call (here `Accepted`'s `SetInterest`), closes it, and the loop goes on.
+/// the driver logs it, the core gets `Failed` once the registration is
+/// brought in line (here for `Accepted`'s `SetInterest`, before the loop
+/// waits), closes it, and the loop goes on.
 #[test]
 fn a_client_whose_registration_fails_is_reported_failed() {
     let (mut driver, logs) = driver();
@@ -246,6 +247,8 @@ fn a_client_whose_registration_fails_is_reported_failed() {
     driver
         .deliver(Event::Accepted { conn, peer: peer() })
         .unwrap();
+    // Registrations are brought in line before the loop waits.
+    driver.settle().unwrap();
     assert!(driver.clients.is_empty());
     let logs: Vec<LogEntry> = logs.try_iter().collect();
     assert_eq!(
@@ -285,10 +288,13 @@ fn an_open_upstream_whose_registration_fails_is_reported_failed() {
             },
             interest: Interest::None,
             registered: None,
+            hints: Hints::fresh(),
         },
     );
     driver.accepting.failed(driver.clock.now());
-    driver.set_upstream_interest(up, Interest::Read).unwrap();
+    // Synced before the wait (`settle`), here at once.
+    driver.set_upstream_interest(up, Interest::Read);
+    driver.sync_upstream(up).unwrap();
     assert!(matches!(driver.upstreams[&up].phase, Phase::Failed));
     // The socket was closed: paused listeners resume (DRV-16).
     assert_eq!(driver.accepting.state(), Accepting::Open);
@@ -312,6 +318,7 @@ fn a_connecting_upstream_whose_registration_fails_is_a_failed_connect() {
             phase: Phase::Connecting(unpollable()),
             interest: Interest::None,
             registered: None,
+            hints: Hints::fresh(),
         },
     );
     driver.accepting.failed(driver.clock.now());
@@ -368,6 +375,7 @@ fn closing_a_client_or_an_upstream_resumes_paused_listeners() {
             },
             interest: Interest::None,
             registered: None,
+            hints: Hints::fresh(),
         },
     );
     driver.accepting.failed(driver.clock.now());
@@ -393,6 +401,7 @@ fn a_write_error_kept_for_the_reads_follows_the_end_of_stream() {
             },
             interest: Interest::ReadWrite,
             registered: None,
+            hints: Hints::fresh(),
         },
     );
     driver.upstream_eof(up).unwrap();
@@ -418,6 +427,7 @@ fn an_end_of_stream_without_a_kept_write_error_queues_nothing() {
             },
             interest: Interest::Read,
             registered: None,
+            hints: Hints::fresh(),
         },
     );
     driver.upstream_eof(up).unwrap();
@@ -442,6 +452,8 @@ fn known_client(driver: &mut Driver, conn: ConnId) -> UnixStream {
     driver
         .deliver(Event::Accepted { conn, peer: peer() })
         .unwrap();
+    // Registrations are brought in line before the loop waits.
+    driver.settle().unwrap();
     theirs
 }
 

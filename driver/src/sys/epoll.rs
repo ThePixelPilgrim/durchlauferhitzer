@@ -127,6 +127,21 @@ impl std::fmt::Debug for EpollEvent {
 #[derive(Debug)]
 pub struct Epoll {
     fd: OwnedFd,
+    /// Tests count the `epoll_ctl` calls (NFR-PERF-05).
+    #[cfg(test)]
+    ctl_calls: CtlCalls,
+}
+
+/// A shared count of an instance's `epoll_ctl` calls (tests only).
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub struct CtlCalls(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+#[cfg(test)]
+impl CtlCalls {
+    pub fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl Epoll {
@@ -136,7 +151,17 @@ impl Epoll {
         // SAFETY: `fd` is a descriptor the call just created and nothing
         // else owns.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        Ok(Epoll { fd })
+        Ok(Epoll {
+            fd,
+            #[cfg(test)]
+            ctl_calls: CtlCalls::default(),
+        })
+    }
+
+    /// The count of this instance's `epoll_ctl` calls, shared.
+    #[cfg(test)]
+    pub fn ctl_calls(&self) -> CtlCalls {
+        self.ctl_calls.clone()
     }
 
     /// Registers `fd` with `token`.
@@ -162,6 +187,10 @@ impl Epoll {
         token: u64,
         readiness: Readiness,
     ) -> io::Result<()> {
+        #[cfg(test)]
+        self.ctl_calls
+            .0
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut event = libc::epoll_event {
             events: readiness.bits(),
             u64: token,

@@ -19,6 +19,7 @@
 
 mod accept;
 mod clients;
+mod eager;
 mod files;
 mod shutdown;
 mod upstreams;
@@ -42,6 +43,7 @@ use crate::log::{Buffered, DriverLog, LogEntry, LogSink, ShutdownPhase};
 use crate::pool::Pool;
 use crate::sys::epoll::{Epoll, EpollEvent, Readiness};
 use crate::sys::eventfd::EventFd;
+use crate::sys::fd::Io;
 use crate::sys::signal::SignalFd;
 
 /// How many ready descriptors one `epoll_wait` returns at most.
@@ -199,6 +201,11 @@ pub struct Driver {
     answers: VecDeque<UpstreamId>,
     /// Sockets whose failed registration waits to be reported.
     broken: VecDeque<Broken>,
+    /// Sockets whose interest the core set, for eager I/O
+    /// ([`Driver::settle`]).
+    noted: VecDeque<eager::Socket>,
+    /// Noted sockets whose registration is synced before the wait.
+    unsynced: Vec<eager::Socket>,
     /// The next connection id: from 1, never reused (DRV-01).
     next_conn: u64,
     clock: Clock,
@@ -275,6 +282,8 @@ impl Driver {
             upstreams: BTreeMap::new(),
             answers: VecDeque::new(),
             broken: VecDeque::new(),
+            noted: VecDeque::new(),
+            unsynced: Vec::new(),
             next_conn: 1,
             clock: Clock {
                 origin: std::time::Instant::now(),
@@ -355,6 +364,11 @@ impl Driver {
     fn run_loop(&mut self) -> io::Result<Exit> {
         let mut events = vec![EpollEvent::EMPTY; EVENTS_PER_WAIT];
         loop {
+            if let Some(exit) = self.ending() {
+                return Ok(exit);
+            }
+            // Eager I/O, then every registration in line (eager.rs).
+            self.settle()?;
             if let Some(exit) = self.ending() {
                 return Ok(exit);
             }
@@ -570,8 +584,9 @@ impl Driver {
                 if let Some(answer) = self.take_answer(up)? {
                     self.call(answer)?;
                     // A connected answer's registration is brought in line
-                    // now, if the core's actions did not already.
-                    self.sync_upstream(up)?;
+                    // before the wait, if the core's actions did not
+                    // already note it.
+                    self.note(eager::Socket::Upstream(up));
                 }
             } else if let Some(broken) = self.broken.pop_front() {
                 if let Some(failed) = self.broken_event(broken) {
@@ -645,7 +660,10 @@ impl Driver {
     /// compile error here.
     fn apply(&mut self, action: Action) -> io::Result<()> {
         match action {
-            Action::SetInterest { conn, interest } => self.set_interest(conn, interest),
+            Action::SetInterest { conn, interest } => {
+                self.set_interest(conn, interest);
+                Ok(())
+            }
             Action::ShutdownWrite { conn } => {
                 self.shutdown_write(conn);
                 Ok(())
@@ -663,7 +681,8 @@ impl Driver {
             Action::Connect { up, backend } => self.connect(up, backend),
             Action::CheckSilent { up } => self.check_silent(up),
             Action::SetUpstreamInterest { up, interest } => {
-                self.set_upstream_interest(up, interest)
+                self.set_upstream_interest(up, interest);
+                Ok(())
             }
             Action::CloseUpstream { up } => self.close_upstream(up),
             Action::Log(log) => {
@@ -671,6 +690,21 @@ impl Driver {
                 Ok(())
             }
         }
+    }
+}
+
+/// The direction of a socket's I/O call (its hint, eager I/O).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Read,
+    Write,
+}
+
+/// The count an I/O call moved, if it moved bytes.
+fn done(io: &Io) -> Option<usize> {
+    match io {
+        Io::Done(len) => Some(*len),
+        Io::WouldBlock | Io::Closed | Io::Err(_) => None,
     }
 }
 
@@ -701,5 +735,7 @@ fn conn_error(err: &io::Error) -> ConnError {
     }
 }
 
+#[cfg(test)]
+mod relay_tests;
 #[cfg(test)]
 mod tests;

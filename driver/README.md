@@ -86,6 +86,11 @@ src/
     accept.rs         the accept pause (DRV-16): `classify` (transient or
                       pause), `AcceptGate` (paused until a descriptor
                       closes or the 1 s retry; one log line a second)
+    eager.rs          eager I/O (NFR-PERF-05): a socket whose interest the
+                      core set is tried at once where its hint expects the
+                      I/O to go through (at most `EAGER_BUDGET`, 64, per
+                      turn), then every noted registration is synced
+                      before the wait (`settle`)
     clients.rs        accept (at most `ACCEPT_BATCH`, 64, per readiness),
                       client reads, writes and errors, client
                       actions, resuming the listeners
@@ -105,9 +110,12 @@ src/
     tests.rs          unit tests of the loop's decisions on a driver that
                       is built but not run; one run on loopback counts a
                       1 KiB file's segments (MSG_MORE, NFR-PERF-06)
+    relay_tests.rs    the loop on loopback relaying a proxied 1 MiB body:
+                      its `epoll_ctl` calls (NFR-PERF-05)
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
                     Signal | Log` in a `u64`), the per-client and per-upstream
-                    records and the registration each wants
+                    records, the registration each wants and its I/O
+                    hints (`Hint`: `Ready | Unknown` per direction)
   log.rs            `LogSink` (`stderr()`, `fd(OwnedFd)`, `channel()` for
                     tests; `write`, `flush`, `buffered` → `Buffered`,
                     `flush_within`: the bounded final flush):
@@ -589,6 +597,19 @@ leaves a choice, this is what the loop does:
   `SO_ERROR` (`ECONNRESET`/`EPIPE` are `Reset`; a hang-up without an error
   is `Reset` too). The end of stream is reported once; the socket is not
   read again after it.
+- **Eager I/O, deferred registrations** (NFR-PERF-05, owner decision
+  2026-11-07). A `SetInterest`/`SetUpstreamInterest` is only noted.
+  Before the loop waits (`settle`), each noted socket is tried at once
+  where its interest allows and its hint expects the I/O to go through
+  (epoll reported it, or the last read filled the whole buffer, or the
+  last write emptied it); at most 64 such attempts per turn
+  (`EAGER_BUDGET`). Then each noted socket's registration is brought in
+  line with what it wants by then. A relayed chunk that goes straight
+  through (upstream read, client write, next upstream read) leaves both
+  registrations as they were, so a proxied MiB costs a handful of
+  `epoll_ctl` instead of about four per 16 KiB chunk. A registration may
+  be stale until the wait: a readiness the interest does not want is
+  ignored, and none is waited for.
 - **Accept** (DRV-16). Loops until it would block, at most 64 times
   per readiness (A3, `ACCEPT_BATCH`): the listener is level-triggered,
   so the rest of a burst is accepted on the next turn, after the other
@@ -617,7 +638,8 @@ leaves a choice, this is what the loop does:
 - **Registration failures** (DRV-15). A failed `epoll_ctl` for one
   socket fails only that socket and is logged
   (`DriverLog::RegisterFailed`). A client is marked broken (no more I/O, taken out of the epoll set)
-  and gets `Failed` after the actions of the current call; an open
+  and gets `Failed` once its registration is synced (before the wait,
+  or after the actions of the current call for the driver's own syncs); an open
   upstream is closed and gets `UpstreamFailed` the same way; a pending
   connect is answered `UpstreamFailed`; a socket just accepted is dropped
   before `Accepted`. A failure queued outside any call (a write that stops

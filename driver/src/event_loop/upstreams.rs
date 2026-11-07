@@ -7,8 +7,9 @@ use std::os::fd::AsFd;
 
 use durchlauferhitzer_core::{BackendId, ConnError, Event, Interest, UpstreamId};
 
-use super::{Broken, Driver, Freed, conn_error, log_register_failed, token};
-use crate::conns::{Answer, Eof, Phase, Token, Upstream, Writes};
+use super::eager::Socket;
+use super::{Broken, Direction, Driver, Freed, conn_error, done, log_register_failed, token};
+use crate::conns::{Answer, Eof, Hints, Phase, Token, Upstream, Writes};
 use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
 use crate::sys::fd::Io;
@@ -101,6 +102,7 @@ impl Driver {
                 phase,
                 interest: Interest::None,
                 registered: None,
+                hints: Hints::fresh(),
             },
         );
         if answering {
@@ -190,9 +192,10 @@ impl Driver {
         readiness: Readiness,
         trouble: Trouble,
     ) -> io::Result<()> {
-        let Some(upstream) = self.upstreams.get(&up) else {
+        let Some(upstream) = self.upstreams.get_mut(&up) else {
             return Ok(());
         };
+        upstream.hints.note(readiness);
         let interest = upstream.interest;
         match &upstream.phase {
             Phase::Connecting(_) => return self.finish_connect(up),
@@ -277,8 +280,9 @@ impl Driver {
     /// Reads into `upstream_recv_buffer` until it is empty or the socket
     /// would block, each read reported as the very next call. The end of
     /// stream and the socket error come only from a read, after every
-    /// readable byte (DRV-10).
-    fn upstream_read(&mut self, up: UpstreamId) -> io::Result<()> {
+    /// readable byte (DRV-10). What the reads did is the read hint (eager
+    /// I/O).
+    pub(super) fn upstream_read(&mut self, up: UpstreamId) -> io::Result<()> {
         loop {
             let Some(upstream) = self.upstreams.get(&up) else {
                 return Ok(());
@@ -297,7 +301,10 @@ impl Driver {
             if buf.is_empty() {
                 return Ok(());
             }
-            let event = match read(fd.as_fd(), buf) {
+            let offered = buf.len();
+            let io = read(fd.as_fd(), buf);
+            self.upstream_hint(up, &io, offered, Direction::Read);
+            let event = match io {
                 Io::Done(0) | Io::WouldBlock => return Ok(()),
                 Io::Done(len) => Event::UpstreamReceived { up, len },
                 Io::Closed => {
@@ -315,8 +322,9 @@ impl Driver {
     }
 
     /// Writes from `upstream_send_buffer` until it is empty or the socket
-    /// would block, each write reported as the very next call.
-    fn upstream_write(&mut self, up: UpstreamId) -> io::Result<()> {
+    /// would block, each write reported as the very next call. What the
+    /// writes did is the write hint (eager I/O).
+    pub(super) fn upstream_write(&mut self, up: UpstreamId) -> io::Result<()> {
         loop {
             let Some(upstream) = self.upstreams.get(&up) else {
                 return Ok(());
@@ -331,7 +339,10 @@ impl Driver {
             if buf.is_empty() {
                 return Ok(());
             }
-            let error = match write(fd.as_fd(), buf, More::No) {
+            let offered = buf.len();
+            let io = write(fd.as_fd(), buf, More::No);
+            self.upstream_hint(up, &io, offered, Direction::Write);
+            let error = match io {
                 Io::Done(0) | Io::WouldBlock => return Ok(()),
                 Io::Done(len) => {
                     self.deliver(Event::UpstreamSent { up, len })?;
@@ -411,15 +422,25 @@ impl Driver {
         self.freed(freed)
     }
 
-    pub(super) fn set_upstream_interest(
-        &mut self,
-        up: UpstreamId,
-        interest: Interest,
-    ) -> io::Result<()> {
+    /// The core's `SetUpstreamInterest`: tried and synced before the next
+    /// wait (eager I/O, [`Driver::settle`]).
+    pub(super) fn set_upstream_interest(&mut self, up: UpstreamId, interest: Interest) {
         if let Some(upstream) = self.upstreams.get_mut(&up) {
             upstream.interest = interest;
+            self.note(Socket::Upstream(up));
         }
-        self.sync_upstream(up)
+    }
+
+    /// Notes what a read or write of `offered` bytes did as the
+    /// upstream's hint for that direction.
+    fn upstream_hint(&mut self, up: UpstreamId, io: &Io, offered: usize, dir: Direction) {
+        if let Some(upstream) = self.upstreams.get_mut(&up) {
+            let hint = Hints::after(done(io), offered);
+            match dir {
+                Direction::Read => upstream.hints.read = hint,
+                Direction::Write => upstream.hints.write = hint,
+            }
+        }
     }
 
     /// Brings the upstream's epoll registration in line with what it

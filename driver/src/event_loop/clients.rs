@@ -7,8 +7,9 @@ use std::os::fd::AsFd;
 use durchlauferhitzer_core::{ConnError, ConnId, Event, FileFollows, Interest};
 
 use super::accept::{AcceptError, Accepting, Logging, Resume, classify};
-use super::{Broken, Driver, Freed, conn_error, log_register_failed, token};
-use crate::conns::{Client, Eof, Health, Token};
+use super::eager::Socket;
+use super::{Broken, Direction, Driver, Freed, conn_error, done, log_register_failed, token};
+use crate::conns::{Client, Eof, Health, Hints, Token};
 use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
 use crate::sys::fd::Io;
@@ -129,10 +130,11 @@ impl Driver {
         readiness: Readiness,
         trouble: Trouble,
     ) -> io::Result<()> {
-        let Some(client) = self.clients.get(&conn) else {
+        let Some(client) = self.clients.get_mut(&conn) else {
             // Closed earlier in this batch, or never ours (DRV-05).
             return Ok(());
         };
+        client.hints.note(readiness);
         match client.health {
             Health::Ok => {}
             // Its `Failed` is queued or delivered (DRV-15).
@@ -180,7 +182,8 @@ impl Driver {
 
     /// Reads into `recv_buffer` until it is empty or the socket would
     /// block (DRV-03), each read reported as the very next call (DRV-04).
-    fn client_read(&mut self, conn: ConnId) -> io::Result<()> {
+    /// What the reads did is the read hint (eager I/O).
+    pub(super) fn client_read(&mut self, conn: ConnId) -> io::Result<()> {
         loop {
             let Some(client) = self.clients.get(&conn) else {
                 return Ok(());
@@ -196,7 +199,10 @@ impl Driver {
             if buf.is_empty() {
                 return Ok(());
             }
-            let event = match read(client.fd.as_fd(), buf) {
+            let offered = buf.len();
+            let io = read(client.fd.as_fd(), buf);
+            self.client_hint(conn, &io, offered, Direction::Read);
+            let event = match io {
                 Io::Done(0) | Io::WouldBlock => return Ok(()),
                 Io::Done(len) => Event::Received { conn, len },
                 Io::Closed => {
@@ -228,8 +234,9 @@ impl Driver {
     /// Writes `send_buffer`, then the `send_file` segment, until done or
     /// the socket would block (DRV-03), each write reported as the very
     /// next call (DRV-04). The buffer goes with `MSG_MORE` while a file
-    /// body follows it (NFR-PERF-06).
-    fn client_write(&mut self, conn: ConnId) -> io::Result<()> {
+    /// body follows it (NFR-PERF-06). What the writes did is the write
+    /// hint (eager I/O).
+    pub(super) fn client_write(&mut self, conn: ConnId) -> io::Result<()> {
         loop {
             let Some(client) = self.clients.get(&conn) else {
                 return Ok(());
@@ -259,7 +266,10 @@ impl Driver {
                 FileFollows::Yes => More::Yes,
                 FileFollows::No => More::No,
             };
-            let event = match write(client.fd.as_fd(), buf, follows) {
+            let offered = buf.len();
+            let io = write(client.fd.as_fd(), buf, follows);
+            self.client_hint(conn, &io, offered, Direction::Write);
+            let event = match io {
                 Io::Done(0) | Io::WouldBlock => return Ok(()),
                 Io::Done(len) => Event::Sent { conn, len },
                 // `send` of a non-empty buffer never returns 0.
@@ -280,18 +290,32 @@ impl Driver {
         }
     }
 
-    pub(super) fn set_interest(&mut self, conn: ConnId, interest: Interest) -> io::Result<()> {
+    /// The core's `SetInterest`: tried and synced before the next wait
+    /// (eager I/O, [`Driver::settle`]).
+    pub(super) fn set_interest(&mut self, conn: ConnId, interest: Interest) {
         if let Some(client) = self.clients.get_mut(&conn) {
             client.interest = interest;
+            self.note(Socket::Client(conn));
         }
-        self.sync_client(conn)
+    }
+
+    /// Notes what a read or write of `offered` bytes did as the client's
+    /// hint for that direction.
+    pub(super) fn client_hint(&mut self, conn: ConnId, io: &Io, offered: usize, dir: Direction) {
+        if let Some(client) = self.clients.get_mut(&conn) {
+            let hint = Hints::after(done(io), offered);
+            match dir {
+                Direction::Read => client.hints.read = hint,
+                Direction::Write => client.hints.write = hint,
+            }
+        }
     }
 
     /// Brings the client's registration in line with what it wants. A
     /// failed `epoll_ctl` fails only this client (DRV-15): it is logged,
     /// no more I/O is done on the socket, and its `Failed` is delivered
     /// after the actions of the current call.
-    fn sync_client(&mut self, conn: ConnId) -> io::Result<()> {
+    pub(super) fn sync_client(&mut self, conn: ConnId) -> io::Result<()> {
         let Some(client) = self.clients.get_mut(&conn) else {
             return Ok(());
         };

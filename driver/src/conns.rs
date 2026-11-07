@@ -83,6 +83,53 @@ pub(crate) enum Eof {
     Delivered,
 }
 
+/// What the driver last learnt about one direction of a socket, for eager
+/// I/O (NFR-PERF-05): `Ready` after epoll reported it, or after a read
+/// filled the whole buffer or a write emptied it (more is likely to go
+/// through); `Unknown` after `EAGAIN` or a short count. A wrong `Ready`
+/// costs one `EAGAIN` call, never a wrong result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hint {
+    Ready,
+    Unknown,
+}
+
+/// Both directions' hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Hints {
+    pub(crate) read: Hint,
+    pub(crate) write: Hint,
+}
+
+impl Hints {
+    /// A connected socket: nothing known to read, room to write.
+    pub(crate) fn fresh() -> Hints {
+        Hints {
+            read: Hint::Unknown,
+            write: Hint::Ready,
+        }
+    }
+
+    /// Epoll reported `readiness`.
+    pub(crate) fn note(&mut self, readiness: Readiness) {
+        if readiness.has_read() {
+            self.read = Hint::Ready;
+        }
+        if readiness.has_write() {
+            self.write = Hint::Ready;
+        }
+    }
+
+    /// After an I/O call that offered `offered` bytes: what it did tells
+    /// whether more is likely to go through.
+    pub(crate) fn after(done: Option<usize>, offered: usize) -> Hint {
+        match done {
+            Some(len) if len >= offered => Hint::Ready,
+            Some(_) | None => Hint::Unknown,
+        }
+    }
+}
+
 /// Whether a client's epoll registration holds. After an `epoll_ctl`
 /// failure the client is reported `Failed` and the driver does no more
 /// I/O on it (DRV-15).
@@ -105,6 +152,7 @@ pub(crate) struct Client {
     /// set, so its errors and hang-ups are seen whatever the interest
     /// (DRV-10), until it is broken (DRV-15).
     pub(crate) registered: Readiness,
+    pub(crate) hints: Hints,
 }
 
 impl Client {
@@ -115,6 +163,7 @@ impl Client {
             eof: Eof::NotYet,
             health: Health::Ok,
             registered: Readiness::None,
+            hints: Hints::fresh(),
         }
     }
 
@@ -182,6 +231,7 @@ pub(crate) struct Upstream {
     /// What the socket is registered for; `None` (the Rust `Option`) while
     /// it is out of the epoll set.
     pub(crate) registered: Option<Readiness>,
+    pub(crate) hints: Hints,
 }
 
 impl Upstream {
@@ -237,6 +287,7 @@ mod tests {
             },
             interest,
             registered: None,
+            hints: Hints::fresh(),
         }
     }
 
@@ -252,6 +303,7 @@ mod tests {
                 phase: Phase::Connecting(fd()),
                 interest,
                 registered: None,
+                hints: Hints::fresh(),
             };
             assert_eq!(up.wanted(), Some(Readiness::Write), "{interest:?}");
         }
@@ -268,6 +320,7 @@ mod tests {
             phase: Phase::Answering(Answer::Failed),
             interest: Interest::Read,
             registered: None,
+            hints: Hints::fresh(),
         };
         assert_eq!(answering.wanted(), None);
     }
