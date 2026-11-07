@@ -279,6 +279,8 @@ Structure and values:
   Static routes may set neither.
 - **FR-CFG-19** [done] `on_file_change abort | allow_growth;` is optional
   on static routes (default `abort`) and an error on proxy routes.
+  *[Stage 8:]* also optional on a proxy route with `internal_files`
+  (FR-CFG-26).
 - **FR-CFG-20** [done] The `limits` block may override these defaults:
 
   | key | default | status |
@@ -346,6 +348,14 @@ Structure and values:
   once. The setting is only meaningful with `seccomp` not `off`; written
   with `seccomp off` it is an error (*builder call*: a setting that does
   nothing is refused rather than ignored).
+- **FR-CFG-26** [stage 8] (owner decisions 2026-11-07, stage 8
+  brainstorm) `internal_files x-sendfile <root>;` or
+  `internal_files x-accel-redirect <prefix> <root>;` is optional on a
+  proxy route, at most once, and an error on a static route
+  (FR-PROXY-32). `<root>` follows FR-CFG-15, checked and opened at
+  startup like a static root and readable under Landlock
+  (FR-PROC-06). `<prefix>` starts and ends with `/` and otherwise obeys
+  FR-CFG-13.
 - **FR-CFG-22** [done] Durations are `<u64>` followed by `ms`, `s` or `m`;
   sizes are plain bytes or `<u64>` followed by `KiB`, `MiB` or `GiB`; any
   other form, or an overflowing value, is an error.
@@ -1078,8 +1088,48 @@ Failures, persistence, timeouts:
   over `max_response_body`, a `Transfer-Encoding` toward an HTTP/1.0
   client [done in stage 3 Task 7]); proxied responses are logged as
   `ProxiedResponse` with the backend's status (FR-LOG-02).
-- **FR-PROXY-32** [stage 8] Backend-directed file serving (an
-  `X-Accel-Redirect`-like header): see Timeline.
+- **FR-PROXY-32** [stage 8] Backend-directed file serving. *(Owner
+  decisions 2026-11-07, stage 8 brainstorm.)* A backend's answer may ask
+  the proxy to send a file from a folder on this machine: the backend
+  decides who gets what, the proxy does the sending.
+  - **Opt-in.** Only a proxy route with `internal_files` (FR-CFG-26)
+    serves files, and it trusts exactly the one header it names:
+    `X-Sendfile` (Apache, lighttpd) or `X-Accel-Redirect` (nginx).
+  - **Stripping.** `X-Sendfile` and `X-Accel-Redirect` are removed from
+    every client request and every backend response on every proxy route;
+    on an `x-accel-redirect` route every `X-Accel-*` response header is
+    removed too. None reaches a backend from a client, or a client from a
+    backend. nginx's other `X-Accel-*` features (expiry, buffering, rate
+    limits, named locations) are not supported.
+  - **Trigger.** A backend `200` whose head carries the route's header.
+    On any other status the header is removed and the response passes
+    unchanged; the other header is removed and ignored.
+  - **Path.** `x-sendfile`: the value is a file-system path, taken as its
+    bytes, that must start with the route's root followed by `/`.
+    `x-accel-redirect`: the value must start with the route's prefix; the
+    rest is percent-decoded once (FR-STATIC-02). The remaining segments
+    are then served exactly as a static route serves its decoded path
+    (FR-STATIC-05…10, the `openat2` jail, no symlinks, dotfiles 404),
+    except that a directory is a 404 (no `index.html`, no redirect).
+  - **Bad path → 502.** A value that does not match its root or prefix,
+    is empty, holds a byte outside visible ASCII, a `?`, an empty, `.` or
+    `..` segment, or a header given more than once is the backend
+    misbehaving: `502`, logged as `BackendFailed` with its own kind, the
+    upstream closed.
+  - **Missing file → 404.** Whatever a static route answers 404 is a
+    `404` here (FR-STATIC-09), logged like any `Response`.
+  - **The client's response** is the file as a static route sends it
+    (FR-STATIC-11…18): `Content-Length`, `ETag` and `Last-Modified` from
+    the file, `304` per FR-STATIC-18, `HEAD` per FR-STATIC-13,
+    `on_file_change` per FR-STATIC-14, failures per FR-STATIC-15.
+    `Content-Type` is the backend's if it sent one, else per FR-STATIC-12.
+    The backend's other headers are kept (after FR-PROXY-12), its
+    `Content-Length`, `Transfer-Encoding`, `ETag` and `Last-Modified`
+    replaced. A request of any method (a `POST` answered with a file too)
+    gets the file.
+  - **The backend's body** is never read. The file starts as soon as the
+    backend head is complete. The backend connection is pooled only after
+    `Content-Length: 0` (FR-PROXY-02), else closed.
 
 ### FR-CONN — Connections: keep-alive, pipelining, close, timeouts, caps
 
@@ -2565,15 +2615,10 @@ project working and tested.
    and the safe retry (FR-PROXY-02), eager I/O and a 32 KiB upstream
    buffer, the `tc netem` measurements, the NFR-PERF targets; `splice`
    and N threads dropped by measurement.
-8. **Backend-directed file serving** — a backend response header (like
-   nginx's `X-Accel-Redirect`) asks the proxy to serve a file via
-   `sendfile`. Only honored on proxy routes that name an explicit root
-   (`internal_files <dir>;`); the path goes through the same validation and
-   `openat2` jail as static routes; the header is never accepted from
-   clients and always stripped; backend status and headers such as
-   `Content-Type` / `Content-Disposition` are kept, its body discarded.
-   Useful when the files are on the proxy's machine (same host or shared
-   storage).
+8. **Backend-directed file serving** — a backend's `X-Sendfile` or
+   `X-Accel-Redirect` asks the proxy to send a file from the route's
+   `internal_files` folder (FR-PROXY-32, FR-CFG-26). Useful when the
+   files are on the proxy's machine (same host or shared storage).
 9. **Later, maybe** — *Hung-disk handling (recorded for a better future
    solution):* today a hung `openat2` keeps its connection slot until the
    disk answers (FR-CONN-11), which bounds the damage at `max_connections`
