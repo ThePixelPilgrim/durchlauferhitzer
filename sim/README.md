@@ -165,9 +165,12 @@ the model (a pooled route, an HTTP/1.1 client, the whole request
 written, an HTTP/1.1 response without `close`, framed, nothing after
 it), and a retry may happen only by FR-PROXY-26's rule (a GET or HEAD
 without a body on a reused connection that failed before any response
-byte), and then must. Backends kill a reused connection as the request
+byte), and then must, unless a drain began: none is retried during a
+drain. Backends kill a reused connection as the request
 arrives (reset or end of stream, before or after the first bytes of a
-response head), end it right behind a response (the core may reuse it
+response head, or a step later, once the backend has the request head:
+a drain not begun yet begins just then, and in a seed without a
+shutdown one may be added for it), end it right behind a response (the core may reuse it
 before it sees that), or write to, close or reset it while idle (which
 must close it at once, `Sim::idle_closes`), or send stray response bytes
 after a complete one; in some rounds the idle watch lags
@@ -179,7 +182,8 @@ core that parks after such a read, and one that parks during a drain. The covera
 reuse (also across clients), idle closes by a byte, an end of stream,
 an error, the idle timeout, the per-backend cap and a drain, a failed
 silence check, a replay
-that is relayed, a refused retry and none after a response byte. Timed scenarios (connect, response, body, head and send timeouts)
+that is relayed, a refused retry, none after a response byte and none
+in a drain. Timed scenarios (connect, response, body, head and send timeouts)
 run alone in their round, so the clock only runs out deadlines the model
 knows. To replay one failing seed (of both nets):
 
@@ -191,7 +195,7 @@ SIM_SEED=1234 cargo test -p durchlauferhitzer-sim --test faults -- random_fault_
 ```
 
 `SIM_SEEDS=<from>..<to>` runs both nets over that range instead of their
-defaults (`0..1500` static, `0..400` proxy); the nightly workflow's long
+defaults (`0..1500` static, `0..1000` proxy); the nightly workflow's long
 runs use it (NFR-TEST-08). `SIM_SEED` wins over it.
 
 In the static net every connection is checked as it is accepted against

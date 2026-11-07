@@ -85,12 +85,14 @@ pub(crate) fn random_exchange(
         };
         script = Some(random_script(rng, &ctx));
     }
-    let stale = match rng.u8(0..10) {
+    let stale = match rng.u8(0..16) {
         0 | 1 => Some(Stale::Reset),
         2 => Some(Stale::Eof),
-        3 | 7 => Some(Stale::Twice),
+        3 | 7 | 8 => Some(Stale::Twice),
         4 | 5 => Some(Stale::HalfReset),
         6 => Some(Stale::HalfEof),
+        10..13 => Some(Stale::LateReset),
+        13..16 => Some(Stale::LateEof),
         _ => None,
     };
     let mut ex = Exchange {

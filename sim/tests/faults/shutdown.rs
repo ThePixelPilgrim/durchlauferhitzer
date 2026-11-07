@@ -205,6 +205,25 @@ impl ShutdownPlan {
         }
     }
 
+    /// The plan with its drain (if it has one) at `step` at the latest;
+    /// an abort after it stays where it was.
+    pub(crate) fn with_drain_at(self, step: usize) -> ShutdownPlan {
+        let at = |drain: usize| drain.min(step);
+        match self {
+            ShutdownPlan::None | ShutdownPlan::Abort { .. } => self,
+            ShutdownPlan::Drain { drain } => ShutdownPlan::Drain { drain: at(drain) },
+            ShutdownPlan::Restart { drain } => ShutdownPlan::Restart { drain: at(drain) },
+            ShutdownPlan::DrainThenAbort { drain, abort } => ShutdownPlan::DrainThenAbort {
+                drain: at(drain),
+                abort,
+            },
+            ShutdownPlan::RestartThenAbort { drain, abort } => ShutdownPlan::RestartThenAbort {
+                drain: at(drain),
+                abort,
+            },
+        }
+    }
+
     /// The target of its `begin_drain`.
     fn target(self) -> DrainTarget {
         match self {
