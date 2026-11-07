@@ -10,7 +10,7 @@ Status: approved — **single source of truth** for what the product must do.
   *withdrawn*. Plans, reviews, ledgers and commit messages cite IDs instead
   of restating requirements. A new owner decision is written here first
   (new ID or edited text), then cited.
-- Status tags: **[done]** implemented and tested (stages 1–6);
+- Status tags: **[done]** implemented and tested (stages 1–7);
   **[done in core; driver stage 4]** the core's half is done and the
   epoll driver's is due (none left after stage 4); **[done; X stage N]**
   done, with the follow-up X due in stage N (e.g. NFR-MAINT-04's CI
@@ -299,8 +299,8 @@ Structure and values:
   | `restart_timeout` | 10m (the restart drain, FR-PROC-07; owner decision 2026-11-04) | [done] |
   | `memory_limit` | 1GiB (budget for per-connection buffers, FR-CFG-21) | [done] |
   | `ipv6_prefix` | 64 (per-IP grouping of IPv6 peers, FR-CONN-13; (owner decision 2026-10-29, stage 5 brainstorm)) | [done] |
-  | `backend_idle_timeout` | 2s (an idle pooled backend connection closes after it, FR-PROXY-02; keep it well below the backend's own keep-alive timeout; stage 7) | [stage 7] |
-  | `backend_idle_max` | 8, or `max_connections` if smaller (idle pooled connections per backend, FR-PROXY-02; stage 7) | [stage 7] |
+  | `backend_idle_timeout` | 2s (an idle pooled backend connection closes after it, FR-PROXY-02; keep it well below the backend's own keep-alive timeout; stage 7) | [done] |
+  | `backend_idle_max` | 8, or `max_connections` if smaller (idle pooled connections per backend, FR-PROXY-02; stage 7) | [done] |
 
 - **FR-CFG-21** [done] Counts and sizes in `limits` are ≥ 1, durations are
   non-zero, `max_request_line` ≤ `max_head`, and `max_head` ≤ 1 MiB.
@@ -589,7 +589,7 @@ Core-generated responses:
 - **FR-STATIC-17** [done] Files are sent in chunks (`FILE_CHUNK` =
   256 KiB): the next chunk is read ahead only after the previous one was
   fully accepted by the client socket. A connection holds at most one file.
-- **FR-STATIC-18** [stage 7] Conditional requests (ETag / Last-Modified).
+- **FR-STATIC-18** [done] Conditional requests (ETag / Last-Modified).
   Range requests and compression are non-goals. *(Owner decision
   2026-11-06:)* every static 200 carries `ETag` (strong, from size and
   mtime, no inode) and `Last-Modified`; `If-None-Match` and
@@ -1981,7 +1981,7 @@ Failures, persistence, timeouts:
   data) — the buffer counts as drained when only that tail remains. Buffer
   capacities exceed 35 bytes. The strategy is internal to the core
   (drivers see only "a slice to read into" / "a slice to send from"), so
-  stage 7 may swap in double buffering after measuring (NFR-PERF-05).
+  double buffering was measured and not adopted in stage 7 (NFR-PERF-05).
   *While our buffer drains, the kernel's socket buffers keep both TCP
   connections busy, so the pause is one system call long.*
   [Request bodies done in stage 3 Task 6.] *Builder calls (stage 3 Task
@@ -2168,7 +2168,7 @@ option. TLS termination is later (not stage 7); in-process TLS would
 disable `sendfile` and `splice` unless the kernel encrypts (kTLS), which
 does not change stage 7's choices.
 
-- **NFR-PERF-08** [stage 7] *(Owner decisions 2026-11-06:)* benchmarks
+- **NFR-PERF-08** [done] *(Owner decisions 2026-11-06:)* benchmarks
   run nightly on GitHub's runners (NFR-TEST-08's workflow) and record,
   per scenario (static, proxy, conditional hit, keep-alive and fresh
   connections), CPU time per request and system calls per request (the
@@ -2203,13 +2203,21 @@ performance: a security improvement justifies a loss on its own, and
 security trumps performance whenever the two conflict (still recorded
 and owner-approved).
 
-- **NFR-PERF-01** [stage 7] Static files (`bench` `static-small`,
-  1 KiB, keep-alive): at most 20 system calls and about 60 µs CPU per
-  request; `static-large` (1 MiB): at most 45 system calls per request.
-- **NFR-PERF-02** [stage 7] Proxy (`proxy-small`, keep-alive): at most 20
-  system calls and about 90 µs CPU per request; pooling (FR-PROXY-02) is
-  expected to bring `proxy-fresh` (about 27 today) toward `proxy-small`.
-- **NFR-PERF-03** [stage 7] Concurrent connections *(owner decision
+*(Ratchet at the stage 7 close, 2026-11-07: the nightly runner
+`gha-ubuntu-24.04-x86_64` measured `main` at `50fbd16`; each target is
+that median plus 2 % for system calls and 15 % for CPU.)*
+
+- **NFR-PERF-01** [done] Static files, per request: `static-small`
+  (1 KiB, keep-alive) at most 18.3 system calls and about 42 µs CPU;
+  `static-fresh` at most 27.0 and about 69 µs; `static-large` (1 MiB) at
+  most 38.0 and about 270 µs; `conditional-hit` at most 11.8 and about
+  30 µs. (Stage 7 start: 19.0 / 46, 27.3 / 77, 44.5 / 285, 19.0 / 45.)
+- **NFR-PERF-02** [done] Proxy, per request: `proxy-small` (keep-alive,
+  pooled) at most 10.8 system calls and about 37 µs CPU; `proxy-fresh`
+  at most 19.3 and about 77 µs; `proxy-large` (1 MiB) at most 76.5 and
+  about 534 µs. (Stage 7 start: 18.8 / 85 and 27.3 / 118; `proxy-large`
+  was first measured at 422 system calls.)
+- **NFR-PERF-03** [done] Concurrent connections *(owner decision
   2026-11-07, from Task 4's measurement)*: with 1 000 idle keep-alive
   connections (`bench` `static-small-1k-idle`, nightly with one run), a
   small static request costs the same system calls per request (±0.1)
@@ -2224,7 +2232,7 @@ and owner-approved).
   socket have `TCP_NODELAY` and the kernel's own buffer sizes (those of
   the same kind of socket the driver never touched); the write rule is
   the driver contract's (DRV-03), tested with it.
-- **NFR-PERF-05** [stage 7] TCP behaviour under `tc netem` (delay, loss,
+- **NFR-PERF-05** [done] TCP behaviour under `tc netem` (delay, loss,
   recovery after pauses); fill-drain-refill vs. double buffering and the
   body buffer size decided by measurement: target to be set in stage 7.
   *(Owner decision 2026-11-07, stage 7 stop measurement:)* Task 8 also
@@ -2242,7 +2250,7 @@ and owner-approved).
   calls, about 40 % less CPU; no cost for small responses; idle
   connections hold no body buffer), so the worst case per proxied
   connection grows from about 49 to 65 KiB (NFR-RES-01).
-- **NFR-PERF-06** [stage 7] `MSG_MORE` to coalesce heads with file data;
+- **NFR-PERF-06** [done] `MSG_MORE` to coalesce heads with file data;
   ~~`splice` for proxied bodies with a known `Content-Length`~~
   *(dropped, owner decision 2026-11-07, by measurement: copying is at
   most 7 % of a large proxied body's CPU and `splice` saved nothing
@@ -2256,7 +2264,7 @@ and owner-approved).
   less CPU per small request). The head is held while the chunk is read:
   time to first byte rises by the readahead time, bounded by the kernel's
   probe timer (max(RTO, 200 ms)); time to the last byte is unchanged.
-- **NFR-PERF-07** [stage 7] ~~N driver threads with `SO_REUSEPORT`~~
+- **NFR-PERF-07** [done] ~~N driver threads with `SO_REUSEPORT`~~
   *(dropped, owner decision 2026-11-07, by measurement: one loop thread
   serves about 19 000 requests per second at one core; at the expected 50
   per second it uses under 1 % of a core, so threads would add capacity,
@@ -2416,7 +2424,8 @@ stage 4 (its tests are in `driver/`).
   `st_size` and mtime in nanoseconds (pre-1970 clamps to 0); a `sendfile`
   returning 0 mid-segment is `Truncated`; `EPIPE`/`ECONNRESET` are the
   socket's (`Failed`); other file-side errors are `FileFailed { Other }`.
-  Known limit: `sendfile` may still block on evicted pages (stage 7).
+  Known limit: `sendfile` may still block on evicted pages (not addressed
+  in stage 7; at the expected load the page cache holds the files).
 - **DRV-10** [done] Upstreams: `backends()` are unicast IP addresses
   with ports (FR-CFG-16; an IPv6 scope id is kept), connected to as they
   are (no DNS; owner decisions 2026-10-27);
@@ -2510,11 +2519,12 @@ project working and tested.
 6. **Zero-downtime restart** [done] — FR-PROC-07 (no connection lost; SIGHUP
    restart drain, `restart_timeout`, `--ready-fd`, `SO_REUSEPORT`, an
    OpenRC script), musl builds on Alpine (NFR-PORT-02).
-7. **Scaling and efficiency** — N driver threads with `SO_REUSEPORT`,
-   backend connection pooling, conditional requests (ETag /
-   Last-Modified), `MSG_MORE`, `splice` for proxied bodies with a known
-   `Content-Length`, the `tc netem` throughput benchmarks, profiling,
-   NFR-PERF targets.
+7. **Efficiency** [done] — nightly benchmarks charted on the `benchmarks`
+   branch (NFR-PERF-08), conditional requests (FR-STATIC-18), `MSG_MORE`,
+   the deadline index, backend connection pooling with a silence check
+   and the safe retry (FR-PROXY-02), eager I/O and a 32 KiB upstream
+   buffer, the `tc netem` measurements, the NFR-PERF targets; `splice`
+   and N threads dropped by measurement.
 8. **Backend-directed file serving** — a backend response header (like
    nginx's `X-Accel-Redirect`) asks the proxy to serve a file via
    `sendfile`. Only honored on proxy routes that name an explicit root
