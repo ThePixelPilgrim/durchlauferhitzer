@@ -1,8 +1,8 @@
 //! Tests for configuration validation: top level, listen, user.
 
 use super::super::model::{
-    BodyLimit, Containment, Limits, OnFileChange, ProxyRoute, Route, RouteAction, StripPrefix,
-    VirtualHost, worst_case_per_connection,
+    BodyLimit, Containment, Limits, OnFileChange, Pooling, ProxyRoute, Route, RouteAction,
+    StripPrefix, VirtualHost, worst_case_per_connection,
 };
 use super::super::syntax::SyntaxErrorKind;
 use super::*;
@@ -109,6 +109,7 @@ fn loads_spec_example() {
                         strip_prefix: StripPrefix::Strip,
                         max_request_body: BodyLimit::Bytes(10 << 20),
                         max_response_body: BodyLimit::Unlimited,
+                        pool: Pooling::On,
                     }),
                 },
             ],

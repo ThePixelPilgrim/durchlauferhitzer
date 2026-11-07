@@ -299,6 +299,8 @@ Structure and values:
   | `restart_timeout` | 10m (the restart drain, FR-PROC-07; owner decision 2026-11-04) | [done] |
   | `memory_limit` | 1GiB (budget for per-connection buffers, FR-CFG-21) | [done] |
   | `ipv6_prefix` | 64 (per-IP grouping of IPv6 peers, FR-CONN-13; (owner decision 2026-10-29, stage 5 brainstorm)) | [done] |
+  | `backend_idle_timeout` | 2s (an idle pooled backend connection closes after it, FR-PROXY-02; stage 7) | [stage 7] |
+  | `backend_idle_max` | 8, or `max_connections` if smaller (idle pooled connections per backend, FR-PROXY-02; stage 7) | [stage 7] |
 
 - **FR-CFG-21** [done] Counts and sizes in `limits` are ≥ 1, durations are
   non-zero, `max_request_line` ≤ `max_head`, and `max_head` ≤ 1 MiB.
@@ -306,7 +308,10 @@ Structure and values:
   - `max_connections` 1–65536; `max_connections_per_ip` 1–`max_connections`
     (an explicit per-IP value above `max_connections` is an error at the
     per-IP setting; when the key is not written its default is
-    `min(64, max_connections)`, owner decision 2026-10-27); `max_headers` 1–1000; every duration (including
+    `min(64, max_connections)`, owner decision 2026-10-27);
+    `backend_idle_max` 1–`max_connections` (likewise: an explicit value
+    above it is an error at the setting, unset it is
+    `min(8, max_connections)`; stage 7); `max_headers` 1–1000; every duration (including
     `shutdown_timeout` and `restart_timeout`) 1 ms – 24 h (written `1440m`); `disk_threads` 1–64; `memory_limit`
     1 MiB – 1 TiB (written `1024GiB`); `ipv6_prefix` 32–128 (a plain
     number of bits; *builder call, stage 5 brainstorm:* below /32 one group
@@ -623,6 +628,10 @@ Forwarding and identity:
   fails before any response byte is retried once on a fresh connection
   for a GET or HEAD without a body, and answered 502 as today
   (FR-PROXY-26) for anything else.
+  *Builder call (stage 7 Task 5):* the switch is the proxy route key
+  `pool on | off;` (default `on`; on a static route an error,
+  `PoolOnStatic`, like `strip_prefix`); the limits are
+  `backend_idle_timeout` and `backend_idle_max` (FR-CFG-20, -21).
 - **FR-PROXY-03** [done] `Core::backends()` lists the distinct backend
   addresses (IP and port, FR-CFG-16) in config order (`BackendId` =
   index); the driver connects by id to the address as it is, with no

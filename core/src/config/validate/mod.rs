@@ -11,7 +11,7 @@ use crate::routing::same_segments;
 use super::lexer::Pos;
 use super::model::{
     BodyLimit, Config, ConfigError, ConfigErrorKind, Containment, Layer, Limits, OnFileChange,
-    ProxyRoute, Route, RouteAction, SeccompAction, StripPrefix, VirtualHost,
+    Pooling, ProxyRoute, Route, RouteAction, SeccompAction, StripPrefix, VirtualHost,
     worst_case_per_connection,
 };
 use super::syntax::{Block, Item, Setting, parse};
@@ -200,12 +200,14 @@ enum LimitKey {
     RestartTimeout,
     MemoryLimit,
     Ipv6Prefix,
+    BackendIdleTimeout,
+    BackendIdleMax,
 }
 
 impl LimitKey {
     /// Every `limits` key with its name: the one list the parser and the
     /// example config's test read.
-    const ALL: [(&'static str, LimitKey); 16] = [
+    const ALL: [(&'static str, LimitKey); 18] = [
         ("max_connections", Self::MaxConnections),
         ("max_connections_per_ip", Self::MaxConnectionsPerIp),
         ("max_request_line", Self::MaxRequestLine),
@@ -217,6 +219,8 @@ impl LimitKey {
         ("backend_connect_timeout", Self::BackendConnectTimeout),
         ("backend_response_timeout", Self::BackendResponseTimeout),
         ("body_idle_timeout", Self::BodyIdleTimeout),
+        ("backend_idle_timeout", Self::BackendIdleTimeout),
+        ("backend_idle_max", Self::BackendIdleMax),
         ("disk_threads", Self::DiskThreads),
         ("shutdown_timeout", Self::ShutdownTimeout),
         ("restart_timeout", Self::RestartTimeout),
@@ -240,6 +244,7 @@ enum RouteKey {
     MaxRequestBody,
     MaxResponseBody,
     OnFileChange,
+    Pool,
 }
 
 impl RouteKey {
@@ -251,6 +256,7 @@ impl RouteKey {
             "max_request_body" => Some(Self::MaxRequestBody),
             "max_response_body" => Some(Self::MaxResponseBody),
             "on_file_change" => Some(Self::OnFileChange),
+            "pool" => Some(Self::Pool),
             _ => None,
         }
     }
@@ -268,6 +274,7 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
     let mut request_line: Option<&Setting> = None;
     let mut head: Option<&Setting> = None;
     let mut per_ip: Option<&Setting> = None;
+    let mut idle_max: Option<&Setting> = None;
     for item in &block.items {
         let setting = match item {
             Item::Setting(setting) => setting,
@@ -330,6 +337,13 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
             LimitKey::BodyIdleTimeout => {
                 limits.body_idle_timeout = duration().ok_or_else(bad)?;
             }
+            LimitKey::BackendIdleTimeout => {
+                limits.backend_idle_timeout = duration().ok_or_else(bad)?;
+            }
+            LimitKey::BackendIdleMax => {
+                limits.backend_idle_max = parse_count(value).ok_or_else(bad)?;
+                idle_max = Some(setting);
+            }
             LimitKey::DiskThreads => {
                 limits.disk_threads = parse_count(value)
                     .filter(|n| *n <= MAX_DISK_THREADS)
@@ -369,6 +383,17 @@ fn parse_limits(block: &Block) -> Result<Limits, ConfigError> {
         }
         Some(setting) => {
             if limits.max_connections_per_ip > limits.max_connections {
+                let value = setting.values.first().map_or("", String::as_str);
+                return Err(invalid_value(&setting.key, value, setting.pos));
+            }
+        }
+    }
+    // Like the per-IP limit: unset, min(8, max_connections); an explicit
+    // value above max_connections is an error at the setting.
+    match idle_max {
+        None => limits.backend_idle_max = limits.backend_idle_max.min(limits.max_connections),
+        Some(setting) => {
+            if limits.backend_idle_max > limits.max_connections {
                 let value = setting.values.first().map_or("", String::as_str);
                 return Err(invalid_value(&setting.key, value, setting.pos));
             }
@@ -514,6 +539,7 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
     let mut max_request: Option<Slot<BodyLimit>> = None;
     let mut max_response: Option<Slot<BodyLimit>> = None;
     let mut on_change: Option<Slot<OnFileChange>> = None;
+    let mut pool: Option<Slot<Pooling>> = None;
     for item in &block.items {
         let setting = match item {
             Item::Setting(setting) => setting,
@@ -531,6 +557,7 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             RouteKey::MaxRequestBody => max_request.is_some(),
             RouteKey::MaxResponseBody => max_response.is_some(),
             RouteKey::OnFileChange => on_change.is_some(),
+            RouteKey::Pool => pool.is_some(),
         };
         if taken {
             return duplicate_key(name, pos);
@@ -584,6 +611,15 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
                 };
                 on_change = Some(Slot { pos, value: parsed });
             }
+            RouteKey::Pool => {
+                let value = one_value(setting)?;
+                let parsed = match value {
+                    "on" => Pooling::On,
+                    "off" => Pooling::Off,
+                    _ => return Err(bad(value)),
+                };
+                pool = Some(Slot { pos, value: parsed });
+            }
         }
     }
     let action = match (static_root, backend) {
@@ -593,6 +629,9 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             }
             if let Some(slot) = max_request.as_ref().or(max_response.as_ref()) {
                 return fail(ConfigErrorKind::BodyLimitOnStatic, slot.pos);
+            }
+            if let Some(slot) = &pool {
+                return fail(ConfigErrorKind::PoolOnStatic, slot.pos);
             }
             RouteAction::Static {
                 root: root.value,
@@ -620,6 +659,7 @@ fn parse_route(block: &Block) -> Result<Route, ConfigError> {
                 strip_prefix: strip.map_or(StripPrefix::Keep, |slot| slot.value),
                 max_request_body: max_request_body.value,
                 max_response_body: max_response_body.value,
+                pool: pool.map_or(Pooling::On, |slot| slot.value),
             })
         }
         (None, None) | (Some(_), Some(_)) => {

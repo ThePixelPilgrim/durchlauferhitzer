@@ -17,6 +17,8 @@ limits {
   backend_connect_timeout 2s;
   backend_response_timeout 90s;
   body_idle_timeout 1500ms;
+  backend_idle_timeout 3s;
+  backend_idle_max 5;
   disk_threads 8;
   shutdown_timeout 5s;
   restart_timeout 2m;
@@ -39,6 +41,8 @@ host a { path / { static /s; } }
             backend_connect_timeout: Duration::from_secs(2),
             backend_response_timeout: Duration::from_secs(90),
             body_idle_timeout: Duration::from_millis(1500),
+            backend_idle_timeout: Duration::from_secs(3),
+            backend_idle_max: 5,
             disk_threads: 8,
             shutdown_timeout: Duration::from_secs(5),
             restart_timeout: Duration::from_secs(120),
@@ -65,6 +69,8 @@ fn default_limits_are_the_spec_table() {
             backend_connect_timeout: Duration::from_secs(5),
             backend_response_timeout: Duration::from_secs(60),
             body_idle_timeout: Duration::from_secs(30),
+            backend_idle_timeout: Duration::from_secs(2),
+            backend_idle_max: 8,
             disk_threads: 4,
             shutdown_timeout: Duration::from_secs(30),
             restart_timeout: Duration::from_secs(600),
@@ -96,6 +102,9 @@ fn limits_must_be_positive_and_valid() {
         "body_idle_timeout 0m;",
         "body_idle_timeout 18446744073709551616s;",
         "disk_threads 0;",
+        "backend_idle_timeout 0s;",
+        "backend_idle_max 0;",
+        "backend_idle_max 1s;",
         "shutdown_timeout 0s;",
         "restart_timeout 0s;",
         "memory_limit 0;",
@@ -197,6 +206,8 @@ fn limit_key_list_is_complete() {
             LimitKey::RestartTimeout => 13,
             LimitKey::MemoryLimit => 14,
             LimitKey::Ipv6Prefix => 15,
+            LimitKey::BackendIdleTimeout => 16,
+            LimitKey::BackendIdleMax => 17,
         }
     }
     let mut seen = [false; LimitKey::ALL.len()];
@@ -227,7 +238,7 @@ fn extra_for(key: &str) -> &'static str {
 fn per_key_caps() {
     // (key, accepted values, rejected values); extra lines make the
     // accepted file consistent with the other rules.
-    let cases: [(&str, &[&str], &[&str]); 9] = [
+    let cases: [(&str, &[&str], &[&str]); 10] = [
         ("max_connections", &["64", "65536"], &["0", "65537"]),
         ("max_headers", &["1", "1000"], &["0", "1001"]),
         (
@@ -244,6 +255,7 @@ fn per_key_caps() {
             &["1048575", "1025GiB"],
         ),
         ("body_idle_timeout", &["1ms", "1440m"], &["0ms", "1441m"]),
+        ("backend_idle_timeout", &["1ms", "1440m"], &["0ms", "1441m"]),
         (
             "ipv6_prefix",
             &["32", "64", "128"],
@@ -294,6 +306,30 @@ fn per_ip_may_not_exceed_max_connections() {
     assert_eq!(large.limits.max_connections_per_ip, 64);
     let one = ok(&with_limit("max_connections 1;"));
     assert_eq!(one.limits.max_connections_per_ip, 1);
+}
+
+/// FR-CFG-21 (stage 7, FR-PROXY-02): `backend_idle_max` is 1 to
+/// `max_connections`, an explicit value above it an error at the setting;
+/// unset it is `min(8, max_connections)`.
+#[test]
+fn backend_idle_max_may_not_exceed_max_connections() {
+    ok(&with_limit("max_connections 10;\n  backend_idle_max 10;"));
+    assert_eq!(
+        err(&with_limit("max_connections 10;\n  backend_idle_max 11;")),
+        (invalid("backend_idle_max", "11"), 4, 3)
+    );
+    assert_eq!(
+        err(&with_limit("backend_idle_max 11;\n  max_connections 10;")),
+        (invalid("backend_idle_max", "11"), 3, 3)
+    );
+    let small = ok(&with_limit("max_connections 3;"));
+    assert_eq!(small.limits.backend_idle_max, 3);
+    let large = ok(&with_limit("max_connections 100;"));
+    assert_eq!(large.limits.backend_idle_max, 8);
+    let top = ok(&with_limit(
+        "memory_limit 1024GiB;\n  backend_idle_max 1024;",
+    ));
+    assert_eq!(top.limits.backend_idle_max, 1024);
 }
 
 /// NFR-RES-01 by hand, for the defaults: receive max(16384, 8192 + 2) +

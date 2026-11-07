@@ -224,6 +224,7 @@ fn proxy_route(backend: SocketAddr) -> RouteAction {
         strip_prefix: StripPrefix::Keep,
         max_request_body: BodyLimit::Bytes(1),
         max_response_body: BodyLimit::Bytes(1),
+        pool: Pooling::On,
     })
 }
 
@@ -347,6 +348,40 @@ fn strip_prefix_is_a_flag() {
             5,
             5
         )
+    );
+}
+
+/// FR-PROXY-02 (owner decision 2026-11-06): backend connections are
+/// pooled on every proxy route unless it says `pool off;`.
+#[test]
+fn pool_is_on_unless_switched_off() {
+    let rest = "    max_request_body 1;\n    max_response_body 1;";
+    assert_eq!(first_proxy(&ok(&proxy_path(rest))).pool, Pooling::On);
+    let off = ok(&proxy_path(&format!("    pool off;\n{rest}")));
+    assert_eq!(first_proxy(&off).pool, Pooling::Off);
+    let on = ok(&proxy_path(&format!("    pool on;\n{rest}")));
+    assert_eq!(first_proxy(&on).pool, Pooling::On);
+    for bad in ["yes", "\"\""] {
+        let value = bad.trim_matches('"');
+        assert_eq!(
+            err(&proxy_path(&format!("    pool {bad};\n{rest}"))),
+            (invalid("pool", value), 5, 5),
+            "pool {bad}"
+        );
+    }
+    assert_eq!(
+        err(&proxy_path(&format!("    pool;\n{rest}"))),
+        (ConfigErrorKind::WrongValueCount("pool".to_string()), 5, 5)
+    );
+    assert_eq!(
+        err(&proxy_path(&format!(
+            "    pool off;\n    pool off;\n{rest}"
+        ))),
+        (ConfigErrorKind::DuplicateKey("pool".to_string()), 6, 5)
+    );
+    assert_eq!(
+        err(&in_host("  path / {\n    static /s;\n    pool off;\n  }")),
+        (ConfigErrorKind::PoolOnStatic, 5, 5)
     );
 }
 

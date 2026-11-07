@@ -79,6 +79,11 @@ pub struct Limits {
     /// How long a proxied body may make no progress in either direction
     /// (FR-PROXY-29).
     pub body_idle_timeout: Duration,
+    /// How long an idle pooled backend connection is kept (FR-PROXY-02).
+    pub backend_idle_timeout: Duration,
+    /// The most idle pooled connections kept per backend (FR-PROXY-02),
+    /// 1 to `max_connections`.
+    pub backend_idle_max: u32,
     /// Size of the disk worker pool (FR-CFG-20).
     pub disk_threads: u32,
     /// How long a graceful shutdown may take before connections are
@@ -136,6 +141,8 @@ impl Default for Limits {
             backend_connect_timeout: Duration::from_secs(5),
             backend_response_timeout: Duration::from_secs(60),
             body_idle_timeout: Duration::from_secs(30),
+            backend_idle_timeout: Duration::from_secs(2),
+            backend_idle_max: 8,
             disk_threads: 4,
             shutdown_timeout: Duration::from_secs(30),
             restart_timeout: Duration::from_secs(600),
@@ -190,6 +197,16 @@ pub struct ProxyRoute {
     pub strip_prefix: StripPrefix,
     pub max_request_body: BodyLimit,
     pub max_response_body: BodyLimit,
+    /// Whether backend connections are pooled (FR-PROXY-02): on by
+    /// default, `pool off;` for backends that keep per-connection state.
+    pub pool: Pooling,
+}
+
+/// Whether a proxy route reuses idle backend connections (FR-PROXY-02).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pooling {
+    On,
+    Off,
 }
 
 /// Whether the route's own segments are removed from the request path
@@ -229,6 +246,7 @@ pub enum ConfigErrorKind {
     StripPrefixOnStatic,
     BodyLimitOnStatic,
     OnFileChangeOnProxy,
+    PoolOnStatic,
     MissingBodyLimit(&'static str),
     /// `max_connections` times the worst case per connection exceeds
     /// `memory_limit` (FR-CFG-21).
@@ -274,6 +292,9 @@ impl fmt::Display for ConfigError {
             }
             ConfigErrorKind::OnFileChangeOnProxy => {
                 write!(f, "`on_file_change` is only allowed on static routes")
+            }
+            ConfigErrorKind::PoolOnStatic => {
+                write!(f, "`pool` is only allowed on proxy routes")
             }
             ConfigErrorKind::MissingBodyLimit(key) => {
                 write!(f, "proxy route is missing `{key}`")
