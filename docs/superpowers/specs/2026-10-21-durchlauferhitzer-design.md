@@ -2139,8 +2139,13 @@ and owner-approved).
 - **NFR-PERF-02** [stage 7] Proxy (`proxy-small`, keep-alive): at most 20
   system calls and about 90 µs CPU per request; pooling (FR-PROXY-02) is
   expected to bring `proxy-fresh` (about 27 today) toward `proxy-small`.
-- **NFR-PERF-03** [stage 7] Concurrent connections: target set when the
-  deadline index (NFR-PERF-06) is measured at 1 000 open connections.
+- **NFR-PERF-03** [stage 7] Concurrent connections *(owner decision
+  2026-11-07, from Task 4's measurement)*: with 1 000 idle keep-alive
+  connections (`bench` `static-small-1k-idle`, nightly with one run), a
+  small static request costs the same system calls per request (±0.1)
+  and at most 10 % more CPU than `static-small`, and memory stays at
+  about 20 KiB per idle connection (measured 17.3 KiB) with default
+  limits. Relative targets, since absolute µs depend on the runner.
 - **NFR-PERF-04** [done] Every client and upstream socket has
   `TCP_NODELAY`; each buffer is written until done or blocked (DRV-03);
   `SO_RCVBUF`/`SO_SNDBUF` are never set (kernel autotuning stays on).
