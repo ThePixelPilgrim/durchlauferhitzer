@@ -247,20 +247,28 @@ fn client_reset_while_awaiting_the_backend_is_reported_at_once() {
 }
 
 /// The stage 3 I1 rule on a real kernel (DRV-10): the backend takes the
-/// head of a 4 MiB upload but none of its body, so the pipeline fills and
-/// the driver waits to write with interest `ReadWrite`. Then the backend
+/// head of a 64 MiB upload but none of its body, so the pipeline fills and
+/// the driver waits to write with interest `ReadWrite`. 64 MiB outlasts
+/// any autotuned socket buffers on the way (`tcp_wmem`/`tcp_rmem` max,
+/// 4–6 MiB by default, on both connections), and the test checks that the
+/// client still had body bytes to send when the backend answered: else the
+/// whole body could be relayed first and the rule would go unexercised. Then the backend
 /// answers 413 and closes with the body unread, so its kernel resets the
 /// connection. The driver must read the 413 before it reports the reset
 /// (a failing write under `ReadWrite` is not reported by itself), and the
 /// client gets the 413, not a 502.
 #[test]
-fn early_413_then_reset_during_a_4_mib_upload_reaches_the_client() {
+fn early_413_then_reset_during_a_64_mib_upload_reaches_the_client() {
     let (backend_listener, backend_addr) = backend();
-    let server = Server::start(&config(backend_addr));
-    let body = vec![b'u'; 4 * 1024 * 1024];
+    let conf = config(backend_addr).replace("max_request_body 8MiB", "max_request_body 64MiB");
+    assert!(conf.contains("max_request_body 64MiB"), "{conf}");
+    let server = Server::start(&conf);
+    let body = vec![b'u'; 64 * 1024 * 1024];
     let total = body.len();
     let mut client = server.connect();
     let mut writer = client.try_clone().unwrap();
+    let uploaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = std::sync::Arc::clone(&uploaded);
     let upload = thread::spawn(move || {
         let head = format!(
             "POST /api/up HTTP/1.1\r\nHost: example.test\r\nContent-Length: {}\r\n\r\n",
@@ -270,6 +278,7 @@ fn early_413_then_reset_during_a_4_mib_upload_reaches_the_client() {
         // here on are expected.
         let _ = writer.write_all(head.as_bytes());
         let _ = writer.write_all(&body);
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
     });
     let mut upstream = accept(&backend_listener);
     let head = read_head(&mut upstream);
@@ -289,6 +298,12 @@ fn early_413_then_reset_during_a_4_mib_upload_reaches_the_client() {
     assert!(
         queued >= 64 * 1024 && queued < total,
         "{queued} of {total} bytes queued"
+    );
+    // The client is still blocked in its write: the driver waits to write
+    // the rest, under `ReadWrite`, when the answer and the reset come.
+    assert!(
+        !uploaded.load(std::sync::atomic::Ordering::SeqCst),
+        "the whole body was taken before the backend answered"
     );
     upstream
         .write_all(
