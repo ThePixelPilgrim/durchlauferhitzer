@@ -276,13 +276,31 @@ class Append(unittest.TestCase):
         self.assertEqual(lines, ok)
 
     def test_the_date_defaults_to_today_in_utc(self):
-        today = bc._utc_today().isoformat()
-        with tempfile.TemporaryDirectory() as d:
-            out, lines = self._append(
-                d, [row(today, "static-small", 1, 1), row("2000-01-01", "static-small", 1, 1)],
-                ["--commit", "abc1234"])
+        # 23:30 UTC on 2030-01-01 is already 2030-01-02 east of UTC: the
+        # clock below answers in local time unless asked for UTC.
+        utc_now = bc.datetime(2030, 1, 1, 23, 30, tzinfo=bc.timezone.utc)
+
+        class Clock(bc.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return bc.datetime(2030, 1, 2, 1, 30)
+                return utc_now.astimezone(tz)
+
+        real = bc.datetime
+        bc.datetime = Clock
+        try:
+            self.assertEqual(bc._utc_today(), bc._date(2030, 1, 1))
+            with tempfile.TemporaryDirectory() as d:
+                out, lines = self._append(
+                    d, [row("2030-01-01", "static-small", 1, 1),
+                        row("2029-12-30", "static-small", 1, 1)],
+                    ["--commit", "abc1234"])
+        finally:
+            bc.datetime = real
         self.assertIn("appended 1 rows, dropped 0, refused 1", out)
-        self.assertEqual(lines, [row(today, "static-small", 1, 1)])
+        self.assertIn("within a day of 2030-01-01", out)
+        self.assertEqual(lines, [row("2030-01-01", "static-small", 1, 1)])
 
     def test_append_needs_a_hex_commit(self):
         with tempfile.TemporaryDirectory() as d:
@@ -290,12 +308,31 @@ class Append(unittest.TestCase):
             results = os.path.join(d, "results.csv")
             with open(new, "w") as fh:
                 fh.write(CSV)
-            for args in ([], ["--commit", "ABC1234"], ["--commit", "abc"],
-                         ["--commit", "abc1234", "--today", "07.11.2026"]):
+            # An existing results.csv stays exactly as it was.
+            with open(results, "w") as fh:
+                fh.write(HEADER + "\n")
+            cases = (
+                ([], "--append needs --commit"),
+                (["--commit", "ABC1234"], "--commit"),
+                (["--commit", "abc"], "--commit"),
+                # Good first characters, bad later ones (`fullmatch`).
+                (["--commit", "abc1234zz"], "--commit"),
+                (["--commit", "abc1234", "--today", "07.11.2026"], "--today"),
+                (["--commit", "abc1234", "--today", "2026-11-07x"], "--today"),
+                (["--commit", "abc1234", "--today", "2026-11-0712"], "--today"),
+                # Other ISO forms date.fromisoformat takes: only the
+                # pattern refuses these.
+                (["--commit", "abc1234", "--today", "20261107"], "--today"),
+                (["--commit", "abc1234", "--today", "2026-W45-6"], "--today"),
+            )
+            for args, message in cases:
+                err = io.StringIO()
                 with self.assertRaises(SystemExit, msg=args):
-                    with contextlib.redirect_stderr(io.StringIO()):
+                    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
                         bc.main(["--append", new] + args + [results, os.path.join(d, "B.md")])
-                self.assertFalse(os.path.exists(results), args)
+                self.assertIn(message, err.getvalue(), args)
+                with open(results) as fh:
+                    self.assertEqual(fh.read(), HEADER + "\n", args)
 
     def test_a_smuggled_line_break_never_splits_results(self):
         with tempfile.TemporaryDirectory() as d:
