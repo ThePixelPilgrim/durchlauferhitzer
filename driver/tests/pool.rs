@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use child::{Containment, PATIENCE, Running, Setup, TempDir, free_port, get};
+use child::{Containment, PATIENCE, Running, Setup, TempDir, free_port, get, read_some};
 
 const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
 
@@ -118,7 +118,8 @@ fn serve_connection(mut stream: TcpStream, serve: Serve) {
                 return;
             }
         }
-        match stream.read(&mut chunk) {
+        // EINTR is no end: the read has a timeout (`support/read.rs`).
+        match read_some(&mut stream, &mut chunk) {
             Ok(0) | Err(_) => return,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }

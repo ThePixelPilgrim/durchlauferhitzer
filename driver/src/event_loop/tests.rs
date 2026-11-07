@@ -1,6 +1,7 @@
 //! Unit tests of the loop's own decisions, on a `Driver` that is built but
-//! never run; one runs it on loopback, to count a response's segments
-//! (`TCP_INFO` needs `unsafe`, which only `sys` holds).
+//! never run; two run it on loopback, to count a response's segments
+//! (`TCP_INFO` needs `unsafe`, which only `sys` holds) and to time heads
+//! that must not wait for `MSG_MORE`'s cork.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -304,6 +305,82 @@ fn an_open_upstream_whose_registration_fails_is_reported_failed() {
         [Broken::Upstream(up, ConnError::Other)]
     );
     assert_eq!(logs.try_iter().collect::<Vec<_>>(), [REGISTER_FAILED]);
+}
+
+/// An open pooled upstream on a socket pair, its peer returned.
+fn open_upstream(driver: &mut Driver, up: UpstreamId) -> UnixStream {
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    ours.set_nonblocking(true).unwrap();
+    driver.upstreams.insert(
+        up,
+        Upstream {
+            phase: Phase::Open {
+                fd: OwnedFd::from(ours),
+                writes: Writes::Open,
+                eof: Eof::NotYet,
+            },
+            interest: Interest::None,
+            registered: None,
+            hints: Hints::fresh(),
+        },
+    );
+    theirs
+}
+
+/// FR-PROXY-02 (owner decision 2026-11-07), the driver's half: a pooled
+/// upstream with nothing to read passes its silence check
+/// (`UpstreamConnected`, the socket kept); one with a byte waiting, or
+/// whose peer is gone, fails it (`UpstreamFailed`, the socket closed).
+#[test]
+fn the_silence_check_tells_a_quiet_upstream_from_one_with_bytes() {
+    use std::io::{Read, Write};
+
+    let (mut driver, _logs) = driver();
+    let quiet = UpstreamId(1);
+    let mut quiet_peer = open_upstream(&mut driver, quiet);
+    driver.check_silent(quiet).unwrap();
+    assert_eq!(
+        driver.take_answer(quiet).unwrap(),
+        Some(Event::UpstreamConnected { up: quiet })
+    );
+    assert!(matches!(driver.upstreams[&quiet].phase, Phase::Open { .. }));
+    // Still open: the peer's read would block, not see the end.
+    quiet_peer.set_nonblocking(true).unwrap();
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        quiet_peer.read(&mut byte).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+
+    let noisy = UpstreamId(2);
+    let mut noisy_peer = open_upstream(&mut driver, noisy);
+    noisy_peer.write_all(b"H").unwrap();
+    driver.check_silent(noisy).unwrap();
+    assert_eq!(
+        driver.take_answer(noisy).unwrap(),
+        Some(Event::UpstreamFailed {
+            up: noisy,
+            error: ConnError::Other
+        })
+    );
+    // Its socket is closed (with the byte unread): the peer reads the end
+    // of stream or a reset.
+    match noisy_peer.read(&mut byte) {
+        Ok(0) => {}
+        Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {}
+        other => panic!("the peer read {other:?}"),
+    }
+
+    let gone = UpstreamId(3);
+    drop(open_upstream(&mut driver, gone));
+    driver.check_silent(gone).unwrap();
+    assert_eq!(
+        driver.take_answer(gone).unwrap(),
+        Some(Event::UpstreamFailed {
+            up: gone,
+            error: ConnError::Other
+        })
+    );
 }
 
 /// DRV-15 with DRV-10: a connecting upstream whose registration fails is
@@ -762,6 +839,139 @@ fn a_1_kib_file_leaves_in_one_segment() {
         segments.push(data_segments_in(client.as_fd()).unwrap() - before);
     }
     assert_eq!(segments, [1, 1, 1], "data segments per response");
+
+    stop.stop().unwrap();
+    assert_eq!(server.join().unwrap().unwrap(), super::Exit::Stopped);
+}
+
+/// NFR-PERF-06, the other half: `MSG_MORE` only while a file body
+/// follows. A head with no body behind it (a `HEAD`, a `304`, a proxied
+/// response) goes out at once: with `MSG_MORE` the kernel would hold the
+/// partial segment back (about 200 ms on Linux), so each such response on
+/// a kept-alive loopback connection must arrive well within 100 ms.
+#[test]
+fn a_head_with_no_file_behind_it_is_not_held_back() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Instant;
+
+    use crate::sys::file::open_dir_path;
+    use crate::sys::socket::{Probe, local_addr, tcp_listen};
+
+    /// The temp root, removed on drop (a failed assertion too).
+    struct TempRoot(std::path::PathBuf);
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Reads one response: its head, and `body` bytes after it.
+    fn response(client: &mut TcpStream, body: usize) -> Vec<u8> {
+        let mut got = Vec::new();
+        let mut piece = [0u8; 4096];
+        loop {
+            if let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                if got.len() >= at + 4 + body {
+                    return got;
+                }
+            }
+            let n = client.read(&mut piece).unwrap();
+            assert_ne!(n, 0, "closed after {got:?}");
+            got.extend_from_slice(&piece[..n]);
+        }
+    }
+
+    // A keep-alive backend: each request head gets `ok`.
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in backend.incoming() {
+            let Ok(mut stream) = stream else { return };
+            std::thread::spawn(move || {
+                let mut got = Vec::new();
+                let mut piece = [0u8; 4096];
+                loop {
+                    while let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                        got.drain(..at + 4);
+                        let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                        if stream.write_all(ok).is_err() {
+                            return;
+                        }
+                    }
+                    match stream.read(&mut piece) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => got.extend_from_slice(&piece[..n]),
+                    }
+                }
+            });
+        }
+    });
+
+    let root_dir =
+        TempRoot(std::env::temp_dir().join(format!("dlh-no-hold-{}", std::process::id())));
+    let dir = &root_dir.0;
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("small.bin"), [7u8; 1024]).unwrap();
+    let config = format!(
+        "listen 127.0.0.1:8080; host a.test {{ path /p {{ proxy {backend_addr}; \
+         max_request_body 1MiB; max_response_body 1MiB; }} path / {{ static {}; }} }}",
+        dir.display()
+    );
+    let core = Core::new(load(&config).unwrap());
+    let root = open_dir_path(dir).unwrap();
+    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16, Probe::First).unwrap();
+    let addr = local_addr(listener.as_fd()).unwrap();
+    let (log, _logs) = LogSink::channel();
+    let mut driver = Driver::new(core, vec![listener], vec![root], 1, log).unwrap();
+    let stop = driver.stop_handle();
+    let server = std::thread::spawn(move || driver.run());
+
+    let mut client = TcpStream::connect(addr).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // The file's ETag, from a first GET.
+    client
+        .write_all(b"GET /small.bin HTTP/1.1\r\nHost: a.test\r\n\r\n")
+        .unwrap();
+    let first = String::from_utf8_lossy(&response(&mut client, 1024)).into_owned();
+    let etag = first
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("etag: "))
+        .and_then(|l| l.get(6..))
+        .unwrap_or_else(|| panic!("no ETag in {:?}", first.lines().next()))
+        .to_owned();
+    let conditional =
+        format!("GET /small.bin HTTP/1.1\r\nHost: a.test\r\nIf-None-Match: {etag}\r\n\r\n");
+    let cases: [(&[u8], &[u8], usize); 3] = [
+        (
+            b"HEAD /small.bin HTTP/1.1\r\nHost: a.test\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\n",
+            0,
+        ),
+        (conditional.as_bytes(), b"HTTP/1.1 304 Not Modified\r\n", 0),
+        (
+            b"GET /p/x HTTP/1.1\r\nHost: a.test\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\n",
+            2,
+        ),
+    ];
+    for (request, status, body) in cases {
+        for _ in 0..3 {
+            let start = Instant::now();
+            client.write_all(request).unwrap();
+            let got = response(&mut client, body);
+            let took = start.elapsed();
+            assert!(got.starts_with(status), "{got:?}");
+            assert!(
+                took < Duration::from_millis(100),
+                "{:?} took {took:?}",
+                String::from_utf8_lossy(request)
+            );
+        }
+    }
 
     stop.stop().unwrap();
     assert_eq!(server.join().unwrap().unwrap(), super::Exit::Stopped);
