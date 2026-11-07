@@ -740,7 +740,9 @@ fn smoke_static_and_proxy_in_parallel_then_sigterm() {
     let backend_addr = backend_listener.local_addr().unwrap();
     let (results_in, results) = mpsc::channel();
     thread::spawn(move || backend(backend_listener, results_in));
-    // A port nothing listens on: the connect is refused (502). Below the
+    // `pool off` on /api: this backend serves one request per connection
+    // (pooling has its own tests). A port nothing listens on:
+    // the connect is refused (502). Below the
     // ephemeral range: a connect to an ephemeral port nothing listens on
     // can get that port as its own source and connect to itself (seen in
     // CI: it read its own request as the response, `bad_version`).
@@ -756,7 +758,7 @@ host static.test {{
   path / {{ static {www}; }}
 }}
 host proxy.test {{
-  path /api {{ proxy {backend_addr}; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }}
+  path /api {{ proxy {backend_addr}; pool off; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }}
   path /down {{ proxy {down}; max_request_body 1MiB; max_response_body unlimited; }}
 }}
 ",

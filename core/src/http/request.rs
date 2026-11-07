@@ -487,7 +487,9 @@ fn check_expect(headers: &[Header], version: Version) -> Result<Expect, HttpErro
     }
 }
 
-fn persistence(headers: &[Header], version: Version) -> Persistence {
+/// Whether a head of `version` with `headers` keeps its connection: never
+/// for HTTP/1.0, for HTTP/1.1 unless a `Connection` token is `close`.
+pub(crate) fn persistence(headers: &[Header], version: Version) -> Persistence {
     match version {
         Version::Http10 => Persistence::Close,
         Version::Http11 => {

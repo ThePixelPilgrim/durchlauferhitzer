@@ -26,7 +26,7 @@ use super::{
 /// As `CONFIG`, with a response body limit of 10 bytes.
 const SMALL: &str = "listen 127.0.0.1:8080;
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 10; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 10; }
 }";
 
 const CHUNKED_HEAD: &[u8] = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";

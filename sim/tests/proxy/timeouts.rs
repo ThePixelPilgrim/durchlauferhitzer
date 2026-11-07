@@ -17,7 +17,7 @@ use super::{BACKEND, GET_X, assert_504, fixed, only_upstream, peer, request, sum
 const TIMEOUTS: &str = "listen 127.0.0.1:8080;
 limits { backend_connect_timeout 2s; backend_response_timeout 3s; body_idle_timeout 4s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// As `TIMEOUTS`, but the response timeout (10 s) is above the body idle
@@ -26,7 +26,7 @@ host example.test {
 const LONG_RESPONSE: &str = "listen 127.0.0.1:8080;
 limits { backend_connect_timeout 2s; backend_response_timeout 10s; body_idle_timeout 4s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 const POST_10: &[u8] = b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 10\r\n\r\n";
@@ -649,7 +649,7 @@ fn client_stall_after_an_interim_head_is_408() {
 const TIE: &str = "listen 127.0.0.1:8080;
 limits { backend_connect_timeout 2s; backend_response_timeout 4s; body_idle_timeout 4s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// FR-PROXY-29 (builder call, stage 3 Task 9): the client stalls its
@@ -703,7 +703,7 @@ fn head_deadline_tied_with_body_idle_is_504() {
 const SEND_3: &str = "listen 127.0.0.1:8080;
 limits { send_idle_timeout 3s; body_idle_timeout 20s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// FR-CONN-08 (final review I2): only the client taking bytes restarts its
@@ -743,7 +743,7 @@ fn chunk_size_trickle_does_not_hold_a_stalled_client() {
 const BODY_4: &str = "listen 127.0.0.1:8080;
 limits { send_idle_timeout 30s; body_idle_timeout 4s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// FR-PROXY-29 (final review I2, follow-up F2): a client that took the

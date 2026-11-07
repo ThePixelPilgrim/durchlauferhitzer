@@ -23,4 +23,4 @@ pub use crate::log::{
     TimeoutKind,
 };
 pub use crate::time::Instant;
-pub use crate::upstream::{BackendId, UpstreamId};
+pub use crate::upstream::{BackendId, UpstreamHolder, UpstreamId};

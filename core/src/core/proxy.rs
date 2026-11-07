@@ -7,14 +7,15 @@
 
 use std::net::SocketAddr;
 
+use super::pool::make_room;
 use super::relay::{ClientSide, client_side};
 use super::request::HeadEnd;
 use super::upload::body_idle_deadline;
-use super::{Action, ConnId, Core};
-use crate::config::{BodyLimit, Limits, ProxyRoute, Route, StripPrefix};
-use crate::conn::{Conn, ConnState, ProxyRequest, UnreadBody};
+use super::{Action, ConnId, Core, Mode};
+use crate::config::{BodyLimit, Limits, Pooling, ProxyRoute, Route, StripPrefix};
+use crate::conn::{Conn, ConnState, ProxyRequest, Replay, Reuse, UnreadBody};
 use crate::http::forward::{backend_request_len, check_forwardable, render_backend_request};
-use crate::http::request::{BodyFraming, Expect, Method, Persistence, RequestHead};
+use crate::http::request::{BodyFraming, Expect, Method, Persistence, RequestHead, Version};
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::response_head::{
     MAX_INTERIM_HEADS, RequestKind, ResponseError, ResponseHead, ResponseParser, ResponseStatus,
@@ -44,6 +45,7 @@ pub(super) struct Forward {
     path: String,
     limit: BodyLimit,
     response_limit: BodyLimit,
+    pool: Pooling,
 }
 
 /// The proxy route rules that need no backend: the request must be
@@ -85,6 +87,7 @@ pub(super) fn plan(
         path,
         limit,
         response_limit: target.max_response_body,
+        pool: target.pool,
     })
 }
 
@@ -114,7 +117,14 @@ impl Core {
             path,
             limit,
             response_limit,
+            pool,
         } = forward;
+        // FR-PROXY-02, -04, -11: an HTTP/1.1 request on a pooled route
+        // keeps the backend connection; anything else asks it to close.
+        let toward = match (pool, head.version) {
+            (Pooling::On, Version::Http11) => Persistence::KeepAlive,
+            (Pooling::On, Version::Http10) | (Pooling::Off, _) => Persistence::Close,
+        };
         let summary = RequestSummary {
             method: head.method.clone(),
             host: head.host.clone(),
@@ -122,7 +132,7 @@ impl Core {
         };
         // Never beyond the head buffer's capacity. A head within the limits
         // always fits (see `head_capacity`); this guards that bound.
-        if backend_request_len(&head, &path, c.peer) > head_capacity {
+        if backend_request_len(&head, &path, c.peer, toward) > head_capacity {
             let status = Status::RequestHeaderFieldsTooLarge;
             render_fixed(
                 status,
@@ -165,28 +175,85 @@ impl Core {
             BodyFraming::Length(_) | BodyFraming::Chunked => head.expect,
             BodyFraming::None => Expect::None,
         };
-        let mut buffers = ExchangeBuffers::new(recv_capacity, head_capacity);
-        render_backend_request(&head, &path, c.peer, &mut buffers.head);
-        let up = self.upstreams.allocate(conn);
-        actions.push(Action::Connect { up, backend });
-        c.state = ConnState::Connecting {
-            up,
-            request: ProxyRequest {
-                summary,
-                backend,
-                kind: match head.method {
-                    Method::Head => RequestKind::Head,
-                    Method::Get | Method::Other(_) => RequestKind::Other,
-                },
-                version: head.version,
-                persistence: head.persistence,
-                response_limit,
-                body,
-                expect,
-            },
-            buffers,
-            deadline: connect_deadline,
+        // FR-PROXY-26: only a GET or HEAD without a body may be replayed.
+        let replay = match (&head.method, head.body) {
+            (Method::Get | Method::Head, BodyFraming::None) => Replay::Allowed,
+            (Method::Get | Method::Head | Method::Other(_), _) => Replay::Never,
         };
+        let mut buffers = ExchangeBuffers::new(recv_capacity, head_capacity);
+        render_backend_request(&head, &path, c.peer, toward, &mut buffers.head);
+        // A pooled request takes the backend's newest idle connection,
+        // unless the core drains (which closed the pool).
+        let idle = match (toward, self.mode) {
+            (Persistence::KeepAlive, Mode::Serving) => self.upstreams.unpark(backend, conn),
+            (Persistence::KeepAlive, Mode::Draining(_)) | (Persistence::Close, _) => None,
+        };
+        let mut request = ProxyRequest {
+            summary,
+            backend,
+            kind: match head.method {
+                Method::Head => RequestKind::Head,
+                Method::Get | Method::Other(_) => RequestKind::Other,
+            },
+            version: head.version,
+            persistence: head.persistence,
+            response_limit,
+            body,
+            expect,
+            toward,
+            reuse: Reuse::Fresh,
+            replay,
+        };
+        c.state = match idle {
+            Some(up) => {
+                request.reuse = Reuse::Pooled;
+                awaiting(c, up, request, buffers, now, limits)
+            }
+            None => {
+                make_room(&mut self.upstreams, limits, actions);
+                let up = self.upstreams.allocate(conn);
+                actions.push(Action::Connect { up, backend });
+                ConnState::Connecting {
+                    up,
+                    request,
+                    buffers,
+                    deadline: connect_deadline,
+                }
+            }
+        };
+    }
+}
+
+/// The state of `c` once its request can be written to `up`, connected
+/// (fresh or taken from the pool): the response timeout runs, and a
+/// client waiting for `100 Continue` gets it now (FR-PROXY-25: the head
+/// passed every check and the backend is there to take the body); its
+/// send idle timeout runs while it has the `100` to take (FR-PROXY-29).
+pub(super) fn awaiting(
+    c: &mut Conn,
+    up: UpstreamId,
+    request: ProxyRequest,
+    buffers: ExchangeBuffers,
+    now: Instant,
+    limits: &Limits,
+) -> ConnState {
+    let send_deadline = match request.expect {
+        Expect::Continue => {
+            c.send.extend_from_slice(CONTINUE);
+            Some(now.saturating_add(limits.send_idle_timeout))
+        }
+        Expect::None => None,
+    };
+    ConnState::AwaitingResponse {
+        up,
+        request,
+        buffers,
+        filled: 0,
+        parser: ResponseParser::new(),
+        interim: 0,
+        head_deadline: None,
+        send_deadline,
+        deadline: now.saturating_add(limits.backend_response_timeout),
     }
 }
 
@@ -222,8 +289,7 @@ impl Core {
         up: UpstreamId,
         actions: &mut Vec<Action>,
     ) {
-        let response_deadline = now.saturating_add(self.config.limits.backend_response_timeout);
-        let send_deadline = now.saturating_add(self.config.limits.send_idle_timeout);
+        let limits = &self.config.limits;
         let Some(conn) = self.upstreams.conn(up) else {
             return;
         };
@@ -236,28 +302,7 @@ impl Core {
                 request,
                 buffers,
                 ..
-            } if own == up => {
-                // The client's send idle timeout runs while it has the
-                // `100 Continue` to take (FR-PROXY-29).
-                let send_deadline = match request.expect {
-                    Expect::Continue => {
-                        c.send.extend_from_slice(CONTINUE);
-                        Some(send_deadline)
-                    }
-                    Expect::None => None,
-                };
-                ConnState::AwaitingResponse {
-                    up,
-                    request,
-                    buffers,
-                    filled: 0,
-                    parser: ResponseParser::new(),
-                    interim: 0,
-                    head_deadline: None,
-                    send_deadline,
-                    deadline: response_deadline,
-                }
-            }
+            } if own == up => awaiting(c, up, request, buffers, now, limits),
             other @ (ConnState::Connecting { .. }
             | ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
@@ -291,7 +336,10 @@ impl Core {
                 self.fail_before_head(now, conn, BackendFailure::Refused, actions);
             }
             ConnState::AwaitingResponse { .. } => {
-                self.fail_before_head(now, conn, BackendFailure::Reset, actions);
+                let kind = BackendFailure::Reset;
+                if !self.retry(now, conn, kind, actions) {
+                    self.fail_before_head(now, conn, kind, actions);
+                }
             }
             ConnState::Relaying { .. } => self.cut(conn, BackendFailure::Reset, actions),
             ConnState::ReadingHead { .. }
@@ -334,7 +382,11 @@ impl Core {
         };
         let kind = BackendFailure::ClosedEarly;
         match c.state {
-            ConnState::AwaitingResponse { .. } => self.fail_before_head(now, conn, kind, actions),
+            ConnState::AwaitingResponse { .. } => {
+                if !self.retry(now, conn, kind, actions) {
+                    self.fail_before_head(now, conn, kind, actions);
+                }
+            }
             ConnState::Relaying { .. } => self.cut(conn, kind, actions),
             ConnState::Connecting { .. }
             | ConnState::ReadingHead { .. }
@@ -566,13 +618,13 @@ impl Core {
             // else waits on the backend (504).
             ConnState::AwaitingResponse {
                 request, buffers, ..
-            } if buffers.head.is_empty() && request.body.stage() == Stage::Receiving => {
+            } if !buffers.head_pending() && request.body.stage() == Stage::Receiving => {
                 self.body_stalled(now, conn, actions);
             }
             // Body bytes waited for a backend that stopped taking them.
             ConnState::AwaitingResponse {
                 request, buffers, ..
-            } if buffers.head.is_empty() && request.body.stage() == Stage::Writing => {
+            } if !buffers.head_pending() && request.body.stage() == Stage::Writing => {
                 self.fail_before_head(now, conn, BackendFailure::BodyTimeout, actions);
             }
             ConnState::AwaitingResponse { .. } => {

@@ -68,8 +68,11 @@ impl Core {
     /// keep-alive before the drain, once its response is written. The
     /// exchanges in flight finish as for a shutdown.
     ///
-    /// It emits only `Close` (none for a restart): the connections it
-    /// closes hold no file or upstream. [`Core::handle`] keeps working as
+    /// Both targets first close every idle pooled upstream
+    /// (`CloseUpstream`, FR-PROXY-02); nothing is parked in or taken from
+    /// the pool while draining, so a connection whose exchange ends
+    /// closes its upstream. Otherwise it emits only `Close` (none for a
+    /// restart): the connections it closes hold no file or upstream. [`Core::handle`] keeps working as
     /// before; the driver keeps running its loop until
     /// [`Core::is_drained`] or its deadline (`shutdown_timeout`,
     /// `restart_timeout`), then calls [`Core::abort_all`]. Deadlines are
@@ -89,6 +92,9 @@ impl Core {
             return;
         }
         self.mode = Mode::Draining(target);
+        // Both drains close the idle pool at once (Review Focus 5);
+        // nothing is parked or taken from it while draining.
+        self.close_pool(actions);
         let ids: Vec<ConnId> = self.conns.keys().copied().collect();
         for conn in ids {
             let Some(c) = self.conns.get_mut(&conn) else {
@@ -128,10 +134,10 @@ impl Core {
         self.conns.rekey();
     }
 
-    /// The fast path: close every connection at once, each open upstream
-    /// and each open file exactly once (per connection, in `ConnId`
-    /// order: its `Log`, if any, then `CloseFile`, `CloseUpstream`,
-    /// `Close`). The driver calls it on a second SIGTERM, a SIGINT or when
+    /// The fast path: close every idle pooled upstream, then every
+    /// connection at once, each open upstream and each open file exactly
+    /// once (per connection, in `ConnId` order: its `Log`, if any, then
+    /// `CloseFile`, `CloseUpstream`, `Close`). The driver calls it on a second SIGTERM, a SIGINT or when
     /// `shutdown_timeout` expires, with or without a drain before it,
     /// between two [`Core::handle`] calls.
     ///
@@ -151,6 +157,7 @@ impl Core {
     /// (a stray `Accepted` is answered 503).
     pub fn abort_all(&mut self, actions: &mut Vec<Action>) {
         self.mode = Mode::Draining(DrainTarget::Shutdown);
+        self.close_pool(actions);
         let ids: Vec<ConnId> = self.conns.keys().copied().collect();
         for conn in ids {
             let Some(c) = self.conns.get(&conn) else {

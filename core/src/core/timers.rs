@@ -1,5 +1,5 @@
-//! Deadlines: every connection state carries one; `TimerFired` handles
-//! each that has passed.
+//! Deadlines: every connection state carries one, every idle pooled
+//! upstream too; `TimerFired` handles each that has passed.
 
 use super::{Action, ConnId, Core};
 use crate::conn::{ConnState, UnreadBody};
@@ -11,9 +11,13 @@ use crate::log::{Log, RejectReason, TimeoutKind};
 use crate::time::Instant;
 
 impl Core {
-    /// Handle every connection whose deadline is at or before `now`, in
-    /// `ConnId` order, until none is left.
+    /// Close every idle upstream whose idle deadline passed, then handle
+    /// every connection whose deadline is at or before `now`, in `ConnId`
+    /// order, until none is left.
     pub(super) fn timer_fired(&mut self, now: Instant, actions: &mut Vec<Action>) {
+        // Idle pooled upstreams past their idle deadline close first
+        // (FR-PROXY-02); none comes back to the pool in this call.
+        self.expire_idle(now, actions);
         // Each pass closes a connection or moves it from reading a head or
         // waiting on a backend to responding (which can only expire once
         // more), so this terminates. The deadline index yields only the

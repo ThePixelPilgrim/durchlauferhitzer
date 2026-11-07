@@ -252,7 +252,10 @@ pub(crate) fn announced<'t>(
             }));
         }
         // The 502 that follows announces the response.
-        Log::Reset { .. } | Log::FileAborted { .. } | Log::BackendFailed { .. } => {
+        Log::Reset { .. }
+        | Log::FileAborted { .. }
+        | Log::BackendFailed { .. }
+        | Log::BackendRetried { .. } => {
             return Ok(None);
         }
         Log::ProxiedResponse { .. } => {
@@ -404,7 +407,8 @@ pub(crate) fn log_conn(log: &Log) -> ConnId {
         | Log::Reset { conn, .. }
         | Log::FileAborted { conn, .. }
         | Log::ProxiedResponse { conn, .. }
-        | Log::BackendFailed { conn, .. } => *conn,
+        | Log::BackendFailed { conn, .. }
+        | Log::BackendRetried { conn, .. } => *conn,
     }
 }
 
@@ -491,7 +495,8 @@ pub(crate) fn check_client(
         | Log::Reset { .. }
         | Log::FileAborted { .. }
         | Log::ProxiedResponse { .. }
-        | Log::BackendFailed { .. } => false,
+        | Log::BackendFailed { .. }
+        | Log::BackendRetried { .. } => false,
     };
     let refused = phased.iter().any(|&(l, p)| refusal(l, p));
     let mut expected = Vec::new();

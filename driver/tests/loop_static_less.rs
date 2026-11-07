@@ -14,7 +14,7 @@
     reason = "test helpers outside #[test] functions; clippy.toml allows these in tests"
 )]
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -169,8 +169,7 @@ fn proxied_get_relays_the_exact_bytes_and_forwards_the_rewritten_head() {
     assert_eq!(
         text(&read_head(&mut upstream)),
         "GET /x?y=1 HTTP/1.1\r\nhost: example.test\r\naccept: */*\r\n\
-         x-forwarded-for: 127.0.0.1\r\nx-forwarded-proto: http\r\n\
-         connection: close\r\n\r\n"
+         x-forwarded-for: 127.0.0.1\r\nx-forwarded-proto: http\r\n\r\n"
     );
     upstream
         .write_all(
@@ -184,8 +183,21 @@ fn proxied_get_relays_the_exact_bytes_and_forwards_the_rewritten_head() {
         "HTTP/1.1 200 Fine\r\ndate: Sun, 06 Nov 1994 08:49:37 GMT\r\nserver: b\r\n\
          content-length: 5\r\n\r\nhello"
     );
-    // The body ended at its framing: the upstream is closed.
-    assert_eq!(read_to_eof(&mut upstream).unwrap(), b"");
+    // The body ended at its framing on a keep-alive response: the
+    // upstream stays open, idle in the pool (FR-PROXY-02), until the
+    // server stops.
+    upstream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let idle = upstream.read(&mut [0; 1]).map_err(|e| e.kind());
+    assert!(
+        matches!(
+            idle,
+            Err(io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        ),
+        "{idle:?}"
+    );
+    upstream.set_read_timeout(Some(server::PATIENCE)).unwrap();
     stop_expecting(
         server,
         &[Log::ProxiedResponse {
@@ -196,6 +208,7 @@ fn proxied_get_relays_the_exact_bytes_and_forwards_the_rewritten_head() {
             request: summary(Method::Get, "example.test", "/api/x"),
         }],
     );
+    assert_eq!(read_to_eof(&mut upstream).unwrap(), b"");
 }
 
 /// DRV-10: a client's errors are reported whatever its interest. While

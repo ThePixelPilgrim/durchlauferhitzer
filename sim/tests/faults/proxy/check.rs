@@ -341,7 +341,8 @@ pub(crate) fn check_story(
             Log::Reset { .. }
             | Log::FileAborted { .. }
             | Log::ProxiedResponse { .. }
-            | Log::BackendFailed { .. } => None,
+            | Log::BackendFailed { .. }
+            | Log::BackendRetried { .. } => None,
         };
         if let Log::Rejected {
             reason:

@@ -135,7 +135,7 @@ impl NetConfig {
         let max_connections_per_ip = 4;
         let route = |r: &RouteConfig| {
             format!(
-                "  path {} {{ proxy {};{} max_request_body {}; max_response_body {}; }}\n",
+                "  path {} {{ proxy {}; pool off;{} max_request_body {}; max_response_body {}; }}\n",
                 r.prefix,
                 r.addr,
                 if r.strip { " strip_prefix;" } else { "" },

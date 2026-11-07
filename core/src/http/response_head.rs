@@ -25,11 +25,13 @@ use crate::http::head_line::{
     check_connection, check_line, check_unterminated, declared_framing, head_lines, parse_headers,
     split_header, to_string, values, work,
 };
-use crate::http::request::{HeadLimits, Header, Version};
+use crate::http::request::{HeadLimits, Header, Persistence, Version, persistence};
 
 /// The head of a backend response that passed every check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseHead {
+    /// `HTTP/1.1` or `HTTP/1.0`.
+    pub version: Version,
     /// 100–599.
     pub status: u16,
     /// Printable ASCII and HTAB only; may be empty.
@@ -44,6 +46,13 @@ impl ResponseHead {
     /// not get one, FR-PROXY-04).
     pub fn names_transfer_encoding(&self) -> bool {
         self.headers.iter().any(|h| h.name == "transfer-encoding")
+    }
+
+    /// Whether the backend keeps its connection after this response: an
+    /// HTTP/1.1 response whose `Connection` has no `close` token; an
+    /// HTTP/1.0 response never does (FR-PROXY-02).
+    pub fn persistence(&self) -> Persistence {
+        persistence(&self.headers, self.version)
     }
 }
 
@@ -313,6 +322,7 @@ fn build_head(head: &[u8], kind: RequestKind) -> Result<ResponseStatus, Response
     };
     Ok(ResponseStatus::Complete {
         head: ResponseHead {
+            version: status.version,
             status: status.code,
             reason: to_string(status.reason),
             headers,

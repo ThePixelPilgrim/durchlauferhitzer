@@ -41,17 +41,15 @@ impl Core {
         else {
             return;
         };
-        let sent = if buffers.head.is_empty() {
-            request.body.sent(len, &mut c.recv)
+        let sent = if buffers.head_pending() {
+            buffers.head_written(len)
         } else {
-            let sent = len.min(buffers.head.len());
-            buffers.head.drain(..sent);
-            sent
+            request.body.sent(len, &mut c.recv)
         };
         if sent == 0 {
             return;
         }
-        if buffers.head.is_empty() {
+        if !buffers.head_pending() {
             *deadline = awaiting_deadline(now, &request.body, limits);
         }
         self.sync_interest(conn, actions);
@@ -80,7 +78,7 @@ impl Core {
         };
         // Only what was offered can have arrived (nothing while the head is
         // still being written).
-        if !buffers.head.is_empty() {
+        if buffers.head_pending() {
             return;
         }
         match request.body.received(len, &mut c.recv) {

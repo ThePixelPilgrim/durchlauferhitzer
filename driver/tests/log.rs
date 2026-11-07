@@ -190,6 +190,22 @@ fn backend_failed() {
     );
 }
 
+/// FR-LOG-05: the safe retry of FR-PROXY-26 (stage 7) has its own kind.
+#[test]
+fn backend_retried() {
+    let entry = Log::BackendRetried {
+        conn: ConnId(4),
+        peer: PEER,
+        backend: BackendId(0),
+        kind: BackendFailure::ClosedEarly,
+    };
+    assert_eq!(
+        line(&entry),
+        "kind=backend_retried conn=4 peer=192.0.2.7 backend=127.0.0.1:9000 \
+         failure=closed_early\n"
+    );
+}
+
 /// A backend id outside `Core::backends` (never from the core) is
 /// written as the index it is, still a plain token.
 #[test]

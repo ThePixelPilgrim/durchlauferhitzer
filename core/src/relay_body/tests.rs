@@ -40,7 +40,10 @@ fn drain(body: &mut RelayBody, recv: &mut [u8]) -> Vec<u8> {
 fn no_body_closes_at_once_and_drops_what_follows() {
     let mut recv = buffer(32, b"HEADjunk");
     let (b, closing) = body(ResponseBody::None, BodyLimit::Unlimited, 4, &mut recv, 8).unwrap();
-    assert_eq!(closing, Closing::Upstream(UP));
+    assert_eq!(closing, Closing::Upstream(UP, Rest::Unread));
+    let mut recv = buffer(32, b"HEAD");
+    let (_, closing) = body(ResponseBody::None, BodyLimit::Unlimited, 4, &mut recv, 4).unwrap();
+    assert_eq!(closing, Closing::Upstream(UP, Rest::Clean));
     assert_eq!(b.unsent(&recv), b"");
     assert_eq!(b.upstream(), None);
     assert_eq!(b.pending(), None);
@@ -64,12 +67,43 @@ fn content_length_fills_drains_refills_and_stops_at_its_end() {
     assert_eq!(b.spare(&mut recv).len(), 8);
     assert_eq!(
         receive(&mut b, &mut recv, b"defXYZ"),
-        Ok(Closing::Upstream(UP))
+        Ok(Closing::Upstream(UP, Rest::Unread))
     );
     assert_eq!(drain(&mut b, &mut recv), b"def");
     assert_eq!(b.upstream(), None);
     assert!(b.spare(&mut recv).is_empty());
     assert_eq!(b.unsent(&recv), b"");
+}
+
+/// FR-PROXY-02: a body whose end is the last byte read leaves nothing
+/// unread, so its upstream may be reused.
+#[test]
+fn a_body_ending_its_read_leaves_nothing_unread() {
+    let mut recv = buffer(16, b"HEADab");
+    let (mut b, closing) = body(
+        ResponseBody::Length(4),
+        BodyLimit::Unlimited,
+        4,
+        &mut recv,
+        6,
+    )
+    .unwrap();
+    assert_eq!(closing, Closing::No);
+    drain(&mut b, &mut recv);
+    assert_eq!(
+        receive(&mut b, &mut recv, b"cd"),
+        Ok(Closing::Upstream(UP, Rest::Clean))
+    );
+    let mut recv = buffer(32, b"HEAD2\r\nok\r\n0\r\n\r\n");
+    let (_, closing) = body(
+        ResponseBody::Chunked,
+        BodyLimit::Unlimited,
+        4,
+        &mut recv,
+        16,
+    )
+    .unwrap();
+    assert_eq!(closing, Closing::Upstream(UP, Rest::Clean));
 }
 
 #[test]
@@ -109,7 +143,7 @@ fn chunked_tail_moves_to_the_front_once() {
     assert_eq!(b.spare(&mut recv).len(), 14);
     assert_eq!(
         receive(&mut b, &mut recv, b"\nz\r\n0\r\n\r\nNEXT"),
-        Ok(Closing::Upstream(UP))
+        Ok(Closing::Upstream(UP, Rest::Unread))
     );
     assert_eq!(drain(&mut b, &mut recv), b"1\r\nz\r\n0\r\n\r\n");
     assert_eq!(b.pending(), None);

@@ -533,6 +533,7 @@ impl Sim {
         }
         self.actions = actions;
         self.context = None;
+        self.note_holders();
         self.check_buffers();
         self.check_files();
         self.check_upstreams();
@@ -718,7 +719,8 @@ fn log_conn(log: &Log) -> ConnId {
         | Log::Reset { conn, .. }
         | Log::FileAborted { conn, .. }
         | Log::ProxiedResponse { conn, .. }
-        | Log::BackendFailed { conn, .. } => *conn,
+        | Log::BackendFailed { conn, .. }
+        | Log::BackendRetried { conn, .. } => *conn,
     }
 }
 

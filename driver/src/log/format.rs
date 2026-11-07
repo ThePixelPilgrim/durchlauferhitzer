@@ -105,6 +105,17 @@ pub fn format_entry(entry: &Log, backends: &[SocketAddr], out: &mut Vec<u8>) {
             out.extend_from_slice(b" failure=");
             backend_failure(out, *kind);
         }
+        Log::BackendRetried {
+            conn,
+            peer,
+            backend,
+            kind,
+        } => {
+            head(out, "backend_retried", *conn, *peer);
+            backend_field(out, backends, *backend);
+            out.extend_from_slice(b" failure=");
+            backend_failure(out, *kind);
+        }
     }
     out.push(b'\n');
 }

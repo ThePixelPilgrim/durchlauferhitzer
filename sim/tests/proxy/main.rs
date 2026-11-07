@@ -3,10 +3,14 @@
 //! here; request bodies in `bodies.rs`, `Expect` in `expect.rs`, response
 //! bodies in `responses.rs`, configured timeouts and the client's
 //! half-close in `timeouts.rs`, backend resets behind readable bytes in
-//! `resets.rs`.
+//! `resets.rs`, backend connection pooling and the safe retry in
+//! `pool.rs`. The routes outside `pool.rs` say `pool off;`: they pin the
+//! one-connection-per-request path (FR-PROXY-02), which the first request
+//! on a pooled route takes too.
 
 mod bodies;
 mod expect;
+mod pool;
 mod resets;
 mod responses;
 mod timeouts;
@@ -20,7 +24,7 @@ use durchlauferhitzer_core::http::response_head::ResponseError;
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::{
     BackendFailure, BackendId, ConnId, Interest, Log, RejectReason, RequestSummary, TimeoutKind,
-    UpstreamId,
+    UpstreamHolder, UpstreamId,
 };
 use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, Window};
 
@@ -28,13 +32,13 @@ const BACKEND: &str = "127.0.0.1:3000";
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// As `CONFIG`, with room for a response larger than 1 MiB.
 const LARGE: &str = "listen 127.0.0.1:8080;
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 4MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 4MiB; }
 }";
 
 fn peer() -> IpAddr {
@@ -341,9 +345,9 @@ fn backends_are_listed() {
     let config = "listen 127.0.0.1:8080;
 host a.test {
   path / { static /srv/www; }
-  path /a { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body 1MiB; }
-  path /b { proxy [::1]:4000; max_request_body 1MiB; max_response_body 1MiB; }
-  path /c { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body 1MiB; }
+  path /a { proxy 127.0.0.1:3000; pool off; max_request_body 1MiB; max_response_body 1MiB; }
+  path /b { proxy [::1]:4000; pool off; max_request_body 1MiB; max_response_body 1MiB; }
+  path /c { proxy 127.0.0.1:3000; pool off; max_request_body 1MiB; max_response_body 1MiB; }
 }
 host b.test {
   path /d { proxy 10.0.0.7:80; max_request_body 1MiB; max_response_body 1MiB; }
@@ -565,7 +569,7 @@ fn stalled_body_after_head_cuts_the_connection() {
 const SHORT_SEND_IDLE: &str = "listen 127.0.0.1:8080;
 limits { send_idle_timeout 5s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// The head and the first `n` body bytes of a 10-byte `Content-Length`

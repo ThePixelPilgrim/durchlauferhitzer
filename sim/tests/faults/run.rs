@@ -182,7 +182,8 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
             | Log::Reset { .. }
             | Log::FileAborted { .. }
             | Log::ProxiedResponse { .. }
-            | Log::BackendFailed { .. } => {}
+            | Log::BackendFailed { .. }
+            | Log::BackendRetried { .. } => {}
         }
         if let Log::Rejected { reason, .. } = log {
             match reason {

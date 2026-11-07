@@ -60,7 +60,10 @@ pub(crate) fn cuts(log: &Log, phase: Phase) -> CutOff {
         },
         Log::Reset { .. } | Log::FileAborted { .. } => true,
         // A 502 follows it; a proxied response is not expected here.
-        Log::Response { .. } | Log::BackendFailed { .. } | Log::ProxiedResponse { .. } => false,
+        Log::Response { .. }
+        | Log::BackendFailed { .. }
+        | Log::BackendRetried { .. }
+        | Log::ProxiedResponse { .. } => false,
     };
     if cut { CutOff::Yes } else { CutOff::No }
 }

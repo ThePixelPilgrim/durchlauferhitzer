@@ -39,11 +39,39 @@ fn head_of(input: &[u8], kind: RequestKind) -> ResponseHead {
 
 const SIMPLE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nServer:  x \t\r\n\r\n";
 
+/// FR-PROXY-02: whether the backend keeps the connection.
+#[test]
+fn response_persistence() {
+    for (raw, expected) in [
+        (&b"HTTP/1.1 200 OK\r\n\r\n"[..], Persistence::KeepAlive),
+        (
+            b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n",
+            Persistence::KeepAlive,
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nConnection: a, CLOSE\r\n\r\n",
+            Persistence::Close,
+        ),
+        (b"HTTP/1.0 200 OK\r\n\r\n", Persistence::Close),
+        (
+            b"HTTP/1.0 200 OK\r\nConnection: keep-alive\r\n\r\n",
+            Persistence::Close,
+        ),
+    ] {
+        assert_eq!(
+            head_of(raw, RequestKind::Other).persistence(),
+            expected,
+            "{raw:?}"
+        );
+    }
+}
+
 #[test]
 fn parses_simple_200() {
     assert_eq!(
         head_of(SIMPLE, RequestKind::Other),
         ResponseHead {
+            version: Version::Http11,
             status: 200,
             reason: "OK".to_string(),
             headers: vec![

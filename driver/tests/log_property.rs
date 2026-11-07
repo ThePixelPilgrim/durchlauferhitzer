@@ -246,7 +246,8 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
             other @ (Log::Response { request: None, .. }
             | Log::Reset { .. }
             | Log::FileAborted { .. }
-            | Log::BackendFailed { .. }) => panic!("not generated: {other:?}"),
+            | Log::BackendFailed { .. }
+            | Log::BackendRetried { .. }) => panic!("not generated: {other:?}"),
         };
         let get = |key: &str| {
             fields
@@ -270,7 +271,8 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
             | Log::Rejected { .. }
             | Log::Reset { .. }
             | Log::FileAborted { .. }
-            | Log::BackendFailed { .. }) => panic!("not generated: {other:?}"),
+            | Log::BackendFailed { .. }
+            | Log::BackendRetried { .. }) => panic!("not generated: {other:?}"),
         };
         let method = match method {
             Method::Get => "GET".to_owned(),

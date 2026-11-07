@@ -104,7 +104,8 @@ fn a_10_mib_file_reaches_a_slow_reader_byte_exact() {
             | Log::Reset { .. }
             | Log::FileAborted { .. }
             | Log::ProxiedResponse { .. }
-            | Log::BackendFailed { .. }) => panic!("unexpected log {other:?}"),
+            | Log::BackendFailed { .. }
+            | Log::BackendRetried { .. }) => panic!("unexpected log {other:?}"),
         })
         .collect();
     assert_eq!(statuses, [200, 200]);

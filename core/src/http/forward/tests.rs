@@ -29,8 +29,11 @@ fn response(raw: &[u8]) -> ResponseHead {
 /// is exactly the number of bytes rendered.
 fn render_request(head: &RequestHead, path: &str, peer: IpAddr) -> String {
     let mut out = Vec::new();
-    render_backend_request(head, path, peer, &mut out);
-    assert_eq!(backend_request_len(head, path, peer), out.len());
+    render_backend_request(head, path, peer, Persistence::Close, &mut out);
+    assert_eq!(
+        backend_request_len(head, path, peer, Persistence::Close),
+        out.len()
+    );
     String::from_utf8(out).unwrap()
 }
 
@@ -257,12 +260,36 @@ fn chunked_request_keeps_transfer_encoding() {
 fn rendering_appends_to_the_buffer() {
     let head = request(b"GET /p HTTP/1.1\r\nHost: a\r\n\r\n");
     let mut out = b"keep".to_vec();
-    render_backend_request(&head, "/p", v4(1, 2, 3, 4), &mut out);
+    render_backend_request(&head, "/p", v4(1, 2, 3, 4), Persistence::Close, &mut out);
     assert!(out.starts_with(b"keepGET /p HTTP/1.1\r\n"));
     let head = response(b"HTTP/1.1 204 No Content\r\n\r\n");
     let mut out = b"keep".to_vec();
     render_client_response(&head, Persistence::KeepAlive, None, &mut out);
     assert_eq!(out, b"keepHTTP/1.1 204 No Content\r\n\r\n");
+}
+
+/// FR-PROXY-02, -11 (stage 7): toward a pooled backend no `Connection:
+/// close` is added; the length twin agrees.
+#[test]
+fn a_keep_alive_request_says_nothing_of_connection() {
+    let head = request(b"GET /p HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    let mut out = Vec::new();
+    render_backend_request(
+        &head,
+        "/p",
+        v4(1, 2, 3, 4),
+        Persistence::KeepAlive,
+        &mut out,
+    );
+    assert_eq!(
+        out,
+        b"GET /p HTTP/1.1\r\nhost: a\r\nx-forwarded-for: 1.2.3.4\r\n\
+          x-forwarded-proto: http\r\n\r\n"
+    );
+    assert_eq!(
+        backend_request_len(&head, "/p", v4(1, 2, 3, 4), Persistence::KeepAlive),
+        out.len()
+    );
 }
 
 #[test]
@@ -446,6 +473,7 @@ fn response_reason_is_kept_or_empty() {
 
 fn head_with_reason(status: u16, reason: &str) -> ResponseHead {
     ResponseHead {
+        version: Version::Http11,
         status,
         reason: reason.to_string(),
         headers: Vec::new(),
@@ -710,8 +738,8 @@ proptest! {
         raw.extend_from_slice(b"\r\n");
         if let Ok(ParseStatus::Complete { head, .. }) = parse_head(&raw, &limits()) {
             let mut out = Vec::new();
-            render_backend_request(&head, path, peer, &mut out);
-            prop_assert_eq!(backend_request_len(&head, path, peer), out.len());
+            render_backend_request(&head, path, peer, Persistence::Close, &mut out);
+            prop_assert_eq!(backend_request_len(&head, path, peer, Persistence::Close), out.len());
             prop_assert_eq!(String::from_utf8(out).unwrap(), model_request(&head, path, peer));
         }
 

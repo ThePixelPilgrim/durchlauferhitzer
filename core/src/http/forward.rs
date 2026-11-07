@@ -108,19 +108,32 @@ const CLIENT_IDENTITY: [&str; 5] = [
 /// re-rendered without leading zeros, everything else (`host`,
 /// `transfer-encoding`, …) as received. Then come `x-forwarded-for` (the
 /// client's non-empty value, `, `, the peer in canonical form),
-/// `x-forwarded-proto: http` and `connection: close`.
+/// `x-forwarded-proto: http` and, when `persistence` is `Close`,
+/// `connection: close` (FR-PROXY-11); a request on a pooled route says
+/// nothing of the connection, which HTTP/1.1 keeps (FR-PROXY-02).
 ///
 /// Callers run [`check_forwardable`] first. Should a head still carry
 /// several `x-forwarded-for` lines, their non-empty values are joined in
 /// order with `, `.
-pub fn render_backend_request(head: &RequestHead, path: &str, peer: IpAddr, out: &mut Vec<u8>) {
-    backend_request(head, path, peer, out);
+pub fn render_backend_request(
+    head: &RequestHead,
+    path: &str,
+    peer: IpAddr,
+    persistence: Persistence,
+    out: &mut Vec<u8>,
+) {
+    backend_request(head, path, peer, persistence, out);
 }
 
 /// The exact number of bytes [`render_backend_request`] appends.
-pub fn backend_request_len(head: &RequestHead, path: &str, peer: IpAddr) -> usize {
+pub fn backend_request_len(
+    head: &RequestHead,
+    path: &str,
+    peer: IpAddr,
+    persistence: Persistence,
+) -> usize {
     let mut count = Count(0);
-    backend_request(head, path, peer, &mut count);
+    backend_request(head, path, peer, persistence, &mut count);
     count.0
 }
 
@@ -204,7 +217,13 @@ fn listed_tokens(headers: &[Header]) -> Vec<&[u8]> {
     connection_tokens(headers).collect()
 }
 
-fn backend_request(head: &RequestHead, path: &str, peer: IpAddr, sink: &mut impl Sink) {
+fn backend_request(
+    head: &RequestHead,
+    path: &str,
+    peer: IpAddr,
+    persistence: Persistence,
+    sink: &mut impl Sink,
+) {
     sink.put(match &head.method {
         Method::Get => b"GET",
         Method::Head => b"HEAD",
@@ -245,7 +264,12 @@ fn backend_request(head: &RequestHead, path: &str, peer: IpAddr, sink: &mut impl
         sink.put(b", ");
     }
     put_display(sink, peer.to_canonical());
-    sink.put(b"\r\nx-forwarded-proto: http\r\nconnection: close\r\n\r\n");
+    sink.put(b"\r\nx-forwarded-proto: http\r\n");
+    match persistence {
+        Persistence::KeepAlive => {}
+        Persistence::Close => sink.put(b"connection: close\r\n"),
+    }
+    sink.put(b"\r\n");
 }
 
 /// A validated `Content-Length` value (decimal digits only) without its

@@ -68,11 +68,21 @@ enum Due {
     UntilClose { data: u64 },
 }
 
-/// Whether the upstream must be closed now: the body just became complete.
+/// Whether the upstream is done now: the body just became complete (and
+/// whether bytes after its end came with it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Closing {
     No,
-    Upstream(UpstreamId),
+    Upstream(UpstreamId, Rest),
+}
+
+/// What the backend sent after a body's end, in the read that completed
+/// it: nothing, or bytes that are dropped unread (FR-PROXY-22). An
+/// upstream with unread bytes is never reused (FR-PROXY-02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rest {
+    Clean,
+    Unread,
 }
 
 impl RelayBody {
@@ -109,7 +119,14 @@ impl RelayBody {
         let (source, closing) = match due {
             Some(due) => (Source::Open { up, backend, due }, Closing::No),
             // Nothing is due: anything after the head is dropped.
-            None => (Source::Done, Closing::Upstream(up)),
+            None => {
+                let rest = if filled > start {
+                    Rest::Unread
+                } else {
+                    Rest::Clean
+                };
+                (Source::Done, Closing::Upstream(up, rest))
+            }
         };
         let mut body = RelayBody {
             source,
@@ -251,7 +268,13 @@ impl RelayBody {
         let closing = if complete {
             let up = *up;
             self.source = Source::Done;
-            Closing::Upstream(up)
+            let end = self.end.saturating_add(accepted);
+            let rest = if end < self.filled {
+                Rest::Unread
+            } else {
+                Rest::Clean
+            };
+            Closing::Upstream(up, rest)
         } else {
             Closing::No
         };
@@ -292,7 +315,9 @@ fn exceeds(length: u64, limit: BodyLimit) -> bool {
 /// The upstream to close, if either says so.
 fn either(a: Closing, b: Closing) -> Closing {
     match (a, b) {
-        (Closing::Upstream(up), _) | (Closing::No, Closing::Upstream(up)) => Closing::Upstream(up),
+        (Closing::Upstream(up, rest), _) | (Closing::No, Closing::Upstream(up, rest)) => {
+            Closing::Upstream(up, rest)
+        }
         (Closing::No, Closing::No) => Closing::No,
     }
 }

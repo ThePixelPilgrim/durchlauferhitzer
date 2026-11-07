@@ -39,7 +39,9 @@ interest only on upstreams (and only with bytes to write and room to read),
 body reads only into a drained buffer and with its full capacity (fill, drain,
 refill; behind a chunked tail of at most 35 bytes, for request and response
 bodies), every backend
-receiving exactly one well-framed request and nothing after its body, no
+receiving well-framed requests one at a time and nothing after a body
+unless the core pooled the connection since (FR-PROXY-02; an idle pooled
+upstream held by no client, with interest `Read`), no
 stalled output, no deadline left in the past, and more. A violation fails the test with a replayable trace.
 
 ## Layout
@@ -88,6 +90,9 @@ tests/
     resets.rs           backend resets behind readable bytes (DRV-10)
     timeouts.rs         the backend timeouts as configured `limits`, the
                         client's half-close, the failure log kinds
+    pool.rs             backend connection pooling: reuse across
+                        clients, idle hygiene and timeout, the safe retry
+                        (the other files' routes say `pool off;`)
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers
     split.rs            deterministic split, byte-by-byte and pipelined runs

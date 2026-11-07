@@ -212,8 +212,21 @@
 //!   A [`BackendId`] is an index into that list; `Connect` names the
 //!   backend by id.
 //! - The core allocates [`UpstreamId`]s, sequentially from 1, and never
-//!   reuses one. A connection holds at most one upstream at a time (one
-//!   fresh backend connection per request, FR-PROXY-02).
+//!   reuses one. A connection holds at most one upstream at a time.
+//! - Pooling (FR-PROXY-02): once a response is complete and reusable,
+//!   the core may keep its upstream open instead of closing it, idle in
+//!   its pool, and later hand it to another request to the same backend,
+//!   from any connection: then no `Connect` comes, only a
+//!   `SetUpstreamInterest` for the reused id, whose events now serve the
+//!   new exchange. An idle upstream keeps interest `Read`; its
+//!   [`Core::upstream_recv_buffer`] is a scratch buffer whose contents are
+//!   never looked at, and any `UpstreamReceived`, `UpstreamReadClosed` or
+//!   `UpstreamFailed` for it is answered with its `CloseUpstream` (so is
+//!   its idle timeout, a drain, or room needed for a new connect). The
+//!   driver does nothing special for it. A request on a reused upstream
+//!   that fails before any response byte may be answered by a
+//!   `CloseUpstream` and a `Connect` for a fresh id in the same call (the
+//!   retry of FR-PROXY-26, logged as [`Log::BackendRetried`]).
 //! - `Connect { up, backend }` is a non-blocking `connect` (`SOCK_NONBLOCK
 //!   | SOCK_CLOEXEC`). It is answered by exactly one `UpstreamConnected`
 //!   (the socket became writable and `SO_ERROR` is 0) or `UpstreamFailed`
@@ -298,7 +311,8 @@
 //!   is pending, and deliver no further event for that id. The core emits it
 //!   exactly once per upstream on every path (response complete, backend
 //!   failure, client reset or close, timeout), never after its
-//!   connection's `Close`. Stray events for unknown or closed upstreams are
+//!   connection's `Close` (an idle pooled upstream outlives the connection
+//!   that last used it). Stray events for unknown or closed upstreams are
 //!   ignored.
 //! - Request bodies are never copied either: once the request head is
 //!   written, [`Core::upstream_send_buffer`] hands out the region of the
@@ -327,8 +341,8 @@
 //!   chunked-framing tail of at most 35 bytes moved to its front (fill,
 //!   drain, refill; NFR-RES-04). A close-delimited body ends with
 //!   [`Event::UpstreamReadClosed`]; any other ends at its framing, and the
-//!   upstream is closed then, so bytes after a body's end are never sent
-//!   (FR-PROXY-22). A response to HEAD, a 204 or a 304 has no body: what
+//!   upstream is closed (or parked idle) then, so bytes after a body's end
+//!   are never sent (FR-PROXY-22). A response to HEAD, a 204 or a 304 has no body: what
 //!   the backend sends after its head is dropped and the upstream closed.
 //!   Interim (1xx) heads are dropped and the next head parsed afresh; more
 //!   than eight in a row are a 502 (FR-PROXY-18). Its capacity is
@@ -339,8 +353,9 @@
 //!   hands out before the body. Its capacity, `max_head + max_headers +
 //!   128`, holds any rewrite of a head within the limits.
 //! - Descriptor budget: at most one upstream socket is open or connecting
-//!   per counted connection, so at most `max_connections` at once; refused
-//!   connections never connect. The driver's `RLIMIT_NOFILE` check at
+//!   per counted connection, and active and idle pooled upstreams together
+//!   are at most `max_connections` (a new connect at that count first
+//!   closes the oldest idle one); refused connections never connect. The driver's `RLIMIT_NOFILE` check at
 //!   startup adds them to the budget above.
 //! - Failures (FR-PROXY-26): before the response head was queued, a failed
 //!   or refused connect is answered 502 ([`BackendFailure::Refused`]), a
@@ -429,6 +444,10 @@
 //!   as a backend response timeout otherwise;
 //! - lingering after a shutdown of the sending side: [`LINGER_TIMEOUT`],
 //!   not extended by input.
+//!
+//! An idle pooled upstream (FR-PROXY-02) has a deadline too, not tied to
+//! any connection: `backend_idle_timeout` from when it was parked, then
+//! its `CloseUpstream`. [`Core::next_deadline`] is the earliest of all.
 //!
 //! Deadlines are judged only when [`Event::TimerFired`] is handled
 //! (owner decision 2026-10-27, DRV-06: delivery order decides). An event

@@ -18,8 +18,8 @@ use super::{BACKEND, fixed, only_upstream, peer, request, summary};
 
 const BODIES: &str = "listen 127.0.0.1:8080;
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 8MiB; max_response_body 1MiB; }
-  path /small { proxy 127.0.0.1:3000; max_request_body 10; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 8MiB; max_response_body 1MiB; }
+  path /small { proxy 127.0.0.1:3000; pool off; max_request_body 10; max_response_body 1MiB; }
   path / { static /srv; }
 }";
 

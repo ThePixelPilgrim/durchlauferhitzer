@@ -34,7 +34,7 @@ host example.test { path / { static /srv/www; } }";
 const PROXY: &str = "listen 127.0.0.1:8080;
 limits { backend_connect_timeout 2s; backend_response_timeout 3s; body_idle_timeout 4s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 fn peer() -> IpAddr {

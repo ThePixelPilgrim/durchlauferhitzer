@@ -4,17 +4,18 @@
 //! (FR-PROXY-19…22, -24, -28; NFR-RES-04), and the failures after the head
 //! (FR-PROXY-26: the connection is cut).
 
+use super::pool::release as release_upstream;
 use super::proxy::{close_upstream, queued_send_deadline, take_exchange};
 use super::request::{AfterResponse, finish};
 use super::{Action, ConnId, Core};
 use crate::config::Limits;
-use crate::conn::{ConnState, UnreadBody};
+use crate::conn::{ConnState, Release, UnreadBody};
 use crate::http::forward::{client_response_len, render_client_response};
 use crate::http::request::{Persistence, Version};
 use crate::http::response_head::{ResponseBody, ResponseError, ResponseHead};
 use crate::log::{BackendFailure, Log};
 use crate::relay_body::{Closing, RelayBody};
-use crate::request_body::{Arrived, BodyEnd};
+use crate::request_body::{Arrived, BodyEnd, Stage};
 use crate::time::Instant;
 use crate::upstream::{ExchangeBuffers, UpstreamId};
 
@@ -35,6 +36,7 @@ impl Core {
     ) {
         let head_capacity = self.head_capacity;
         let date = self.date;
+        let mode = self.mode;
         let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
@@ -90,6 +92,28 @@ impl Core {
                 return;
             }
         };
+        // FR-PROXY-02: the upstream may be reused once the body is
+        // complete only if the exchange is reusable on both sides: the
+        // request asked to keep the connection and was written whole (a
+        // backend that answered early has part of a request), and the
+        // response keeps it (HTTP/1.1, no `close`) and ends at its
+        // framing, not at the end of stream.
+        let release = match (
+            request.toward,
+            buffers.head_pending(),
+            request.body.stage(),
+            head.persistence(),
+            head.body,
+        ) {
+            (
+                Persistence::KeepAlive,
+                false,
+                Stage::Written,
+                Persistence::KeepAlive,
+                ResponseBody::None | ResponseBody::Length(_) | ResponseBody::Chunked,
+            ) => Release::Park(request.backend),
+            (Persistence::KeepAlive | Persistence::Close, _, _, _, _) => Release::Close,
+        };
         let Some((_, mut request, mut buffers)) = take_exchange(c) else {
             return;
         };
@@ -106,11 +130,20 @@ impl Core {
             status: head.status,
             request: request.summary,
         }));
-        buffers.head.clear();
+        buffers.clear_head();
         render_client_response(&head, persistence, date.as_ref(), &mut buffers.head);
         match closing {
             // Every body byte is here: anything after it is dropped.
-            Closing::Upstream(up) => close_upstream(&mut self.upstreams, up, actions),
+            Closing::Upstream(up, rest) => release_upstream(
+                &mut self.upstreams,
+                mode,
+                limits,
+                now,
+                up,
+                release,
+                rest,
+                actions,
+            ),
             Closing::No => {}
         }
         // The rewritten head is for the client to take now.
@@ -120,6 +153,7 @@ impl Core {
             buffers,
             persistence,
             buffered,
+            release,
         };
         self.sync_interest(conn, actions);
     }
@@ -134,6 +168,7 @@ impl Core {
         len: usize,
         actions: &mut Vec<Action>,
     ) {
+        let mode = self.mode;
         let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
@@ -142,6 +177,7 @@ impl Core {
             body,
             buffers,
             deadline,
+            release,
             ..
         } = &mut c.state
         else {
@@ -151,7 +187,16 @@ impl Core {
         // `upstream_received` checked that a read was offered (the body is
         // open and drained), so the bytes are new progress.
         match body.received(len, &mut buffers.recv) {
-            Ok(Closing::Upstream(up)) => close_upstream(&mut self.upstreams, up, actions),
+            Ok(Closing::Upstream(up, rest)) => release_upstream(
+                &mut self.upstreams,
+                mode,
+                limits,
+                now,
+                up,
+                *release,
+                rest,
+                actions,
+            ),
             Ok(Closing::No) => {}
             Err(kind) => {
                 self.cut(conn, kind, actions);
@@ -262,12 +307,10 @@ impl Core {
             let sent = len.min(c.send.len());
             c.send.drain(..sent);
             sent
-        } else if buffers.head.is_empty() {
-            body.sent(len, &mut buffers.recv)
+        } else if buffers.head_pending() {
+            buffers.head_written(len)
         } else {
-            let sent = len.min(buffers.head.len());
-            buffers.head.drain(..sent);
-            sent
+            body.sent(len, &mut buffers.recv)
         };
         if sent == 0 {
             return;
@@ -323,7 +366,7 @@ pub(super) enum ClientSide {
 
 /// What the client of a relaying connection has to take.
 pub(super) fn client_side(send: &[u8], buffers: &ExchangeBuffers, body: &RelayBody) -> ClientSide {
-    if !send.is_empty() || !buffers.head.is_empty() || body.unsent_len() > 0 {
+    if !send.is_empty() || buffers.head_pending() || body.unsent_len() > 0 {
         ClientSide::HasBytes
     } else {
         ClientSide::Waits

@@ -632,6 +632,31 @@ Forwarding and identity:
   `pool on | off;` (default `on`; on a static route an error,
   `PoolOnStatic`, like `strip_prefix`); the limits are
   `backend_idle_timeout` and `backend_idle_max` (FR-CFG-20, -21).
+  *Builder calls (stage 7 Task 5, controller rulings R1–R3):* a request
+  on a pooled route from an HTTP/1.1 client goes out without
+  `Connection: close` (FR-PROXY-11) and takes the backend's newest idle
+  connection (LIFO per backend), else connects. Its connection returns to
+  the idle pool once the response is complete and reusable on both
+  sides: the whole request (head and body) was written, the response is
+  HTTP/1.1 without a `close` token, framed by `Content-Length` or chunked
+  (or has no body: HEAD, 204, 304, `Content-Length: 0`), and nothing
+  followed its end in the read that completed it; anything else
+  (HTTP/1.0 either side, `close`, a close-delimited body, an early
+  response, bytes after the end, any failure) closes it. An HTTP/1.0
+  client's request (mirrored as HTTP/1.0, FR-PROXY-04) is never pooled.
+  An idle connection holds no buffer; it is watched for readability, and
+  any byte, end of stream or error closes it at once (it is read into
+  the core's shared discard buffer). At most `backend_idle_max` idle per
+  backend (a park beyond it closes that backend's oldest idle one), each
+  closed after `backend_idle_timeout`. Every upstream, active or idle,
+  counts against `max_connections`: a connect when `max_connections`
+  upstreams are open first closes the oldest idle one, so the descriptor
+  budget (NFR-RES-05) keeps its bound. Both drains (FR-PROC-05, -07)
+  close the idle pool at once; while draining nothing is parked or taken
+  from it, and nothing is retried (a stale connection is a 502 then). An
+  exchange in flight on a pooled connection finishes or is cut as
+  before. The retry (FR-PROXY-26) is logged as `BackendRetried`
+  (FR-LOG-02).
 - **FR-PROXY-03** [done] `Core::backends()` lists the distinct backend
   addresses (IP and port, FR-CFG-16) in config order (`BackendId` =
   index); the driver connects by id to the address as it is, with no
@@ -680,7 +705,10 @@ Request head toward the backend:
 - **FR-PROXY-10** [done] A request `Content-Length` is re-rendered
   without leading zeros; a chunked request keeps `Transfer-Encoding:
   chunked`.
-- **FR-PROXY-11** [done] `Connection: close` is added.
+- **FR-PROXY-11** [done] `Connection: close` is added. *(Stage 7,
+  FR-PROXY-02:)* only on a `pool off` route and for an HTTP/1.0 client;
+  a request on a pooled route from an HTTP/1.1 client says nothing of
+  the connection, which HTTP/1.1 keeps.
 
 Response head toward the client:
 
@@ -850,7 +878,17 @@ Failures, persistence, timeouts:
   response head, an end of stream before the response head
   (`ClosedEarly`), a malformed or oversized response head, 101, too many
   interim heads, an oversized `Content-Length` → 502;
-  `backend_connect_timeout` or `backend_response_timeout` → 504. After the
+  `backend_connect_timeout` or `backend_response_timeout` → 504.
+  *(Stage 7, FR-PROXY-02, controller ruling R2:)* one exception: a
+  request sent on a *reused* (pooled) connection that fails by a reset,
+  an end of stream or a write error before any response byte (an
+  interim head counts as one) is replayed once on a fresh connection if
+  it is a GET or HEAD without a body and the core is not draining,
+  logged as `BackendRetried { backend, kind }` (`kind` `Reset` or
+  `ClosedEarly`); the replay's own outcome follows this matrix (a fresh
+  connection is never retried). Any other request on a reused connection,
+  a timeout, and a failure after a response byte get the 502/504 above.
+  After the
   response head was queued: any failure (backend reset or EOF mid-body,
   framing error, limit, timeout) cuts both connections. The client
   resetting or timing out closes the upstream at once. A client that only
@@ -1095,7 +1133,9 @@ Failures, persistence, timeouts:
   `Reset`, `FileAborted` (with the file error);
   `ProxiedResponse { status: u16, backend, request }` (a backend's
   response head was queued; its status is any 100–599, so a number rather
-  than one of the core's statuses) and `BackendFailed { backend, kind }`
+  than one of the core's statuses), `BackendRetried { backend, kind }`
+  (stage 7: a request on a reused connection replayed once after `kind`,
+  FR-PROXY-26) and `BackendFailed { backend, kind }`
   (`kind` per FR-PROXY-31, `ClosedEarly`, `BodyTimeout`, `BadChunk`,
   `BodyTooLarge` and `TransferEncodingToHttp10` included). A 502 or 504 the core
   generates for a failed backend is a `Response`, preceded by its
@@ -1147,6 +1187,9 @@ Failures, persistence, timeouts:
     - `kind=file_aborted conn peer error`
     - `kind=proxied_response conn peer backend status method [host] path`
     - `kind=backend_failed conn peer backend failure`
+    - `kind=backend_retried conn peer backend failure` (stage 7,
+      FR-PROXY-26: `failure` is why the reused connection was given up,
+      `reset` or `closed_early`)
     - Driver kinds (FR-LOG-07): `kind=accept_failed errno`,
       `kind=socket_failed errno`, `kind=open_failed errno`,
       `kind=register_failed errno`, `kind=dropped count` (FR-LOG-06),
@@ -1940,7 +1983,9 @@ Failures, persistence, timeouts:
   files whose readahead a worker still runs, held only by that job until
   the worker drops it (DRV-09; owner decision 2026-10-29, OA1); at most
   2 × `max_connections` client sockets (refused ones included); from
-  stage 3 at most one upstream socket per counted connection; plus the
+  stage 3 at most one upstream socket per counted connection (from stage
+  7, FR-PROXY-02: at most `max_connections` upstream sockets, active and
+  idle pooled ones together); plus the
   static roots, listeners and the eventfd.
   The driver checks `RLIMIT_NOFILE` against this at startup. *(Stage 4
   Task 8; owner decision 2026-10-28, O5, which replaced a constant 3 for

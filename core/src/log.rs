@@ -68,6 +68,16 @@ pub enum Log {
         backend: BackendId,
         kind: BackendFailure,
     },
+    /// The request on `conn` went out on a reused (pooled) connection to
+    /// `backend`, which failed (`kind`: `Reset` or `ClosedEarly`) before any
+    /// response byte; it is replayed once on a fresh connection
+    /// (FR-PROXY-26). What the replay brings is logged as usual.
+    BackendRetried {
+        conn: ConnId,
+        peer: IpAddr,
+        backend: BackendId,
+        kind: BackendFailure,
+    },
 }
 
 /// How talking to a backend failed (FR-PROXY-31).

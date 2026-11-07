@@ -14,7 +14,10 @@
 //! action for an unknown or closed upstream and no second `CloseUpstream`;
 //! upstream ids allocated sequentially from 1, each `Connect` during an
 //! event of its client and for a listed backend; at most one open upstream
-//! per client; no upstream left open after its client closed; upstream
+//! held per client (as the core reports who holds it,
+//! `Core::upstream_holder`); no upstream held for a client that closed
+//! (an idle pooled one is held by nobody, FR-PROXY-02, and must be idle
+//! only after a complete request, with interest `Read`); upstream
 //! buffers within their capacities; no `Read` or `ReadWrite` interest with
 //! nothing to read into and no `Write` or `ReadWrite` interest with nothing
 //! to write (`ReadWrite` is for upstreams only; a client `ReadWrite` is a
@@ -28,12 +31,14 @@
 //! `upstream_body_pending` report for that, and checks the offered
 //! buffer against it. Once `run_until_idle` settles, an upstream the
 //! backend failed or ended must have been closed. And every upstream gets
-//! exactly one well-framed request: what the sim writes to a backend is
+//! well-framed requests one at a time: what the sim writes to a backend is
 //! judged as it goes (the head by the core's request parser, then the body
 //! by its `Content-Length` or chunked framing), and a malformed head or
-//! body, or any byte after the body's end, is a violation (FR-PROXY-22).
+//! body, or any byte after the body's end, is a violation (FR-PROXY-22),
+//! unless the core parked the upstream in its idle pool since: then the
+//! bytes begin the next request on the reused connection (FR-PROXY-02).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use std::net::SocketAddr;
 
@@ -41,7 +46,7 @@ use durchlauferhitzer_core::config::Limits;
 use durchlauferhitzer_core::http::chunked::{ChunkedValidator, Done, MAX_UNCONSUMED};
 use durchlauferhitzer_core::http::request::{BodyFraming, HeadLimits, ParseStatus, parse_head};
 use durchlauferhitzer_core::{
-    Action, BackendId, BodyPending, ConnError, ConnId, Event, Interest, UpstreamId,
+    Action, BackendId, BodyPending, ConnError, ConnId, Event, Interest, UpstreamHolder, UpstreamId,
 };
 
 use crate::{Eof, Pending, Sim, SimConnState, Window};
@@ -82,8 +87,12 @@ struct Upstream {
     reset: Reset,
     /// Bytes the backend has received (taken by `take_backend_request`).
     received: Vec<u8>,
-    /// Every byte the backend has received, judged as one request.
+    /// Every byte the backend has received since its current request
+    /// began, judged as one request.
     forwarded: Forwarded,
+    /// The core parked the upstream in its idle pool (FR-PROXY-02) since
+    /// its last request was complete: only then may another begin.
+    idled: bool,
     window: Window,
 }
 
@@ -202,6 +211,8 @@ pub(crate) struct Backends {
     connect: BTreeMap<SocketAddr, ConnectBehaviour>,
     default_window: Window,
     upstreams: BTreeMap<UpstreamId, Upstream>,
+    /// Connections that ever held an upstream (`note_holders`).
+    served: BTreeSet<ConnId>,
     /// The upstream receive buffer's capacity for this config, by the
     /// documented formula `max(16 KiB, max_head)`.
     pub(crate) recv_bound: usize,
@@ -218,6 +229,7 @@ impl Backends {
             connect: BTreeMap::new(),
             default_window: Window::Unlimited,
             upstreams: BTreeMap::new(),
+            served: BTreeSet::new(),
             recv_bound: limits.max_head.max(16 * 1024),
             head_bound: limits.max_head + limits.max_headers + 128,
             forwarded_limits: HeadLimits {
@@ -350,6 +362,12 @@ impl Sim {
         self.upstream(up).conn
     }
 
+    /// Who holds upstream `up` now, as the core reports it: a connection,
+    /// the idle pool (FR-PROXY-02), or nobody once it is closed.
+    pub fn upstream_holder(&self, up: UpstreamId) -> Option<UpstreamHolder> {
+        self.core.upstream_holder(up)
+    }
+
     /// The backend upstream `up` was connected to.
     pub fn upstream_backend(&self, up: UpstreamId) -> BackendId {
         self.upstream(up).backend
@@ -478,6 +496,11 @@ impl Sim {
         let bytes = pending[..n].to_vec();
         let limits = self.backends.forwarded_limits;
         let u = self.upstream_mut(up);
+        // A reused connection carries the next request (FR-PROXY-02).
+        if u.idled && u.forwarded == Forwarded::Done {
+            u.forwarded = Forwarded::new();
+            u.idled = false;
+        }
         u.window.take(n);
         u.received.extend_from_slice(&bytes);
         if let Err(what) = u.forwarded.feed(&bytes, &limits) {
@@ -512,12 +535,11 @@ impl Sim {
                         up.0, backend.0
                     ));
                 };
-                if let Some((other, _)) = self
-                    .backends
-                    .upstreams
-                    .iter()
-                    .find(|(_, u)| u.conn == conn && u.phase != Phase::Closed)
-                {
+                let core = &self.core;
+                if let Some((other, _)) = self.backends.upstreams.iter().find(|(id, u)| {
+                    u.phase != Phase::Closed
+                        && core.upstream_holder(**id) == Some(UpstreamHolder::Conn(conn))
+                }) {
                     self.violation(&format!(
                         "Connect up={} while conn={} still has up={} open",
                         up.0, conn.0, other.0
@@ -542,6 +564,7 @@ impl Sim {
                         reset: Reset::No,
                         received: Vec::new(),
                         forwarded: Forwarded::new(),
+                        idled: false,
                         window,
                     },
                 );
@@ -579,19 +602,52 @@ impl Sim {
 
     /// The upstream invariants that hold after every step.
     pub(crate) fn check_upstreams(&mut self) {
-        let open: Vec<(UpstreamId, ConnId, Interest)> = self
+        let open: Vec<(UpstreamId, Interest)> = self
             .backends
             .upstreams
             .iter()
             .filter(|(_, u)| u.phase != Phase::Closed)
-            .map(|(id, u)| (*id, u.conn, u.interest))
+            .map(|(id, u)| (*id, u.interest))
             .collect();
-        for (up, conn, interest) in open {
-            if self.conn(conn).state == SimConnState::Closed {
-                self.violation(&format!(
-                    "up={} left open after conn={} closed",
-                    up.0, conn.0
-                ));
+        let mut held: BTreeMap<ConnId, UpstreamId> = BTreeMap::new();
+        for (up, interest) in open {
+            match self.core.upstream_holder(up) {
+                Some(UpstreamHolder::Conn(conn)) => {
+                    if self.conn(conn).state == SimConnState::Closed {
+                        self.violation(&format!(
+                            "up={} left open after conn={} closed",
+                            up.0, conn.0
+                        ));
+                    }
+                    if let Some(other) = held.insert(conn, up) {
+                        self.violation(&format!(
+                            "conn={} holds up={} and up={} at once",
+                            conn.0, other.0, up.0
+                        ));
+                    }
+                }
+                // Idle in the pool (FR-PROXY-02): only after a complete
+                // request, and watched for any byte or end of stream.
+                Some(UpstreamHolder::Pool) => {
+                    let u = self.upstream_mut(up);
+                    u.idled = true;
+                    if u.forwarded != Forwarded::Done || u.phase != Phase::Connected {
+                        self.violation(&format!(
+                            "up={} is idle in the pool before its request was complete",
+                            up.0
+                        ));
+                    }
+                    if interest != Interest::Read {
+                        self.violation(&format!(
+                            "up={} is idle with interest {interest:?}, not Read",
+                            up.0
+                        ));
+                    }
+                }
+                None => self.violation(&format!(
+                    "up={} is open in the sim but unknown to the core",
+                    up.0
+                )),
             }
             // The capacities follow from the config alone; the core's own
             // report must agree with them.
@@ -707,8 +763,25 @@ impl Sim {
         }
     }
 
-    /// Whether `conn` ever had an upstream.
+    /// Record every connection the core reports holding an upstream now
+    /// (a reused one included, FR-PROXY-02).
+    pub(crate) fn note_holders(&mut self) {
+        let held: Vec<ConnId> = self
+            .backends
+            .upstreams
+            .keys()
+            .filter_map(|up| match self.core.upstream_holder(*up) {
+                Some(UpstreamHolder::Conn(conn)) => Some(conn),
+                Some(UpstreamHolder::Pool) | None => None,
+            })
+            .collect();
+        self.backends.served.extend(held);
+    }
+
+    /// Whether `conn` ever had an upstream: opened one, or held a reused
+    /// one (as of the last `note_holders`).
     pub(crate) fn ever_proxied(&self, conn: ConnId) -> bool {
-        self.backends.upstreams.values().any(|u| u.conn == conn)
+        self.backends.served.contains(&conn)
+            || self.backends.upstreams.values().any(|u| u.conn == conn)
     }
 }

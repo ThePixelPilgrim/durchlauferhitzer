@@ -8,6 +8,7 @@
 mod conns;
 mod contract;
 mod limits;
+mod pool;
 mod proxy;
 mod relay;
 mod request;
@@ -37,7 +38,7 @@ use crate::routing::Router;
 use crate::time::Instant;
 #[cfg(doc)]
 use crate::upstream::BackendId;
-use crate::upstream::{UpstreamId, UpstreamTable, head_capacity, recv_capacity};
+use crate::upstream::{UpstreamHolder, UpstreamId, UpstreamTable, head_capacity, recv_capacity};
 use conns::Conns;
 
 pub use contract::{Action, ConnError, ConnId, Event, Interest};
@@ -190,6 +191,10 @@ impl Core {
     }
 
     fn dispatch(&mut self, now: Instant, event: Event, actions: &mut Vec<Action>) {
+        // An idle pooled upstream serves no connection (FR-PROXY-02).
+        if self.idle_event(&event, actions) {
+            return;
+        }
         match event {
             Event::Accepted { conn, peer } => self.accepted(now, conn, peer, actions),
             Event::Received { conn, len } => self.received(now, conn, len, actions),
@@ -293,10 +298,10 @@ impl Core {
                 ConnState::Relaying { body, buffers, .. } => {
                     if !c.send.is_empty() {
                         &c.send
-                    } else if buffers.head.is_empty() {
-                        body.unsent(&buffers.recv)
+                    } else if buffers.head_pending() {
+                        buffers.head_unsent()
                     } else {
-                        &buffers.head
+                        body.unsent(&buffers.recv)
                     }
                 }
                 ConnState::ReadingHead { .. }
@@ -388,7 +393,7 @@ impl Core {
             ConnState::Relaying { buffers, .. } => {
                 if !c.send.is_empty() {
                     SEND_CAPACITY
-                } else if buffers.head.is_empty() {
+                } else if !buffers.head_pending() {
                     buffers.recv.len()
                 } else {
                     self.head_capacity
@@ -413,6 +418,11 @@ impl Core {
     /// If the driver writes any bytes into it, it reports them with
     /// [`Event::UpstreamReceived`] for `up` as the very next `handle` call.
     pub fn upstream_recv_buffer(&mut self, up: UpstreamId) -> &mut [u8] {
+        // An idle upstream has no buffer of its own: what it reads is
+        // discarded (and closes it), like a lingering connection's input.
+        if self.upstreams.is_idle(up) {
+            return &mut self.scratch;
+        }
         let Some(conn) = self.upstreams.conn(up) else {
             return &mut [];
         };
@@ -456,10 +466,10 @@ impl Core {
                 request,
                 ..
             } if *own == up => {
-                if buffers.head.is_empty() {
-                    request.body.unsent(&c.recv)
+                if buffers.head_pending() {
+                    buffers.head_unsent()
                 } else {
-                    &buffers.head
+                    request.body.unsent(&c.recv)
                 }
             }
             ConnState::AwaitingResponse { .. }
@@ -474,21 +484,35 @@ impl Core {
         }
     }
 
+    /// Who holds upstream `up`: the connection whose exchange it serves,
+    /// or the idle pool (FR-PROXY-02); `None` for unknown or closed
+    /// upstreams. For drivers' invariant checks, not for I/O.
+    #[doc(hidden)]
+    pub fn upstream_holder(&self, up: UpstreamId) -> Option<UpstreamHolder> {
+        self.upstreams.holder(up)
+    }
+
     /// Capacity of upstream `up`'s receive buffer; 0 for unknown or closed
     /// upstreams. For drivers' invariant checks (the simulation), not for
     /// I/O.
     #[doc(hidden)]
     pub fn upstream_recv_capacity(&self, up: UpstreamId) -> usize {
-        self.upstreams
-            .conn(up)
-            .map_or(0, |_| self.upstream_recv_capacity)
+        if self.upstreams.is_open(up) {
+            self.upstream_recv_capacity
+        } else {
+            0
+        }
     }
 
     /// Capacity of upstream `up`'s send buffer; 0 for unknown or closed
     /// upstreams. For drivers' invariant checks, not for I/O.
     #[doc(hidden)]
     pub fn upstream_send_capacity(&self, up: UpstreamId) -> usize {
-        self.upstreams.conn(up).map_or(0, |_| self.head_capacity)
+        if self.upstreams.is_open(up) {
+            self.head_capacity
+        } else {
+            0
+        }
     }
 
     /// While upstream `up` is relaying a body: how many body bytes of its
@@ -538,9 +562,17 @@ impl Core {
     }
 
     /// The earliest instant at which the core wants [`Event::TimerFired`],
-    /// or `None` if it has no connections (every connection has a deadline).
-    /// Read from the deadline index (`conns.rs`), not a scan.
+    /// or `None` if it has no connections and no idle pooled upstreams
+    /// (every connection has a deadline, and so has every idle upstream,
+    /// FR-PROXY-02). Read from the deadline indexes (`conns.rs` and the
+    /// pool's), not a scan.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.conns.next_deadline()
+        match (
+            self.conns.next_deadline(),
+            self.upstreams.next_idle_deadline(),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 }

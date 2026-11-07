@@ -13,7 +13,7 @@ use super::{fixed, only_upstream, peer, request};
 /// A proxy route next to a static one.
 const MIXED: &str = "listen 127.0.0.1:8080;
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
   path / { static /srv; }
 }";
 
@@ -90,7 +90,7 @@ fn http10_ignores_expect() {
 const SHORT: &str = "listen 127.0.0.1:8080;
 limits { send_idle_timeout 7s; body_idle_timeout 4s; backend_response_timeout 20s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// FR-PROXY-25 (builder call, stage 3 Task 9): a client that never reads
@@ -162,7 +162,7 @@ fn unread_100_continue_stalls_the_body_into_a_408() {
 const SHORT_SEND: &str = "listen 127.0.0.1:8080;
 limits { send_idle_timeout 3s; body_idle_timeout 6s; backend_response_timeout 20s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// FR-PROXY-29: the client's `send_idle_timeout` still applies while the
@@ -230,7 +230,7 @@ fn slowly_read_100_continue_restarts_the_send_idle_timeout() {
 const CAP_FIRST: &str = "listen 127.0.0.1:8080;
 limits { send_idle_timeout 7s; body_idle_timeout 20s; backend_response_timeout 3s; }
 host example.test {
-  path /api { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
+  path /api { proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }
 }";
 
 /// The send idle deadline of an unread `100 Continue` carries over to the
@@ -350,7 +350,7 @@ fn timeouts(send: u64, response: u64, body: u64) -> String {
         "listen 127.0.0.1:8080;
 limits {{ send_idle_timeout {send}s; backend_response_timeout {response}s; body_idle_timeout {body}s; }}
 host example.test {{
-  path /api {{ proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }}
+  path /api {{ proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB; }}
 }}"
     )
 }

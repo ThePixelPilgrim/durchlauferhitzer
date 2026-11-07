@@ -162,13 +162,17 @@ pub(crate) enum ConnState {
     /// send idle timeout while the client has bytes to take or nothing more
     /// is due, the body idle timeout while it waits for the backend's next
     /// bytes. The send idle deadline restarts only when the client takes
-    /// bytes, never on backend progress (FR-CONN-08).
+    /// bytes, never on backend progress (FR-CONN-08). `release` says
+    /// whether the upstream may go to the idle pool once the body is
+    /// complete (FR-PROXY-02).
     Relaying {
         body: RelayBody,
         buffers: ExchangeBuffers,
         persistence: Persistence,
         buffered: usize,
         deadline: Instant,
+        /// What becomes of the upstream once the body is complete.
+        release: Release,
     },
     /// The sending side is shut down; input is read and discarded until the
     /// peer closes or `deadline` passes.
@@ -194,6 +198,42 @@ pub(crate) struct ProxyRequest {
     /// `Continue` when the core answers `100 Continue` once connected: the
     /// request asked for it and has a body (FR-PROXY-25).
     pub(crate) expect: Expect,
+    /// What the request asked of the backend's connection: `KeepAlive` on
+    /// a pooled route for an HTTP/1.1 client, else `Close` (FR-PROXY-02,
+    /// -11). Only a `KeepAlive` request's connection may be reused.
+    pub(crate) toward: Persistence,
+    /// Whether it went out on a connection taken from the idle pool.
+    pub(crate) reuse: Reuse,
+    /// Whether it may be replayed once on a fresh connection if its
+    /// reused one fails before any response byte (FR-PROXY-26).
+    pub(crate) replay: Replay,
+}
+
+/// Whether a proxied request went out on a fresh connection or one taken
+/// from the idle pool (FR-PROXY-02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reuse {
+    Fresh,
+    Pooled,
+}
+
+/// Whether a request may be replayed (FR-PROXY-26): a GET or HEAD without
+/// a body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Replay {
+    Allowed,
+    Never,
+}
+
+/// What becomes of a relayed response's upstream once its body is
+/// complete (FR-PROXY-02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Release {
+    /// The exchange was reusable on both sides: park it in `backend`'s
+    /// idle pool, if nothing unread came with the body's end and the core
+    /// is still serving.
+    Park(BackendId),
+    Close,
 }
 
 impl ConnState {
@@ -309,7 +349,7 @@ impl ConnState {
                 ..
             } => {
                 let room = *filled < buffers.recv.len();
-                let interest = if !buffers.head.is_empty() {
+                let interest = if buffers.head_pending() {
                     Interest::Write
                 } else if request.body.unsent_len() > 0 {
                     // A response may come before the backend takes the
@@ -410,7 +450,7 @@ impl Conn {
                 ref request,
                 ref buffers,
                 ..
-            } if buffers.head.is_empty() => request.body.spare(&mut self.recv),
+            } if !buffers.head_pending() => request.body.spare(&mut self.recv),
             ConnState::Responding { .. }
             | ConnState::OpeningFile { .. }
             | ConnState::SendingFile { .. }
@@ -460,7 +500,7 @@ impl Conn {
             // 51 bytes and fit in this buffer. The check stays as defence.
             ConnState::AwaitingResponse {
                 request, buffers, ..
-            } if buffers.head.is_empty()
+            } if !buffers.head_pending()
                 && request.body.stage() == Stage::Receiving
                 && request.body.spare_len(self.recv.len()) > 0 =>
             {
@@ -469,7 +509,7 @@ impl Conn {
             // Waiting on the backend.
             ConnState::Connecting { .. } | ConnState::AwaitingResponse { .. } => Interest::None,
             ConnState::Relaying { body, buffers, .. } => {
-                if !buffers.head.is_empty() || body.unsent_len() > 0 {
+                if buffers.head_pending() || body.unsent_len() > 0 {
                     Interest::Write
                 } else {
                     Interest::None

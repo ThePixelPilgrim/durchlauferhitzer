@@ -50,6 +50,9 @@ src/
                         stream mid-body, the 408 for a stalled body
     limits.rs           connection counting per peer group (IPv6 by
                         prefix), refusals (503), orphaned opens
+    pool.rs             backend connection pooling: parking a reusable
+                        upstream, idle hygiene and timeouts, drains, the
+                        max_connections budget, the safe retry
     shutdown.rs         DrainTarget, begin_drain, abort_all, is_drained;
                         the 503 for requests completed during a shutdown's
                         drain, the restart drain's serving with close
@@ -58,8 +61,11 @@ src/
   conn.rs             per-connection state (ConnState) and buffers
   file.rs             file ids, file metadata/stamps, change policy,
                       `FileFollows` (file data after the send buffer)
-  upstream.rs         upstream and backend ids, open upstreams, the
-                      fixed-size buffers of a proxied exchange
+  upstream.rs         upstream and backend ids, open upstreams and who
+                      holds them, the fixed-size buffers of a proxied
+                      exchange
+  upstream/pool.rs    the idle pool: per backend, LIFO, capped, by
+                      deadline
   request_body.rs     a request body in the client's receive buffer:
                       what is due, unsent, kept as a chunked tail or
                       pipelined after it (fill, drain, refill)
