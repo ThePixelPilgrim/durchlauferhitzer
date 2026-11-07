@@ -486,8 +486,10 @@ Core-generated responses:
     simulation's default; tests that check `Date` set one).
   - The 37 bytes of the line (`Date: ` + 29 + CRLF) fit both bounds of
     NFR-RES-01: the largest rendered fixed response or file head (a
-    200-byte content type and a 20-digit length) is 362 bytes, 387 behind
-    a queued `100 Continue`, within the 1 KiB send buffer; toward the
+    200-byte content type, a 20-digit length and the longest `ETag` and
+    `Last-Modified`) is 451 bytes, 476 behind a queued `100 Continue`
+    (stage 7 review: 362 and 387 before the validators), within the 1 KiB
+    send buffer; toward the
     client a relayed head grows by at most one byte per header line plus
     `connection: close` (19), the `date` line (37) and a substituted
     reason (31), 87 bytes within the head buffer's 128 bytes of slack.

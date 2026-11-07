@@ -1,8 +1,8 @@
 //! Upstreams as the core sees them: backend and upstream ids, which
-//! connection each open upstream serves (or whether it is idle in the
-//! pool, FR-PROXY-02), and the fixed-size buffers of a proxied exchange. The core never touches a backend socket; the driver
-//! connects, reads and writes on its behalf (see the contract in
-//! `core/contract.rs`).
+//! connection each open upstream serves (or whether it is idle in the pool,
+//! FR-PROXY-02), and the fixed-size buffers of a proxied exchange. The core
+//! never touches a backend socket; the driver connects, reads and writes on
+//! its behalf (see the contract in `core/contract.rs`).
 
 mod pool;
 
