@@ -367,7 +367,7 @@ impl ConnState {
                 Some((*up, interest))
             }
             // There is always room behind a chunked tail (at most 35 bytes
-            // of a buffer of at least 16 KiB).
+            // of a buffer of at least 32 KiB).
             ConnState::Relaying { body, .. } => body.upstream().map(|up| {
                 let interest = if body.unsent_len() == 0 {
                     Interest::Read

@@ -332,8 +332,8 @@ fn backend_idle_max_may_not_exceed_max_connections() {
     assert_eq!(top.limits.backend_idle_max, 1024);
 }
 
-/// NFR-RES-01 by hand, for the defaults: receive max(16384, 8192 + 2) +
-/// send 1024; proxy adds upstream receive max(32768, 16384) and the head
+/// NFR-RES-01 by hand, for the defaults: the client's receive buffer
+/// max(16384, 8192 + 2) + send 1024; proxy adds upstream receive max(32768, 16384) and the head
 /// buffer 16384 + 100 + 128.
 #[test]
 fn worst_case_per_connection_for_defaults() {
