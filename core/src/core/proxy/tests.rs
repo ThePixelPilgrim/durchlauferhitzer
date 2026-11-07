@@ -308,7 +308,7 @@ fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
     // buffer constant must be a deliberate spec change.
     let defaults = crate::config::Limits::default();
     assert_eq!(worst_case_per_connection(&defaults, false), 17_408);
-    assert_eq!(worst_case_per_connection(&defaults, true), 50_404);
+    assert_eq!(worst_case_per_connection(&defaults, true), 66_788);
     let get = b"GET /p/f HTTP/1.1\r\nHost: b.test\r\n\r\n";
     for limits in [
         "",

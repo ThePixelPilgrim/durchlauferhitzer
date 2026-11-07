@@ -111,7 +111,7 @@ pub struct Limits {
 ///   (`client_recv_capacity`);
 /// - client send buffer 1 KiB (`conn::SEND_CAPACITY`);
 /// - only when `proxied` (the config has a proxy route) an active exchange
-///   adds the upstream receive buffer `max(16 KiB, max_head)`
+///   adds the upstream receive buffer `max(32 KiB, max_head)`
 ///   (`upstream::recv_capacity`) and the head buffer
 ///   `max_head + max_headers + 128` (`upstream::head_capacity`).
 ///

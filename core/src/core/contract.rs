@@ -355,7 +355,7 @@
 //!   the backend sends after its head is dropped and the upstream closed.
 //!   Interim (1xx) heads are dropped and the next head parsed afresh; more
 //!   than eight in a row are a 502 (FR-PROXY-18). Its capacity is
-//!   `max(16 KiB, max_head)`
+//!   `max(32 KiB, max_head)`
 //!   ([`UPSTREAM_RECV_MIN`]). The upstream's send buffer holds the
 //!   rewritten request head; once that is written, the same buffer holds
 //!   the rewritten response head for the client, which `send_buffer`

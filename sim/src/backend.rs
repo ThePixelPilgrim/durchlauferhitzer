@@ -240,7 +240,7 @@ pub(crate) struct Backends {
     /// A drain or the abort was called: nothing may be parked from now on.
     pub(crate) drained: bool,
     /// The upstream receive buffer's capacity for this config, by the
-    /// documented formula `max(16 KiB, max_head)`.
+    /// documented formula `max(32 KiB, max_head)` (NFR-RES-01).
     pub(crate) recv_bound: usize,
     /// The head buffer's capacity, `max_head + max_headers + 128`.
     pub(crate) head_bound: usize,
@@ -258,7 +258,7 @@ impl Backends {
             served: BTreeSet::new(),
             hold_idle: false,
             drained: false,
-            recv_bound: limits.max_head.max(16 * 1024),
+            recv_bound: limits.max_head.max(32 * 1024),
             head_bound: limits.max_head + limits.max_headers + 128,
             forwarded_limits: HeadLimits {
                 max_request_line: limits.max_head + limits.max_headers + 128,

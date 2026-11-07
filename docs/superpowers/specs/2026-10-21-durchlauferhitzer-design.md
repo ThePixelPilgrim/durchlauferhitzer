@@ -1942,7 +1942,8 @@ Failures, persistence, timeouts:
     `SEND_CAPACITY` (1 KiB); from stage 3 an active proxy exchange adds its
     upstream's receive and send buffers, of fixed capacities (each more
     than 35 bytes). Builder call (stage 3 Task 5): the upstream receive
-    buffer is `max(16 KiB, max_head)` (it holds a whole response head);
+    buffer is `max(32 KiB, max_head)` (it holds a whole response head;
+    16 KiB until the owner decision of 2026-11-07, NFR-PERF-05);
     the send ("head") buffer is `max_head + max_headers + 128`, enough for
     any rewritten head within the limits; it carries the request head to
     the backend, then the response head to the client, since a backend

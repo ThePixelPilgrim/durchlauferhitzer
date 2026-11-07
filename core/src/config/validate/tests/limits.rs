@@ -333,7 +333,7 @@ fn backend_idle_max_may_not_exceed_max_connections() {
 }
 
 /// NFR-RES-01 by hand, for the defaults: receive max(16384, 8192 + 2) +
-/// send 1024; proxy adds upstream receive max(16384, 16384) and the head
+/// send 1024; proxy adds upstream receive max(32768, 16384) and the head
 /// buffer 16384 + 100 + 128.
 #[test]
 fn worst_case_per_connection_for_defaults() {
@@ -341,7 +341,7 @@ fn worst_case_per_connection_for_defaults() {
     assert_eq!(worst_case_per_connection(&limits, false), 16384 + 1024);
     assert_eq!(
         worst_case_per_connection(&limits, true),
-        16384 + 1024 + 16384 + (16384 + 100 + 128)
+        16384 + 1024 + 32768 + (16384 + 100 + 128)
     );
     // A large max_head dominates every term; a tiny one is floored.
     let big = Limits {
@@ -360,7 +360,7 @@ fn worst_case_per_connection_for_defaults() {
     assert_eq!(worst_case_per_connection(&tiny, false), 102 + 1024);
     assert_eq!(
         worst_case_per_connection(&tiny, true),
-        102 + 1024 + 16384 + (100 + 100 + 128)
+        102 + 1024 + 32768 + (100 + 100 + 128)
     );
 }
 
@@ -413,7 +413,7 @@ fn memory_budget_is_enforced_at_the_limits_block() {
 #[test]
 fn memory_budget_counts_proxy_terms_only_with_a_proxy_route() {
     let limits = "limits {\n  max_connections 1000;\n  max_connections_per_ip 1;\n  memory_limit 20MiB;\n}\n";
-    // 1000 * 17408 = 17.4 MB fits in 20 MiB; with proxy 1000 * 50404 does not.
+    // 1000 * 17408 = 17.4 MB fits in 20 MiB; with proxy 1000 * 66788 does not.
     ok(&cfg(&format!(
         "{limits}host a {{ path / {{ static /s; }} }}\n"
     )));
@@ -424,7 +424,7 @@ fn memory_budget_counts_proxy_terms_only_with_a_proxy_route() {
         err(&cfg(&proxied)),
         (
             ConfigErrorKind::MemoryBudget {
-                needed: 1000 * 50404,
+                needed: 1000 * 66788,
                 limit: 20 << 20
             },
             2,
@@ -450,7 +450,7 @@ fn memory_budget_without_a_limits_block_is_checked_at_the_first_host() {
         check_memory_budget(&small, first_host),
         Err(ConfigError {
             kind: ConfigErrorKind::MemoryBudget {
-                needed: 1024 * 50404,
+                needed: 1024 * 66788,
                 limit: 1 << 20
             },
             pos: first_host

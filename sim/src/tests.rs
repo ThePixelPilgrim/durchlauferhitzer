@@ -313,10 +313,10 @@ fn long_response_chunked_tail_is_a_violation() {
 }
 
 #[test]
-#[should_panic(expected = "offers a body read of 16380 bytes behind a 3-byte tail, not the rest")]
+#[should_panic(expected = "offers a body read of 32764 bytes behind a 3-byte tail, not the rest")]
 fn short_read_behind_a_response_tail_is_a_violation() {
     let (sim, _, up) = connecting();
-    sim.check_upstream_view(up, &tail_view(16380, 0, 3));
+    sim.check_upstream_view(up, &tail_view(32764, 0, 3));
 }
 
 #[test]
@@ -328,17 +328,17 @@ fn read_offered_with_unsent_body_bytes_is_a_violation() {
 }
 
 #[test]
-#[should_panic(expected = "offers a body read of 16383 bytes behind a 0-byte tail, not the rest")]
+#[should_panic(expected = "offers a body read of 32767 bytes behind a 0-byte tail, not the rest")]
 fn partial_body_read_is_a_violation() {
     let (sim, _, up) = connecting();
-    sim.check_upstream_view(up, &body_view(16383, 0));
+    sim.check_upstream_view(up, &body_view(32767, 0));
 }
 
 #[test]
-#[should_panic(expected = "up=1 upstream_recv_buffer 16385 bytes exceeds capacity 16384")]
+#[should_panic(expected = "up=1 upstream_recv_buffer 32769 bytes exceeds capacity 32768")]
 fn upstream_recv_buffer_over_capacity_is_a_violation() {
     let (sim, _, up) = connecting();
-    let mut view = body_view(16385, 0);
+    let mut view = body_view(32769, 0);
     view.body_pending = None;
     sim.check_upstream_view(up, &view);
 }

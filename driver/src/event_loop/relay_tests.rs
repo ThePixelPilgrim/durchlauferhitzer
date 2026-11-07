@@ -14,7 +14,7 @@ use super::{Driver, Exit};
 use crate::log::LogSink;
 use crate::sys::socket::{Probe, local_addr, tcp_listen};
 
-/// The relayed body: 64 chunks of the 16 KiB upstream buffer.
+/// The relayed body: 32 chunks of the 32 KiB upstream buffer.
 const BODY: usize = 1024 * 1024;
 
 /// A keep-alive backend answering every request head with a `BODY`-byte
@@ -73,7 +73,7 @@ fn fetch(client: &mut TcpStream) {
     }
 }
 
-/// Today's relay re-armed both sockets for every 16 KiB chunk (about 4
+/// The relay used to re-arm both sockets for every 16 KiB chunk (about 4
 /// `epoll_ctl` per chunk, 263 per MiB in the stage 7 stop measurement).
 /// A kept-alive client and a pooled backend connection relay 1 MiB with a
 /// handful; a few more are allowed for the times a socket really blocks.

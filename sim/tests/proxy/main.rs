@@ -195,7 +195,7 @@ fn large_content_length_body_is_streamed_intact() {
         .collect();
     let (last, full) = reads.split_last().unwrap();
     let capacity = full[0];
-    assert!(capacity >= 16 * 1024, "{capacity}");
+    assert!(capacity >= 32 * 1024, "{capacity}");
     assert!(full.iter().all(|&n| n == capacity), "{reads:?}");
     assert!(*last <= capacity);
     assert_eq!(reads.iter().sum::<usize>(), response.len());

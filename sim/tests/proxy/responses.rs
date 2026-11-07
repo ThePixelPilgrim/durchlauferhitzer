@@ -528,7 +528,7 @@ fn slow_client_large_response_bounded() {
             .map(|(_, len)| len.parse().unwrap())
             .collect();
         let capacity = reads.iter().copied().max().unwrap_or(0);
-        assert!(capacity >= 16 * 1024, "{capacity}");
+        assert!(capacity >= 32 * 1024, "{capacity}");
         let behind_a_tail = reads.split_last().map_or(0, |(_, full)| {
             full.iter().filter(|&&n| n < capacity).count()
         });

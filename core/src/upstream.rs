@@ -21,13 +21,14 @@ pub struct UpstreamId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BackendId(pub u32);
 
-/// The least capacity of an upstream's receive buffer (16 KiB). The buffer
+/// The least capacity of an upstream's receive buffer (32 KiB; owner
+/// decision 2026-11-07, NFR-PERF-05: 16 KiB until stage 7). The buffer
 /// holds a whole response head, so it is never smaller than `max_head`
 /// (see [`recv_capacity`]); body bytes are relayed straight out of it,
 /// fill, drain, refill (NFR-RES-04), so it is also the largest piece of a
 /// body in flight per exchange. Well above the 35 bytes NFR-RES-04
 /// requires.
-pub(crate) const UPSTREAM_RECV_MIN: usize = 16 * 1024;
+pub(crate) const UPSTREAM_RECV_MIN: usize = 32 * 1024;
 
 // NFR-RES-04: every body buffer holds more than a chunked-framing tail.
 const _: () = assert!(UPSTREAM_RECV_MIN > 35);

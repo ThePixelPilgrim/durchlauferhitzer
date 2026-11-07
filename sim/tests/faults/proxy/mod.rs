@@ -108,11 +108,11 @@ impl NetConfig {
         self.max_head.max(MAX_REQUEST_LINE + 2)
     }
 
-    /// An upstream's receive buffer, by NFR-RES-01: `max(16 KiB,
+    /// An upstream's receive buffer, by NFR-RES-01: `max(32 KiB,
     /// max_head)`. Only bytes within it can arrive together with a
     /// response head.
     pub(crate) fn upstream_recv_capacity(&self) -> usize {
-        self.max_head.max(16 * 1024)
+        self.max_head.max(32 * 1024)
     }
 
     pub(crate) fn random(rng: &mut fastrand::Rng) -> NetConfig {
