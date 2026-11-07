@@ -123,7 +123,7 @@ Nightly dispatch on `main` with `bench_netem=true`, run 42398454271 (job `bench 
 
 \* About 400 requests per window: CPU quantized to 10 ms ticks (runs 50, 75, 100).
 
-Recovery after the 2 s pause: static-large 1000 ×3 ms (longest gap 3.11 s), proxy-small 1250 ×3 ms (3.33 s), proxy-large 1000, 1050, 1050 ms (3.15 s).
+Recovery after the 2 s pause: static-large 1000 ms in all 3 runs (longest gap 3.11 s), proxy-small 1250 ms in all 3 runs (3.33 s), proxy-large 1000, 1050, 1050 ms (3.15 s).
 
 **The target holds:** no run had errors under any setting, and every recovery is within 1.5 s (at most 1.25 s). Throughput matches the 16 and 64 KiB runs (TCP-bound), and proxy-large syscalls sit between them (78 under delay, against 144.5 and 44.6), as the local 32 KiB numbers predicted.
 
