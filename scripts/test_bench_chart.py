@@ -104,6 +104,13 @@ class Validation(unittest.TestCase):
             row("2026-11-06", "static-small", 1, 1, commit="ABC1234"),
             row("2026-11-06", "static-small", 1, 1, runner="<img src=x>"),
             row("2026-11-06", "static-small", 1, 1, runner="[x](https://evil)"),
+            # Good first characters, bad later ones: only a whole-field
+            # match (`fullmatch`, not `match`) drops these.
+            row("2026-11-06", "static-small", 1, 1, commit="abc1234`x"),
+            row("2026-11-06", "static-small", 1, 1, commit="abc1234 <b>"),
+            row("2026-11-06", "static-small", 1, 1, runner="gha-ok](https://evil)"),
+            row("2026-11-06", "static-small", 1, 1, runner="gha-ok<img src=x>"),
+            row("2026-11-06x", "static-small", 1, 1),
             row("2026-11-06", "static-small", "nan", 1),
             row("2026-11-06", "static-small", "inf", 1),
             row("2026-11-06", "static-small", "-1", 1),
