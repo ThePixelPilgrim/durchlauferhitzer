@@ -1,10 +1,10 @@
 //! Backend connection pooling and the safe retry (FR-PROXY-02,
 //! FR-PROXY-26).
 //!
-//! - **Reuse.** A request on a pooled route from an HTTP/1.1 client asks
-//!   the backend to keep its connection (no `Connection: close`) and takes
-//!   the backend's newest idle connection, if any (`forward` in
-//!   `proxy.rs`). Its upstream goes back to the pool once the response is
+//! - **Reuse.** A request on a pooled route from an HTTP/1.1 client, while
+//!   serving, asks the backend to keep its connection (no `Connection:
+//!   close`; in a restart's drain it says close) and takes the backend's
+//!   newest idle connection, if any (`forward` in `proxy.rs`). Its upstream goes back to the pool once the response is
 //!   complete and reusable on both sides: the whole request was written,
 //!   the response is HTTP/1.1 without `close`, framed by
 //!   `Content-Length` or chunked (or `Content-Length: 0`; never a
@@ -15,8 +15,8 @@
 //!   driver checks it has nothing to read (`Action::CheckSilent`, one
 //!   non-blocking peek; owner decision 2026-11-07): stray bytes a buggy
 //!   backend sent after a response never become the next response. A
-//!   failed check closes it and the request connects afresh
-//!   ([`Core::reconnect`]).
+//!   failed check closes it and the request connects afresh, logged as
+//!   [`Log::BackendNotSilent`] ([`Core::reconnect`]).
 //! - **Idle.** An idle upstream holds no buffer; it is read into the
 //!   shared scratch buffer, and any byte, end of stream or error closes it
 //!   ([`Core::idle_event`], Review Focus 1). At most `backend_idle_max`
@@ -141,8 +141,8 @@ impl Core {
     }
 
     /// The pooled upstream `conn` was to reuse is not silent (its
-    /// `CheckSilent` failed): close it and connect afresh with the whole
-    /// request, nothing sent, nothing logged (FR-PROXY-02).
+    /// `CheckSilent` failed): log it, close it and connect afresh with the
+    /// whole request, nothing sent (FR-PROXY-02).
     pub(super) fn reconnect(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
         let limits = &self.config.limits;
         let connect_deadline = now.saturating_add(limits.backend_connect_timeout);
@@ -152,6 +152,12 @@ impl Core {
         let Some((dead, mut request, buffers)) = take_exchange(c) else {
             return;
         };
+        actions.push(Action::Log(Log::BackendNotSilent {
+            conn,
+            peer: c.peer,
+            backend: request.backend,
+            request: request.summary.clone(),
+        }));
         close_upstream(&mut self.upstreams, dead, actions);
         make_room(&mut self.upstreams, limits, actions);
         request.reuse = Reuse::Fresh;
@@ -210,6 +216,7 @@ impl Core {
             peer: c.peer,
             backend: request.backend,
             kind,
+            request: request.summary.clone(),
         }));
         close_upstream(&mut self.upstreams, dead, actions);
         make_room(&mut self.upstreams, limits, actions);

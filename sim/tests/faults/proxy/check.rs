@@ -226,6 +226,46 @@ pub(crate) fn check_story(
             sim.trace()
         )
     };
+    // A failed silence check (FR-PROXY-02) is logged with the request
+    // that was to reuse the connection, before what its fresh connection
+    // brings: one of the story's forwarded requests, to its route's
+    // backend, and at least one for each check the net saw fail. The
+    // exchanges are judged without them.
+    let mut not_silent = 0;
+    let mut k = 0;
+    while k < logs.len() {
+        let Log::BackendNotSilent {
+            backend, request, ..
+        } = &logs[k]
+        else {
+            k += 1;
+            continue;
+        };
+        let named = story.exchanges.iter().any(|ex| {
+            let forwarded = matches!(
+                ex.req.verdict,
+                Verdict::Forward(_) | Verdict::BadBody { .. }
+            );
+            forwarded
+                && ex.req.summary == *request
+                && ex.route.map(|r| net.routes[r].backend) == Some(*backend)
+        });
+        if !named {
+            fail(format!(
+                "logged {:?}, which names no forwarded request of the story",
+                logs[k]
+            ));
+        }
+        logs.remove(k);
+        phases.remove(k);
+        not_silent += 1;
+    }
+    let busy = story.runs.iter().filter(|r| r.busy).count();
+    if not_silent < busy {
+        fail(format!(
+            "{busy} silence checks failed, but {not_silent} were logged"
+        ));
+    }
     // The abort cut the story: its last log says so (FR-PROC-05c), and
     // what came before it may stop anywhere.
     let aborted = phases.last() == Some(&Phase::AbortCut);
@@ -324,7 +364,16 @@ pub(crate) fn check_story(
             ));
         }
         let base = if marks.shut_down() {
-            drain_alts(ex, &who, net, marks, phases.get(first).copied())
+            let start: usize = story.exchanges[..i].iter().map(Exchange::send_len).sum();
+            let read_before = marks.read_at_drain(story.conn).is_some_and(|r| r > start);
+            drain_alts(
+                ex,
+                &who,
+                net,
+                marks,
+                phases.get(first).copied(),
+                read_before,
+            )
         } else {
             ex.alts.clone()
         };
@@ -412,7 +461,8 @@ pub(crate) fn check_story(
             | Log::FileAborted { .. }
             | Log::ProxiedResponse { .. }
             | Log::BackendFailed { .. }
-            | Log::BackendRetried { .. } => None,
+            | Log::BackendRetried { .. }
+            | Log::BackendNotSilent { .. } => None,
         };
         if let Log::Rejected {
             reason:

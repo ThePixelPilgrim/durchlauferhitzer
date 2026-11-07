@@ -63,6 +63,7 @@ pub(crate) fn cuts(log: &Log, phase: Phase) -> CutOff {
         Log::Response { .. }
         | Log::BackendFailed { .. }
         | Log::BackendRetried { .. }
+        | Log::BackendNotSilent { .. }
         | Log::ProxiedResponse { .. } => false,
     };
     if cut { CutOff::Yes } else { CutOff::No }

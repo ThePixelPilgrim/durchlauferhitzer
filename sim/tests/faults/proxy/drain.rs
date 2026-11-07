@@ -108,11 +108,30 @@ fn refused_alt(ex: &Exchange, who: &Who) -> Alt {
 }
 
 /// The model's outcomes of `ex` for a client that closes after it: its
-/// head rendered during the drain says `Connection: close` (the backend
-/// side is unchanged, it was decided before), tagged `tag`.
-fn closing_alts(ex: &Exchange, who: &Who, net: &NetConfig, tag: &'static str) -> Vec<Alt> {
+/// head rendered during the drain says `Connection: close`, tagged `tag`.
+/// With `backend_close` (a request forwarded during a restart's drain,
+/// stage 7 review) the head toward the backend says `connection: close`
+/// too; otherwise the backend side is unchanged, decided before.
+fn closing_alts(
+    ex: &Exchange,
+    who: &Who,
+    net: &NetConfig,
+    tag: &'static str,
+    backend_close: bool,
+) -> Vec<Alt> {
     let mut req = ex.req.clone();
     req.persistence = Persistence::Close;
+    if backend_close {
+        if let Verdict::Forward(fwd) | Verdict::BadBody { fwd, .. } = &mut req.verdict {
+            const CLOSE: &[u8] = b"connection: close\r\n";
+            let head = &fwd.bytes[..fwd.head_len];
+            if !head.ends_with(b"connection: close\r\n\r\n") {
+                let end = fwd.head_len - 2;
+                fwd.bytes.splice(end..end, CLOSE.iter().copied());
+                fwd.head_len += CLOSE.len();
+            }
+        }
+    }
     if let Verdict::Answer(status, _) = req.verdict {
         req.verdict = Verdict::Answer(status, Persistence::Close);
     }
@@ -142,13 +161,15 @@ fn closing_alts(ex: &Exchange, who: &Who, net: &NetConfig, tag: &'static str) ->
 }
 
 /// The outcomes `ex` may have once the drain (of `marks`) began, given
-/// that its first log (if any) was written in `phase`.
+/// that its first log (if any) was written in `phase` and whether the
+/// core had read any of its request by then (`read_before`).
 pub(crate) fn drain_alts(
     ex: &Exchange,
     who: &Who,
     net: &NetConfig,
     marks: &Marks,
     phase: Option<Phase>,
+    read_before: bool,
 ) -> Vec<Alt> {
     match phase {
         Some(Phase::Serving) => return ex.alts.clone(),
@@ -158,9 +179,17 @@ pub(crate) fn drain_alts(
         return match &ex.req.verdict {
             // Its own error, which closes (FR-PROC-05b).
             Verdict::Parse(_) => ex.alts.clone(),
-            // Served as usual, its head saying close (FR-PROC-07).
+            // Served as usual, its head saying close (FR-PROC-07); a
+            // request forwarded during the drain tells the backend to
+            // close too, and one the core had not begun to read by then
+            // can only be forwarded during it.
             Verdict::Answer(..) | Verdict::Forward(_) | Verdict::BadBody { .. } => {
-                closing_alts(ex, who, net, "restart: served with close")
+                let tag = "restart: served with close";
+                let mut out = closing_alts(ex, who, net, tag, true);
+                if read_before {
+                    out.extend(closing_alts(ex, who, net, tag, false));
+                }
+                out
             }
         };
     }
@@ -172,7 +201,7 @@ pub(crate) fn drain_alts(
         // the 503.
         Verdict::Parse(_) => ex.alts.clone(),
         Verdict::Forward(_) | Verdict::BadBody { .. } => {
-            let mut out = closing_alts(ex, who, net, "drain: closing head");
+            let mut out = closing_alts(ex, who, net, "drain: closing head", false);
             out.push(refused_alt(ex, who));
             out
         }

@@ -187,24 +187,26 @@ impl Story {
         // dead connection's (`pool.rs`).
         let (mut bytes, mut logs) = (0, 0);
         for (ex, run) in self.exchanges[..=i].iter().zip(&self.runs) {
-            let first = match run.reused {
+            let first = if run.reused.is_some() {
                 // Not yet what the spec says (a retry still to come): not
                 // resolved.
-                Some(_) => match reuse_alts(ex.alts.clone(), ex, run, &who, net, false) {
+                match reuse_alts(ex.alts.clone(), ex, run, &who, net, false) {
                     Ok(alts) => alts.into_iter().next(),
                     Err(_) => return false,
-                },
-                None => ex.alts.first().cloned(),
+                }
+            } else {
+                ex.alts.first().cloned()
             };
             if let Some(alt) = first {
                 bytes += alt.bytes.len();
                 logs += alt.logs.len();
             }
         }
+        // A failed silence check's log is no exchange's (`check_story`).
         let logged = sim
             .logs()
             .iter()
-            .filter(|l| conn_of(l) == self.conn)
+            .filter(|l| conn_of(l) == self.conn && !matches!(l, Log::BackendNotSilent { .. }))
             .count();
         self.received.len() >= bytes && logged >= logs
     }
@@ -279,8 +281,18 @@ impl Story {
         let Verdict::Forward(fwd) = &ex.req.verdict else {
             return None;
         };
+        // A request forwarded during a restart's drain says close toward
+        // the backend (`drain.rs`): its head is that much longer.
+        const CLOSE: &[u8] = b"connection: close\r\n\r\n";
+        let extra = usize::from(
+            !fwd.bytes[..fwd.head_len].ends_with(CLOSE)
+                && run
+                    .got
+                    .get(..fwd.head_len + CLOSE.len() - 2)
+                    .is_some_and(|head| head.ends_with(CLOSE)),
+        ) * (CLOSE.len() - 2);
         let trigger = match ex.timing {
-            Timing::Early { .. } => fwd.head_len,
+            Timing::Early { .. } => fwd.head_len + extra,
             Timing::Eager => 0,
             Timing::Normal
             | Timing::ConnectHang
@@ -290,7 +302,7 @@ impl Story {
             | Timing::BackendBodyStall(_)
             | Timing::RelayStall(_)
             | Timing::ClientStall
-            | Timing::HeadDuringUpload { .. } => fwd.bytes.len(),
+            | Timing::HeadDuringUpload { .. } => fwd.bytes.len() + extra,
         };
         (run.got.len() >= trigger).then_some(Step::Backend(i, script_target(script)))
     }
@@ -718,7 +730,8 @@ pub(crate) fn conn_of(log: &Log) -> ConnId {
         | Log::FileAborted { conn, .. }
         | Log::ProxiedResponse { conn, .. }
         | Log::BackendFailed { conn, .. }
-        | Log::BackendRetried { conn, .. } => *conn,
+        | Log::BackendRetried { conn, .. }
+        | Log::BackendNotSilent { conn, .. } => *conn,
     }
 }
 
@@ -889,6 +902,24 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         })
         .collect();
     check_full_house(&mut sim, &shutdown.marks, &peers);
+    // Each failed silence check is logged once, with the request that was
+    // to reuse the connection (`check_story` judges what it names).
+    let busy = sim
+        .idle_closes()
+        .get(&IdleClose::Busy)
+        .copied()
+        .unwrap_or(0);
+    let logged = sim
+        .logs()
+        .iter()
+        .filter(|l| matches!(l, Log::BackendNotSilent { .. }))
+        .count();
+    assert_eq!(
+        logged,
+        busy,
+        "{busy} pooled connections failed their silence check, {logged} were logged\ntrace:\n{}",
+        sim.trace()
+    );
     for (cause, n) in sim.idle_closes() {
         let what = match cause {
             IdleClose::Byte => "pool: idle close by byte",

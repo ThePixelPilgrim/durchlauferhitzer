@@ -664,7 +664,10 @@ Forwarding and identity:
   upstreams are open first closes the oldest idle one, so the descriptor
   budget (NFR-RES-05) keeps its bound. Both drains (FR-PROC-05, -07)
   close the idle pool at once; while draining nothing is parked or taken
-  from it, and nothing is retried (a stale connection is a 502 then). An
+  from it, and nothing is retried (a stale connection is a 502 then); a
+  request forwarded during a drain (a restart's) asks the backend to
+  close, `Connection: close`, since its upstream closes after it (stage 7
+  review). An
   exchange in flight on a pooled connection finishes or is cut as
   before. *(Owner decision 2026-11-07, stage 7 Task 5 review; security
   trumps performance:)* a buggy backend's stray bytes after a complete
@@ -673,7 +676,8 @@ Forwarding and identity:
   on a reused connection, the connection must be silent (one
   non-blocking peek; any byte, end of stream or error closes it and the
   request connects fresh — safe for every method, since nothing was sent
-  yet), and a connection is never pooled after a response to HEAD or a
+  yet; logged as `BackendNotSilent`, FR-LOG-02, stage 7 review), and a
+  connection is never pooled after a response to HEAD or a
   204 or 304. *Residual limit, inherent to HTTP/1.1 pooling:* stray bytes
   that arrive only after the next request was written are parsed as its
   response. An end of stream or reset that arrives late is harmless: the
@@ -1163,9 +1167,14 @@ Failures, persistence, timeouts:
   `Reset`, `FileAborted` (with the file error);
   `ProxiedResponse { status: u16, backend, request }` (a backend's
   response head was queued; its status is any 100–599, so a number rather
-  than one of the core's statuses), `BackendRetried { backend, kind }`
-  (stage 7: a request on a reused connection replayed once after `kind`,
-  FR-PROXY-26) and `BackendFailed { backend, kind }`
+  than one of the core's statuses), `BackendRetried { backend, kind,
+  request }` (stage 7: a request on a reused connection replayed once
+  after `kind`, FR-PROXY-26; the request summary added by the stage 7
+  review), `BackendNotSilent { backend, request }` (stage 7 review: the
+  pooled connection a request was to reuse failed its silence check,
+  FR-PROXY-02, and the request connects afresh; one entry per failed
+  check, so a backend that writes after its responses shows) and
+  `BackendFailed { backend, kind }`
   (`kind` per FR-PROXY-31, `ClosedEarly`, `BodyTimeout`, `BadChunk`,
   `BodyTooLarge` and `TransferEncodingToHttp10` included). A 502 or 504 the core
   generates for a failed backend is a `Response`, preceded by its
@@ -1217,9 +1226,13 @@ Failures, persistence, timeouts:
     - `kind=file_aborted conn peer error`
     - `kind=proxied_response conn peer backend status method [host] path`
     - `kind=backend_failed conn peer backend failure`
-    - `kind=backend_retried conn peer backend failure` (stage 7,
-      FR-PROXY-26: `failure` is why the reused connection was given up,
-      `reset` or `closed_early`)
+    - `kind=backend_retried conn peer backend failure method [host] path`
+      (stage 7, FR-PROXY-26: `failure` is why the reused connection was
+      given up, `reset` or `closed_early`; the request summary since the
+      stage 7 review)
+    - `kind=backend_not_silent conn peer backend method [host] path`
+      (stage 7 review, FR-PROXY-02: the request whose pooled connection
+      failed its silence check)
     - Driver kinds (FR-LOG-07): `kind=accept_failed errno`,
       `kind=socket_failed errno`, `kind=open_failed errno`,
       `kind=register_failed errno`, `kind=dropped count` (FR-LOG-06),

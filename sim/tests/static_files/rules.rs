@@ -69,7 +69,8 @@ pub(crate) fn log_conn(log: &Log) -> ConnId {
         | Log::FileAborted { conn, .. }
         | Log::ProxiedResponse { conn, .. }
         | Log::BackendFailed { conn, .. }
-        | Log::BackendRetried { conn, .. } => *conn,
+        | Log::BackendRetried { conn, .. }
+        | Log::BackendNotSilent { conn, .. } => *conn,
     }
 }
 

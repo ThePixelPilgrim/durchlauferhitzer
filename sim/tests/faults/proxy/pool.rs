@@ -173,6 +173,7 @@ fn replay_of(sim: &Sim, story: &Story) -> Option<(usize, BackendFailure)> {
         .filter_map(|l| match l {
             Log::BackendRetried { conn, kind, .. } if *conn == story.conn => Some(*kind),
             Log::BackendRetried { .. }
+            | Log::BackendNotSilent { .. }
             | Log::Response { .. }
             | Log::Rejected { .. }
             | Log::Reset { .. }
@@ -741,6 +742,7 @@ pub(crate) fn reuse_alts(
                             peer: who.peer,
                             backend: route_backend(ex, net),
                             kind,
+                            request: ex.req.summary.clone(),
                         },
                     );
                     alt.tags = vec!["retry: replayed, failed again"];
@@ -758,6 +760,7 @@ pub(crate) fn reuse_alts(
                         peer: who.peer,
                         backend: route_backend(ex, net),
                         kind,
+                        request: ex.req.summary.clone(),
                     },
                 );
                 alt.tags.push(match &ex.script.as_ref().map(|s| &s.reply) {
