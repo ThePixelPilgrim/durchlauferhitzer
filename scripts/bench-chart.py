@@ -49,6 +49,7 @@ SCENARIOS = (
     "proxy-small",
     "proxy-fresh",
     "conditional-hit",
+    "static-small-1k-idle",
 )
 METRICS = (
     ("cpu_us_per_req", "CPU time per request (µs)", "CPU µs per request"),

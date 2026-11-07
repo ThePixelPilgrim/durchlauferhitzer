@@ -394,8 +394,9 @@ jobs:
     # its strace pass runs as root (`sudo -n`).
     name: bench
     runs-on: ubuntu-24.04
-    # Full budget: 5 runs x 6 scenarios x about 27 s, plus the builds.
-    timeout-minutes: 45
+    # Full budget: 5 runs x 6 scenarios x about 27 s, plus one run of
+    # the 1k-idle scenario (about 30 s), plus the builds.
+    timeout-minutes: 46
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain from rust-toolchain.toml
@@ -416,6 +417,13 @@ jobs:
           export BENCH_RUNNER="gha-ubuntu-24.04-$(uname -m)"
           bench/target/release/bench --binary target/release/durchlauferhitzer \
             --out bench.csv --runs "$BENCH_RUNS" --duration "$BENCH_SECONDS" 2>&1 | tee bench.log
+          # The 1k-idle scenario: one run a night (NFR-PERF-03). The bench
+          # overwrites its --out file, so it writes a second CSV whose rows
+          # (not its header) are appended to bench.csv.
+          bench/target/release/bench --binary target/release/durchlauferhitzer \
+            --out bench-idle.csv --scenarios static-small-1k-idle --runs 1 \
+            --duration "$BENCH_SECONDS" 2>&1 | tee -a bench.log
+          tail -n +2 bench-idle.csv >> bench.csv
       - name: Upload the results
         # Rows with errors too: they are kept, marked, and never charted.
         if: always()

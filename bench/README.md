@@ -38,10 +38,11 @@ client threads), then the strace pass (another `duration`).
 | `proxy-small` | 1 KiB response, keep-alive client |
 | `proxy-fresh` | as `proxy-small`, a new connection per request |
 | `conditional-hit` | `If-None-Match` with the file's `ETag`: 304 expected; 200 while the server sends none |
-| `static-small-1k-idle` | as `static-small`, with 1 000 idle keep-alive connections held open (on demand only) |
+| `static-small-1k-idle` | as `static-small`, with 1 000 idle keep-alive connections held open (nightly: one run) |
 
-Without `--scenarios` all but `static-small-1k-idle` run (the nightly's
-set). That one opens its 1 000 connections before the warm-up (each makes
+Without `--scenarios` all but `static-small-1k-idle` run. The nightly
+runs that one separately, once (`--scenarios static-small-1k-idle --runs 1`,
+its rows appended to the same CSV; NFR-PERF-03). That one opens its 1 000 connections before the warm-up (each makes
 one request, then sends nothing) and holds them through the measured
 window and the strace pass (NFR-PERF-03, NFR-PERF-06); its `rss_kib` is
 the server with them open. Each idle connection the server closed by
