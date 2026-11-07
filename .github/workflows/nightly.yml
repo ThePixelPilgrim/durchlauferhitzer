@@ -422,15 +422,16 @@ jobs:
       - name: Benchmarks
         run: |
           set -euo pipefail
-          export BENCH_COMMIT="${GITHUB_SHA::7}"
+          # The binary was built from the run's commit: the rows' label.
+          commit="${GITHUB_SHA::7}"
           export BENCH_RUNNER="gha-ubuntu-24.04-$(uname -m)"
-          bench/target/release/bench --binary target/release/durchlauferhitzer \
+          bench/target/release/bench --binary target/release/durchlauferhitzer --commit "$commit" \
             --out bench.csv --runs "$BENCH_RUNS" --duration "$BENCH_SECONDS" 2>&1 | tee bench.log
           # The 1k-idle and proxy-large scenarios: one run a night
           # (NFR-PERF-03, NFR-PERF-05). The bench overwrites its --out
           # file, so it writes a second CSV whose rows (not its header)
           # are appended to bench.csv.
-          bench/target/release/bench --binary target/release/durchlauferhitzer \
+          bench/target/release/bench --binary target/release/durchlauferhitzer --commit "$commit" \
             --out bench-idle.csv --scenarios static-small-1k-idle,proxy-large --runs 1 \
             --duration "$BENCH_SECONDS" 2>&1 | tee -a bench.log
           tail -n +2 bench-idle.csv >> bench.csv
@@ -496,9 +497,9 @@ jobs:
           netem() {
             local label=$1 spec=$2 pause=${3:-}
             echo "== netem $label: $spec ${pause:+pause $pause s}"
-            sudo env BENCH_COMMIT="${GITHUB_SHA::7}" \
-              BENCH_RUNNER="gha-ubuntu-24.04-$(uname -m)-netem-$label" \
+            sudo env BENCH_RUNNER="gha-ubuntu-24.04-$(uname -m)-netem-$label" \
               bench/target/release/bench --binary target/release/durchlauferhitzer \
+              --commit "${GITHUB_SHA::7}" \
               --out "netem-$label.csv" --runs "$BENCH_NETEM_RUNS" --duration "$BENCH_SECONDS" \
               --scenarios static-large,proxy-small,proxy-large \
               --netem "$spec" ${pause:+--pause "$pause"} || status=1

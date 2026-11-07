@@ -1,6 +1,6 @@
 //! The command line:
 //! `bench --binary <path> --out <csv> [--runs N] [--duration S] [--scenarios a,b]
-//! [--syscalls-only] [--netem <spec> [--pause S]]`.
+//! [--syscalls-only] [--netem <spec> [--pause S]] [--commit <sha>]`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use crate::scenario::Scenario;
 /// The longest `--duration`, in seconds.
 pub const MAX_DURATION_SECS: f64 = 3600.0;
 
-pub const USAGE: &str = "usage: bench --binary <path> --out <csv> [--runs N] [--duration S] [--scenarios a,b] [--syscalls-only] [--netem <spec> [--pause S]]";
+pub const USAGE: &str = "usage: bench --binary <path> --out <csv> [--runs N] [--duration S] [--scenarios a,b] [--syscalls-only] [--netem <spec> [--pause S]] [--commit <sha>]";
 
 #[derive(Debug, PartialEq)]
 pub struct Args {
@@ -26,6 +26,32 @@ pub struct Args {
     pub netem: Option<String>,
     /// A pause (every packet dropped) inside each measured window.
     pub pause: Option<Duration>,
+    /// The commit `--binary` was built from (the rows' label).
+    pub commit: Option<String>,
+}
+
+/// A commit: 7 to 40 lowercase hex digits.
+fn commit_sha(value: &str) -> Result<String, String> {
+    let ok = (7..=40).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if ok {
+        Ok(value.to_string())
+    } else {
+        Err(format!(
+            "--commit {value:?}: the measured binary's commit, 7 to 40 lowercase hex digits"
+        ))
+    }
+}
+
+/// The rows' commit label: it names the measured binary, so it comes
+/// from `--commit`, else `BENCH_COMMIT` (`env`), else `local`; never
+/// from the checkout the bench runs in, which need not be the binary's.
+pub fn commit_label(flag: Option<&str>, env: Option<&str>) -> String {
+    flag.or(env.filter(|c| !c.is_empty()))
+        .unwrap_or("local")
+        .to_string()
 }
 
 /// A netem spec: words of letters, digits, `.` and `%` (`delay 50ms`,
@@ -53,6 +79,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut syscalls_only = false;
     let mut netem = None;
     let mut pause = None;
+    let mut commit = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         if flag == "--syscalls-only" {
@@ -95,6 +122,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                     .ok_or_else(|| format!("--pause {value}: seconds, above 0, at most 60"))?;
                 pause = Some(Duration::from_secs_f64(secs));
             }
+            "--commit" => commit = Some(commit_sha(&value)?),
             _ => return Err(format!("unknown argument {flag}")),
         }
     }
@@ -113,6 +141,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         syscalls_only,
         netem,
         pause,
+        commit,
     })
 }
 
@@ -166,6 +195,32 @@ mod tests {
             v.extend_from_slice(bad);
             assert!(parse(v.into_iter().map(String::from)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_commit_flag() {
+        let a = args("--binary b --out o --commit 999724c").unwrap();
+        assert_eq!(a.commit.as_deref(), Some("999724c"));
+        assert_eq!(args("--binary b --out o").unwrap().commit, None);
+        let full = "999724c1d9f8eee3e4a147846d1536020cf0b997";
+        let a = args(&format!("--binary b --out o --commit {full}")).unwrap();
+        assert_eq!(a.commit.as_deref(), Some(full));
+        for bad in ["99972", "999724C", "999724g", "local", &format!("{full}0")] {
+            assert!(
+                args(&format!("--binary b --out o --commit {bad}")).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    /// The label names the measured binary: the flag, else
+    /// `BENCH_COMMIT`, else `local` (never the bench's own checkout).
+    #[test]
+    fn the_commit_label() {
+        assert_eq!(commit_label(Some("abc1234"), Some("def5678")), "abc1234");
+        assert_eq!(commit_label(None, Some("def5678")), "def5678");
+        assert_eq!(commit_label(None, Some("")), "local");
+        assert_eq!(commit_label(None, None), "local");
     }
 
     #[test]

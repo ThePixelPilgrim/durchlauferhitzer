@@ -21,7 +21,7 @@ mod strace;
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -70,21 +70,6 @@ fn fail(scenario: &str, reason: Reason, detail: &str) {
         "bench failed: scenario={scenario} reason={} ({detail})",
         reason.name()
     );
-}
-
-/// The measured build: `BENCH_COMMIT`, else the checkout's short SHA.
-fn commit() -> String {
-    if let Ok(c) = std::env::var("BENCH_COMMIT") {
-        return c;
-    }
-    Command::new("git")
-        .args(["rev-parse", "--short=7", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn write_csv(path: &Path, rows: &[Row]) -> std::io::Result<()> {
@@ -332,7 +317,10 @@ fn main() -> ExitCode {
     };
     let mut ctx = Context {
         date: row::today(),
-        commit: commit(),
+        commit: cli::commit_label(
+            args.commit.as_deref(),
+            std::env::var("BENCH_COMMIT").ok().as_deref(),
+        ),
         runner: std::env::var("BENCH_RUNNER").unwrap_or_else(|_| "local".to_string()),
         duration: args.duration,
         run: 0,

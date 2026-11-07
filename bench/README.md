@@ -10,7 +10,7 @@ cargo build --release --locked -p durchlauferhitzer
 cargo run --release --locked --manifest-path bench/Cargo.toml -- \
   --binary target/release/durchlauferhitzer --out bench.csv \
   [--runs 5] [--duration 10] [--scenarios static-small,proxy-fresh] \
-  [--syscalls-only] [--netem "<netem args>" [--pause S]]
+  [--syscalls-only] [--netem "<netem args>" [--pause S]] [--commit <sha>]
 ```
 
 `--syscalls-only` skips the measured window: only the strace pass runs,
@@ -89,10 +89,13 @@ CSV, one row per scenario and run:
   load (attach and settle); the idle server's few calls there are
   negligible against the requests.
 - `rss_kib`: the server's `VmRSS` after the measured window.
-- `commit` and `runner`: `BENCH_COMMIT` (else `git rev-parse --short=7
-  HEAD`) and `BENCH_RUNNER` (else `local`). Outside a git checkout the
-  commit is `unknown`, and `scripts/bench-chart.py` drops such a row (it
-  takes hex commits only).
+- `commit` and `runner`: the commit `--binary` was built from, from
+  `--commit <sha>` (7 to 40 lowercase hex digits; the nightly passes
+  the run's commit) or else `BENCH_COMMIT`, else `local`; and
+  `BENCH_RUNNER` (else `local`). The label never comes from the checkout
+  the bench runs in, so a local A/B run of two builds must name each
+  build's commit, or its rows say `local`. `scripts/bench-chart.py`
+  drops a row whose commit is not hex (`local` included).
 
 ## Finding the commit
 
@@ -127,7 +130,7 @@ its rows as the run's `bench-results` artifact.
 bisect.sh      the `git bisect run` script (tested by scripts/test_bench_bisect.py)
 src/
   main.rs      runs, scenarios, the measured window, failures
-  cli.rs       the command line (incl. --syscalls-only)
+  cli.rs       the command line (incl. --syscalls-only, --commit)
   fds.rs       the bench's open-files limit (raised for the idle scenario)
   scenario.rs  the scenarios: path, connection reuse, expected response
   load.rs      the client threads and the response check
