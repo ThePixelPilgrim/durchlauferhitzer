@@ -54,7 +54,7 @@ client threads), then the strace pass (another `duration`).
 | `static-fresh` | 1 KiB file, a new connection per request |
 | `proxy-small` | 1 KiB response, keep-alive client |
 | `proxy-fresh` | as `proxy-small`, a new connection per request |
-| `conditional-hit` | `If-None-Match` with the file's `ETag`: 304 expected; 200 while the server sends none |
+| `conditional-hit` | `If-None-Match` with the file's `ETag`: 304 expected (the server sends an `ETag` for every file since FR-STATIC-18; only a binary from before it, e.g. in a bisect, answers 200, which then counts as correct) |
 | `static-small-1k-idle` | as `static-small`, with 1 000 idle keep-alive connections held open (nightly: one run) |
 | `proxy-medium` | as `proxy-small`, a 64 KiB response (on demand) |
 | `proxy-large` | as `proxy-small`, a 1 MiB response (nightly: one run) |

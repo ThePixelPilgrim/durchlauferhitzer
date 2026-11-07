@@ -112,7 +112,7 @@ No run had errors.
    - Gain: proxy-large −40 % CPU and −46 % syscalls; proxy-medium −15 % CPU and −22 % syscalls; proxy-small unchanged.
    - Cost: +16 KiB per *active* proxied exchange. The worst case goes from 49.2 to 65.2 KiB, and the connections that fit 1 GiB from 21 302 to 16 076. Idle connections are unaffected.
    - Against 64 KiB: 64 KiB gains a little more on 1 MiB bodies (−51 %), but costs proxy-small about 5–10 % CPU, because the zeroed allocation happens on every request.
-   - Changing it means editing the NFR-RES-01 builder call ("`max(16 KiB, max_head)`"). That needs the owner's OK, so it is a follow-up task.
+   - Changing it meant editing the NFR-RES-01 builder call ("`max(16 KiB, max_head)`"), which needed the owner's OK; the owner gave it on 2026-11-07, and `ad86dc3` made the change.
    - A possible later follow-up: reuse the buffer, without zeroing it again, across exchanges (pooled with the backend connection). That would make 64 KiB free for small responses.
-3. **NFR-PERF-05 decision proposal: keep fill-drain-refill.** Under delay, loss and a pause, throughput and recovery are set by TCP. Even a 4× larger user buffer changed neither, and double buffering adds at most one more buffer in flight. Double buffering was not built: it is not cheap, because it rewrites the core relay and adds a sim model.
-   - Proposed NFR-PERF-05 target: no errors under netem 50 ms, 1 % loss and a 2 s pause; recovery within the kernel's RTO backoff (≤ 1.5 s after a 2 s pause).
+3. **NFR-PERF-05: fill-drain-refill stays (owner decision 2026-11-07).** Under delay, loss and a pause, throughput and recovery are set by TCP. Even a 4× larger user buffer changed neither, and double buffering adds at most one more buffer in flight. Double buffering was not built: it is not cheap, because it rewrites the core relay and adds a sim model.
+   - NFR-PERF-05 target (owner decision 2026-11-07, in the spec): no errors under netem 50 ms, 1 % loss and a 2 s pause; traffic back within 1.5 s after a 2 s pause (the kernel's RTO backoff).
