@@ -56,7 +56,8 @@ way that matters.
 - HTTP/2, HTTP/3, WebSockets / `Upgrade`.
 - Regex or rewrite rules, wildcard hosts, load balancing across backends.
 - Config hot-reload (restart instead; zero-downtime restart is stage 6).
-- Directory listings, range requests, compression.
+- Directory listings, compression. *(Range requests: a goal since the
+  owner decision 2026-11-07, FR-STATIC-19.)*
 - Response caching (last stage, see timeline).
 - Minimum transfer rates (slow-but-moving peers are bounded by caps and
   idle timeouts only).
@@ -602,12 +603,13 @@ Core-generated responses:
   256 KiB): the next chunk is read ahead only after the previous one was
   fully accepted by the client socket. A connection holds at most one file.
 - **FR-STATIC-18** [done] Conditional requests (ETag / Last-Modified).
-  Range requests and compression are non-goals. *(Owner decision
+  Compression is a non-goal; ranges are FR-STATIC-19. *(Owner decision
   2026-11-06:)* every static 200 carries `ETag` (strong, from size and
   mtime, no inode) and `Last-Modified`; `If-None-Match` and
   `If-Modified-Since` give 304 per RFC 9110 (`If-None-Match` wins), a
   malformed one is ignored as the RFC requires; `If-Match`,
-  `If-Unmodified-Since` and `If-Range` are ignored (no 412, no ranges).
+  `If-Unmodified-Since` are ignored (no 412); `If-Range` is FR-STATIC-19
+  (stage 8; ignored before).
   *(Owner decision 2026-11-07, stage 7 review:)* at most 16 distinct
   entity tags of an `If-None-Match` are kept; further ones are ignored
   (worst case a 200 instead of a 304), so the request's state stays
@@ -622,6 +624,23 @@ Core-generated responses:
   apart before). RFC 850 two-digit years read 70–99 as 19xx and 00–69 as
   20xx, a fixed rule instead of RFC 9110's 50-year window; it differs
   only for years the RFC places in the 2070s.
+
+- **FR-STATIC-19** [stage 8] Range requests (RFC 9110 §14). *(Owner
+  decision 2026-11-07, stage 8 brainstorm: for static routes and for
+  backend-directed files, FR-PROXY-32, alike.)* Every file response
+  carries `Accept-Ranges: bytes`. A `GET` with one valid `bytes` range
+  (`a-b`, `a-`, or the suffix `-n`) that overlaps the file gets `206`
+  with `Content-Range: bytes a-b/size` and exactly those bytes; one that
+  does not overlap gets `416` with `Content-Range: bytes */size`. Ranges
+  are judged after the conditional checks (a `304` wins). `If-Range`
+  with the file's strong `ETag` or its exact `Last-Modified` keeps the
+  range; anything else sends the whole file with `200`. `Range` is
+  ignored on every method but `GET`. `on_file_change` and failures apply
+  to the range as to a whole file (FR-STATIC-14, -15).
+  *Controller calls (stage 8 brainstorm):* only a single range is
+  served; a request with several ranges (no `multipart/byteranges`), a
+  malformed `Range` or another unit gets the whole file with `200`, as
+  RFC 9110 allows.
 
 ### FR-PROXY — Proxy routes
 
@@ -1095,11 +1114,19 @@ Failures, persistence, timeouts:
   - **Opt-in.** Only a proxy route with `internal_files` (FR-CFG-26)
     serves files, and it trusts exactly the one header it names:
     `X-Sendfile` (Apache, lighttpd) or `X-Accel-Redirect` (nginx).
-  - **Stripping.** `X-Sendfile` and `X-Accel-Redirect` are removed from
-    every client request and every backend response on every proxy route;
+  - **Stripping.** `X-Sendfile`, `X-Accel-Redirect`, `X-Sendfile-Type`
+    and `X-Accel-Mapping` are removed from every client request on every
+    proxy route (forged copies of the last two steered Rack's choice of
+    path); `X-Sendfile` and `X-Accel-Redirect` are removed from every
+    backend response on every proxy route;
     on an `x-accel-redirect` route every `X-Accel-*` response header is
     removed too. None reaches a backend from a client, or a client from a
-    backend. nginx's other `X-Accel-*` features (expiry, buffering, rate
+    backend.
+  - **Hints for the backend.** *(Owner decision 2026-11-07.)* On an
+    `internal_files` route the proxy sets `X-Sendfile-Type` to the
+    route's header name (`X-Sendfile` or `X-Accel-Redirect`) and, on an
+    `x-accel-redirect` route, `X-Accel-Mapping: <root>/=<prefix>`
+    (Rack's format), so Rack-style apps work without their own config. nginx's other `X-Accel-*` features (expiry, buffering, rate
     limits, named locations) are not supported.
   - **Trigger.** A backend `200` whose head carries the route's header.
     On any other status the header is removed and the response passes
@@ -1121,8 +1148,8 @@ Failures, persistence, timeouts:
   - **Missing file → 404.** Whatever a static route answers 404 is a
     `404` here (FR-STATIC-09), logged like any `Response`.
   - **The client's response** is the file as a static route sends it
-    (FR-STATIC-11…18): `Content-Length`, `ETag` and `Last-Modified` from
-    the file, `304` per FR-STATIC-18, `HEAD` per FR-STATIC-13,
+    (FR-STATIC-11…19): `Content-Length`, `ETag` and `Last-Modified` from
+    the file, `304` per FR-STATIC-18, ranges per FR-STATIC-19, `HEAD` per FR-STATIC-13,
     `on_file_change` per FR-STATIC-14, failures per FR-STATIC-15.
     `Content-Type` is the backend's if it sent one, else per FR-STATIC-12.
     The backend's other headers are kept (after FR-PROXY-12), its
