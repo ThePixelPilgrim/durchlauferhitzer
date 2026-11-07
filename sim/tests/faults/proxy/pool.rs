@@ -47,18 +47,47 @@ pub(crate) enum Stale {
     /// As `Reset`, and the replay's fresh connection is reset too once
     /// its backend has the request head (a 502, never a second retry).
     Twice,
+    /// As `Reset` and `Eof`, but a step later, once the backend has the
+    /// request head: a drain may begin in between, and then nothing is
+    /// retried (FR-PROXY-26).
+    LateReset,
+    LateEof,
 }
 
 impl Stale {
     pub(crate) fn kind(self) -> BackendFailure {
         match self {
-            Stale::Reset | Stale::HalfReset | Stale::Twice => BackendFailure::Reset,
-            Stale::Eof | Stale::HalfEof => BackendFailure::ClosedEarly,
+            Stale::Reset | Stale::HalfReset | Stale::Twice | Stale::LateReset => {
+                BackendFailure::Reset
+            }
+            Stale::Eof | Stale::HalfEof | Stale::LateEof => BackendFailure::ClosedEarly,
         }
     }
 
     fn half(self) -> bool {
         matches!(self, Stale::HalfReset | Stale::HalfEof)
+    }
+
+    /// Whether the backend kills it only once it has the request head
+    /// (`half_stale`), not as the request goes out.
+    fn waits(self) -> bool {
+        matches!(
+            self,
+            Stale::HalfReset | Stale::HalfEof | Stale::LateReset | Stale::LateEof
+        )
+    }
+
+    pub(crate) fn late(self) -> bool {
+        matches!(self, Stale::LateReset | Stale::LateEof)
+    }
+
+    pub(crate) fn kill(self, sim: &mut Sim, up: UpstreamId) {
+        match self {
+            Stale::Reset | Stale::HalfReset | Stale::Twice | Stale::LateReset => {
+                sim.backend_reset(up);
+            }
+            Stale::Eof | Stale::HalfEof | Stale::LateEof => sim.backend_eof(up),
+        }
     }
 }
 
@@ -243,21 +272,19 @@ fn reuse(
     };
     run.ended = true;
     run.stale = Some(stale);
-    if stale.half() {
+    if stale.waits() {
         // Once the backend has the request head (`half_stale`).
         return false;
     }
     run.stale_done = true;
-    match stale {
-        Stale::Reset | Stale::HalfReset | Stale::Twice => sim.backend_reset(up),
-        Stale::Eof | Stale::HalfEof => sim.backend_eof(up),
-    }
+    stale.kill(sim, up);
     sim.run_until_idle();
     true
 }
 
 /// A `Half` stale backend that has the request head: it sends the first
-/// bytes of a response head, then resets or closes.
+/// bytes of a response head, then resets or closes. (A `Late` one is a
+/// step of its own, `Step::StaleKill`.)
 fn half_stale(sim: &mut Sim, stories: &mut [Story]) -> bool {
     let mut acted = false;
     for story in stories.iter_mut() {
@@ -265,6 +292,9 @@ fn half_stale(sim: &mut Sim, stories: &mut [Story]) -> bool {
             let (Some(up), Some(stale), false) = (run.up, run.stale, run.stale_done) else {
                 continue;
             };
+            if stale.late() {
+                continue;
+            }
             let head_len = match &ex.req.verdict {
                 Verdict::Forward(fwd) | Verdict::BadBody { fwd, .. } => fwd.head_len,
                 Verdict::Parse(_) | Verdict::Answer(..) => 0,
@@ -273,15 +303,13 @@ fn half_stale(sim: &mut Sim, stories: &mut [Story]) -> bool {
                 continue;
             }
             run.stale_done = true;
-            // The replay's connection dies too, before any byte.
-            if stale != Stale::Twice {
+            // The replay's connection (`Twice`) and a late one die before
+            // any byte.
+            if stale.half() {
                 sim.backend_send(up, HALF_HEAD);
                 sim.run_until_idle();
             }
-            match stale {
-                Stale::Reset | Stale::HalfReset | Stale::Twice => sim.backend_reset(up),
-                Stale::Eof | Stale::HalfEof => sim.backend_eof(up),
-            }
+            stale.kill(sim, up);
             sim.run_until_idle();
             acted = true;
         }
@@ -744,7 +772,13 @@ pub(crate) fn reuse_alts(
         }
         // Only a drain may have stopped the retry (FR-PROXY-26).
         (Some(kind), true, None) if draining => Ok(match run.stale {
-            Some(_) => stale_fail(ex, who, net, kind, draining),
+            Some(_) => stale_fail(ex, who, net, kind, draining)
+                .into_iter()
+                .map(|mut alt| {
+                    alt.tags = vec!["retry: none in a drain"];
+                    alt
+                })
+                .collect(),
             None => base,
         }),
         (Some(kind), true, None) => Err(format!(

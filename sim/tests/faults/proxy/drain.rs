@@ -22,6 +22,14 @@ pub(crate) struct Shutdown {
     pub(crate) plan: ShutdownPlan,
     pub(crate) marks: Marks,
     step: usize,
+    /// A seed whose plan has no shutdown drains (even seeds) or restarts
+    /// (odd ones) once a `Late` stale connection waits: in its last round,
+    /// or, for two seeds in five, in any round (`tick`). So a retry the
+    /// drain forbids is common (FR-PROXY-26), and mostly no round is lost.
+    on_late: ShutdownPlan,
+    eager: bool,
+    /// The seed's last round runs (`run_proxy_seed`).
+    pub(crate) last_round: bool,
 }
 
 /// The steps a proxy seed's shutdown falls among (its rounds' steps).
@@ -33,11 +41,34 @@ impl Shutdown {
             plan: shutdown_plan(seed, PROXY_SPAN),
             marks: Marks::default(),
             step: 0,
+            on_late: if seed % 2 == 0 {
+                ShutdownPlan::Drain { drain: 0 }
+            } else {
+                ShutdownPlan::Restart { drain: 0 }
+            },
+            eager: matches!(seed % 5, 1 | 3),
+            last_round: false,
         }
     }
 
-    /// One step of a round's interleaving: the calls due before it.
+    /// One step of a round's interleaving: the calls due before it. While
+    /// a `Late` stale connection waits to die, a drain not begun yet
+    /// begins at once (one the plan has, or `on_late`'s), so its failure
+    /// falls in the drain: no retry then (FR-PROXY-26).
     pub(crate) fn tick(&mut self, sim: &mut Sim, stories: &[Story]) {
+        let late = stories
+            .iter()
+            .flat_map(|s| &s.runs)
+            .any(|r| r.up.is_some() && !r.stale_done && r.stale.is_some_and(Stale::late));
+        if late && self.marks.drain.is_none() {
+            let none = self.plan == ShutdownPlan::None;
+            let plan = if none && (self.last_round || self.eager) {
+                self.on_late
+            } else {
+                self.plan
+            };
+            self.plan = plan.with_drain_at(self.step);
+        }
         shutdown_at(sim, self.plan, self.step, &mut self.marks, &conns(stories));
         self.step += 1;
     }

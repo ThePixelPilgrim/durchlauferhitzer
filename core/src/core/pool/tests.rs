@@ -653,6 +653,29 @@ fn a_failure_after_a_response_byte_is_not_retried() {
     }
 }
 
+/// Nothing is retried once a drain began (FR-PROXY-26): a GET whose
+/// reused connection dies after the drain began gets the 502.
+#[test]
+fn nothing_is_retried_while_draining() {
+    for target in [DrainTarget::Shutdown, DrainTarget::Restart] {
+        let (mut core, c, up) = with_idle();
+        let (again, fresh, _) = forward(&mut core, 1, c, GET);
+        assert_eq!((again, fresh), (up, false));
+        let mut actions = Vec::new();
+        core.begin_drain(secs(1), target, &mut actions);
+        assert!(closes(&actions).is_empty(), "{target:?}: {actions:?}");
+        let actions = handle(&mut core, 1, Event::UpstreamReadClosed { up });
+        assert!(retried(&actions).is_empty(), "{target:?}: {actions:?}");
+        assert!(connects(&actions).is_empty(), "{target:?}: {actions:?}");
+        assert_eq!(
+            failed(&actions),
+            [BackendFailure::ClosedEarly],
+            "{target:?}"
+        );
+        assert!(client_takes(&mut core, 1, c).starts_with(b"HTTP/1.1 502 "));
+    }
+}
+
 /// A response timeout on a reused connection is no reset: a 504, no
 /// retry.
 #[test]

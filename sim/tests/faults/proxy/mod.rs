@@ -49,8 +49,9 @@ use pool::*;
 use request::*;
 use response::*;
 
-/// Seeds the proxy net runs (debug build: a few seconds).
-pub(crate) const PROXY_SEEDS: u64 = 400;
+/// Seeds the proxy net runs (debug build: about 15 s; 1000 so the thin
+/// pool, retry and drain gates each see more than a handful).
+pub(crate) const PROXY_SEEDS: u64 = 1000;
 
 /// `max_request_line` of every generated config.
 pub(crate) const MAX_REQUEST_LINE: usize = 1024;
@@ -344,6 +345,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "retry: replayed, failed again",
     "retry: refused, 502",
     "retry: none after a response byte",
+    "retry: none in a drain",
     // Restart (FR-PROC-07, `drain.rs`).
     "restart: plain drain",
     "restart: drain cut by the abort",

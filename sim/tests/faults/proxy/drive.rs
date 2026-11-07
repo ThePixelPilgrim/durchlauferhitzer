@@ -71,6 +71,9 @@ enum Step {
     Backend(usize, usize),
     Timed(usize),
     Accept(usize),
+    /// A `Late` stale connection dies, its backend having the request
+    /// head.
+    StaleKill(usize),
     Eof,
     EofAnywhere,
     ClientWindow,
@@ -116,7 +119,7 @@ impl Story {
         let count = rng.usize(1..6);
         // A timed exchange sits anywhere among untimed ones.
         let timed_at = draw.timed.then(|| rng.usize(0..count));
-        let pooly = rng.u8(0..5) == 0;
+        let pooly = rng.u8(0..5) < 2;
         for i in 0..count {
             let d = Draw {
                 connect: draw.connect,
@@ -253,6 +256,15 @@ impl Story {
     fn backend_step(&self, i: usize) -> Option<Step> {
         let ex = &self.exchanges[i];
         let run = &self.runs[i];
+        if let (Some(_), Some(stale), false) = (run.up, run.stale, run.stale_done) {
+            if stale.late() {
+                let head_len = match &ex.req.verdict {
+                    Verdict::Forward(fwd) | Verdict::BadBody { fwd, .. } => fwd.head_len,
+                    Verdict::Parse(_) | Verdict::Answer(..) => 0,
+                };
+                return (run.got.len() >= head_len).then_some(Step::StaleKill(i));
+            }
+        }
         if let (Some(_), Some(route)) = (run.up, ex.route) {
             if self.slow[route] && !run.accepted {
                 return Some(Step::Accept(i));
@@ -465,6 +477,19 @@ fn do_step(
             }
         }
         Step::Timed(i) => run_timed(sim, rng, net, story, i, assign),
+        Step::StaleKill(i) => {
+            let run = &mut story.runs[i];
+            run.stale_done = true;
+            match (run.up, run.stale) {
+                (Some(up), Some(stale)) if sim.upstream_holder(up).is_some() => {
+                    stale.kill(sim, up);
+                    sim.run_until_idle();
+                }
+                // The core let go of it first (the client went): it never
+                // died under the request.
+                _ => run.stale = None,
+            }
+        }
         Step::Accept(i) => {
             if let Some(up) = story.runs[i].up {
                 sim.accept_upstream(up);
@@ -709,6 +734,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
     let mut shutdown = Shutdown::new(seed);
     let rounds = rng.usize(2..6);
     for round in 0..rounds {
+        shutdown.last_round = round + 1 == rounds;
         let solo = rng.u8(0..3) == 0;
         let kind = if solo {
             RoundKind::Timed

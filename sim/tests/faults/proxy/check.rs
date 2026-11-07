@@ -313,6 +313,16 @@ pub(crate) fn check_story(
         // Once the server shut down, what the exchange may show depends on
         // when its first log was written (a retry's comes first).
         let first = c.lpos + usize::from(run.retried.is_some());
+        // FR-PROXY-26: nothing is retried once a drain began.
+        if run.retried.is_some()
+            && matches!(logs.get(c.lpos), Some(Log::BackendRetried { .. }))
+            && phases.get(c.lpos).is_some_and(|p| *p != Phase::Serving)
+        {
+            fail(format!(
+                "exchange {i}: retried during the drain ({:?})",
+                phases.get(c.lpos)
+            ));
+        }
         let base = if marks.shut_down() {
             drain_alts(ex, &who, net, marks, phases.get(first).copied())
         } else {
