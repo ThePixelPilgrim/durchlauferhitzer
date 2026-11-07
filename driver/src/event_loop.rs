@@ -736,6 +736,8 @@ fn conn_error(err: &io::Error) -> ConnError {
 }
 
 #[cfg(test)]
+mod eager_tests;
+#[cfg(test)]
 mod relay_tests;
 #[cfg(test)]
 mod tests;

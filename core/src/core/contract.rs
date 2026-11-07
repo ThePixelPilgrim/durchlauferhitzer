@@ -259,8 +259,10 @@
 //!   means the client is gone.
 //! - An epoll driver whose `epoll_ctl` fails for one client or upstream
 //!   socket treats it as that socket's error (DRV-15): [`Event::Failed`]
-//!   or [`Event::UpstreamFailed`] after the actions of the current call (a
-//!   pending connect's answer is `UpstreamFailed`); the loop goes on.
+//!   or [`Event::UpstreamFailed`] once its registration is synced, before
+//!   the next wait (a driver may sync an interest the core set only just
+//!   before it waits; a pending connect's answer is `UpstreamFailed`); the
+//!   loop goes on.
 //! - An `accept` failure that is not transient (`EMFILE`, `ENFILE`,
 //!   `ENOBUFS`, `ENOMEM`, anything unexpected) pauses the listeners until
 //!   the driver closes a descriptor or a 1 s retry, logged at most once a

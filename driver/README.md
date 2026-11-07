@@ -110,6 +110,7 @@ src/
     tests.rs          unit tests of the loop's decisions on a driver that
                       is built but not run; one run on loopback counts a
                       1 KiB file's segments (MSG_MORE, NFR-PERF-06)
+    eager_tests.rs    eager I/O at its edges: the budget, EOF, an error
     relay_tests.rs    the loop on loopback relaying a proxied 1 MiB body:
                       its `epoll_ctl` calls (NFR-PERF-05)
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |

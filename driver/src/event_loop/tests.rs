@@ -214,7 +214,7 @@ fn a_failed_write_after_the_end_of_stream_is_reported_at_once() {
 }
 
 /// A driver for [`STATIC_LESS`] with no listeners, and its log.
-fn driver() -> (Driver, Receiver<LogEntry>) {
+pub(super) fn driver() -> (Driver, Receiver<LogEntry>) {
     let core = Core::new(load(STATIC_LESS).unwrap());
     let (log, logs) = LogSink::channel();
     let driver = Driver::new(core, Vec::new(), Vec::new(), 4, log).unwrap();
@@ -227,7 +227,7 @@ fn unpollable() -> OwnedFd {
     OwnedFd::from(std::fs::File::open("/dev/null").unwrap())
 }
 
-fn peer() -> IpAddr {
+pub(super) fn peer() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
 
@@ -442,7 +442,7 @@ fn an_end_of_stream_without_a_kept_write_error_queues_nothing() {
 }
 
 /// A registered client socket the core knows, with the peer's end.
-fn known_client(driver: &mut Driver, conn: ConnId) -> UnixStream {
+pub(super) fn known_client(driver: &mut Driver, conn: ConnId) -> UnixStream {
     let (ours, theirs) = UnixStream::pair().unwrap();
     let fd = OwnedFd::from(ours);
     let raw = Token::Client(conn).encode().unwrap();

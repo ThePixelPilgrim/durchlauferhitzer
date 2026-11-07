@@ -635,6 +635,8 @@ jobs:
     # jobs are reported too (`always()`: a run cancelled by hand files as
     # well; controller ruling 2026-11-02).
     name: report failures
+    # `bench-netem` is left out: it runs only when dispatched by hand,
+    # whose caller reads its result directly.
     needs: [long-runs, fuzz, older-glibc, restart-soak, bench, bench-publish]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest

@@ -314,7 +314,8 @@ impl Driver {
     /// Brings the client's registration in line with what it wants. A
     /// failed `epoll_ctl` fails only this client (DRV-15): it is logged,
     /// no more I/O is done on the socket, and its `Failed` is delivered
-    /// after the actions of the current call.
+    /// once the caller flushes the queue (`settle`, before the wait, for
+    /// a sync the core's interest asked for).
     pub(super) fn sync_client(&mut self, conn: ConnId) -> io::Result<()> {
         let Some(client) = self.clients.get_mut(&conn) else {
             return Ok(());

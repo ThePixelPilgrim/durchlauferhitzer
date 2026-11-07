@@ -107,6 +107,6 @@ fn a_proxied_body_is_relayed_without_epoll_ctl_per_chunk() {
     }
     stop.stop().unwrap();
     assert_eq!(server.join().unwrap().unwrap(), Exit::Stopped);
-    let fewest = counts.iter().copied().min().unwrap();
-    assert!(fewest <= 16, "epoll_ctl per proxied MiB: {counts:?}");
+    let most = counts.iter().copied().max().unwrap();
+    assert!(most <= 16, "epoll_ctl per proxied MiB: {counts:?}");
 }

@@ -2460,8 +2460,11 @@ stage 4 (its tests are in `driver/`).
 - **DRV-15** [done] *(Owner decision 2026-10-28, O2.)* A failed
   `epoll_ctl` for one client or upstream socket fails only that socket: the
   driver logs it (a driver log, FR-LOG-07) and reports it as for a socket
-  error, `Failed` or `UpstreamFailed`, after the actions of the current
-  call (a pending connect is a failed connect, DRV-10; a socket accepted
+  error, `Failed` or `UpstreamFailed`, once its registration is synced,
+  before the next wait (after the actions of the current call at the
+  latest; *stage 7 Task 8:* a registration the core's interest asks for
+  is synced just before the wait, after any eager I/O) (a pending connect
+  is a failed connect, DRV-10; a socket accepted
   but not yet announced is dropped, since its first event must be
   `Accepted`, DRV-01). Only `epoll_wait` failing, or `epoll_ctl` on the
   loop's own descriptors (listeners, wake eventfd, signalfd), ends the
