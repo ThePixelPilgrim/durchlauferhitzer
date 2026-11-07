@@ -62,7 +62,7 @@ pub use read::read_some;
 mod running;
 
 #[allow(unused_imports, reason = "each test binary uses part")]
-pub use running::{Lines, Running, get, signal_pid};
+pub use running::{Lines, Running, get, past_the_bind, signal_pid};
 
 pub fn exe() -> &'static str {
     env!("CARGO_BIN_EXE_durchlauferhitzer")

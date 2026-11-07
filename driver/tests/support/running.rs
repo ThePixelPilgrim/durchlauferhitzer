@@ -47,7 +47,11 @@ impl Running {
                 };
                 panic!("the server exited early ({status}){race}: {stderr}");
             }
-            if TcpStream::connect(addr).is_ok() {
+            // The connect alone is not enough: a normal start's bind probe
+            // (`Probe::First`, `sys/socket.rs`) listens for a moment
+            // first, and a connect it takes is reset when it closes. The
+            // signalfd is made in `run_loop`, after the real listeners.
+            if past_the_bind(self.child.id()) && TcpStream::connect(addr).is_ok() {
                 return self;
             }
             assert!(Instant::now() < deadline, "the server never listened");
@@ -215,4 +219,15 @@ pub fn get(addr: SocketAddr, path: &str) -> String {
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
     text(&response)
+}
+
+/// Whether the server `pid` has its signalfd: startup has bound the real
+/// listeners (A11; the bind probe's listener is closed by then).
+pub fn past_the_bind(pid: u32) -> bool {
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    fds.flatten().any(|fd| {
+        std::fs::read_link(fd.path()).is_ok_and(|link| link.as_os_str() == "anon_inode:[signalfd]")
+    })
 }

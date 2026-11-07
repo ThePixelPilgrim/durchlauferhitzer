@@ -177,7 +177,9 @@ impl Site {
             .unwrap_or_else(|err| panic!("{}: {err}", self.bin.display()));
         let mut server = Running { child };
         let deadline = Instant::now() + child::PATIENCE;
-        while TcpStream::connect(self.addr).is_err() {
+        // Past the bind probe first (`child::past_the_bind`): a connect
+        // the probe takes is reset when it closes.
+        while !(child::past_the_bind(server.pid()) && TcpStream::connect(self.addr).is_ok()) {
             if let Some(status) = server.child.try_wait().unwrap() {
                 panic!("the server exited ({status}): {}", self.log_text());
             }
