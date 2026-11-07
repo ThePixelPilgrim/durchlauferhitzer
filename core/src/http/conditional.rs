@@ -15,6 +15,11 @@ use crate::file::FileStamp;
 /// numbers.
 pub const ETAG_MAX_LEN: usize = 35;
 
+/// The most distinct entity tags of an `If-None-Match` that count (owner
+/// decision 2026-11-07, FR-STATIC-18): later ones are ignored, so a
+/// request's conditions stay small whatever its head holds.
+pub const MAX_TAGS: usize = 16;
+
 /// A file's strong entity tag, `"<size hex>-<modified_ns hex>"` (lowercase
 /// hex, no leading zeros): it names the file's stamp, so any change of
 /// size or mtime changes it (no inode, FR-STATIC-18).
@@ -96,9 +101,10 @@ pub enum IfNoneMatch {
     Malformed,
     /// `*`: matches any file that exists.
     Any,
-    /// A list of entity tags (possibly empty). Only the stamps of the tags
-    /// written exactly in this server's `ETag` form are kept, strong or
-    /// weak alike: no other tag can match one of its files.
+    /// A list of entity tags (possibly empty). Only the first
+    /// [`MAX_TAGS`] distinct tags count, and of those only the stamps of
+    /// the tags written exactly in this server's `ETag` form are kept,
+    /// strong or weak alike: no other tag can match one of its files.
     Tags(Vec<FileStamp>),
 }
 
@@ -184,8 +190,13 @@ fn if_none_match(headers: &[Header]) -> IfNoneMatch {
         (Some(_), _) if lines().any(|line| line == b"*") => return IfNoneMatch::Malformed,
         (Some(_), _) => {}
     }
-    // Only tags in this server's form are kept: no allocation unless the
-    // request names one.
+    // The first MAX_TAGS distinct tags count (weak comparison: `W/` and
+    // its absence alike), of any form; later ones are only checked
+    // against the grammar. Of those, only tags in this server's form are
+    // kept: no allocation unless the request names one, and never more
+    // than MAX_TAGS.
+    let mut seen: [&[u8]; MAX_TAGS] = [&[]; MAX_TAGS];
+    let mut distinct = 0;
     let mut stamps = Vec::new();
     for line in lines() {
         let mut rest = line;
@@ -202,8 +213,15 @@ fn if_none_match(headers: &[Header]) -> IfNoneMatch {
             let Some((opaque, tail)) = entity_tag(rest) else {
                 return IfNoneMatch::Malformed;
             };
-            if let Some(stamp) = own_stamp(opaque) {
-                stamps.push(stamp);
+            let counted = seen.get(..distinct).unwrap_or_default();
+            if distinct < MAX_TAGS && !counted.contains(&opaque) {
+                if let Some(slot) = seen.get_mut(distinct) {
+                    *slot = opaque;
+                }
+                distinct += 1;
+                if let Some(stamp) = own_stamp(opaque) {
+                    stamps.push(stamp);
+                }
             }
             rest = trim_ows(tail);
             match rest {

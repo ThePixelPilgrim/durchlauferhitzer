@@ -203,3 +203,82 @@ fn if_none_match_decides_when_present() {
     // So is an empty list.
     assert_eq!(both(",", new), Freshness::Modified);
 }
+
+/// The `n`th of a set of distinct stamps: no other stamp matches its tag.
+fn nth_stamp(n: u64) -> FileStamp {
+    FileStamp {
+        size: 0x1000 + n,
+        modified_ns: 7,
+    }
+}
+
+fn nth_tag(n: u64) -> String {
+    String::from_utf8_lossy(EntityTag::of(nth_stamp(n)).as_bytes()).into_owned()
+}
+
+/// Owner decision 2026-11-07: at most `MAX_TAGS` distinct tags are kept,
+/// so a huge list costs no memory; a match among later ones is ignored.
+#[test]
+fn at_most_sixteen_distinct_tags_are_kept() {
+    assert_eq!(MAX_TAGS, 16);
+    let tags: Vec<String> = (0..3000).map(nth_tag).collect();
+    let c = inm(&[tags.join(", ").as_str()]);
+    let IfNoneMatch::Tags(kept) = &c.if_none_match else {
+        panic!("{:?}", c.if_none_match);
+    };
+    assert!(kept.len() <= MAX_TAGS, "{}", kept.len());
+    assert!(kept.capacity() <= MAX_TAGS, "{}", kept.capacity());
+    for n in 0..16 {
+        assert_eq!(
+            c.not_modified(nth_stamp(n), None),
+            Freshness::NotModified,
+            "tag {n}"
+        );
+    }
+    for n in [16, 17, 2999] {
+        assert_eq!(
+            c.not_modified(nth_stamp(n), None),
+            Freshness::Modified,
+            "tag {n}"
+        );
+    }
+}
+
+/// Tags of any form count, across all lines, and a repeated tag (strong
+/// or weak alike: weak comparison) counts once.
+#[test]
+fn repeats_count_once_and_other_tags_count_too() {
+    let mut list: Vec<String> = Vec::new();
+    for n in 0..15 {
+        list.push(nth_tag(n));
+        list.push(format!("W/{}", nth_tag(n)));
+    }
+    list.push(nth_tag(0));
+    let joined = list.join(",");
+    // Then the 16th distinct tag, then the 17th.
+    let sixteenth = nth_tag(15);
+    let seventeenth = nth_tag(16);
+    let c = inm(&[joined.as_str(), sixteenth.as_str(), seventeenth.as_str()]);
+    assert_eq!(c.not_modified(nth_stamp(15), None), Freshness::NotModified);
+    assert_eq!(c.not_modified(nth_stamp(16), None), Freshness::Modified);
+
+    // 16 foreign tags fill the list: the server's own tag after them is
+    // ignored.
+    let foreign: Vec<String> = (0..16).map(|n| format!("\"x{n}\"")).collect();
+    let all = foreign.join(", ");
+    let c = inm(&[all.as_str(), sixteenth.as_str()]);
+    assert_eq!(c.not_modified(nth_stamp(15), None), Freshness::Modified);
+    let fifteen = foreign.get(..15).unwrap_or_default().join(", ");
+    let c = inm(&[fifteen.as_str(), sixteenth.as_str()]);
+    assert_eq!(c.not_modified(nth_stamp(15), None), Freshness::NotModified);
+}
+
+/// The whole field is still read against the grammar: a malformed
+/// element after the 16th tag makes it malformed.
+#[test]
+fn the_grammar_covers_ignored_tags_too() {
+    let mut tags: Vec<String> = (0..20).map(nth_tag).collect();
+    tags.push("x".to_owned());
+    let c = inm(&[tags.join(", ").as_str()]);
+    assert_eq!(c.if_none_match, IfNoneMatch::Malformed);
+}

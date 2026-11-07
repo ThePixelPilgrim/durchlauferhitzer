@@ -103,6 +103,19 @@ pub(crate) fn model_inm(head: &[u8]) -> ModelInm {
     ModelInm::Tags(tags)
 }
 
+/// The tags of a list that count (FR-STATIC-18, owner decision
+/// 2026-11-07): the first 16 distinct ones, distinct by weak comparison
+/// (the `W/` dropped); later ones are ignored.
+pub(crate) fn model_counted(tags: &[(String, bool)]) -> Vec<&str> {
+    let mut counted: Vec<&str> = Vec::new();
+    for (tag, _) in tags {
+        if counted.len() < 16 && !counted.contains(&tag.as_str()) {
+            counted.push(tag);
+        }
+    }
+    counted
+}
+
 /// The seconds an HTTP-date names (RFC 9110 section 5.6.7): IMF-fixdate,
 /// RFC 850 or asctime; `None` for anything else. RFC 850's two-digit year
 /// is the latest year with those digits at most 50 years after `now`.
@@ -222,7 +235,7 @@ pub(crate) fn model_verdict(head: &[u8], stamp: FileStamp, now: u64) -> ModelFre
     let etag = model_etag(stamp);
     let not_modified = match model_inm(head) {
         ModelInm::Any => true,
-        ModelInm::Tags(tags) => tags.iter().any(|(tag, _)| *tag == etag),
+        ModelInm::Tags(tags) => model_counted(&tags).contains(&etag.as_str()),
         // Present but malformed: matches nothing, and the request still
         // contains it, so the date is ignored (section 13.1.3).
         ModelInm::Malformed => false,
@@ -280,7 +293,7 @@ pub(crate) fn random_conditional(rng: &mut fastrand::Rng, stamp: Option<FileStam
         modified_ns: rng.u64(0..=NET_DATE.0) * 1_000_000_000,
     });
     let etag = model_etag(stamp);
-    let inm = match rng.u8(0..12) {
+    let inm = match rng.u8(0..13) {
         0 | 1 => format!("If-None-Match: {etag}\r\n"),
         2 => format!("If-None-Match: W/{etag}\r\n"),
         3 => format!("If-None-Match: \"a,b\", {etag}\r\n"),
@@ -299,6 +312,18 @@ pub(crate) fn random_conditional(rng: &mut fastrand::Rng, stamp: Option<FileStam
         9 => "If-None-Match: ,\r\n".to_owned(),
         // `*` on one line, a tag on another: malformed.
         10 => format!("If-None-Match: *\r\nIf-None-Match: {etag}\r\n"),
+        // The tag after 15 or 16 other distinct ones (one repeated, weak,
+        // in a third of the lists: it counts once). Only the long limits
+        // leave room for it.
+        11 => {
+            let others = rng.u8(15..17);
+            let mut list: Vec<String> = (0..others).map(|n| format!("\"{n:x}\"")).collect();
+            if rng.u8(0..3) == 0 {
+                list.push("W/\"0\"".to_owned());
+            }
+            list.push(etag.clone());
+            format!("If-None-Match: {}\r\n", list.join(","))
+        }
         _ => "If-None-Match: *, \"x\"\r\n".to_owned(),
     };
     let mtime = stamp.modified_ns / 1_000_000_000;
@@ -363,6 +388,10 @@ pub(crate) struct ConditionalCoverage {
     pub(crate) star_with_tags: usize,
     /// 304s by an `If-Modified-Since` equal to the server's clock.
     pub(crate) date_at_clock: usize,
+    /// 304s by the 16th distinct tag of a longer list.
+    pub(crate) by_last_counted_tag: usize,
+    /// 200s for a matching tag after 16 distinct others (ignored).
+    pub(crate) beyond_the_cap: usize,
 }
 
 impl ConditionalCoverage {
@@ -384,6 +413,17 @@ impl ConditionalCoverage {
         let date_alone = parsed.filter(|d| *d <= NET_DATE.0 && dates.len() == 1);
         let by_date = date_alone.is_some_and(|d| mtime <= d);
         let not_modified = status == Status::NotModified;
+        if let ModelInm::Tags(tags) = &inm {
+            let etag = model_etag(stamp);
+            let counted = model_counted(tags);
+            let listed = tags.iter().any(|(tag, _)| *tag == etag);
+            if not_modified && counted.len() == 16 && counted.last() == Some(&etag.as_str()) {
+                self.by_last_counted_tag += 1;
+            }
+            if !not_modified && listed && !counted.contains(&etag.as_str()) {
+                self.beyond_the_cap += 1;
+            }
+        }
         // A present If-None-Match (even malformed) decides alone.
         if inm != ModelInm::Absent && !dates.is_empty() && by_date != not_modified {
             self.tag_over_date += 1;
@@ -465,6 +505,8 @@ impl ConditionalCoverage {
             ("200 for an empty If-None-Match list", self.empty_list),
             ("* on one line and tags on another", self.star_with_tags),
             ("304 by a date equal to the clock", self.date_at_clock),
+            ("304 by the 16th distinct tag", self.by_last_counted_tag),
+            ("200 for a tag after 16 others", self.beyond_the_cap),
         ] {
             assert!(n > 0, "no {what} in any seed");
         }

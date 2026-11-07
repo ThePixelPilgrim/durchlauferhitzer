@@ -599,7 +599,10 @@ Core-generated responses:
   *(Owner decision 2026-11-07, stage 7 review:)* at most 16 distinct
   entity tags of an `If-None-Match` are kept; further ones are ignored
   (worst case a 200 instead of a 304), so the request's state stays
-  within the memory budget (NFR-RES-01). *(Stage 7 Task 2, builder calls and controller ruling:)* a malformed
+  within the memory budget (NFR-RES-01). *(Stage 7 review fix:)* the 16
+  are the first distinct tags of the whole field (all its lines, in
+  order, tags of any form), distinct by weak comparison, so a repeat
+  counts once; the ignored ones are still read against the grammar. *(Stage 7 Task 2, builder calls and controller ruling:)* a malformed
   `If-None-Match` counts as present and matches nothing, so
   `If-Modified-Since` is then ignored (RFC 9110 §13.1.3 "contains"); a
   well-formed empty list does the same. `If-Modified-Since` is ignored
