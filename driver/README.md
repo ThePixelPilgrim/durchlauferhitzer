@@ -325,6 +325,12 @@ tests/
                     baseline, then SIGTERM: `draining`, `done
                     detached=0`, exit 0 (the seccomp line `action=kill`
                     under the kill switch)
+  pool.rs           backend connection pooling through the binary
+                    (FR-PROXY-02, -26): a keep-alive stub backend counts
+                    one connection for 10 sequential requests (10 with
+                    `pool off`), an idle connection the backend closes
+                    is not reused, a GET on a reused connection that dies
+                    is retried and logged (`kind=backend_retried`)
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process

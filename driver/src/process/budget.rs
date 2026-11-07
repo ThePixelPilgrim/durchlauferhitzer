@@ -19,7 +19,10 @@
 //!                                 runs (OA1: a queued one is cancelled)
 //!        + (backends > 0) max_connections
 //!                                 upstream sockets, one per counted
-//!                                 connection
+//!                                 connection (with pooling, active
+//!                                 and idle ones together: the core
+//!                                 closes an idle one before a connect
+//!                                 beyond it, FR-PROXY-02)
 //! ```
 //!
 //! A soft limit below it is raised to exactly it when the hard limit
