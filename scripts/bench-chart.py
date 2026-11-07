@@ -8,10 +8,14 @@ scenario, x = date, y = the median of that date's runs, and a table of
 the latest values.
 
     bench-chart.py results.csv BENCHMARKS.md
-    bench-chart.py --append bench.csv results.csv BENCHMARKS.md
+    bench-chart.py --append bench.csv --commit <sha> [--today YYYY-MM-DD] \
+        results.csv BENCHMARKS.md
 
 `--append` first adds the rows of a new CSV (the nightly `bench` job's
-artifact) to `results.csv`, created with its header if missing. Those
+artifact) to `results.csv`, created with its header if missing: only
+rows of the run's own commit (`--commit`, matched exactly) dated at most
+a day from the run (`--today`, default today in UTC) are taken; other
+valid rows are refused and counted. Those
 rows come from a job that ran code under test, so they are untrusted:
 every field is checked (a date, a lowercase hex commit, a plain runner
 label, a scenario from the fixed set, numbers that parse, are finite and
@@ -29,6 +33,7 @@ import re
 import statistics
 import sys
 from datetime import date as _date
+from datetime import datetime, timezone
 
 HEADER = [
     "date",
@@ -270,10 +275,25 @@ def _read_text(path):
         return fh.read()
 
 
-def append(new_path, results_path):
-    """Appends the valid rows of `new_path` to `results_path` (created
-    with the header if missing); returns (appended, dropped)."""
+def _utc_today():
+    return datetime.now(timezone.utc).date()
+
+
+def _the_runs(r, commit, today):
+    """Whether a valid row is the run's own: its commit exactly, and a
+    date at most one day from the run's."""
+    return r["commit"] == commit and abs((_date.fromisoformat(r["date"]) - today).days) <= 1
+
+
+def append(new_path, results_path, commit, today):
+    """Appends the valid rows of `new_path` that are the run's own (its
+    `commit`, dated within a day of `today`) to `results_path` (created
+    with the header if missing); returns (appended, dropped, refused):
+    refused rows are valid but another commit's or date's."""
     rows, dropped = parse(_read_text(new_path))
+    mine = [r for r in rows if _the_runs(r, commit, today)]
+    refused = len(rows) - len(mine)
+    rows = mine
     if len(rows) > MAX_NEW_ROWS:
         dropped += len(rows) - MAX_NEW_ROWS
         rows = rows[:MAX_NEW_ROWS]
@@ -284,21 +304,45 @@ def append(new_path, results_path):
             out.writerow(HEADER)
         for r in rows:
             out.writerow(r["fields"])
-    return len(rows), dropped
+    return len(rows), dropped, refused
+
+
+def _commit_arg(text):
+    if not _COMMIT.fullmatch(text):
+        raise argparse.ArgumentTypeError(f"{text!r}: 7 to 40 lowercase hex digits")
+    return text
+
+
+def _date_arg(text):
+    if not _DATE.fullmatch(text):
+        raise argparse.ArgumentTypeError(f"{text!r}: YYYY-MM-DD")
+    try:
+        return _date.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r}: YYYY-MM-DD")
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--append", metavar="NEW_CSV", help="first append this CSV's valid rows")
+    p.add_argument("--commit", type=_commit_arg,
+                   help="with --append (required): the run's commit; other rows are refused")
+    p.add_argument("--today", type=_date_arg,
+                   help="with --append: the run's date (default: today, UTC); rows dated "
+                        "more than a day from it are refused")
     p.add_argument("csv")
     p.add_argument("out")
     args = p.parse_args(argv)
     if args.append:
+        if args.commit is None:
+            p.error("--append needs --commit")
+        today = args.today or _utc_today()
         try:
-            added, dropped = append(args.append, args.csv)
+            added, dropped, refused = append(args.append, args.csv, args.commit, today)
         except ValueError as e:
             raise SystemExit(f"bench-chart: {args.append}: {e}")
-        print(f"appended {added} rows, dropped {dropped}")
+        print(f"appended {added} rows, dropped {dropped}, refused {refused} "
+              f"(not commit {args.commit} or not within a day of {today.isoformat()})")
     rows, dropped = parse(_read_text(args.csv))
     if dropped:
         print(f"{args.csv}: {dropped} invalid rows left out", file=sys.stderr)

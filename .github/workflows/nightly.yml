@@ -529,7 +529,8 @@ jobs:
     # under test: only the `benchmarks` branch is checked out, plus
     # scripts/bench-chart.py (stdlib Python) from the run's commit; the
     # artifact's rows are untrusted and the script checks every field
-    # before it enters the CSV or the page. The token is passed only to
+    # before it enters the CSV or the page, and takes only rows of the
+    # run's own commit dated within a day of the run. The token is passed only to
     # the git commands that fetch and push (`-c`), never stored on disk
     # while the script runs. Rows with errors are published too (never
     # charted), so it also runs after a failing `bench`.
@@ -601,7 +602,10 @@ jobs:
             echo "no bench artifact: nothing to publish"
             exit 0
           fi
-          python3 -I tools/scripts/bench-chart.py --append "$csv" pages/results.csv pages/BENCHMARKS.md
+          # Only the rows of this run's commit, dated within a day of
+          # today (UTC), are taken; any other row is refused.
+          python3 -I tools/scripts/bench-chart.py --append "$csv" --commit "${GITHUB_SHA::7}" \
+            pages/results.csv pages/BENCHMARKS.md
           cd pages
           git add -A
           if git diff --cached --quiet; then

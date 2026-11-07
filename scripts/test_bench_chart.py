@@ -210,6 +210,11 @@ class Page(unittest.TestCase):
         self.assertIn("No results yet", md)
 
 
+# The run whose artifact is appended: its commit and date (the CSV's
+# first date).
+RUN = ["--commit", "abc1234", "--today", "2026-11-06"]
+
+
 class Append(unittest.TestCase):
     def test_valid_rows_are_appended_and_the_page_rendered(self):
         with tempfile.TemporaryDirectory() as d:
@@ -219,22 +224,78 @@ class Append(unittest.TestCase):
             with open(new, "w") as fh:
                 fh.write(CSV + row("2026-11-07", "static-huge", 1, 1) + "\n")
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                bc.main(["--append", new, results, page])
-            self.assertIn("appended 9 rows, dropped 1", out.getvalue())
+                bc.main(["--append", new] + RUN + [results, page])
+            # The three def5678 rows are another run's.
+            self.assertIn("appended 6 rows, dropped 1, refused 3", out.getvalue())
             with open(results) as fh:
                 text = fh.read()
             self.assertTrue(text.startswith(HEADER + "\n"))
-            self.assertEqual(len(text.splitlines()), 10)
+            self.assertEqual(len(text.splitlines()), 7)
             self.assertNotIn("static-huge", text)
+            self.assertNotIn("def5678", text)
             # A second artifact appends below; the header stays single.
             with contextlib.redirect_stdout(io.StringIO()):
-                bc.main(["--append", new, results, page])
+                bc.main(["--append", new] + RUN + [results, page])
             with open(results) as fh:
                 text = fh.read()
             self.assertEqual(text.count("date,commit"), 1)
-            self.assertEqual(len(text.splitlines()), 19)
+            self.assertEqual(len(text.splitlines()), 13)
             with open(page) as fh:
                 self.assertEqual(len(blocks(fh.read())), 4)
+
+    def _append(self, d, rows, args):
+        new = os.path.join(d, "bench.csv")
+        results = os.path.join(d, "results.csv")
+        with open(new, "w") as fh:
+            fh.write("\n".join([HEADER] + rows) + "\n")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            bc.main(["--append", new] + args + [results, os.path.join(d, "B.md")])
+        with open(results) as fh:
+            return out.getvalue(), fh.read().splitlines()[1:]
+
+    def test_only_the_runs_commit_and_dates_within_a_day_are_appended(self):
+        full = "abc1234" + "0" * 33
+        ok = [
+            row("2026-11-07", "static-small", 1, 1),
+            row("2026-11-06", "static-small", 1, 1),
+            row("2026-11-08", "static-small", 1, 1),
+        ]
+        refused = [
+            row("2026-11-07", "static-small", 1, 1, commit="def5678"),
+            row("2026-11-07", "static-small", 1, 1, commit="abc12345"),
+            row("2026-11-07", "static-small", 1, 1, commit=full),
+            row("2026-11-07", "static-small", 1, 1, commit="0abc123"),
+            row("2026-11-05", "static-small", 1, 1),
+            row("2026-11-09", "static-small", 1, 1),
+            row("2025-11-07", "static-small", 1, 1),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            out, lines = self._append(
+                d, ok + refused, ["--commit", "abc1234", "--today", "2026-11-07"])
+        self.assertIn(f"appended 3 rows, dropped 0, refused {len(refused)}", out)
+        self.assertEqual(lines, ok)
+
+    def test_the_date_defaults_to_today_in_utc(self):
+        today = bc._utc_today().isoformat()
+        with tempfile.TemporaryDirectory() as d:
+            out, lines = self._append(
+                d, [row(today, "static-small", 1, 1), row("2000-01-01", "static-small", 1, 1)],
+                ["--commit", "abc1234"])
+        self.assertIn("appended 1 rows, dropped 0, refused 1", out)
+        self.assertEqual(lines, [row(today, "static-small", 1, 1)])
+
+    def test_append_needs_a_hex_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            new = os.path.join(d, "bench.csv")
+            results = os.path.join(d, "results.csv")
+            with open(new, "w") as fh:
+                fh.write(CSV)
+            for args in ([], ["--commit", "ABC1234"], ["--commit", "abc"],
+                         ["--commit", "abc1234", "--today", "07.11.2026"]):
+                with self.assertRaises(SystemExit, msg=args):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        bc.main(["--append", new] + args + [results, os.path.join(d, "B.md")])
+                self.assertFalse(os.path.exists(results), args)
 
     def test_a_smuggled_line_break_never_splits_results(self):
         with tempfile.TemporaryDirectory() as d:
@@ -245,7 +306,7 @@ class Append(unittest.TestCase):
             with open(new, "w", newline="") as fh:
                 fh.write(HEADER + "\n" + _csv_line(fields) + row("2026-11-06", "static-small", 1, 1) + "\n")
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                bc.main(["--append", new, results, os.path.join(d, "B.md")])
+                bc.main(["--append", new] + RUN + [results, os.path.join(d, "B.md")])
             self.assertIn("appended 1 rows, dropped 1", out.getvalue())
             with open(results, newline="") as fh:
                 lines = fh.read().split("\n")
@@ -259,7 +320,7 @@ class Append(unittest.TestCase):
                 fh.write("evil\n" + row("2026-11-06", "static-small", 1, 1) + "\n")
             with self.assertRaises(SystemExit):
                 with contextlib.redirect_stderr(io.StringIO()):
-                    bc.main(["--append", new, results, os.path.join(d, "B.md")])
+                    bc.main(["--append", new] + RUN + [results, os.path.join(d, "B.md")])
             self.assertFalse(os.path.exists(results))
 
     def test_render_only(self):

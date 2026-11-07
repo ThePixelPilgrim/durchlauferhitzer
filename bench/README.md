@@ -124,7 +124,9 @@ nightly issue's fingerprint is `bench|<s>|<r>`) and exits 1; rows with
 errors are still written. `scripts/bench-chart.py` renders the CSV: each
 runner label is its own series. The nightly publishes to the `benchmarks`
 branch only from the default branch; a dispatch from another branch keeps
-its rows as the run's `bench-results` artifact.
+its rows as the run's `bench-results` artifact. The publish takes only
+the rows of the run's own commit dated within a day of the run
+(`bench-chart.py --append ... --commit <sha>`); any other row is refused.
 
 ```
 bisect.sh      the `git bisect run` script (tested by scripts/test_bench_bisect.py)
