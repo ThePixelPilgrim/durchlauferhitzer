@@ -263,6 +263,8 @@ fn a_closing_304_says_close() {
 fn the_connection_is_reused_after_a_304() {
     let headers = format!("If-None-Match: {TAG}\r\n");
     let (_, mut core) = answer(&get("GET", &headers), STAMP, Some(NOW));
+    // NFR-PERF-06: a 304 has no body, so its head is never held back.
+    assert_eq!(core.file_follows(ConnId(1)), crate::file::FileFollows::No);
     let sent = core.send_buffer(ConnId(1)).len();
     let mut actions = Vec::new();
     let conn = ConnId(1);

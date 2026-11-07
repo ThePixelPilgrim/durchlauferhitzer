@@ -663,8 +663,9 @@ fn reset_while_sending_a_file_emits_log_close_file_close() {
 
 /// NFR-PERF-06: file data follows the send buffer from the head of a 200
 /// until the body is all sent, whether the chunk is ready or still read;
-/// never for a HEAD, an empty file, a connection without a file or an
-/// unknown one.
+/// never for a HEAD, an empty file, a connection without a file (the next
+/// kept-alive or pipelined request while it opens) or an unknown one. The
+/// 304 is in `conditional_tests.rs`.
 #[test]
 fn file_follows_the_head_of_a_200_until_the_body_is_sent() {
     let mut core = files_core();
@@ -688,6 +689,40 @@ fn file_follows_the_head_of_a_200_until_the_body_is_sent() {
     assert_eq!(core.file_follows(conn), FileFollows::Yes, "one byte left");
     core.handle(now, Event::FileSent { conn, len: 1 }, &mut actions);
     assert_eq!(core.file_follows(conn), FileFollows::No, "all sent");
+    // Keep-alive: the next request starts without a body to follow.
+    let spare = core.recv_buffer(conn);
+    spare.get_mut(..GET_F.len()).unwrap().copy_from_slice(GET_F);
+    let len = GET_F.len();
+    core.handle(now, Event::Received { conn, len }, &mut actions);
+    assert!(actions.contains(&Action::OpenFile {
+        file: FileId(2),
+        root: RootId(1),
+        path: vec![b"f.txt".to_vec()],
+    }));
+    assert_eq!(core.file_follows(conn), FileFollows::No, "next request");
+
+    // Pipelined: once the first body is sent, the second request waits
+    // for its open with nothing to follow.
+    let mut core = files_core();
+    request(&mut core, now, 1, &[GET_F, GET_F].concat());
+    let meta = regular(1);
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    let stamp = crate::core::test_support::stamp(1);
+    core.handle(now, Event::ChunkReady { file, stamp }, &mut actions);
+    let len = core.send_buffer(conn).len();
+    core.handle(now, Event::Sent { conn, len }, &mut actions);
+    assert_eq!(core.file_follows(conn), FileFollows::Yes, "first body");
+    actions.clear();
+    core.handle(now, Event::FileSent { conn, len: 1 }, &mut actions);
+    assert!(
+        actions.contains(&Action::OpenFile {
+            file: FileId(2),
+            root: RootId(1),
+            path: vec![b"f.txt".to_vec()],
+        }),
+        "{actions:?}"
+    );
+    assert_eq!(core.file_follows(conn), FileFollows::No, "pipelined");
 
     for (head, size) in [
         (&b"HEAD /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n"[..], 3),

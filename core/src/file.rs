@@ -63,9 +63,11 @@ pub struct FileSegment {
     pub len: u64,
 }
 
-/// Whether file data follows the send buffer at once (NFR-PERF-06): the
-/// driver then writes the buffer with `MSG_MORE`, so a head leaves in one
-/// segment with the file's first bytes.
+/// Whether file data follows the send buffer (NFR-PERF-06), after the
+/// chunk's readahead if it is still running: the driver then writes the
+/// buffer with `MSG_MORE`, so a head leaves in one segment with the file's
+/// first bytes. The kernel's probe timer (max(RTO, 200 ms)) bounds how
+/// long the head is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileFollows {
     /// The connection sends a file body that is not all sent yet.

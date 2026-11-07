@@ -294,9 +294,10 @@ pub enum More {
     /// The write is pushed out as usual (`TCP_NODELAY`).
     No,
     /// `MSG_MORE`: the kernel holds a partial segment back for the data
-    /// that follows (a file's `sendfile`), which pushes both out. The
-    /// caller must send that data at once: a held segment otherwise waits
-    /// for the kernel's probe timer (at least 200 ms).
+    /// that follows (a file's `sendfile`, once the chunk's readahead is
+    /// done), which pushes both out. Without that data the held segment
+    /// leaves when the kernel's probe timer fires (max(RTO, 200 ms)):
+    /// that timer bounds the hold.
     Yes,
 }
 

@@ -695,9 +695,19 @@ fn a_1_kib_file_leaves_in_one_segment() {
     use crate::sys::file::open_dir_path;
     use crate::sys::socket::{Probe, data_segments_in, local_addr, tcp_listen};
 
-    let dir = std::env::temp_dir().join(format!("dlh-segments-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    /// The temp root, removed on drop (a failed assertion too).
+    struct TempRoot(std::path::PathBuf);
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let root_dir =
+        TempRoot(std::env::temp_dir().join(format!("dlh-segments-{}", std::process::id())));
+    let dir = &root_dir.0;
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
     let content: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(dir.join("small.bin"), &content).unwrap();
     let config = format!(
@@ -705,7 +715,7 @@ fn a_1_kib_file_leaves_in_one_segment() {
         dir.display()
     );
     let core = Core::new(load(&config).unwrap());
-    let root = open_dir_path(&dir).unwrap();
+    let root = open_dir_path(dir).unwrap();
     let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16, Probe::First).unwrap();
     let addr = local_addr(listener.as_fd()).unwrap();
     let (log, _logs) = LogSink::channel();
@@ -743,5 +753,4 @@ fn a_1_kib_file_leaves_in_one_segment() {
 
     stop.stop().unwrap();
     assert_eq!(server.join().unwrap().unwrap(), super::Exit::Stopped);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
