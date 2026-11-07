@@ -117,7 +117,9 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
         | Scenario::StaticFresh
         | Scenario::ProxySmall
         | Scenario::ProxyFresh
-        | Scenario::StaticSmall1kIdle => None,
+        | Scenario::StaticSmall1kIdle
+        | Scenario::ProxyMedium
+        | Scenario::ProxyLarge => None,
     };
     let etag = etag.as_deref();
     let target = Target {
@@ -262,7 +264,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let backend = match Backend::start() {
+    let backend = match Backend::start([127, 0, 0, 1].into()) {
         Ok(b) => b,
         Err(e) => {
             fail("all", Reason::Startup, &format!("backend: {e}"));

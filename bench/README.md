@@ -18,7 +18,8 @@ the row's `requests` are that pass's, `cpu_us_per_req` and `rss_kib` are
 empty.
 
 Per run a fresh server: a temp static root with a 1 KiB and a 1 MiB file,
-one proxy route to the in-process stub backend (1 KiB body, keep-alive),
+one proxy route to the in-process stub backend (keep-alive; the body is
+64 KiB for `/medium`, 1 MiB for `/large`, else 1 KiB),
 default limits except three for `static-small-1k-idle` (one server
 serves every scenario of a run): `max_connections 2048` and
 `max_connections_per_ip 2048` (every client shares 127.0.0.1), and
@@ -39,10 +40,13 @@ client threads), then the strace pass (another `duration`).
 | `proxy-fresh` | as `proxy-small`, a new connection per request |
 | `conditional-hit` | `If-None-Match` with the file's `ETag`: 304 expected; 200 while the server sends none |
 | `static-small-1k-idle` | as `static-small`, with 1 000 idle keep-alive connections held open (nightly: one run) |
+| `proxy-medium` | as `proxy-small`, a 64 KiB response (on demand) |
+| `proxy-large` | as `proxy-small`, a 1 MiB response (nightly: one run) |
 
-Without `--scenarios` all but `static-small-1k-idle` run. The nightly
-runs that one separately, once (`--scenarios static-small-1k-idle --runs 1`,
-its rows appended to the same CSV; NFR-PERF-03). That one opens its 1 000 connections before the warm-up (each makes
+Without `--scenarios` all but `static-small-1k-idle`, `proxy-medium` and
+`proxy-large` run. The nightly runs the 1k-idle and `proxy-large`
+separately, once (`--scenarios static-small-1k-idle,proxy-large --runs 1`,
+their rows appended to the same CSV; NFR-PERF-03, NFR-PERF-05). That one opens its 1 000 connections before the warm-up (each makes
 one request, then sends nothing) and holds them through the measured
 window and the strace pass (NFR-PERF-03, NFR-PERF-06); its `rss_kib` is
 the server with them open. Each idle connection the server closed by

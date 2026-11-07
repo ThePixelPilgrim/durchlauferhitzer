@@ -7,8 +7,10 @@ use crate::load::{Expect, Reuse};
 pub const HOST: &str = "bench.test";
 /// The small file's (and the stub backend's body's) size.
 pub const SMALL: u64 = 1024;
-/// The large file's size.
+/// The large file's (and `proxy-large`'s body's) size.
 pub const LARGE: u64 = 1024 * 1024;
+/// `proxy-medium`'s body size.
+pub const MEDIUM: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
@@ -19,6 +21,8 @@ pub enum Scenario {
     ProxyFresh,
     ConditionalHit,
     StaticSmall1kIdle,
+    ProxyMedium,
+    ProxyLarge,
 }
 
 /// The idle keep-alive connections `static-small-1k-idle` holds open.
@@ -26,7 +30,7 @@ pub const IDLE: usize = 1000;
 
 impl Scenario {
     /// Every scenario.
-    pub const ALL: [Scenario; 7] = [
+    pub const ALL: [Scenario; 9] = [
         Scenario::StaticSmall,
         Scenario::StaticLarge,
         Scenario::StaticFresh,
@@ -34,10 +38,13 @@ impl Scenario {
         Scenario::ProxyFresh,
         Scenario::ConditionalHit,
         Scenario::StaticSmall1kIdle,
+        Scenario::ProxyMedium,
+        Scenario::ProxyLarge,
     ];
 
     /// The scenarios run without `--scenarios` (the nightly's set):
-    /// all but `static-small-1k-idle`, which is run on demand.
+    /// all but `static-small-1k-idle`, `proxy-medium` and `proxy-large`,
+    /// which are run on demand.
     pub const DEFAULT: [Scenario; 6] = [
         Scenario::StaticSmall,
         Scenario::StaticLarge,
@@ -56,6 +63,8 @@ impl Scenario {
             Scenario::ProxyFresh => "proxy-fresh",
             Scenario::ConditionalHit => "conditional-hit",
             Scenario::StaticSmall1kIdle => "static-small-1k-idle",
+            Scenario::ProxyMedium => "proxy-medium",
+            Scenario::ProxyLarge => "proxy-large",
         }
     }
 
@@ -72,6 +81,8 @@ impl Scenario {
             | Scenario::StaticSmall1kIdle => "/small.bin",
             Scenario::StaticLarge => "/large.bin",
             Scenario::ProxySmall | Scenario::ProxyFresh => "/proxy/small",
+            Scenario::ProxyMedium => "/proxy/medium",
+            Scenario::ProxyLarge => "/proxy/large",
         }
     }
 
@@ -82,7 +93,9 @@ impl Scenario {
             | Scenario::StaticLarge
             | Scenario::ProxySmall
             | Scenario::ConditionalHit
-            | Scenario::StaticSmall1kIdle => Reuse::KeepAlive,
+            | Scenario::StaticSmall1kIdle
+            | Scenario::ProxyMedium
+            | Scenario::ProxyLarge => Reuse::KeepAlive,
         }
     }
 
@@ -96,7 +109,9 @@ impl Scenario {
             | Scenario::StaticFresh
             | Scenario::ProxySmall
             | Scenario::ProxyFresh
-            | Scenario::ConditionalHit => 0,
+            | Scenario::ConditionalHit
+            | Scenario::ProxyMedium
+            | Scenario::ProxyLarge => 0,
         }
     }
 
@@ -110,7 +125,8 @@ impl Scenario {
             _ => 200,
         };
         let body_len = match self {
-            Scenario::StaticLarge => LARGE,
+            Scenario::StaticLarge | Scenario::ProxyLarge => LARGE,
+            Scenario::ProxyMedium => MEDIUM,
             Scenario::StaticSmall
             | Scenario::StaticFresh
             | Scenario::ProxySmall
@@ -132,7 +148,9 @@ impl Scenario {
             | Scenario::StaticFresh
             | Scenario::ProxySmall
             | Scenario::ProxyFresh
-            | Scenario::StaticSmall1kIdle => String::new(),
+            | Scenario::StaticSmall1kIdle
+            | Scenario::ProxyMedium
+            | Scenario::ProxyLarge => String::new(),
         }
     }
 }
@@ -157,12 +175,35 @@ mod tests {
                 _ => 0,
             };
             assert_eq!(s.idle(), expected, "{}", s.name());
-            assert_eq!(Scenario::DEFAULT.contains(&s), s.idle() == 0);
+            let on_demand = matches!(
+                s,
+                Scenario::StaticSmall1kIdle | Scenario::ProxyMedium | Scenario::ProxyLarge
+            );
+            assert_eq!(Scenario::DEFAULT.contains(&s), !on_demand, "{}", s.name());
         }
         let s = Scenario::StaticSmall1kIdle;
         assert_eq!(s.path(), Scenario::StaticSmall.path());
         assert_eq!(s.reuse(), Reuse::KeepAlive);
         assert_eq!(s.expect(None), Scenario::StaticSmall.expect(None));
+    }
+
+    #[test]
+    fn the_large_proxy_scenarios_ask_the_backend_for_their_size() {
+        for (s, path, len) in [
+            (Scenario::ProxySmall, "/proxy/small", SMALL),
+            (Scenario::ProxyMedium, "/proxy/medium", MEDIUM),
+            (Scenario::ProxyLarge, "/proxy/large", LARGE),
+        ] {
+            assert_eq!(s.path(), path);
+            assert_eq!(s.expect(None).body_len, len);
+            assert_eq!(s.reuse(), Reuse::KeepAlive);
+            assert_eq!(
+                crate::backend::body_len(path.trim_start_matches("/proxy")),
+                len
+            );
+        }
+        assert!(!Scenario::DEFAULT.contains(&Scenario::ProxyMedium));
+        assert!(!Scenario::DEFAULT.contains(&Scenario::ProxyLarge));
     }
 
     #[test]

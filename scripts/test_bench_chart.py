@@ -81,6 +81,20 @@ class Validation(unittest.TestCase):
         self.assertIn("line [5.00, 7.00]", next(c for c in charts if "CPU" in c))
         self.assertIn("static-small-1k-idle", md.split("Latest", 1)[-1])
 
+    def test_the_large_proxy_scenarios_are_accepted(self):
+        text = "\n".join(
+            [
+                HEADER,
+                row("2026-11-07", "proxy-medium", 120.0, 38.0),
+                row("2026-11-07", "proxy-large", 1400.0, 400.0),
+            ]
+        )
+        rows, dropped = bc.parse(text)
+        self.assertEqual((len(rows), dropped), (2, 0))
+        latest = bc.render(rows).split("Latest", 1)[-1]
+        self.assertIn("proxy-medium", latest)
+        self.assertIn("proxy-large", latest)
+
     def test_untrusted_fields_drop_the_row(self):
         bad = [
             row("2026-11-06", '"static-small""]\nline [1"', 1, 1),

@@ -48,6 +48,8 @@ SCENARIOS = (
     "static-fresh",
     "proxy-small",
     "proxy-fresh",
+    "proxy-medium",
+    "proxy-large",
     "conditional-hit",
     "static-small-1k-idle",
 )
