@@ -2231,6 +2231,16 @@ and owner-approved).
   time for large proxied bodies by 17 % and calls by 4× in the stop
   measurement) and removes the `epoll_ctl` re-arms per proxied chunk
   (about 4 per 16 KiB chunk today).
+  *(Owner decisions 2026-11-07, Task 8 measurements,
+  `docs/superpowers/measurements/2026-11-07-stage-7-netem.md`:)*
+  fill-drain-refill stays (no double buffering: under `tc netem` neither
+  throughput nor recovery depended on the buffer). Target: no errors
+  under 50 ms delay, 1 % loss, or a 2 s pause, and traffic back within
+  1.5 s after a 2 s pause (measured 1.0–1.2 s). The upstream body buffer
+  grows from 16 KiB to 32 KiB (a 1 MiB proxied response: 140 → 75 system
+  calls, about 40 % less CPU; no cost for small responses; idle
+  connections hold no body buffer), so the worst case per proxied
+  connection grows from about 49 to 65 KiB (NFR-RES-01).
 - **NFR-PERF-06** [stage 7] `MSG_MORE` to coalesce heads with file data;
   ~~`splice` for proxied bodies with a known `Content-Length`~~
   *(dropped, owner decision 2026-11-07, by measurement: copying is at
