@@ -38,7 +38,7 @@ pub(super) enum Socket {
 /// The most eager attempts in one [`Driver::settle`], so a fast relay
 /// cannot hold the loop from its other descriptors and timers (as
 /// [`super::clients::ACCEPT_BATCH`] bounds accepts): 64 attempts move
-/// half a MiB of 16 KiB chunks; what is left waits for its readiness.
+/// about 1 MiB of 32 KiB chunks; what is left waits for its readiness.
 pub(super) const EAGER_BUDGET: usize = 64;
 
 /// Which I/O an eager attempt does.

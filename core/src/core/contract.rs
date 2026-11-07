@@ -213,19 +213,19 @@
 //!   backend by id.
 //! - The core allocates [`UpstreamId`]s, sequentially from 1, and never
 //!   reuses one. A connection holds at most one upstream at a time.
-//! - Pooling (FR-PROXY-02): once a response is complete and reusable,
-//!   the core may keep its upstream open instead of closing it, idle in
-//!   its pool, and later hand it to another request to the same backend,
-//!   from any connection: then no `Connect` comes but an
-//!   [`Action::CheckSilent`] for the reused id, whose events now serve the
-//!   new exchange. The driver answers it like a connect (a later event,
-//!   nothing delivered if `CloseUpstream` comes first; the interest stays
-//!   `None` meanwhile): one non-blocking peek of a byte (`recv` with
-//!   `MSG_PEEK | MSG_DONTWAIT`, which consumes nothing); `UpstreamConnected`
-//!   if nothing is readable, `UpstreamFailed` for a byte, the end of
-//!   stream or an error (the core then closes it and connects afresh;
-//!   owner decision 2026-11-07: a buggy backend's stray bytes after a
-//!   response never become the next client's). An idle upstream keeps interest `Read`; its
+//! - Pooling (FR-PROXY-02): once a response is complete and reusable, the
+//!   core may keep its upstream open instead of closing it, idle in its
+//!   pool, and later hand it to another request to the same backend, from
+//!   any connection: then no `Connect` comes but an [`Action::CheckSilent`]
+//!   for the reused id, whose events now serve the new exchange. The driver
+//!   answers it like a connect (a later event, nothing delivered if
+//!   `CloseUpstream` comes first; the interest stays `None` meanwhile): one
+//!   non-blocking peek of a byte (`recv` with `MSG_PEEK | MSG_DONTWAIT`,
+//!   which consumes nothing); `UpstreamConnected` if nothing is readable,
+//!   `UpstreamFailed` for a byte, the end of stream or an error (the core
+//!   then closes it and connects afresh; owner decision 2026-11-07: a buggy
+//!   backend's stray bytes after a response never become the next
+//!   client's). An idle upstream keeps interest `Read`; its
 //!   [`Core::upstream_recv_buffer`] is a scratch buffer whose contents are
 //!   never looked at, and any `UpstreamReceived`, `UpstreamReadClosed` or
 //!   `UpstreamFailed` for it is answered with its `CloseUpstream` (so is
@@ -351,8 +351,9 @@
 //!   drain, refill; NFR-RES-04). A close-delimited body ends with
 //!   [`Event::UpstreamReadClosed`]; any other ends at its framing, and the
 //!   upstream is closed (or parked idle) then, so bytes after a body's end
-//!   are never sent (FR-PROXY-22). A response to HEAD, a 204 or a 304 has no body: what
-//!   the backend sends after its head is dropped and the upstream closed.
+//!   are never sent (FR-PROXY-22). A response to HEAD, a 204 or a 304 has
+//!   no body: what the backend sends after its head is dropped and the
+//!   upstream closed.
 //!   Interim (1xx) heads are dropped and the next head parsed afresh; more
 //!   than eight in a row are a 502 (FR-PROXY-18). Its capacity is
 //!   `max(32 KiB, max_head)`
@@ -364,8 +365,9 @@
 //! - Descriptor budget: at most one upstream socket is open or connecting
 //!   per counted connection, and active and idle pooled upstreams together
 //!   are at most `max_connections` (a new connect at that count first
-//!   closes the oldest idle one); refused connections never connect. The driver's `RLIMIT_NOFILE` check at
-//!   startup adds them to the budget above.
+//!   closes the oldest idle one); refused connections never connect. The
+//!   driver's `RLIMIT_NOFILE` check at startup adds them to the budget
+//!   above.
 //! - Failures (FR-PROXY-26): before the response head was queued, a failed
 //!   or refused connect is answered 502 ([`BackendFailure::Refused`]), a
 //!   reset 502 ([`BackendFailure::Reset`]), an early end of stream 502
@@ -516,10 +518,10 @@
 //!   closed at once, per connection `CloseFile`, `CloseUpstream`, `Close`
 //!   as usual, each exactly once; each connection with an exchange in
 //!   flight is logged first as `Rejected` with `ShuttingDown`, idle,
-//!   lingering and refused connections are cut silently. Unanswered opens become orphaned opens
-//!   (the core would answer a late `FileOpened` with `CloseFile` as
-//!   always); the driver exits after this call without waiting for them
-//!   (DRV-14), so `is_drained` is not polled after it.
+//!   lingering and refused connections are cut silently. Unanswered opens
+//!   become orphaned opens (the core would answer a late `FileOpened` with
+//!   `CloseFile` as always); the driver exits after this call without
+//!   waiting for them (DRV-14), so `is_drained` is not polled after it.
 //!
 //! # Connection limits
 //!

@@ -72,12 +72,12 @@ impl Core {
     /// (`CloseUpstream`, FR-PROXY-02); nothing is parked in or taken from
     /// the pool while draining, so a connection whose exchange ends
     /// closes its upstream. Otherwise it emits only `Close` (none for a
-    /// restart): the connections it closes hold no file or upstream. [`Core::handle`] keeps working as
-    /// before; the driver keeps running its loop until
-    /// [`Core::is_drained`] or its deadline (`shutdown_timeout`,
-    /// `restart_timeout`), then calls [`Core::abort_all`]. Deadlines are
-    /// unchanged, so `now` is not needed yet; it is taken for symmetry
-    /// with `handle`.
+    /// restart): the connections it closes hold no file or upstream.
+    /// [`Core::handle`] keeps working as before; the driver keeps running
+    /// its loop until [`Core::is_drained`] or its deadline
+    /// (`shutdown_timeout`, `restart_timeout`), then calls
+    /// [`Core::abort_all`]. Deadlines are unchanged, so `now` is not needed
+    /// yet; it is taken for symmetry with `handle`.
     ///
     /// A shutdown during a restart's drain escalates it as if it came
     /// first (idle and fresh connections close, requests and connections
@@ -137,9 +137,9 @@ impl Core {
     /// The fast path: close every idle pooled upstream, then every
     /// connection at once, each open upstream and each open file exactly
     /// once (per connection, in `ConnId` order: its `Log`, if any, then
-    /// `CloseFile`, `CloseUpstream`, `Close`). The driver calls it on a second SIGTERM, a SIGINT or when
-    /// `shutdown_timeout` expires, with or without a drain before it,
-    /// between two [`Core::handle`] calls.
+    /// `CloseFile`, `CloseUpstream`, `Close`). The driver calls it on a
+    /// second SIGTERM, a SIGINT or when `shutdown_timeout` expires, with or
+    /// without a drain before it, between two [`Core::handle`] calls.
     ///
     /// Each connection with an exchange in flight (a request read past its
     /// first byte, a response being written, a file being opened or sent,
