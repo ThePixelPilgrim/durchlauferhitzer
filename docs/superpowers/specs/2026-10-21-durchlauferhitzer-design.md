@@ -2155,6 +2155,12 @@ and owner-approved).
 - **NFR-PERF-06** [stage 7] `MSG_MORE` to coalesce heads with file data;
   `splice` for proxied bodies with a known `Content-Length`; readahead
   overlap with sending; deadline index instead of the O(n) scan.
+  *(Stage 7 Task 3; owner-acknowledged trade-off 2026-11-07:)* a 200
+  head whose file body follows is written with `MSG_MORE`, so head and
+  first chunk leave together (one segment for a small file; about 5 %
+  less CPU per small request). The head is held while the chunk is read:
+  time to first byte rises by the readahead time, bounded by the kernel's
+  probe timer (max(RTO, 200 ms)); time to the last byte is unchanged.
 - **NFR-PERF-07** [stage 7] N driver threads with `SO_REUSEPORT`; backend
   connection pooling. *(Owner decision 2026-11-06:)* the thread count is
   a setting, a number or `auto` (the CPU count), with a default of 1: at
