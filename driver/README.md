@@ -108,8 +108,11 @@ src/
                       ignore; SIGTERM turns a restart drain into the
                       shutdown drain)
     tests.rs          unit tests of the loop's decisions on a driver that
-                      is built but not run; one run on loopback counts a
-                      1 KiB file's segments (MSG_MORE, NFR-PERF-06)
+                      is built but not run (the silence check's peek on a
+                      socket pair among them); one run on loopback counts
+                      a 1 KiB file's segments (MSG_MORE, NFR-PERF-06),
+                      another times heads with no file behind them (a
+                      HEAD, a 304, a proxied response: never corked)
     eager_tests.rs    eager I/O at its edges: the budget, EOF, an error
     relay_tests.rs    the loop on loopback relaying a proxied 1 MiB body:
                       its `epoll_ctl` calls (NFR-PERF-05)
