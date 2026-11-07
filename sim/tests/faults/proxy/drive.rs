@@ -736,7 +736,13 @@ pub(crate) fn conn_of(log: &Log) -> ConnId {
 }
 
 /// One seed of the proxy net.
-pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
+/// `plan` follows the seed's shutdown plan as `Shutdown::tick` changes it,
+/// for the failure report (`run_reporting`).
+pub(crate) fn run_proxy_seed(
+    seed: u64,
+    coverage: &mut ProxyCoverage,
+    plan: Rc<Cell<ShutdownPlan>>,
+) {
     let mut rng = fastrand::Rng::with_seed(seed ^ 0x005e_ed0f_9e7a);
     let net = NetConfig::random(&mut rng);
     let mut sim = dated_sim(&net.text);
@@ -744,7 +750,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
     let mut assign = Assign::default();
     let mut n = 1u8;
     let mut used_peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-    let mut shutdown = Shutdown::new(seed);
+    let mut shutdown = Shutdown::new(seed, plan);
     let rounds = rng.usize(2..6);
     for round in 0..rounds {
         shutdown.last_round = round + 1 == rounds;

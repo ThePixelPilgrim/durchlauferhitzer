@@ -18,7 +18,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
 use durchlauferhitzer::log::format_entry;
 use durchlauferhitzer_core::http::request::{HttpError, Method};
 use durchlauferhitzer_core::http::status::Status;
-use durchlauferhitzer_core::{BackendId, ConnId, Log, RejectReason, RequestLine, RequestSummary};
+use durchlauferhitzer_core::{
+    BackendFailure, BackendId, ConnId, Log, RejectReason, RequestLine, RequestSummary,
+};
 
 /// The backends the core entries name by index (`Core::backends`).
 fn backends() -> Vec<SocketAddr> {
@@ -80,7 +82,9 @@ impl Rng {
             host: (self.below(2) == 0).then(|| self.string()),
             path: self.string(),
         };
-        match self.below(3) {
+        // One past the list too: the index fallback.
+        let backend = BackendId(self.below(4) as u32);
+        match self.below(5) {
             0 => Log::Response {
                 conn,
                 peer,
@@ -90,9 +94,25 @@ impl Rng {
             1 => Log::ProxiedResponse {
                 conn,
                 peer,
-                // One past the list too: the index fallback.
-                backend: BackendId(self.below(4) as u32),
+                backend,
                 status: self.below(600) as u16,
+                request,
+            },
+            2 => Log::BackendRetried {
+                conn,
+                peer,
+                backend,
+                kind: if self.below(2) == 0 {
+                    BackendFailure::Reset
+                } else {
+                    BackendFailure::ClosedEarly
+                },
+                request,
+            },
+            3 => Log::BackendNotSilent {
+                conn,
+                peer,
+                backend,
                 request,
             },
             _ => Log::Rejected {
@@ -242,13 +262,25 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
                     .chain(["path"])
                     .collect()
             }
+            Log::BackendRetried { request: r, .. } => {
+                ["kind", "conn", "peer", "backend", "failure", "method"]
+                    .into_iter()
+                    .chain(host_key(r))
+                    .chain(["path"])
+                    .collect()
+            }
+            Log::BackendNotSilent { request: r, .. } => {
+                ["kind", "conn", "peer", "backend", "method"]
+                    .into_iter()
+                    .chain(host_key(r))
+                    .chain(["path"])
+                    .collect()
+            }
             Log::Rejected { .. } => vec!["kind", "conn", "peer", "reason", "method", "path"],
             other @ (Log::Response { request: None, .. }
             | Log::Reset { .. }
             | Log::FileAborted { .. }
-            | Log::BackendFailed { .. }
-            | Log::BackendRetried { .. }
-            | Log::BackendNotSilent { .. }) => panic!("not generated: {other:?}"),
+            | Log::BackendFailed { .. }) => panic!("not generated: {other:?}"),
         };
         let get = |key: &str| {
             fields
@@ -260,7 +292,9 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
             Log::Response {
                 request: Some(r), ..
             }
-            | Log::ProxiedResponse { request: r, .. } => (&r.method, r.host.clone(), &r.path),
+            | Log::ProxiedResponse { request: r, .. }
+            | Log::BackendRetried { request: r, .. }
+            | Log::BackendNotSilent { request: r, .. } => (&r.method, r.host.clone(), &r.path),
             Log::Rejected {
                 reason:
                     RejectReason::Http {
@@ -272,9 +306,7 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
             | Log::Rejected { .. }
             | Log::Reset { .. }
             | Log::FileAborted { .. }
-            | Log::BackendFailed { .. }
-            | Log::BackendRetried { .. }
-            | Log::BackendNotSilent { .. }) => panic!("not generated: {other:?}"),
+            | Log::BackendFailed { .. }) => panic!("not generated: {other:?}"),
         };
         let method = match method {
             Method::Get => "GET".to_owned(),
@@ -336,7 +368,10 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
                 "seed {seed}: {key} cut short"
             );
         }
-        if let Log::ProxiedResponse { backend, .. } = &entry {
+        if let Log::ProxiedResponse { backend, .. }
+        | Log::BackendRetried { backend, .. }
+        | Log::BackendNotSilent { backend, .. } = &entry
+        {
             let expected = usize::try_from(backend.0)
                 .ok()
                 .and_then(|index| backends().get(index).copied())

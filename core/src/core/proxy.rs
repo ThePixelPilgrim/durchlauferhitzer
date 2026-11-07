@@ -187,11 +187,11 @@ impl Core {
         };
         let mut buffers = ExchangeBuffers::new(recv_capacity, head_capacity);
         render_backend_request(&head, &path, c.peer, toward, &mut buffers.head);
-        // A pooled request takes the backend's newest idle connection,
-        // unless the core drains (which closed the pool).
-        let idle = match (toward, self.mode) {
-            (Persistence::KeepAlive, Mode::Serving) => self.upstreams.unpark(backend, conn),
-            (Persistence::KeepAlive, Mode::Draining(_)) | (Persistence::Close, _) => None,
+        // A request that keeps the backend connection (only while serving:
+        // a drain closed the pool) takes the backend's newest idle one.
+        let idle = match toward {
+            Persistence::KeepAlive => self.upstreams.unpark(backend, conn),
+            Persistence::Close => None,
         };
         let mut request = ProxyRequest {
             summary,

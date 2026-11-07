@@ -30,24 +30,28 @@ pub(crate) struct Shutdown {
     eager: bool,
     /// The seed's last round runs (`run_proxy_seed`).
     pub(crate) last_round: bool,
+    /// Where the plan is reported as it changes (`run_reporting`).
+    report: Rc<Cell<ShutdownPlan>>,
 }
 
 /// The steps a proxy seed's shutdown falls among (its rounds' steps).
 pub(crate) const PROXY_SPAN: usize = 160;
 
 impl Shutdown {
-    pub(crate) fn new(seed: u64) -> Shutdown {
+    pub(crate) fn new(seed: u64, report: Rc<Cell<ShutdownPlan>>) -> Shutdown {
         Shutdown {
             plan: shutdown_plan(seed, PROXY_SPAN),
             marks: Marks::default(),
             step: 0,
+            // Its drain falls where `tick` puts it (`with_drain_at`).
             on_late: if seed % 2 == 0 {
-                ShutdownPlan::Drain { drain: 0 }
+                ShutdownPlan::Drain { drain: usize::MAX }
             } else {
-                ShutdownPlan::Restart { drain: 0 }
+                ShutdownPlan::Restart { drain: usize::MAX }
             },
             eager: matches!(seed % 5, 1 | 3),
             last_round: false,
+            report,
         }
     }
 
@@ -68,6 +72,7 @@ impl Shutdown {
                 self.plan
             };
             self.plan = plan.with_drain_at(self.step);
+            self.report.set(self.plan);
         }
         shutdown_at(sim, self.plan, self.step, &mut self.marks, &conns(stories));
         self.step += 1;
