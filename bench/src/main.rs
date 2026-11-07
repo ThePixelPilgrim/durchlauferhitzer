@@ -10,6 +10,7 @@
 
 mod backend;
 mod cli;
+mod fds;
 mod load;
 mod measure;
 mod row;
@@ -32,10 +33,10 @@ use server::Server;
 /// Client threads per scenario.
 const CONCURRENCY: usize = 8;
 /// The longest warm-up.
-const WARM_UP: Duration = Duration::from_secs(1);
+pub(crate) const WARM_UP: Duration = Duration::from_secs(1);
 /// Time for the server to finish the closes after the load, inside the
 /// measured window.
-const SETTLE: Duration = Duration::from_millis(100);
+pub(crate) const SETTLE: Duration = Duration::from_millis(100);
 
 /// Why a scenario failed (the fingerprint's reason).
 #[derive(Debug, Clone, Copy)]
@@ -276,6 +277,14 @@ fn main() -> ExitCode {
         run: 0,
         syscalls_only: args.syscalls_only,
     };
+    let idle = args.scenarios.iter().map(|s| s.idle()).max().unwrap_or(0);
+    if let Err(e) = match idle {
+        0 => Ok(()),
+        n => fds::ensure(n as u64 + fds::MARGIN),
+    } {
+        fail("all", Reason::Startup, &e);
+        return ExitCode::FAILURE;
+    }
     let mut rows = Vec::new();
     let mut failed = false;
     for run in 1..=args.runs {

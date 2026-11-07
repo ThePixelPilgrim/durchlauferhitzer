@@ -122,3 +122,35 @@ impl Core {
         actions.push(Action::Close { conn });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::test_support::{PEER, accept, core, secs};
+    use crate::core::{Action, ConnId, Event};
+
+    /// Connections due at one `TimerFired` expire in `ConnId` order,
+    /// whatever their deadlines' order and the order they arrived in: two
+    /// at the same instant (accepted 7 then 5) and an earlier id (2) with
+    /// a later deadline.
+    #[test]
+    fn due_connections_expire_in_id_order() {
+        let mut core = core();
+        accept(&mut core, secs(0), 7, PEER);
+        accept(&mut core, secs(0), 5, PEER);
+        accept(&mut core, secs(1), 2, PEER);
+        let mut actions = Vec::new();
+        core.handle(secs(20), Event::TimerFired, &mut actions);
+        let closed: Vec<ConnId> = actions
+            .iter()
+            .filter_map(|a| {
+                if let Action::Close { conn } = a {
+                    Some(*conn)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(closed, vec![ConnId(2), ConnId(5), ConnId(7)], "{actions:?}");
+        assert_eq!(core.next_deadline(), None);
+    }
+}

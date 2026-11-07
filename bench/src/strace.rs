@@ -13,9 +13,9 @@ use crate::measure;
 use crate::server::{self, Server};
 
 /// How long strace may take to attach to every thread.
-const ATTACH: Duration = Duration::from_secs(3);
+pub(crate) const ATTACH: Duration = Duration::from_secs(3);
 /// Time after the load for the last closes, before strace stops.
-const SETTLE: Duration = Duration::from_secs(3);
+pub(crate) const SETTLE: Duration = Duration::from_secs(3);
 
 pub struct Traced {
     /// The calls of every server thread over the window.

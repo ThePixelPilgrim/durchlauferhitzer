@@ -7,6 +7,9 @@ use std::time::Duration;
 
 use crate::scenario::Scenario;
 
+/// The longest `--duration`, in seconds.
+pub const MAX_DURATION_SECS: f64 = 3600.0;
+
 pub const USAGE: &str = "usage: bench --binary <path> --out <csv> [--runs N] [--duration S] [--scenarios a,b] [--syscalls-only]";
 
 #[derive(Debug, PartialEq)]
@@ -49,7 +52,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                 let secs: f64 = value
                     .parse()
                     .ok()
-                    .filter(|s: &f64| s.is_finite() && *s > 0.0 && *s <= 3600.0)
+                    .filter(|s: &f64| s.is_finite() && *s > 0.0 && *s <= MAX_DURATION_SECS)
                     .ok_or_else(|| format!("--duration {value}: seconds, above 0, at most 3600"))?;
                 duration = Duration::from_secs_f64(secs);
             }

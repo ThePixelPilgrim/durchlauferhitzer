@@ -19,8 +19,14 @@ empty.
 
 Per run a fresh server: a temp static root with a 1 KiB and a 1 MiB file,
 one proxy route to the in-process stub backend (1 KiB body, keep-alive),
-default limits (except `max_connections_per_ip 1024`, as every client
-shares 127.0.0.1) and containment, `user nobody` when run as root. Per
+default limits except three for `static-small-1k-idle` (one server
+serves every scenario of a run): `max_connections 2048` and
+`max_connections_per_ip 2048` (every client shares 127.0.0.1), and
+`keepalive_timeout 125m`, which outlasts the idle connections' hold at
+the longest `--duration` (two windows plus about 8 s). The other
+scenarios hold a few connections, closed after each window, so neither
+change touches them. Default containment, `user nobody` when run as
+root. Per
 scenario: a warm-up (at most 1 s), the measured window (`duration`, 8
 client threads), then the strace pass (another `duration`).
 
@@ -39,7 +45,10 @@ set). That one opens its 1 000 connections before the warm-up (each makes
 one request, then sends nothing) and holds them through the measured
 window and the strace pass (NFR-PERF-03, NFR-PERF-06); its `rss_kib` is
 the server with them open. Each idle connection the server closed by
-then counts as an error.
+then counts as an error. The bench itself then holds about 1 010
+sockets: before such a scenario it raises its soft `RLIMIT_NOFILE` to the
+hard limit with util-linux's `prlimit` (the server inherits it), and
+fails at startup (`reason=startup`) if that leaves fewer than 1 064.
 
 CSV, one row per scenario and run:
 `date,commit,runner,scenario,requests,errors,seconds,cpu_us_per_req,syscalls_per_req,rss_kib`.
@@ -95,6 +104,7 @@ bisect.sh      the `git bisect run` script (tested by scripts/test_bench_bisect.
 src/
   main.rs      runs, scenarios, the measured window, failures
   cli.rs       the command line (incl. --syscalls-only)
+  fds.rs       the bench's open-files limit (raised for the idle scenario)
   scenario.rs  the scenarios: path, connection reuse, expected response
   load.rs      the client threads and the response check
   backend.rs   the stub backend
