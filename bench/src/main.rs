@@ -13,6 +13,7 @@ mod cli;
 mod fds;
 mod load;
 mod measure;
+mod netem;
 mod row;
 mod scenario;
 mod server;
@@ -28,7 +29,7 @@ use backend::Backend;
 use load::Target;
 use row::Row;
 use scenario::Scenario;
-use server::Server;
+use server::{Place, Server};
 
 /// Client threads per scenario.
 const CONCURRENCY: usize = 8;
@@ -47,6 +48,7 @@ enum Reason {
     Proc,
     Strace,
     ServerExited,
+    Netem,
 }
 
 impl Reason {
@@ -58,6 +60,7 @@ impl Reason {
             Reason::Proc => "proc",
             Reason::Strace => "strace",
             Reason::ServerExited => "server-exited",
+            Reason::Netem => "netem",
         }
     }
 }
@@ -101,6 +104,9 @@ struct Context {
     duration: Duration,
     run: u32,
     syscalls_only: bool,
+    /// `--netem`'s namespace and pair, and `--pause`.
+    net: Option<netem::Net>,
+    pause: Option<Duration>,
 }
 
 /// One scenario on a running server: its row, or None after a failure
@@ -153,8 +159,40 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
     } else {
         let before = server.cpu_ticks();
         let started = Instant::now();
-        let tally = load::drive(&target, CONCURRENCY, ctx.duration);
+        let (tally, paused) = thread::scope(|scope| {
+            let pause = match (&ctx.net, ctx.pause) {
+                (Some(net), Some(pause)) => Some(scope.spawn(move || {
+                    thread::sleep(ctx.duration / 3);
+                    let paused = Instant::now();
+                    net.pause(pause).map(|()| (paused, Instant::now()))
+                })),
+                _ => None,
+            };
+            let tally = load::drive(&target, CONCURRENCY, ctx.duration);
+            let paused = pause.map(|p| p.join().unwrap_or(Err("the pause panicked".to_string())));
+            (tally, paused)
+        });
+        let ended = Instant::now();
         let seconds = started.elapsed().as_secs_f64();
+        match paused {
+            None => {}
+            Some(Ok((paused, resumed))) => {
+                let r = netem::recovery(started, ended, paused, resumed, &tally.done);
+                println!(
+                    "bench: pause {name} run={} rate_before={:.0} recovery_ms={} gap_ms={}",
+                    ctx.run,
+                    r.rate_before,
+                    r.recovery
+                        .map(|d| d.as_millis().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    r.gap.as_millis()
+                );
+            }
+            Some(Err(e)) => {
+                fail(name, Reason::Netem, &e);
+                return None;
+            }
+        }
         thread::sleep(SETTLE);
         let after = server.cpu_ticks();
         let rss = server.rss_kib();
@@ -264,7 +302,28 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let backend = match Backend::start([127, 0, 0, 1].into()) {
+    // `--netem`: the server behind the veth pair; the backend on our end.
+    let (net, place, backend_ip) = match &args.netem {
+        None => (
+            None,
+            Place::Loopback,
+            std::net::IpAddr::from([127, 0, 0, 1]),
+        ),
+        Some(spec) => {
+            if !server::is_root() {
+                fail("all", Reason::Startup, "--netem needs root");
+                return ExitCode::FAILURE;
+            }
+            match netem::Net::up(spec) {
+                Ok(net) => (Some(net), Place::Netns, netem::CLIENT_IP),
+                Err(e) => {
+                    fail("all", Reason::Netem, &e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+    let backend = match Backend::start(backend_ip) {
         Ok(b) => b,
         Err(e) => {
             fail("all", Reason::Startup, &format!("backend: {e}"));
@@ -278,6 +337,8 @@ fn main() -> ExitCode {
         duration: args.duration,
         run: 0,
         syscalls_only: args.syscalls_only,
+        net,
+        pause: args.pause,
     };
     let idle = args.scenarios.iter().map(|s| s.idle()).max().unwrap_or(0);
     if let Err(e) = match idle {
@@ -292,7 +353,7 @@ fn main() -> ExitCode {
     for run in 1..=args.runs {
         ctx.run = run;
         println!("bench: run {run} of {}", args.runs);
-        let mut server = match Server::start(&args.binary, backend.addr, &run.to_string()) {
+        let mut server = match Server::start(&args.binary, backend.addr, &run.to_string(), place) {
             Ok(s) => s,
             Err(e) => {
                 fail("all", Reason::Startup, &e);

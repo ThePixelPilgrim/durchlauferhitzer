@@ -28,6 +28,10 @@ on:
         description: "Seconds of each measured benchmark window (bench --duration)"
         type: number
         default: 10
+      bench_netem:
+        description: "Run only the tc netem benchmarks (bench --netem, NFR-PERF-05), skipping every other job"
+        type: boolean
+        default: false
 
 # The jobs only read the repository; only `report` writes issues, and
 # only `bench-publish` writes (the `benchmarks` branch).
@@ -55,6 +59,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     name: long runs (${{ matrix.arch }})
+    if: ${{ !inputs.bench_netem }}
     runs-on: ${{ matrix.runner }}
     # Full budget: about 8 min on 4 cores, plus the build.
     timeout-minutes: 60
@@ -107,6 +112,7 @@ jobs:
 
   fuzz:
     name: fuzz
+    if: ${{ !inputs.bench_netem }}
     runs-on: ubuntu-latest
     # Full budget: 4 x 600 s plus install and build, about 45 min.
     timeout-minutes: 90
@@ -183,6 +189,7 @@ jobs:
     # glibc than the runners' (Task 6 runs every server under kill), and
     # the restart tests run (FR-PROC-07; owner decision 2026-11-06).
     name: older glibc (debian 12)
+    if: ${{ !inputs.bench_netem }}
     runs-on: ubuntu-latest
     # About 1.5 min.
     timeout-minutes: 30
@@ -278,6 +285,7 @@ jobs:
           - { arch: x86_64, runner: ubuntu-latest, libc: musl }
           - { arch: arm64, runner: ubuntu-24.04-arm, libc: musl }
     name: restart soak (${{ matrix.arch }}, ${{ matrix.libc }})
+    if: ${{ !inputs.bench_netem }}
     runs-on: ${{ matrix.runner }}
     # One run takes about 30 s: 20 runs about 10 min, plus the build.
     timeout-minutes: 60
@@ -393,6 +401,7 @@ jobs:
     # in the rows stays true. The bench runs as the runner user; only
     # its strace pass runs as root (`sudo -n`).
     name: bench
+    if: ${{ !inputs.bench_netem }}
     runs-on: ubuntu-24.04
     # Full budget: 5 runs x 6 scenarios x about 27 s, plus one run of
     # the 1k-idle and proxy-large scenarios (about 60 s), plus the builds.
@@ -444,6 +453,71 @@ jobs:
         with:
           name: nightly-failure-bench
           path: failure.json
+          if-no-files-found: ignore
+
+  bench-netem:
+    # The tc netem benchmarks (NFR-PERF-05, bench/README.md), only when
+    # dispatched with `bench_netem`: the server in its own network
+    # namespace behind a veth pair with netem on both ends, as root
+    # (sudo). Three settings: 50 ms delay each way, 1 % loss, and a 2 s
+    # pause (every packet dropped) in each window; each setting's rows
+    # are their own CSV (runner label `...-netem-<setting>`), uploaded as
+    # `bench-netem-results` and never published.
+    name: bench netem
+    if: ${{ inputs.bench_netem }}
+    runs-on: ubuntu-24.04
+    # 3 settings x 3 scenarios x BENCH_NETEM_RUNS (3) x about 30 s, plus
+    # the builds.
+    timeout-minutes: 40
+    env:
+      BENCH_NETEM_RUNS: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+      - name: Install strace, check netem
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends strace iproute2
+          sudo modprobe sch_netem || true
+          sudo ip netns add dlh-netem-probe
+          sudo ip -n dlh-netem-probe link set lo up
+          sudo tc -n dlh-netem-probe qdisc add dev lo root netem delay 1ms
+          sudo ip netns del dlh-netem-probe
+      - name: Build the release binary and the bench
+        run: |
+          cargo build --release --locked -p durchlauferhitzer
+          cargo build --release --locked --manifest-path bench/Cargo.toml
+      - name: Netem benchmarks
+        # Every setting runs, even after one fails.
+        run: |
+          set -uo pipefail
+          status=0
+          netem() {
+            local label=$1 spec=$2 pause=${3:-}
+            echo "== netem $label: $spec ${pause:+pause $pause s}"
+            sudo env BENCH_COMMIT="${GITHUB_SHA::7}" \
+              BENCH_RUNNER="gha-ubuntu-24.04-$(uname -m)-netem-$label" \
+              bench/target/release/bench --binary target/release/durchlauferhitzer \
+              --out "netem-$label.csv" --runs "$BENCH_NETEM_RUNS" --duration "$BENCH_SECONDS" \
+              --scenarios static-large,proxy-small,proxy-large \
+              --netem "$spec" ${pause:+--pause "$pause"} || status=1
+          }
+          # The log through tee without a subshell around the calls, so
+          # `status` survives them.
+          exec > >(tee bench-netem.log) 2>&1
+          netem delay50ms "delay 50ms"
+          netem loss1pct "loss 1%"
+          netem pause2s "limit 1000" 2
+          exit "$status"
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-netem-results
+          path: |
+            netem-*.csv
+            bench-netem.log
           if-no-files-found: ignore
 
   bench-publish:

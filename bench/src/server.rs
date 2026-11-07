@@ -76,8 +76,21 @@ pub fn config(addr: SocketAddr, root: &Path, backend: SocketAddr, as_root: bool)
     )
 }
 
+/// Where the server runs: on loopback, or behind the netem veth pair in
+/// its own namespace (`--netem`, netem.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Loopback,
+    Netns,
+}
+
 impl Server {
-    pub fn start(binary: &Path, backend: SocketAddr, tag: &str) -> Result<Server, String> {
+    pub fn start(
+        binary: &Path,
+        backend: SocketAddr,
+        tag: &str,
+        place: Place,
+    ) -> Result<Server, String> {
         let dir = std::env::temp_dir().join(format!("dlh-bench-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let root = dir.join("www");
@@ -89,11 +102,24 @@ impl Server {
             .map_err(io("small.bin"))?;
         write_world_readable(&root.join("large.bin"), &vec![b'l'; LARGE as usize])
             .map_err(io("large.bin"))?;
-        let addr = free_addr().map_err(io("free port"))?;
+        let addr = match place {
+            Place::Loopback => free_addr().map_err(io("free port"))?,
+            Place::Netns => crate::netem::Net::server_addr(),
+        };
         let conf = dir.join("bench.conf");
         write_world_readable(&conf, config(addr, &root, backend, is_root()).as_bytes())
             .map_err(io("config"))?;
-        let mut child = Command::new(binary)
+        // `ip netns exec` execs the binary (no fork): the child's pid is
+        // the server's.
+        let mut command = match place {
+            Place::Loopback => Command::new(binary),
+            Place::Netns => {
+                let mut c = Command::new("ip");
+                c.args(["netns", "exec", crate::netem::NETNS]).arg(binary);
+                c
+            }
+        };
+        let mut child = command
             .arg(&conf)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

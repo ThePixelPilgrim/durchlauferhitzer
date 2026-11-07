@@ -10,12 +10,28 @@ cargo build --release --locked -p durchlauferhitzer
 cargo run --release --locked --manifest-path bench/Cargo.toml -- \
   --binary target/release/durchlauferhitzer --out bench.csv \
   [--runs 5] [--duration 10] [--scenarios static-small,proxy-fresh] \
-  [--syscalls-only]
+  [--syscalls-only] [--netem "<netem args>" [--pause S]]
 ```
 
 `--syscalls-only` skips the measured window: only the strace pass runs,
 the row's `requests` are that pass's, `cpu_us_per_req` and `rss_kib` are
 empty.
+
+`--netem "<args>"` (root only; `ip` and `tc` from iproute2, a kernel
+with `sch_netem`; NFR-PERF-05): the server runs in its own network
+namespace (`dlh-bench-srv`, via `ip netns exec`, listening on
+10.77.0.2:8080), joined to the bench's namespace (the clients and the
+stub backend, on 10.77.0.1) by a veth pair. Both ends carry `tc qdisc
+... root netem <args>`, so `delay 50ms` delays each direction (100 ms
+round trip) and a proxied request crosses the pair twice (client to
+server, server to backend). `--pause S` (at most a third of
+`--duration`) drops every packet on both ends (`netem loss 100%`) for S
+seconds, starting a third into each measured window; the window then
+prints `bench: pause <scenario> run=<n> rate_before=<req/s>
+recovery_ms=<ms> gap_ms=<ms>`: from the pause's end to the first 250 ms
+with at least half the rate before it (`none` if none), and the longest
+time without a completed response. The namespace is removed at exit.
+The nightly runs this only when dispatched with `bench_netem`.
 
 Per run a fresh server: a temp static root with a 1 KiB and a 1 MiB file,
 one proxy route to the in-process stub backend (keep-alive; the body is
@@ -116,5 +132,6 @@ src/
   server.rs    the config, the server process, its /proc numbers
   strace.rs    the system-call pass
   measure.rs   /proc and strace parsing, per-request arithmetic
+  netem.rs     --netem: the namespace, the veth pair, netem, the pause and its recovery
   row.rs       the CSV row and the date
 ```

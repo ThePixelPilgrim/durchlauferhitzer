@@ -45,6 +45,8 @@ pub struct Tally {
     pub errors: u64,
     /// The first error's description.
     pub first_error: Option<String>,
+    /// When each counted response completed (for `--pause`'s recovery).
+    pub done: Vec<Instant>,
 }
 
 /// `GET <path>` for host `host`, with `extra` header lines (each ending
@@ -80,6 +82,7 @@ pub fn drive(target: &Target, concurrency: usize, duration: Duration) -> Tally {
                     requests: 0,
                     errors: 1,
                     first_error: Some("a client thread panicked".to_string()),
+                    done: Vec::new(),
                 })
             })
             .collect()
@@ -88,6 +91,7 @@ pub fn drive(target: &Target, concurrency: usize, duration: Duration) -> Tally {
     for t in tallies {
         total.requests += t.requests;
         total.errors += t.errors;
+        total.done.extend(t.done);
         if total.first_error.is_none() {
             total.first_error = t.first_error;
         }
@@ -116,6 +120,7 @@ fn client(target: &Target, end: Instant) -> Tally {
         match result {
             Ok((c, close)) => {
                 tally.requests += 1;
+                tally.done.push(Instant::now());
                 if target.reuse == Reuse::KeepAlive && !close {
                     conn = Some(c);
                 }
