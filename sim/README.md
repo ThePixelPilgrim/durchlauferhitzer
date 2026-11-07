@@ -302,7 +302,12 @@ kind. Whether the answer is a 304, 206, 416 or 200 comes from a model of
 FR-STATIC-19 written in the net (the 304 first), the body of a 206 must
 be exactly its bytes of the file, a fault cuts it where it strikes
 within the range, and each kind of answer is gated in the coverage
-(`range-206` ... `range-across-chunk`).
+(`range-206` ... `range-cut`). In big seeds one request without
+conditional lines in six is replaced (from a stream of its own) by a
+`GET` of a range longer than a chunk of a file of several chunks, so
+`range-across-chunk` (a 206 checked byte for byte past its first chunk)
+must reach at least 15, and `range-cut` (a 206 cut where its fault
+strikes within the range) is reached.
 
 Every test binary takes the bytes of the responses the core writes itself
 (fixed 4xx/5xx, file heads, 206s, 416s, 304s, redirects) and the status of each parse error

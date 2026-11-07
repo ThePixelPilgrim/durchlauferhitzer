@@ -11,9 +11,8 @@ use crate::http::response::{
 use crate::time::Instant;
 
 /// The send buffer bound: every fixed response, every file head (200 and
-/// 206, FR-STATIC-19), every 416 and every
-/// `304` (FR-STATIC-18), in
-/// every persistence and body mode, at its largest (longest content type,
+/// 206, FR-STATIC-19), every 416 and every `304` (FR-STATIC-18), in every
+/// persistence and body mode, at its largest (longest content type,
 /// largest length), with and without its `Date` line (FR-HTTP-22a), fits
 /// `SEND_CAPACITY` even behind a queued `100 Continue` (the only bytes a
 /// response is ever rendered behind). (Redirects are checked before they

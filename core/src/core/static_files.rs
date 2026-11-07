@@ -117,15 +117,15 @@ impl Core {
                             request
                                 .range
                                 .judge(&request.summary.method, &validators, size);
-                        let part = match ranged {
-                            Ranged::Whole => Some(Part::Whole { size }),
-                            Ranged::Part { first, last } => Some(Part::Range { first, last, size }),
-                            Ranged::Unsatisfiable => None,
-                        };
-                        let status = match part {
-                            Some(Part::Whole { .. }) => Status::Ok,
-                            Some(Part::Range { .. }) => Status::PartialContent,
-                            None => Status::RangeNotSatisfiable,
+                        let (status, answer) = match ranged {
+                            Ranged::Whole => (Status::Ok, Answer::File(Part::Whole { size })),
+                            Ranged::Part { first, last } => (
+                                Status::PartialContent,
+                                Answer::File(Part::Range { first, last, size }),
+                            ),
+                            Ranged::Unsatisfiable => {
+                                (Status::RangeNotSatisfiable, Answer::Unsatisfiable)
+                            }
                         };
                         actions.push(Action::Log(Log::Response {
                             conn,
@@ -134,8 +134,8 @@ impl Core {
                             request: Some(request.summary),
                         }));
                         let date = self.date.as_ref();
-                        match part {
-                            Some(part) => {
+                        match answer {
+                            Answer::File(part) => {
                                 let name =
                                     request.path.last().map(Vec::as_slice).unwrap_or_default();
                                 render_file_head(
@@ -147,7 +147,7 @@ impl Core {
                                     &mut c.send,
                                 );
                             }
-                            None => render_range_not_satisfiable(
+                            Answer::Unsatisfiable => render_range_not_satisfiable(
                                 size,
                                 persistence,
                                 body,
@@ -157,8 +157,8 @@ impl Core {
                         }
                         // A HEAD (never ranged) and a 416 are the head
                         // alone, like a 304: nothing is read.
-                        match (part, body) {
-                            (Some(part), BodyMode::Full) => {
+                        match (answer, body) {
+                            (Answer::File(part), BodyMode::Full) => {
                                 let (offset, end) = match part {
                                     Part::Whole { size } => (0, size),
                                     Part::Range { first, last, .. } => {
@@ -186,8 +186,8 @@ impl Core {
                                     deadline,
                                 }
                             }
-                            (None, BodyMode::Full | BodyMode::HeadOnly)
-                            | (Some(_), BodyMode::HeadOnly) => {
+                            (Answer::Unsatisfiable, BodyMode::Full | BodyMode::HeadOnly)
+                            | (Answer::File(_), BodyMode::HeadOnly) => {
                                 self.files.release(file);
                                 actions.push(Action::CloseFile { file });
                                 ConnState::Responding {
@@ -485,6 +485,16 @@ enum Opened {
     /// A directory requested with `/`: open its `index.html` next.
     OpenIndex,
     NotServed(NotServed),
+}
+
+/// What the response to a modified regular file carries, by its range
+/// (FR-STATIC-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// The file's head, then (for a `GET`) its bytes: whole or one range.
+    File(Part),
+    /// The `416`, its file unread.
+    Unsatisfiable,
 }
 
 /// Why a static request is answered without a file.

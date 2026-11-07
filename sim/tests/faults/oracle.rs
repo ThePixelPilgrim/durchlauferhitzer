@@ -665,6 +665,10 @@ pub(crate) fn check_client(
         }
         match a.renderings.iter().find(|r| r.bytes.starts_with(rest)) {
             Some(r) => {
+                // A 206 checked byte for byte past its first chunk.
+                if a.status == Status::PartialContent && rest.len() > r.head_len + CHUNK as usize {
+                    coverage.range.across_chunk();
+                }
                 cut = Some(Cut {
                     index,
                     head_len: r.head_len,
@@ -777,6 +781,9 @@ pub(crate) fn check_client(
         }
         if body_at.is_none() {
             coverage.aborted_first_chunk += 1;
+        }
+        if a.status == Status::PartialContent && body_at.is_some() {
+            coverage.range.cut();
         }
     }
     if refused && statuses.len() > 1 {

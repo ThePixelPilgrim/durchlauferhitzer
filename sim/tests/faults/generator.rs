@@ -146,6 +146,18 @@ const RANGE_STREAM: u64 = 0x5241_4e47_4553_2121;
 /// or `HEAD` without a body may carry when the head stays within
 /// `tree.max_head`.
 pub(crate) fn random_static_request(rng: &mut fastrand::Rng, tree: &Tree) -> Vec<u8> {
+    let drawn = drawn_static_request(rng, tree);
+    // Now and then, for a request without conditional lines (their rare
+    // cases stay as common as they were), a range longer than a chunk of
+    // a file of several chunks instead, drawn from a stream of its own
+    // (the draws above stay what they were).
+    if String::from_utf8_lossy(&drawn).contains("\r\nIf-") {
+        return drawn;
+    }
+    long_range_request(rng.get_seed(), tree).unwrap_or(drawn)
+}
+
+fn drawn_static_request(rng: &mut fastrand::Rng, tree: &Tree) -> Vec<u8> {
     let long_dir = tree.long_dir.as_deref();
     // One request in six asks to close, so closing 200s and 301s occur.
     let host = if rng.u8(0..6) == 0 {

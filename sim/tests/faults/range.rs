@@ -194,7 +194,14 @@ pub(crate) fn random_range(rng: &mut fastrand::Rng, stamp: Option<FileStamp>) ->
     });
     let size = stamp.size;
     let inside = |rng: &mut fastrand::Rng| rng.u64(0..size.max(1));
-    let spec = match rng.u8(0..16) {
+    // A file of more than two chunks: half the time a range longer than
+    // a chunk, so ranges read in several chunks are common.
+    let draw = if size > 2 * CHUNK && rng.bool() {
+        6
+    } else {
+        rng.u8(0..16)
+    };
+    let spec = match draw {
         0..3 => {
             let a = inside(rng);
             format!("bytes={a}-{}", rng.u64(a..size.max(a + 1)))
@@ -203,11 +210,13 @@ pub(crate) fn random_range(rng: &mut fastrand::Rng, stamp: Option<FileStamp>) ->
         3 => format!("bytes={}-{}", inside(rng), size + rng.u64(0..100)),
         4 => format!("bytes={}-", inside(rng)),
         5 => format!("bytes=-{}", rng.u64(1..size.max(1) + 2)),
-        // Longer than a chunk: read in two or more.
-        6 => {
-            let a = rng.u64(0..size.clamp(1, CHUNK));
-            format!("bytes={a}-{}", a + CHUNK + rng.u64(0..CHUNK))
+        // Longer than a chunk: read in two or more (inside a file of more
+        // than a chunk, else clamped or unsatisfiable).
+        6 if size > CHUNK + 1 => {
+            let a = rng.u64(0..size - CHUNK - 1);
+            format!("bytes={a}-{}", rng.u64(a + CHUNK..size))
         }
+        6 => format!("bytes={}-{}", rng.u64(0..CHUNK), 2 * CHUNK),
         7 => format!("BYTES= {}-{} ,", inside(rng), size.saturating_sub(1)),
         // Unsatisfiable.
         8 => format!("bytes={}-", size + rng.u64(0..10)),
@@ -252,6 +261,48 @@ pub(crate) fn random_range(rng: &mut fastrand::Rng, stamp: Option<FileStamp>) ->
     format!("Range: {spec}\r\n{if_range}")
 }
 
+/// Mixed into the generator's state to seed [`long_range_request`].
+const LONG_RANGE_STREAM: u64 = 0x4c4f_4e47_5241_4e47;
+
+/// One request in six, when the tree has a file of more than one chunk
+/// that a plain path reaches (big seeds): a `GET` of a range of it longer
+/// than a chunk, under `/` or `/g/`, from a stream seeded by `seed`.
+pub(crate) fn long_range_request(seed: u64, tree: &Tree) -> Option<Vec<u8>> {
+    let mut rng = fastrand::Rng::with_seed(seed ^ LONG_RANGE_STREAM);
+    if rng.u8(0..6) != 0 {
+        return None;
+    }
+    let plain = |key: &str| {
+        key.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"./_-".contains(&b))
+            && !key.split('/').any(|s| s.starts_with('.'))
+    };
+    let files: Vec<(&str, u64)> = tree
+        .nodes
+        .iter()
+        .filter_map(|(key, node)| match node {
+            Node::File(f) if f.size() > CHUNK + 1 && plain(key) => Some((key.as_str(), f.size())),
+            Node::File(_) | Node::Dir | Node::Unservable => None,
+        })
+        .collect();
+    let (path, size) = rng.choice(files)?;
+    let first = rng.u64(0..size - CHUNK - 1);
+    let last = rng.u64(first + CHUNK..size);
+    let prefix = if rng.bool() { "/" } else { "/g/" };
+    let close = if rng.u8(0..6) == 0 {
+        "Connection: close\r\n"
+    } else {
+        ""
+    };
+    Some(
+        format!(
+            "GET {prefix}{path} HTTP/1.1\r\nHost: example.test\r\n{close}\
+             Range: bytes={first}-{last}\r\n\r\n"
+        )
+        .into_bytes(),
+    )
+}
+
 /// What the range requests reached, summed over all seeds.
 #[derive(Debug, Default)]
 pub(crate) struct RangeCoverage {
@@ -259,7 +310,7 @@ pub(crate) struct RangeCoverage {
 }
 
 /// Every name [`RangeCoverage::count`] can give; each must be reached.
-const RANGE_NAMES: [&str; 12] = [
+const RANGE_NAMES: [&str; 13] = [
     "range-206",
     "range-suffix",
     "range-open-end",
@@ -272,11 +323,27 @@ const RANGE_NAMES: [&str; 12] = [
     "range-304",
     "range-head-200",
     "range-across-chunk",
+    "range-cut",
 ];
+
+/// `range-across-chunk` must be well clear of zero (like `MIN_GROWN`).
+const MIN_ACROSS_CHUNK: usize = 15;
 
 impl RangeCoverage {
     fn hit(&mut self, name: &'static str) {
         *self.counts.entry(name).or_default() += 1;
+    }
+
+    /// A 206 of more than one chunk whose bytes were checked past its
+    /// first chunk: sent whole, or cut later.
+    pub(crate) fn across_chunk(&mut self) {
+        self.hit("range-across-chunk");
+    }
+
+    /// A 206 cut by the fault its file must abort with, exactly where the
+    /// fault strikes within the range (`ModelFile::expected_abort`).
+    pub(crate) fn cut(&mut self) {
+        self.hit("range-cut");
     }
 
     /// Count a complete response of `status` to the file request `head`
@@ -303,7 +370,7 @@ impl RangeCoverage {
                 }
                 if let ModelRanged::Part(first, last) = model_ranged(head, stamp) {
                     if last - first + 1 > CHUNK {
-                        self.hit("range-across-chunk");
+                        self.across_chunk();
                     }
                 }
             }
@@ -333,6 +400,11 @@ impl RangeCoverage {
     }
 
     pub(crate) fn check(&self) {
+        let across = self.counts.get("range-across-chunk").copied().unwrap_or(0);
+        assert!(
+            across >= MIN_ACROSS_CHUNK,
+            "only {across} 206s checked past their first chunk (want {MIN_ACROSS_CHUNK})"
+        );
         for name in RANGE_NAMES {
             assert!(
                 self.counts.get(name).is_some_and(|n| *n > 0),

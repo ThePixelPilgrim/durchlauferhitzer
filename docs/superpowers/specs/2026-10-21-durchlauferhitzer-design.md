@@ -501,8 +501,7 @@ Core-generated responses:
     19-digit length and the longest `ETag` and `Last-Modified`) is 570
     bytes, 595 behind a queued `100 Continue` (stage 8: 451 and 476 for a
     200 before `Accept-Ranges` and ranges; stage 7 review: 362 and 387
-    before the validators), within the 1 KiB
-    send buffer; toward the
+    before the validators), within the 1 KiB send buffer; toward the
     client a relayed head grows by at most one byte per header line plus
     `connection: close` (19), the `date` line (37) and a substituted
     reason (31), 87 bytes within the head buffer's 128 bytes of slack.
@@ -568,15 +567,14 @@ Core-generated responses:
   /srv/well-known; }` (ACME, security.txt); dotfiles below that route are
   still 404.
 - **FR-STATIC-11** [done] `200 OK` (and `206 Partial Content`,
-  FR-STATIC-19) heads are: status line, `Date` once the
-  driver set the time (FR-HTTP-22a), `Content-Type`,
-  `Content-Length` = size at open (a 206: the range's length),
-  `Content-Range: bytes a-b/size` (206 only; stage 8), `ETag` and
-  `Last-Modified` of the
-  stamp at open (FR-STATIC-18; stage 7), `Accept-Ranges: bytes`
-  (FR-STATIC-19; stage 8), `X-Content-Type-Options: nosniff`,
-  `Connection: close` only when closing. Exactly that many body bytes
-  follow, or the connection is cut (FR-STATIC-15).
+  FR-STATIC-19) heads are: status line, `Date` once the driver set the
+  time (FR-HTTP-22a), `Content-Type`, `Content-Length` = size at open (a
+  206: the range's length), `Content-Range: bytes a-b/size` (206 only;
+  stage 8), `ETag` and `Last-Modified` of the stamp at open
+  (FR-STATIC-18; stage 7), `Accept-Ranges: bytes` (FR-STATIC-19; stage
+  8), `X-Content-Type-Options: nosniff`, `Connection: close` only when
+  closing. Exactly that many body bytes follow, or the connection is cut
+  (FR-STATIC-15).
 - **FR-STATIC-12** [done] `Content-Type` comes from the last `.` of the
   file name, ASCII case-insensitive: `html htm` text/html; charset=utf-8,
   `css` text/css; charset=utf-8, `js mjs` text/javascript; charset=utf-8,
