@@ -100,6 +100,8 @@ fn closing_alts(ex: &Exchange, who: &Who, net: &NetConfig, tag: &'static str) ->
         script,
         timing: ex.timing,
         alts: Vec::new(),
+        stale: ex.stale,
+        poke: ex.poke,
     };
     let mut out = alts(&closing_ex, who, net);
     for alt in &mut out {

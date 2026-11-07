@@ -33,6 +33,9 @@ pub(crate) struct Script {
     pub(crate) interim_ends: Vec<usize>,
     pub(crate) ending: Ending,
     pub(crate) reply: Reply,
+    /// The backend keeps its connection after it (FR-PROXY-02): HTTP/1.1
+    /// and no `close` among its `Connection` tokens.
+    pub(crate) keeps: bool,
     /// Coverage tag of the hostile or edge case it carries, if any.
     pub(crate) tag: Option<&'static str>,
 }
@@ -107,6 +110,9 @@ pub(crate) struct Ctx {
     /// Only a well-formed response without failures (for timed
     /// scenarios), with a body if `need_body`.
     pub(crate) valid_only: bool,
+    /// A response the backend keeps its connection after, framed, with
+    /// nothing after it: reusable (FR-PROXY-02), so pooling gets going.
+    pub(crate) clean: bool,
     pub(crate) need_body: bool,
     /// Allow a large body (the client's window is not tiny).
     pub(crate) large: bool,
@@ -261,9 +267,10 @@ fn response_len(rng: &mut fastrand::Rng, large: bool) -> usize {
 
 /// A random backend response for `ctx`, and its model.
 pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
-    let defect = (!ctx.valid_only && rng.u8(0..6) == 0).then(|| HeadDefect::random(rng));
-    let body_defect = (!ctx.valid_only && defect.is_none() && rng.u8(0..12) == 0)
-        .then(|| ChunkDefect::random(rng));
+    let hostile = !ctx.valid_only && !ctx.clean;
+    let defect = (hostile && rng.u8(0..6) == 0).then(|| HeadDefect::random(rng));
+    let body_defect =
+        (hostile && defect.is_none() && rng.u8(0..12) == 0).then(|| ChunkDefect::random(rng));
     let mut wire = Vec::new();
     // Interim heads.
     let interim = match defect {
@@ -296,6 +303,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     let mut framing = match rng.u8(0..10) {
         0..5 => BodyKind::Length,
         5..8 => BodyKind::Chunked,
+        _ if ctx.clean => BodyKind::Length,
         _ => BodyKind::UntilClose,
     };
     if ctx.need_body && matches!(code, 204 | 304) {
@@ -311,8 +319,10 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     if body_defect.is_some() {
         framing = BodyKind::Chunked;
     }
-    let http10 =
-        framing != BodyKind::Chunked && defect != Some(HeadDefect::ClTe) && rng.u8(0..6) == 0;
+    let http10 = !ctx.clean
+        && framing != BodyKind::Chunked
+        && defect != Some(HeadDefect::ClTe)
+        && rng.u8(0..6) == 0;
     // The status line.
     let mut reason = reason.as_bytes().to_vec();
     let mut version: &[u8] = if http10 { b"HTTP/1.0" } else { b"HTTP/1.1" };
@@ -355,6 +365,17 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     if rng.u8(0..5) == 0 {
         push(&mut wire, rng, "Connection", b"X-Secret, keep-alive");
         push(&mut wire, rng, "X-Secret", b"internal");
+    }
+    // A backend that will close (FR-PROXY-02: its connection is not
+    // reused).
+    let says_close = rng.u8(0..5) == 0;
+    if says_close {
+        let value: &[u8] = if rng.bool() {
+            b"close"
+        } else {
+            b"X-Other, Close"
+        };
+        push(&mut wire, rng, "Connection", value);
     }
     match defect {
         Some(HeadDefect::LfInValue) => wire.extend_from_slice(b"X-Split: a\nInjected: b\r\n"),
@@ -430,7 +451,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     // line brings it to within 3 bytes of the limit, either side.
     let mut too_large = false;
     let mut padded = false;
-    if defect.is_none() && rng.u8(0..12) == 0 {
+    if defect.is_none() && !ctx.clean && rng.u8(0..12) == 0 {
         let target = ctx.max_head as i64 + rng.i64(-3..=3);
         let pad = target - (wire.len() - head_start) as i64 - 2 - "X-Pad: \r\n".len() as i64;
         if pad > 0 {
@@ -459,7 +480,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         BodyKind::None => head_end,
         BodyKind::Length | BodyKind::Chunked | BodyKind::UntilClose => wire.len(),
     };
-    if kind != BodyKind::UntilClose && rng.u8(0..5) == 0 {
+    if kind != BodyKind::UntilClose && !ctx.clean && rng.u8(0..5) == 0 {
         wire.extend_from_slice(rng.choice(AFTER).copied().unwrap_or_default());
     }
     let mut tag = defect.map(|d| match d {
@@ -491,27 +512,40 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     // with a body that breaks a rule).
     let overflow = matches!(kind, BodyKind::Chunked | BodyKind::UntilClose)
         && ctx.limit.is_some_and(|max| body.len() as u64 > max);
-    let ending =
-        if ctx.valid_only || defect.is_some() || body_defect.is_some() || overflow || too_large {
-            Ending::Done {
-                eof: kind == BodyKind::UntilClose || rng.bool(),
-            }
-        } else {
-            match rng.u8(0..10) {
-                0 => Ending::Reset(rng.usize(0..=body_end)),
-                // Before any byte, within the body, at its end, anywhere.
-                2 if ctx.resets == Resets::WithBytes => Ending::ResetAfter(match rng.u8(0..5) {
-                    0 => 0,
-                    1 => rng.usize(head_end..=body_end),
-                    2 => body_end,
-                    _ => rng.usize(0..=body_end),
-                }),
-                1 if kind != BodyKind::UntilClose => Ending::Eof(rng.usize(0..=body_end)),
-                _ => Ending::Done {
-                    eof: kind == BodyKind::UntilClose || rng.bool(),
-                },
-            }
-        };
+    let ending = if ctx.clean {
+        Ending::Done { eof: false }
+    } else if ctx.valid_only || defect.is_some() || body_defect.is_some() || overflow || too_large {
+        Ending::Done {
+            eof: kind == BodyKind::UntilClose || rng.bool(),
+        }
+    } else {
+        match rng.u8(0..10) {
+            // Now and then before any byte: on a reused connection
+            // that may be replayed (FR-PROXY-26).
+            0 => Ending::Reset(if rng.u8(0..3) == 0 {
+                0
+            } else {
+                rng.usize(0..=body_end)
+            }),
+            // Before any byte, within the body, at its end, anywhere.
+            2 if ctx.resets == Resets::WithBytes => Ending::ResetAfter(match rng.u8(0..5) {
+                0 => 0,
+                1 => rng.usize(head_end..=body_end),
+                2 => body_end,
+                _ => rng.usize(0..=body_end),
+            }),
+            1 if kind != BodyKind::UntilClose => Ending::Eof(if rng.u8(0..3) == 0 {
+                0
+            } else {
+                rng.usize(0..=body_end)
+            }),
+            // Mostly kept open: a pooled connection may serve again
+            // (FR-PROXY-02).
+            _ => Ending::Done {
+                eof: kind == BodyKind::UntilClose || rng.u8(0..4) == 0,
+            },
+        }
+    };
     // The model.
     let reply = if let Some(d) = defect {
         Reply::Fail(BackendFailure::BadResponse(d.error()))
@@ -569,6 +603,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         interim_ends,
         ending,
         reply,
+        keeps: !http10 && !says_close,
         tag: match (too_large, padded) {
             (true, _) => Some("backend head just too large"),
             (false, true) => Some("backend head at the limit"),

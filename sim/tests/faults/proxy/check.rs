@@ -145,11 +145,61 @@ fn describe(ex: &Exchange) -> String {
     )
 }
 
+/// The reuse rules of exchange `ex` (run as `run`): a reused connection
+/// was left reusable by its last exchange (FR-PROXY-02), and a retry's
+/// dead connection got a part of the request.
+fn check_reuse(
+    client: ConnId,
+    ex: &Exchange,
+    run: &Run,
+    stories: &[Story],
+    net: &NetConfig,
+    coverage: &mut ProxyCoverage,
+) -> Result<(), String> {
+    if let Some((conn, i)) = run.reused {
+        let Some(prev) = stories.iter().find(|s| s.conn == conn) else {
+            return Err(format!(
+                "reused a connection of conn={} of another round",
+                conn.0
+            ));
+        };
+        let (prev_ex, prev_run) = (&prev.exchanges[i], &prev.runs[i]);
+        let backend = |e: &Exchange| e.route.map(|r| net.routes[r].backend);
+        if backend(prev_ex) != backend(ex) {
+            return Err("reused a connection to another backend".to_owned());
+        }
+        left_reusable(prev_ex, prev_run, net, run).map_err(|why| {
+            format!(
+                "reused the connection of conn={} exchange {i}, whose exchange left it \
+                 unusable: {why}",
+                conn.0
+            )
+        })?;
+        coverage.add("pool: reuse");
+        if conn != client {
+            coverage.add("pool: reuse by another client");
+        }
+    }
+    if run.retried.is_some() {
+        let Verdict::Forward(fwd) = &ex.req.verdict else {
+            return Err("retried a request that was not forwarded".to_owned());
+        };
+        if fwd.bytes.get(..run.stale_got.len()) != Some(run.stale_got.as_slice()) {
+            return Err(format!(
+                "the dead connection got {:?}, not a part of the request",
+                String::from_utf8_lossy(&run.stale_got)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Judge one story once its round is over; `marks` say where a drain or
 /// abort fell (`drain.rs`).
 pub(crate) fn check_story(
     sim: &Sim,
     story: &Story,
+    stories: &[Story],
     net: &NetConfig,
     marks: &Marks,
     coverage: &mut ProxyCoverage,
@@ -254,14 +304,24 @@ pub(crate) fn check_story(
             }
             continue;
         }
+        // FR-PROXY-02: a reused connection was left reusable by the
+        // exchange that used it last; the dead one a retry gave up got a
+        // part of the request.
+        if let Err(e) = check_reuse(story.conn, ex, run, stories, net, coverage) {
+            fail(format!("exchange {i}: {e}"));
+        }
         // Once the server shut down, what the exchange may show depends on
-        // when its first log was written.
-        let drained;
-        let candidates: &[Alt] = if marks.shut_down() {
-            drained = drain_alts(ex, &who, net, marks, phases.get(c.lpos).copied());
-            &drained
+        // when its first log was written (a retry's comes first).
+        let first = c.lpos + usize::from(run.retried.is_some());
+        let base = if marks.shut_down() {
+            drain_alts(ex, &who, net, marks, phases.get(first).copied())
         } else {
-            &ex.alts
+            ex.alts.clone()
+        };
+        let reused = reuse_alts(base, ex, run, &who, net, marks.shut_down());
+        let candidates: &[Alt] = match &reused {
+            Ok(alts) => alts,
+            Err(e) => fail(format!("exchange {i}: {e}")),
         };
         let full = candidates
             .iter()

@@ -640,7 +640,8 @@ Forwarding and identity:
   sides: the whole request (head and body) was written, the response is
   HTTP/1.1 without a `close` token, framed by `Content-Length` or chunked
   (or has no body: HEAD, 204, 304, `Content-Length: 0`), and nothing
-  followed its end in the read that completed it; anything else
+  followed its end in the read that completed it, which did not fill the
+  receive buffer either (more bytes may wait in the socket then); anything else
   (HTTP/1.0 either side, `close`, a close-delimited body, an early
   response, bytes after the end, any failure) closes it. An HTTP/1.0
   client's request (mirrored as HTTP/1.0, FR-PROXY-04) is never pooled.
@@ -655,7 +656,13 @@ Forwarding and identity:
   close the idle pool at once; while draining nothing is parked or taken
   from it, and nothing is retried (a stale connection is a 502 then). An
   exchange in flight on a pooled connection finishes or is cut as
-  before. The retry (FR-PROXY-26) is logged as `BackendRetried`
+  before. *Known limit:* a backend that sends bytes after a complete
+  response, so late that they arrive only after the core reused the
+  connection, has them parsed as the next request's response (every
+  pooling proxy shares this; the idle watch closes the connection when
+  they arrive first). An end of stream or reset that arrives late is
+  harmless: the reusing request fails before any response byte, which the
+  retry rule handles. The retry (FR-PROXY-26) is logged as `BackendRetried`
   (FR-LOG-02).
 - **FR-PROXY-03** [done] `Core::backends()` lists the distinct backend
   addresses (IP and port, FR-CFG-16) in config order (`BackendId` =

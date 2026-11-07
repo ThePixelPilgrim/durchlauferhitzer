@@ -106,6 +106,46 @@ fn a_body_ending_its_read_leaves_nothing_unread() {
     assert_eq!(closing, Closing::Upstream(UP, Rest::Clean));
 }
 
+/// A read that filled the whole buffer may have left more bytes in the
+/// socket: its upstream is not reused even when the body ends right at
+/// the buffer's end (FR-PROXY-02, -22: bytes after a body are never
+/// taken for the next response).
+#[test]
+fn a_body_ending_a_full_read_may_leave_bytes_unread() {
+    let mut recv = buffer(8, b"HEADab");
+    let (mut b, _) = body(
+        ResponseBody::Length(6),
+        BodyLimit::Unlimited,
+        4,
+        &mut recv,
+        6,
+    )
+    .unwrap();
+    drain(&mut b, &mut recv);
+    assert_eq!(
+        receive(&mut b, &mut recv, b"cdef"),
+        Ok(Closing::Upstream(UP, Rest::Clean))
+    );
+    let mut recv = buffer(8, b"HEADab");
+    let (mut b, _) = body(
+        ResponseBody::Length(10),
+        BodyLimit::Unlimited,
+        4,
+        &mut recv,
+        6,
+    )
+    .unwrap();
+    drain(&mut b, &mut recv);
+    assert_eq!(
+        receive(&mut b, &mut recv, b"cdefghij"),
+        Ok(Closing::Upstream(UP, Rest::Unread))
+    );
+    // No body, the head filling the buffer.
+    let mut recv = buffer(4, b"HEAD");
+    let (_, closing) = body(ResponseBody::None, BodyLimit::Unlimited, 4, &mut recv, 4).unwrap();
+    assert_eq!(closing, Closing::Upstream(UP, Rest::Unread));
+}
+
 #[test]
 fn content_length_over_the_limit_is_refused_up_front() {
     let mut recv = buffer(8, b"HEAD");

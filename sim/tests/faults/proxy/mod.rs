@@ -7,6 +7,8 @@
 //! client's body, the client exactly the rewritten head and the backend's
 //! body bytes, a cut connection with its log, or the predicted 4xx/5xx;
 //! nothing after a framing end is ever forwarded (NFR-SEC-02, NFR-SEC-03).
+//! Backend connections are pooled on the routes a seed draws pooled, and
+//! every reuse and retry is judged by the spec's rules (`pool.rs`).
 //!
 //! A seed is a series of rounds: several stories (one client connection
 //! each, a series of exchanges on it) interleaved at random without time
@@ -24,6 +26,7 @@ mod drain;
 mod draw;
 mod drive;
 mod outcome;
+mod pool;
 mod request;
 mod response;
 
@@ -33,7 +36,7 @@ use std::time::Duration;
 
 use durchlauferhitzer_core::http::chunked::ChunkedError;
 use durchlauferhitzer_core::http::response_head::ResponseError;
-use durchlauferhitzer_core::{BackendFailure, BackendId, UpstreamId};
+use durchlauferhitzer_core::{BackendFailure, BackendId, UpstreamHolder, UpstreamId};
 
 use super::*;
 use check::*;
@@ -42,6 +45,7 @@ use drain::*;
 use draw::*;
 use drive::*;
 use outcome::*;
+use pool::*;
 use request::*;
 use response::*;
 
@@ -60,6 +64,8 @@ pub(crate) struct RouteConfig {
     pub(crate) backend: BackendId,
     pub(crate) max_request_body: Option<u64>,
     pub(crate) max_response_body: Option<u64>,
+    /// Backend connections are pooled (FR-PROXY-02); else `pool off;`.
+    pub(crate) pool: bool,
 }
 
 /// A random config: two proxy routes next to a static one.
@@ -75,6 +81,9 @@ pub(crate) struct NetConfig {
     pub(crate) response: Duration,
     pub(crate) body_idle: Duration,
     pub(crate) send_idle: Duration,
+    /// `backend_idle_timeout` and `backend_idle_max` (FR-PROXY-02).
+    pub(crate) idle: Duration,
+    pub(crate) idle_max: u8,
 }
 
 fn body_limit(rng: &mut fastrand::Rng) -> Option<u64> {
@@ -115,6 +124,7 @@ impl NetConfig {
                 backend: BackendId(0),
                 max_request_body: body_limit(rng),
                 max_response_body: body_limit(rng),
+                pool: rng.u8(0..4) != 0,
             },
             RouteConfig {
                 prefix: "/raw",
@@ -123,6 +133,7 @@ impl NetConfig {
                 backend: BackendId(1),
                 max_request_body: body_limit(rng),
                 max_response_body: body_limit(rng),
+                pool: rng.bool(),
             },
         ];
         let max_head = *rng.choice(&[2048, 4096, 16 * 1024]).unwrap_or(&4096);
@@ -131,13 +142,16 @@ impl NetConfig {
         let response = secs(rng, 2, 8);
         let body_idle = secs(rng, 2, 8);
         let send_idle = secs(rng, 3, 10);
+        let idle = secs(rng, 1, 4);
+        let idle_max = rng.u8(1..=2);
         let max_connections = 8;
         let max_connections_per_ip = 4;
         let route = |r: &RouteConfig| {
             format!(
-                "  path {} {{ proxy {}; pool off;{} max_request_body {}; max_response_body {}; }}\n",
+                "  path {} {{ proxy {};{}{} max_request_body {}; max_response_body {}; }}\n",
                 r.prefix,
                 r.addr,
+                if r.pool { "" } else { " pool off;" },
                 if r.strip { " strip_prefix;" } else { "" },
                 limit_text(r.max_request_body),
                 limit_text(r.max_response_body)
@@ -154,6 +168,8 @@ limits {{
   backend_connect_timeout {}s;
   backend_response_timeout {}s;
   body_idle_timeout {}s;
+  backend_idle_timeout {}s;
+  backend_idle_max {idle_max};
   max_connections {max_connections};
   max_connections_per_ip {max_connections_per_ip};
 }}
@@ -164,6 +180,7 @@ host example.test {{
             connect.as_secs(),
             response.as_secs(),
             body_idle.as_secs(),
+            idle.as_secs(),
             route(&routes[0]),
             route(&routes[1]),
         );
@@ -177,6 +194,8 @@ host example.test {{
             response,
             body_idle,
             send_idle,
+            idle,
+            idle_max,
         }
     }
 }
@@ -311,6 +330,18 @@ pub(crate) const REQUIRED: &[&str] = &[
     "drain: closed before a request",
     "abort: exchange cut",
     "abort: response cut short",
+    // Pooling and the safe retry (FR-PROXY-02, -26, `pool.rs`).
+    "pool: reuse",
+    "pool: reuse by another client",
+    "pool: idle close by byte",
+    "pool: idle close by eof",
+    "pool: idle close by error",
+    "pool: idle close by timeout",
+    "pool: idle close for room",
+    "pool: idle close by a drain",
+    "retry: replayed, relayed",
+    "retry: refused, 502",
+    "retry: none after a response byte",
     // Restart (FR-PROC-07, `drain.rs`).
     "restart: plain drain",
     "restart: drain cut by the abort",

@@ -34,6 +34,7 @@ mod backend;
 mod clock;
 mod disk;
 mod fs;
+mod pool;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
@@ -45,14 +46,15 @@ use durchlauferhitzer_core::config::load;
 use durchlauferhitzer_core::http::chunked::MAX_UNCONSUMED;
 use durchlauferhitzer_core::{
     Action, BodyPending, ConnError, ConnId, Core, DrainTarget, Event, FileId, Instant, Interest,
-    Log, UpstreamId,
+    Log, UpstreamHolder, UpstreamId,
 };
 
 use crate::backend::Backends;
-pub use crate::backend::ConnectBehaviour;
+pub use crate::backend::{BackendChunk, ConnectBehaviour};
 pub use crate::clock::TimerOrder;
 use crate::disk::{DiskOp, FileTrack};
 use crate::fs::Fs;
+pub use crate::pool::IdleClose;
 
 /// Default bound on pump steps in one `run_until_idle` before the sim
 /// declares a livelock.
@@ -165,6 +167,8 @@ pub struct Sim {
     context: Option<ConnId>,
     backends: Backends,
     timer_order: TimerOrder,
+    /// Idle pooled upstreams the core closed, by cause (`pool.rs`).
+    idle_closes: BTreeMap<IdleClose, usize>,
 }
 
 impl Sim {
@@ -193,6 +197,7 @@ impl Sim {
             context: None,
             backends: Backends::new(&limits),
             timer_order: TimerOrder::OnTime,
+            idle_closes: BTreeMap::new(),
         }
     }
 
@@ -515,10 +520,61 @@ impl Sim {
             | Event::UpstreamFailed { up, .. }
             | Event::UpstreamReceived { up, .. }
             | Event::UpstreamReadClosed { up }
-            | Event::UpstreamSent { up, .. } => self.backends.conn_of(*up),
+            // The client the upstream serves now: a reused one serves
+            // another than the one that opened it (FR-PROXY-02).
+            | Event::UpstreamSent { up, .. } => match self.core.upstream_holder(*up) {
+                Some(UpstreamHolder::Conn(conn)) => Some(conn),
+                Some(UpstreamHolder::Pool) | None => self.backends.conn_of(*up),
+            },
             Event::TimerFired => None,
         };
+        let pooled = self.pooled_upstreams();
+        let idle_target = match &event {
+            Event::UpstreamReceived { up, .. }
+            | Event::UpstreamReadClosed { up }
+            | Event::UpstreamFailed { up, .. } => pooled.contains(up).then_some(*up),
+            Event::Accepted { .. }
+            | Event::Received { .. }
+            | Event::ReadClosed { .. }
+            | Event::Sent { .. }
+            | Event::Failed { .. }
+            | Event::TimerFired
+            | Event::FileOpened { .. }
+            | Event::FileFailed { .. }
+            | Event::ChunkReady { .. }
+            | Event::FileSent { .. }
+            | Event::UpstreamConnected { .. }
+            | Event::UpstreamSent { .. } => None,
+        };
+        let cause = match &event {
+            Event::UpstreamReceived { .. } => IdleClose::Byte,
+            Event::UpstreamReadClosed { .. } => IdleClose::Eof,
+            Event::UpstreamFailed { .. } => IdleClose::Error,
+            Event::TimerFired => IdleClose::Timeout,
+            Event::Accepted { .. }
+            | Event::Received { .. }
+            | Event::ReadClosed { .. }
+            | Event::Sent { .. }
+            | Event::Failed { .. }
+            | Event::FileOpened { .. }
+            | Event::FileFailed { .. }
+            | Event::ChunkReady { .. }
+            | Event::FileSent { .. }
+            | Event::UpstreamConnected { .. }
+            | Event::UpstreamSent { .. } => IdleClose::Room,
+        };
         self.call_core(|core, now, actions| core.handle(now, event, actions));
+        // Review Focus 1: a byte, end of stream or error on an idle
+        // pooled upstream closes it at once (FR-PROXY-02).
+        if let Some(up) = idle_target {
+            if self.core.upstream_holder(up).is_some() {
+                self.violation(&format!(
+                    "up={} got {cause:?} while idle in the pool but stays open",
+                    up.0
+                ));
+            }
+        }
+        self.count_idle_closes(&pooled, idle_target, cause);
     }
 
     /// Run one call into the core that emits actions (`handle`,
@@ -546,14 +602,18 @@ impl Sim {
     /// `run_until_idle` or `advance` afterwards.
     pub fn begin_drain(&mut self, target: DrainTarget) {
         self.line(&format!("begin_drain {target:?}"));
+        let pooled = self.pooled_upstreams();
         self.call_core(|core, now, actions| core.begin_drain(now, target, actions));
+        self.drained_pool(&pooled);
     }
 
     /// The fast shutdown (`Core::abort_all`): every connection, upstream
     /// and open file is closed at once.
     pub fn abort_all(&mut self) {
         self.line("abort_all");
+        let pooled = self.pooled_upstreams();
         self.call_core(|core, _, actions| core.abort_all(actions));
+        self.drained_pool(&pooled);
     }
 
     /// Whether the core holds nothing any more (`Core::is_drained`): no

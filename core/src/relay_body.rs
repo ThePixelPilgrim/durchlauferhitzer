@@ -77,8 +77,9 @@ pub(crate) enum Closing {
 }
 
 /// What the backend sent after a body's end, in the read that completed
-/// it: nothing, or bytes that are dropped unread (FR-PROXY-22). An
-/// upstream with unread bytes is never reused (FR-PROXY-02).
+/// it: nothing, or bytes that are dropped unread (FR-PROXY-22), or maybe
+/// some (the read filled the whole buffer). An upstream with unread bytes
+/// is never reused (FR-PROXY-02).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rest {
     Clean,
@@ -120,11 +121,7 @@ impl RelayBody {
             Some(due) => (Source::Open { up, backend, due }, Closing::No),
             // Nothing is due: anything after the head is dropped.
             None => {
-                let rest = if filled > start {
-                    Rest::Unread
-                } else {
-                    Rest::Clean
-                };
+                let rest = rest_after(start, filled, recv.len());
                 (Source::Done, Closing::Upstream(up, rest))
             }
         };
@@ -269,11 +266,7 @@ impl RelayBody {
             let up = *up;
             self.source = Source::Done;
             let end = self.end.saturating_add(accepted);
-            let rest = if end < self.filled {
-                Rest::Unread
-            } else {
-                Rest::Clean
-            };
+            let rest = rest_after(end, self.filled, recv.len());
             Closing::Upstream(up, rest)
         } else {
             Closing::No
@@ -301,6 +294,17 @@ impl RelayBody {
         }
         self.start = 0;
         self.end = 0;
+    }
+}
+
+/// What follows a body that ends at `end` of `filled` bytes in a buffer
+/// of `capacity`: bytes already read after it, or a full buffer, whose
+/// read may have left more in the socket, are unread.
+fn rest_after(end: usize, filled: usize, capacity: usize) -> Rest {
+    if end < filled || filled >= capacity {
+        Rest::Unread
+    } else {
+        Rest::Clean
     }
 }
 

@@ -8,14 +8,30 @@ use super::*;
 #[derive(Debug, Default)]
 pub(crate) struct Run {
     pub(crate) up: Option<UpstreamId>,
-    /// Everything the backend received.
+    /// Everything the backend received on `up` for this exchange.
     pub(crate) got: Vec<u8>,
     /// Script bytes sent so far.
-    sent: usize,
+    pub(crate) sent: usize,
     /// A slow connect was let through.
-    accepted: bool,
+    pub(crate) accepted: bool,
     /// The script's ending was applied.
-    ended: bool,
+    pub(crate) ended: bool,
+    /// `up` was reused (FR-PROXY-02): the client and exchange it served
+    /// before.
+    pub(crate) reused: Option<(ConnId, usize)>,
+    /// The reused `up` turned out dead this way (`Stale`), and whether
+    /// the backend did it yet.
+    pub(crate) stale: Option<Stale>,
+    pub(crate) stale_done: bool,
+    /// The core replayed the request after this failure (FR-PROXY-26):
+    /// `up` is the replay's fresh upstream, `stale_got` what the dead one
+    /// received.
+    pub(crate) retried: Option<BackendFailure>,
+    pub(crate) stale_got: Vec<u8>,
+    /// Its backend wrote to `up` while it was idle (`poke`).
+    pub(crate) poked: bool,
+    /// The number of its request on `up` (`BackendChunk::request`).
+    pub(crate) seq: usize,
 }
 
 #[derive(Debug)]
@@ -94,7 +110,7 @@ impl Story {
         let conn = sim.connect(peer);
         let who = Who { conn, peer };
         let mut exchanges = Vec::new();
-        let count = rng.usize(1..5);
+        let count = rng.usize(1..6);
         // A timed exchange sits anywhere among untimed ones.
         let timed_at = draw.timed.then(|| rng.usize(0..count));
         for i in 0..count {
@@ -102,7 +118,19 @@ impl Story {
                 connect: draw.connect,
                 timed: timed_at == Some(i),
             };
-            let ex = random_exchange(rng, net, &who, &peer_text, &d);
+            let mut ex = random_exchange(rng, net, &who, &peer_text, &d);
+            // A dead pooled connection may close a client whose body it
+            // left unread (`pool.rs`); a timed scenario behind it needs
+            // the connection.
+            let body = match &ex.req.verdict {
+                Verdict::Forward(fwd) | Verdict::BadBody { fwd, .. } => {
+                    fwd.bytes.len() > fwd.head_len
+                }
+                Verdict::Parse(_) | Verdict::Answer(..) => false,
+            };
+            if body && timed_at.is_some_and(|t| t > i) {
+                ex.stale = None;
+            }
             let keeps = ex.keeps_alive();
             exchanges.push(ex);
             if !keeps {
@@ -142,17 +170,29 @@ impl Story {
 
     /// Bytes and logs the client must have once exchanges `..=i` are
     /// done (all of them certain to keep the connection).
-    fn resolved(&self, sim: &Sim, i: usize) -> bool {
-        let bytes: usize = self.exchanges[..=i]
-            .iter()
-            .filter_map(|e| e.alts.first())
-            .map(|a| a.bytes.len())
-            .sum();
-        let logs: usize = self.exchanges[..=i]
-            .iter()
-            .filter_map(|e| e.alts.first())
-            .map(|a| a.logs.len())
-            .sum();
+    fn resolved(&self, sim: &Sim, net: &NetConfig, i: usize) -> bool {
+        let who = Who {
+            conn: self.conn,
+            peer: self.peer,
+        };
+        // On a reused connection the outcome may be the retry's or a
+        // dead connection's (`pool.rs`).
+        let (mut bytes, mut logs) = (0, 0);
+        for (ex, run) in self.exchanges[..=i].iter().zip(&self.runs) {
+            let first = match run.reused {
+                // Not yet what the spec says (a retry still to come): not
+                // resolved.
+                Some(_) => match reuse_alts(ex.alts.clone(), ex, run, &who, net, false) {
+                    Ok(alts) => alts.into_iter().next(),
+                    Err(_) => return false,
+                },
+                None => ex.alts.first().cloned(),
+            };
+            if let Some(alt) = first {
+                bytes += alt.bytes.len();
+                logs += alt.logs.len();
+            }
+        }
         let logged = sim
             .logs()
             .iter()
@@ -162,7 +202,7 @@ impl Story {
     }
 
     /// Whether the client may send (more of) exchange `send_ex` now.
-    fn next_send(&mut self, sim: &Sim) -> Option<Step> {
+    fn next_send(&mut self, sim: &Sim, net: &NetConfig) -> Option<Step> {
         if self.reset.is_some() || self.eof || self.paused {
             return None;
         }
@@ -173,7 +213,7 @@ impl Story {
                 let prev = &self.exchanges[i - 1];
                 let pipelined =
                     prev.keeps_alive() && prev.timing == Timing::Normal && !ex.timing.timed();
-                if !pipelined && !self.resolved(sim, i - 1) {
+                if !pipelined && !self.resolved(sim, net, i - 1) {
                     return None;
                 }
             }
@@ -247,46 +287,6 @@ fn script_target(script: &Script) -> usize {
     }
 }
 
-/// Assign new upstreams to their exchanges; collect what backends and
-/// clients received.
-pub(crate) fn sync(sim: &mut Sim, stories: &mut [Story], assigned: &mut usize) {
-    let ups = sim.upstreams();
-    for &up in ups.iter().skip(*assigned) {
-        let conn = sim.upstream_conn(up);
-        let Some(story) = stories.iter_mut().find(|s| s.conn == conn) else {
-            panic!(
-                "up={} for a connection of an earlier round\ntrace:\n{}",
-                up.0,
-                sim.trace()
-            );
-        };
-        let next = story
-            .exchanges
-            .iter()
-            .zip(story.runs.iter())
-            .position(|(e, r)| e.may_connect() && r.up.is_none());
-        let last = story.runs.iter().rposition(|r| r.up.is_some());
-        match next {
-            Some(i) if last.is_none_or(|l| l < i) => story.runs[i].up = Some(up),
-            Some(_) | None => panic!(
-                "conn={} opened up={} with no exchange left to forward\ntrace:\n{}",
-                conn.0,
-                up.0,
-                sim.trace()
-            ),
-        }
-    }
-    *assigned = ups.len();
-    for story in stories.iter_mut() {
-        for run in &mut story.runs {
-            if let Some(up) = run.up {
-                run.got.extend(sim.take_backend_request(up));
-            }
-        }
-        story.received.extend(sim.take_received(story.conn));
-    }
-}
-
 fn window(rng: &mut fastrand::Rng, large: bool) -> Window {
     match (rng.u8(0..3), large) {
         (0, _) => Window::Unlimited,
@@ -310,20 +310,21 @@ pub(crate) fn run_round(
     rng: &mut fastrand::Rng,
     net: &NetConfig,
     stories: &mut [Story],
-    assigned: &mut usize,
+    assign: &mut Assign,
     kind: RoundKind,
     shutdown: &mut Shutdown,
 ) {
     let mut steps = 0;
     loop {
-        sync(sim, stories, assigned);
+        sync(sim, stories, assign);
+        check_pool(sim, net);
         match kind {
             RoundKind::Plain => shutdown.tick(sim, stories),
             RoundKind::Timed => {}
         }
         let mut options = Vec::new();
         for (s, story) in stories.iter_mut().enumerate() {
-            if let Some(step) = story.next_send(sim) {
+            if let Some(step) = story.next_send(sim, net) {
                 options.push((s, step));
             }
             for i in 0..story.exchanges.len() {
@@ -337,9 +338,9 @@ pub(crate) fn run_round(
         }
         if options.is_empty() {
             sim.run_until_idle();
-            sync(sim, stories, assigned);
+            sync(sim, stories, assign);
             let more = stories.iter_mut().any(|s| {
-                s.next_send(sim).is_some()
+                s.next_send(sim, net).is_some()
                     || (0..s.exchanges.len()).any(|i| s.backend_step(i).is_some())
             });
             if !more {
@@ -358,7 +359,7 @@ pub(crate) fn run_round(
             4 if rng.u8(0..8) == 0 => (rng.usize(0..stories.len()), Step::EofAnywhere),
             _ => options[rng.usize(0..options.len())],
         };
-        do_step(sim, rng, net, &mut stories[s], step, assigned);
+        do_step(sim, rng, net, &mut stories[s], step, assign);
         if rng.u8(0..4) != 0 {
             sim.run_until_idle();
         }
@@ -377,7 +378,7 @@ fn do_step(
     net: &NetConfig,
     story: &mut Story,
     step: Step,
-    assigned: &mut usize,
+    assign: &mut Assign,
 ) {
     match step {
         Step::Send(i) => {
@@ -385,7 +386,7 @@ fn do_step(
             if story.send_off == 0
                 && i > 0
                 && story.exchanges[i - 1].req.chunked
-                && !story.resolved(sim, i - 1)
+                && !story.resolved(sim, net, i - 1)
             {
                 story.exchanges[i - 1].alts[0]
                     .tags
@@ -403,7 +404,17 @@ fn do_step(
                 return;
             };
             if run.sent < target {
-                let n = rng.usize(1..=target - run.sent);
+                let mut n = rng.usize(1..=target - run.sent);
+                // What a backend sends after a response's end (bytes, its
+                // end of stream, a reset) goes with the response's last
+                // byte, before anything else happens: a real backend writes
+                // it at once, and whether the connection may be reused
+                // (FR-PROXY-02) is then settled before another request
+                // could take it.
+                let finishing = run.sent + n >= script.body_end;
+                if finishing {
+                    n = target - run.sent;
+                }
                 let piece = &script.wire[run.sent..run.sent + n];
                 run.sent += n;
                 match script.ending {
@@ -417,17 +428,14 @@ fn do_step(
                     | Ending::Reset(_)
                     | Ending::Eof(_) => sim.backend_send(up, piece),
                 }
-            } else {
-                run.ended = true;
-                match script.ending {
-                    Ending::Done { eof: true } | Ending::Eof(_) => sim.backend_eof(up),
-                    Ending::Done { eof: false } => {}
-                    Ending::Reset(_) => {
-                        sim.run_until_idle();
-                        sim.backend_reset(up);
-                    }
-                    Ending::ResetAfter(_) => sim.backend_reset_after(up, &[]),
+                if finishing && !run.ended {
+                    end_script(sim, run, up, script.ending);
                 }
+                if finishing {
+                    sim.settle_upstreams();
+                }
+            } else {
+                end_script(sim, run, up, script.ending);
             }
         }
         Step::ClientWindow => {
@@ -446,7 +454,7 @@ fn do_step(
                 sim.reset(story.conn);
             }
         }
-        Step::Timed(i) => run_timed(sim, rng, net, story, i, assigned),
+        Step::Timed(i) => run_timed(sim, rng, net, story, i, assign),
         Step::Accept(i) => {
             if let Some(up) = story.runs[i].up {
                 sim.accept_upstream(up);
@@ -467,14 +475,28 @@ fn do_step(
     }
 }
 
+/// Apply the script's ending once its bytes are sent.
+fn end_script(sim: &mut Sim, run: &mut Run, up: UpstreamId, ending: Ending) {
+    run.ended = true;
+    match ending {
+        Ending::Done { eof: true } | Ending::Eof(_) => sim.backend_eof(up),
+        Ending::Done { eof: false } => {}
+        Ending::Reset(_) => {
+            sim.run_until_idle();
+            sim.backend_reset(up);
+        }
+        Ending::ResetAfter(_) => sim.backend_reset_after(up, &[]),
+    }
+}
+
 /// Advance by `d` but 1 ms, check that nothing happened on the
 /// connection, then by the last millisecond.
-fn wait_for(sim: &mut Sim, story: &mut Story, d: Duration, assigned: &mut usize) {
-    sync(sim, std::slice::from_mut(story), assigned);
+fn wait_for(sim: &mut Sim, story: &mut Story, d: Duration, assign: &mut Assign) {
+    sync(sim, std::slice::from_mut(story), assign);
     let before_logs = sim.logs().len();
     let before = story.received.len();
     sim.advance(d - Duration::from_millis(1));
-    sync(sim, std::slice::from_mut(story), assigned);
+    sync(sim, std::slice::from_mut(story), assign);
     assert!(
         sim.logs().len() == before_logs && story.received.len() == before,
         "conn={} acted {}ms before its deadline\ntrace:\n{}",
@@ -483,7 +505,7 @@ fn wait_for(sim: &mut Sim, story: &mut Story, d: Duration, assigned: &mut usize)
         sim.trace()
     );
     sim.advance(Duration::from_millis(1));
-    sync(sim, std::slice::from_mut(story), assigned);
+    sync(sim, std::slice::from_mut(story), assign);
 }
 
 /// A timed scenario, alone in its round: set the stall up, then let the
@@ -494,7 +516,7 @@ fn run_timed(
     net: &NetConfig,
     story: &mut Story,
     i: usize,
-    assigned: &mut usize,
+    assign: &mut Assign,
 ) {
     let conn = story.conn;
     let ex = &story.exchanges[i];
@@ -519,6 +541,10 @@ fn run_timed(
         Verdict::Forward(f) => f.head_len,
         Verdict::Parse(_) | Verdict::Answer(..) | Verdict::BadBody { .. } => 0,
     };
+    // Alone with the clock: every idle connection runs out first, so the
+    // scenario's exchange connects afresh, by the connect and window it
+    // sets up (FR-PROXY-02).
+    clear_pool(sim, net);
     story.send_off = send_len;
     story.runs[i].ended = true;
     // Half the time in one piece, so a whole request can arrive with its
@@ -545,7 +571,7 @@ fn run_timed(
             sim.set_connect(route.addr, ConnectBehaviour::Hang);
             send(sim);
             sim.set_connect(route.addr, ConnectBehaviour::Accept);
-            wait_for(sim, story, net.connect, assigned);
+            wait_for(sim, story, net.connect, assign);
         }
         Timing::Silent | Timing::ClientBodyStall(_) => {
             send(sim);
@@ -554,11 +580,11 @@ fn run_timed(
             } else {
                 net.body_idle
             };
-            wait_for(sim, story, d, assigned);
+            wait_for(sim, story, d, assign);
         }
         Timing::PartialHead(k) | Timing::RelayStall(k) => {
             send(sim);
-            sync(sim, std::slice::from_mut(story), assigned);
+            sync(sim, std::slice::from_mut(story), assign);
             let Some(up) = story.runs[i].up else {
                 panic!("conn={} never connected\ntrace:\n{}", conn.0, sim.trace());
             };
@@ -569,30 +595,30 @@ fn run_timed(
             } else {
                 net.body_idle
             };
-            wait_for(sim, story, d, assigned);
+            wait_for(sim, story, d, assign);
         }
         Timing::BackendBodyStall(j) => {
             sim.set_default_backend_window(Window::Budget(head_len + j));
             send(sim);
             sim.set_default_backend_window(Window::Unlimited);
-            wait_for(sim, story, net.body_idle, assigned);
+            wait_for(sim, story, net.body_idle, assign);
         }
         Timing::ClientStall => {
             sim.set_client_window(conn, Window::Stalled);
             send(sim);
-            sync(sim, std::slice::from_mut(story), assigned);
+            sync(sim, std::slice::from_mut(story), assign);
             let Some(up) = story.runs[i].up else {
                 panic!("conn={} never connected\ntrace:\n{}", conn.0, sim.trace());
             };
             sim.backend_send(up, &script_wire);
             sim.backend_eof(up);
             sim.run_until_idle();
-            wait_for(sim, story, net.send_idle, assigned);
+            wait_for(sim, story, net.send_idle, assign);
             sim.set_client_window(conn, Window::Unlimited);
         }
         Timing::HeadDuringUpload { k, .. } => {
             send(sim);
-            sync(sim, std::slice::from_mut(story), assigned);
+            sync(sim, std::slice::from_mut(story), assign);
             let Some(up) = story.runs[i].up else {
                 panic!("conn={} never connected\ntrace:\n{}", conn.0, sim.trace());
             };
@@ -600,7 +626,7 @@ fn run_timed(
             sim.run_until_idle();
             let capped = !interim_ends.contains(&k) && net.response <= net.body_idle;
             let d = if capped { net.response } else { net.body_idle };
-            wait_for(sim, story, d, assigned);
+            wait_for(sim, story, d, assign);
         }
         Timing::Normal | Timing::Early { .. } | Timing::Eager => {}
     }
@@ -608,7 +634,7 @@ fn run_timed(
 }
 
 /// End a round: windows open, every client ends its stream.
-pub(crate) fn wind_down(sim: &mut Sim, stories: &mut [Story], assigned: &mut usize) {
+pub(crate) fn wind_down(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) {
     for story in stories.iter() {
         if story.reset.is_none() && sim.state(story.conn) != SimConnState::Closed {
             sim.set_client_window(story.conn, Window::Unlimited);
@@ -620,14 +646,14 @@ pub(crate) fn wind_down(sim: &mut Sim, stories: &mut [Story], assigned: &mut usi
         }
     }
     sim.run_until_idle();
-    sync(sim, stories, assigned);
+    sync(sim, stories, assign);
     for story in stories.iter() {
         if story.reset.is_none() {
             sim.send_eof(story.conn);
         }
     }
     sim.run_until_idle();
-    sync(sim, stories, assigned);
+    sync(sim, stories, assign);
 }
 
 /// Every connection and upstream of a round is closed.
@@ -667,7 +693,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
     let net = NetConfig::random(&mut rng);
     let mut sim = dated_sim(&net.text);
     sim.set_timer_order(timer_order(seed));
-    let mut assigned = 0;
+    let mut assign = Assign::default();
     let mut n = 1u8;
     let mut used_peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
     let mut shutdown = Shutdown::new(seed);
@@ -731,7 +757,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
             &mut rng,
             &net,
             &mut stories,
-            &mut assigned,
+            &mut assign,
             kind,
             &mut shutdown,
         );
@@ -742,7 +768,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
                 &mut rng,
                 &net,
                 &mut stories,
-                &mut assigned,
+                &mut assign,
                 kind,
                 &mut shutdown,
             );
@@ -762,9 +788,13 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
             net.send_idle,
             Duration::from_secs(120),
         );
-        wind_down(&mut sim, &mut stories, &mut assigned);
+        wind_down(&mut sim, &mut stories, &mut assign);
+        // The pool outlives its clients; its idle timeout ends it.
+        clear_pool(&mut sim, &net);
+        sync(&mut sim, &mut stories, &mut assign);
+        assign.round();
         for story in &stories {
-            check_story(&sim, story, &net, &shutdown.marks, coverage);
+            check_story(&sim, story, &stories, &net, &shutdown.marks, coverage);
         }
         assert_closed(&sim, &stories);
         // A server that shut down takes no new round.
@@ -818,6 +848,19 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         })
         .collect();
     check_full_house(&mut sim, &shutdown.marks, &peers);
+    for (cause, n) in sim.idle_closes() {
+        let what = match cause {
+            IdleClose::Byte => "pool: idle close by byte",
+            IdleClose::Eof => "pool: idle close by eof",
+            IdleClose::Error => "pool: idle close by error",
+            IdleClose::Timeout => "pool: idle close by timeout",
+            IdleClose::Room => "pool: idle close for room",
+            IdleClose::Drain => "pool: idle close by a drain",
+        };
+        for _ in 0..*n {
+            coverage.add(what);
+        }
+    }
     if shutdown.marks.restart() {
         coverage.add(match shutdown.marks.abort {
             None => "restart: plain drain",

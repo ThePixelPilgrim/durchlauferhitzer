@@ -75,6 +75,13 @@ pub(crate) struct Exchange {
     pub(crate) script: Option<Script>,
     pub(crate) timing: Timing,
     pub(crate) alts: Vec<Alt>,
+    /// If its request reuses a pooled connection, the backend killed that
+    /// connection just then (FR-PROXY-26's retry, `pool.rs`).
+    pub(crate) stale: Option<Stale>,
+    /// Once its response is complete and its connection idle, the backend
+    /// writes to it, ends its stream or resets it (which must close it,
+    /// FR-PROXY-02).
+    pub(crate) poke: Option<Poke>,
 }
 
 impl Exchange {

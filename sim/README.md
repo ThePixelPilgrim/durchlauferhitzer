@@ -53,6 +53,8 @@ src/
                       and late timers (NFR-TEST-07)
   disk.rs             file ids, disk operations, sendfile, file invariants
   backend.rs          scripted backends, upstream pumping and invariants
+  pool.rs             the core's idle pool as the sim sees it: idle
+                      hygiene and drain checks, idle closes by cause
   fs.rs               the in-memory file system
   tests.rs            unit tests of the sim's own invariant checks
 tests/
@@ -127,6 +129,10 @@ tests/
       drain.rs            the shutdown in this net: when it falls, and
                           the outcomes a drain (shutdown or restart)
                           allows an exchange
+      pool.rs             backend connection pooling (FR-PROXY-02, -26):
+                          which exchange each upstream serves, dead and
+                          poked pooled connections, the model of reuse
+                          and of the retry
 ```
 
 ## Randomized runs
@@ -149,7 +155,24 @@ request and the client's body, and the client exactly the rewritten head and
 the backend's body bytes, a cut connection with its log, or the predicted
 4xx/5xx. A response cut by a reset behind its bytes delivers every body
 byte before it, then the cut is logged `BackendFailed { Reset }`
-(FR-PROXY-26, DRV-10, NFR-RES-04). Timed scenarios (connect, response, body, head and send timeouts)
+(FR-PROXY-26, DRV-10, NFR-RES-04). Backend connections are pooled
+(FR-PROXY-02) on the routes the seed draws pooled (`pool off;` on the
+others): the net follows which exchange each upstream serves by the
+core's report of who holds it and by the client each forwarded byte was
+written for, so a response paired with another request is a mismatch;
+every reuse must have been left reusable by the exchange before it, by
+the model (a pooled route, an HTTP/1.1 client, the whole request
+written, an HTTP/1.1 response without `close`, framed, nothing after
+it), and a retry may happen only by FR-PROXY-26's rule (a GET or HEAD
+without a body on a reused connection that failed before any response
+byte), and then must. Backends kill a reused connection as the request
+arrives (reset or end of stream, before or after the first bytes of a
+response head), end it right behind a response (the core may reuse it
+before it sees that), or write to, close or reset it while idle (which
+must close it at once, `Sim::idle_closes`). The coverage gates require
+reuse (also across clients), idle closes by a byte, an end of stream,
+an error, the idle timeout, the per-backend cap and a drain, a replay
+that is relayed, a refused retry and none after a response byte. Timed scenarios (connect, response, body, head and send timeouts)
 run alone in their round, so the clock only runs out deadlines the model
 knows. To replay one failing seed (of both nets):
 

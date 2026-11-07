@@ -60,6 +60,7 @@ pub(crate) fn random_exchange(
             limit: net.routes[fwd.route].max_response_body,
             max_head: net.max_head,
             valid_only: false,
+            clean: rng.u8(0..3) != 0,
             need_body: false,
             large: rng.u8(0..3) == 0,
             // An eager backend may answer while the request head is still
@@ -80,6 +81,13 @@ pub(crate) fn random_exchange(
         };
         script = Some(random_script(rng, &ctx));
     }
+    let stale = match rng.u8(0..10) {
+        0 | 1 => Some(Stale::Reset),
+        2 | 3 => Some(Stale::Eof),
+        4 => Some(Stale::HalfReset),
+        5 => Some(Stale::HalfEof),
+        _ => None,
+    };
     let mut ex = Exchange {
         req,
         route,
@@ -87,6 +95,13 @@ pub(crate) fn random_exchange(
         script,
         timing,
         alts: Vec::new(),
+        stale,
+        poke: match rng.u8(0..12) {
+            0 => Some(Poke::Byte),
+            1 => Some(Poke::Eof),
+            2 => Some(Poke::Reset),
+            _ => None,
+        },
     };
     ex.alts = alts(&ex, who, net);
     ex
@@ -122,6 +137,7 @@ fn timed_exchange(
         limit: net.routes[fwd.route].max_response_body,
         max_head: net.max_head,
         valid_only: true,
+        clean: false,
         need_body: kind == 5,
         large: false,
         resets: Resets::Late,
@@ -192,6 +208,8 @@ fn timed_exchange(
         script,
         timing,
         alts: Vec::new(),
+        stale: None,
+        poke: None,
     };
     ex.alts = alts(&ex, who, net);
     Some(ex)

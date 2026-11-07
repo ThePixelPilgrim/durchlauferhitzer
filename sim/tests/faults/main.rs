@@ -25,7 +25,7 @@ use durchlauferhitzer_core::{
     ConnId, DrainTarget, FileError, FileStamp, Instant, LimitKind, Log, RejectReason,
     RequestBodyError, RequestLine, RequestSummary, TimeoutKind,
 };
-use durchlauferhitzer_sim::{ConnectBehaviour, Sim, SimConnState, TimerOrder, Window};
+use durchlauferhitzer_sim::{ConnectBehaviour, IdleClose, Sim, SimConnState, TimerOrder, Window};
 
 const CONFIG: &str = "listen 127.0.0.1:8080;
 host example.test { path / { static /srv/www; } }";

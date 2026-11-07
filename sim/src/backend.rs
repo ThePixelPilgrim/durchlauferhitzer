@@ -85,8 +85,14 @@ struct Upstream {
     eof: Eof,
     /// A reset queued behind `to_core` ([`Sim::backend_reset_after`]).
     reset: Reset,
-    /// Bytes the backend has received (taken by `take_backend_request`).
-    received: Vec<u8>,
+    /// Bytes the backend has received (taken by `take_backend_request`),
+    /// in pieces, each with the client that held the upstream when it was
+    /// written (`take_backend_chunks`; a reused upstream serves another
+    /// client than its opener, FR-PROXY-02).
+    received: Vec<BackendChunk>,
+    /// The number of the request the backend is receiving: 1, and one
+    /// more for each request on the reused connection.
+    request: usize,
     /// Every byte the backend has received since its current request
     /// began, judged as one request.
     forwarded: Forwarded,
@@ -194,6 +200,17 @@ impl Forwarded {
     }
 }
 
+/// Bytes a backend received in one write, with the client that held the
+/// upstream then (`None`: no client, which the checks report) and the
+/// number of the request they belong to on that connection (1, then one
+/// more for each request on the reused connection, FR-PROXY-02).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendChunk {
+    pub holder: Option<ConnId>,
+    pub request: usize,
+    pub bytes: Vec<u8>,
+}
+
 /// What the core hands out for an open upstream, as the checks see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct UpstreamView {
@@ -242,6 +259,15 @@ impl Backends {
 }
 
 impl Backends {
+    /// Every upstream not closed yet.
+    pub(crate) fn open_ids(&self) -> Vec<UpstreamId> {
+        self.upstreams
+            .iter()
+            .filter(|(_, u)| u.phase != Phase::Closed)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// The client an upstream serves, if the sim knows it.
     pub(crate) fn conn_of(&self, up: UpstreamId) -> Option<ConnId> {
         self.upstreams.get(&up).map(|u| u.conn)
@@ -271,6 +297,16 @@ impl Sim {
 
     /// Take the bytes backend `up` has received so far.
     pub fn take_backend_request(&mut self, up: UpstreamId) -> Vec<u8> {
+        std::mem::take(&mut self.upstream_mut(up).received)
+            .into_iter()
+            .flat_map(|chunk| chunk.bytes)
+            .collect()
+    }
+
+    /// Take the bytes backend `up` has received so far, in pieces, each
+    /// with the client that held the upstream (as the core reported) when
+    /// it was written and the number of its request on the connection.
+    pub fn take_backend_chunks(&mut self, up: UpstreamId) -> Vec<BackendChunk> {
         std::mem::take(&mut self.upstream_mut(up).received)
     }
 
@@ -494,15 +530,24 @@ impl Sim {
             return false;
         }
         let bytes = pending[..n].to_vec();
+        let holder = match self.core.upstream_holder(up) {
+            Some(UpstreamHolder::Conn(conn)) => Some(conn),
+            Some(UpstreamHolder::Pool) | None => None,
+        };
         let limits = self.backends.forwarded_limits;
         let u = self.upstream_mut(up);
         // A reused connection carries the next request (FR-PROXY-02).
         if u.idled && u.forwarded == Forwarded::Done {
             u.forwarded = Forwarded::new();
             u.idled = false;
+            u.request += 1;
         }
         u.window.take(n);
-        u.received.extend_from_slice(&bytes);
+        u.received.push(BackendChunk {
+            holder,
+            request: u.request,
+            bytes: bytes.clone(),
+        });
         if let Err(what) = u.forwarded.feed(&bytes, &limits) {
             self.violation(&format!("up={} received {what}", up.0));
         }
@@ -565,6 +610,7 @@ impl Sim {
                         received: Vec::new(),
                         forwarded: Forwarded::new(),
                         idled: false,
+                        request: 1,
                         window,
                     },
                 );

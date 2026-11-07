@@ -754,7 +754,13 @@ fn forward(j: &Judged, route: &RouteConfig) -> Forward {
         out.extend_from_slice(b", ");
     }
     out.extend_from_slice(j.peer.as_bytes());
-    out.extend_from_slice(b"\r\nx-forwarded-proto: http\r\nconnection: close\r\n\r\n");
+    out.extend_from_slice(b"\r\nx-forwarded-proto: http\r\n");
+    // FR-PROXY-02, -11: only a pooled route's HTTP/1.1 request keeps the
+    // backend connection.
+    if j.http10 || !route.pool {
+        out.extend_from_slice(b"connection: close\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
     let head_len = out.len();
     match j.body {
         Body::None => {}
