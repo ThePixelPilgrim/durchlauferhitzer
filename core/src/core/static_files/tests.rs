@@ -1,6 +1,6 @@
 use crate::core::test_support::{GET_F, PEER, files_core, regular, request, secs, stamp};
 use crate::core::{Action, ConnError, ConnId, Event, Interest};
-use crate::file::{FileError, FileId, FileKind, FileMeta, FileSegment, RootId};
+use crate::file::{FileError, FileFollows, FileId, FileKind, FileMeta, FileSegment, RootId};
 use crate::http::conditional::Validators;
 use crate::http::request::{Method, Persistence};
 use crate::http::response::{BodyMode, render_fixed};
@@ -659,4 +659,45 @@ fn reset_while_sending_a_file_emits_log_close_file_close() {
     );
     assert!(core.conns.is_empty());
     assert_eq!(core.files.len(), 0);
+}
+
+/// NFR-PERF-06: file data follows the send buffer from the head of a 200
+/// until the body is all sent, whether the chunk is ready or still read;
+/// never for a HEAD, an empty file, a connection without a file or an
+/// unknown one.
+#[test]
+fn file_follows_the_head_of_a_200_until_the_body_is_sent() {
+    let mut core = files_core();
+    let now = secs(0);
+    let conn = ConnId(1);
+    let file = FileId(1);
+    assert_eq!(core.file_follows(conn), FileFollows::No, "unknown");
+    request(&mut core, now, 1, GET_F);
+    assert_eq!(core.file_follows(conn), FileFollows::No, "opening");
+    let mut actions = Vec::new();
+    let meta = regular(3);
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    assert!(!core.send_buffer(conn).is_empty());
+    assert_eq!(core.file_follows(conn), FileFollows::Yes, "reading");
+    let stamp = stamp(3);
+    core.handle(now, Event::ChunkReady { file, stamp }, &mut actions);
+    assert_eq!(core.file_follows(conn), FileFollows::Yes, "ready");
+    let len = core.send_buffer(conn).len();
+    core.handle(now, Event::Sent { conn, len }, &mut actions);
+    core.handle(now, Event::FileSent { conn, len: 2 }, &mut actions);
+    assert_eq!(core.file_follows(conn), FileFollows::Yes, "one byte left");
+    core.handle(now, Event::FileSent { conn, len: 1 }, &mut actions);
+    assert_eq!(core.file_follows(conn), FileFollows::No, "all sent");
+
+    for (head, size) in [
+        (&b"HEAD /x/f.txt HTTP/1.1\r\nHost: a.test\r\n\r\n"[..], 3),
+        (GET_F, 0),
+    ] {
+        let mut core = files_core();
+        request(&mut core, now, 1, head);
+        let meta = regular(size);
+        core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+        assert!(!core.send_buffer(conn).is_empty());
+        assert_eq!(core.file_follows(conn), FileFollows::No, "size {size}");
+    }
 }

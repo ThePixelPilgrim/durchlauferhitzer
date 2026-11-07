@@ -155,6 +155,10 @@
 //!   `ChunkReady` has arrived. Interest is [`Interest::Write`] while either
 //!   has bytes, and [`Interest::None`] while the connection waits on the
 //!   disk.
+//! - While [`Core::file_follows`] is `Yes`, file bytes follow the send
+//!   buffer: the driver may hold the buffer's last partial segment back
+//!   for them (`MSG_MORE`, NFR-PERF-06), since the segment's `sendfile`
+//!   pushes it out. Otherwise every write is pushed out at once.
 //! - `FileSent { len }` reports how many bytes of the segment the socket
 //!   accepted (more than the segment is clamped). A `sendfile` that hits end
 //!   of file before the segment ends (the file shrank) is reported as

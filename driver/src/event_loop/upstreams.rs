@@ -12,7 +12,9 @@ use crate::conns::{Answer, Eof, Phase, Token, Upstream, Writes};
 use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
 use crate::sys::fd::Io;
-use crate::sys::socket::{ConnectStart, connect_nonblocking, read, set_nodelay, take_error, write};
+use crate::sys::socket::{
+    ConnectStart, More, connect_nonblocking, read, set_nodelay, take_error, write,
+};
 
 /// Whether a failed write is reported at once or left to the reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,7 +287,7 @@ impl Driver {
             if buf.is_empty() {
                 return Ok(());
             }
-            let error = match write(fd.as_fd(), buf) {
+            let error = match write(fd.as_fd(), buf, More::No) {
                 Io::Done(0) | Io::WouldBlock => return Ok(()),
                 Io::Done(len) => {
                     self.deliver(Event::UpstreamSent { up, len })?;

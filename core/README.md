@@ -54,7 +54,8 @@ src/
     timers.rs           deadlines and TimerFired; closing on a timeout
     test_support.rs     helpers shared by the unit tests
   conn.rs             per-connection state (ConnState) and buffers
-  file.rs             file ids, file metadata/stamps, change policy
+  file.rs             file ids, file metadata/stamps, change policy,
+                      `FileFollows` (file data after the send buffer)
   upstream.rs         upstream and backend ids, open upstreams, the
                       fixed-size buffers of a proxied exchange
   request_body.rs     a request body in the client's receive buffer:

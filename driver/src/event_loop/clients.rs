@@ -4,7 +4,7 @@
 use std::io;
 use std::os::fd::AsFd;
 
-use durchlauferhitzer_core::{ConnError, ConnId, Event, Interest};
+use durchlauferhitzer_core::{ConnError, ConnId, Event, FileFollows, Interest};
 
 use super::accept::{AcceptError, Accepting, Logging, Resume, classify};
 use super::{Broken, Driver, Freed, conn_error, log_register_failed, token};
@@ -13,7 +13,7 @@ use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
 use crate::sys::fd::Io;
 use crate::sys::socket::{
-    accept_nonblocking, read, set_nodelay, shutdown_write, take_error, write,
+    More, accept_nonblocking, read, set_nodelay, shutdown_write, take_error, write,
 };
 
 /// The most connections one readiness of a listener accepts (review A,
@@ -227,7 +227,8 @@ impl Driver {
 
     /// Writes `send_buffer`, then the `send_file` segment, until done or
     /// the socket would block (DRV-03), each write reported as the very
-    /// next call (DRV-04).
+    /// next call (DRV-04). The buffer goes with `MSG_MORE` while a file
+    /// body follows it (NFR-PERF-06).
     fn client_write(&mut self, conn: ConnId) -> io::Result<()> {
         loop {
             let Some(client) = self.clients.get(&conn) else {
@@ -252,7 +253,13 @@ impl Driver {
                 }
                 continue;
             }
-            let event = match write(client.fd.as_fd(), buf) {
+            // A head whose file body follows is held back for the body's
+            // first `sendfile`, which pushes both out (NFR-PERF-06).
+            let follows = match self.core.file_follows(conn) {
+                FileFollows::Yes => More::Yes,
+                FileFollows::No => More::No,
+            };
+            let event = match write(client.fd.as_fd(), buf, follows) {
                 Io::Done(0) | Io::WouldBlock => return Ok(()),
                 Io::Done(len) => Event::Sent { conn, len },
                 // `send` of a non-empty buffer never returns 0.

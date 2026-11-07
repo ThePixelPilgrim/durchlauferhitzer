@@ -33,8 +33,9 @@ use durchlauferhitzer::sys::file::{
 };
 use durchlauferhitzer::sys::rlimit::{nofile, raise_nofile};
 use durchlauferhitzer::sys::socket::{
-    ConnectStart, Listening, Probe, accept_nonblocking, connect_nonblocking, is_listening_stream,
-    local_addr, read, set_nodelay, shutdown_write, take_error, tcp_listen, write,
+    ConnectStart, Listening, More, Probe, accept_nonblocking, connect_nonblocking,
+    is_listening_stream, local_addr, read, set_nodelay, shutdown_write, take_error, tcp_listen,
+    write,
 };
 use durchlauferhitzer::sys::user::{euid, lookup_user};
 use durchlauferhitzer_core::{FileError, FileKind};
@@ -276,7 +277,10 @@ fn connect_to_an_open_listener_completes() {
     set_nodelay(connecting.fd.as_fd()).unwrap();
 
     let (mut server, _) = listener.accept().unwrap();
-    assert!(matches!(write(connecting.fd.as_fd(), b"ping"), Io::Done(4)));
+    assert!(matches!(
+        write(connecting.fd.as_fd(), b"ping", More::No),
+        Io::Done(4)
+    ));
     let mut got = [0u8; 4];
     server.read_exact(&mut got).unwrap();
     assert_eq!(&got, b"ping");
@@ -294,7 +298,7 @@ fn write_to_a_closed_peer_is_an_error() {
     // The first writes may still be accepted; the peer's reset follows.
     let mut outcome = None;
     for _ in 0..1000 {
-        match write(fd.as_fd(), &[0u8; 1024]) {
+        match write(fd.as_fd(), &[0u8; 1024], More::No) {
             Io::Done(_) | Io::WouldBlock => thread::sleep(Duration::from_millis(1)),
             Io::Err(err) => {
                 outcome = Some(err);
@@ -317,7 +321,7 @@ fn write_to_a_closed_peer_is_an_error() {
 fn empty_buffers_do_not_touch_the_socket() {
     let (_client, server) = loopback_pair();
     assert!(matches!(read(server.as_fd(), &mut []), Io::Done(0)));
-    assert!(matches!(write(server.as_fd(), &[]), Io::Done(0)));
+    assert!(matches!(write(server.as_fd(), &[], More::No), Io::Done(0)));
 }
 
 // ---- files -------------------------------------------------------------

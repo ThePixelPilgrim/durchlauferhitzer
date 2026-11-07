@@ -27,7 +27,7 @@ use crate::config::{Config, Limits, RouteAction};
 use crate::conn::{Conn, ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 #[cfg(doc)]
 use crate::file::RootId;
-use crate::file::{Chunk, FileSegment, FileTable};
+use crate::file::{Chunk, FileFollows, FileSegment, FileTable};
 use crate::http::date::{ImfFixdate, imf_fixdate};
 use crate::http::request::HeadLimits;
 use crate::log::Log;
@@ -349,6 +349,23 @@ impl Core {
                 len: end.saturating_sub(offset),
             }),
             Chunk::Ready { .. } | Chunk::Reading { .. } | Chunk::Done => None,
+        }
+    }
+
+    /// Whether a file body follows `conn`'s send buffer (NFR-PERF-06): the
+    /// connection is sending a file whose bytes are not all sent, whether
+    /// its chunk is ready or still being read. A HEAD, a 304 and an empty
+    /// file have none; neither has an unknown connection.
+    pub fn file_follows(&self, conn: ConnId) -> FileFollows {
+        let Some(c) = self.conns.get(&conn) else {
+            return FileFollows::No;
+        };
+        let ConnState::SendingFile { offset, chunk, .. } = c.state else {
+            return FileFollows::No;
+        };
+        match chunk {
+            Chunk::Ready { end } | Chunk::Reading { end } if end > offset => FileFollows::Yes,
+            Chunk::Ready { .. } | Chunk::Reading { .. } | Chunk::Done => FileFollows::No,
         }
     }
 

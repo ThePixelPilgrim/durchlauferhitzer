@@ -1,5 +1,6 @@
 //! Unit tests of the loop's own decisions, on a `Driver` that is built but
-//! never run.
+//! never run; one runs it on loopback, to count a response's segments
+//! (`TCP_INFO` needs `unsafe`, which only `sys` holds).
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -676,4 +677,71 @@ fn one_readiness_accepts_at_most_64_connections() {
     assert_eq!(driver.clients.len(), 64);
     driver.accept_all(0).unwrap();
     assert_eq!(driver.clients.len(), 100);
+}
+
+/// NFR-PERF-06: the head of a 200 whose file body follows goes with
+/// `MSG_MORE`, so a 1 KiB file's head and body leave in one segment (on
+/// loopback the MSS is far above the response), on a fresh connection and
+/// on a kept-alive one. The client counts the data segments it received
+/// (`TCP_INFO`'s `tcpi_data_segs_in`): exact on loopback, blind to pure
+/// ACKs and their timing, and read from the test's own socket, where a
+/// loopback capture would need privileges and a parser. A unit test, as
+/// reading `TCP_INFO` takes `unsafe`, which only `sys` may hold.
+#[test]
+fn a_1_kib_file_leaves_in_one_segment() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    use crate::sys::file::open_dir_path;
+    use crate::sys::socket::{Probe, data_segments_in, local_addr, tcp_listen};
+
+    let dir = std::env::temp_dir().join(format!("dlh-segments-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let content: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir.join("small.bin"), &content).unwrap();
+    let config = format!(
+        "listen 127.0.0.1:8080; host a.test {{ path / {{ static {}; }} }}",
+        dir.display()
+    );
+    let core = Core::new(load(&config).unwrap());
+    let root = open_dir_path(&dir).unwrap();
+    let listener = tcp_listen("127.0.0.1:0".parse().unwrap(), 16, Probe::First).unwrap();
+    let addr = local_addr(listener.as_fd()).unwrap();
+    let (log, _logs) = LogSink::channel();
+    let mut driver = Driver::new(core, vec![listener], vec![root], 1, log).unwrap();
+    let stop = driver.stop_handle();
+    let server = std::thread::spawn(move || driver.run());
+
+    let mut client = TcpStream::connect(addr).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut segments = Vec::new();
+    for _ in 0..3 {
+        let before = data_segments_in(client.as_fd()).unwrap();
+        client
+            .write_all(b"GET /small.bin HTTP/1.1\r\nHost: a.test\r\n\r\n")
+            .unwrap();
+        let mut response = Vec::new();
+        let mut piece = [0u8; 4096];
+        let body_at = loop {
+            let n = client.read(&mut piece).unwrap();
+            assert_ne!(n, 0, "closed after {response:?}");
+            response.extend_from_slice(&piece[..n]);
+            if let Some(at) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+                if response.len() >= at + 4 + content.len() {
+                    break at + 4;
+                }
+            }
+        };
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(response[body_at..] == content[..], "the body differs");
+        segments.push(data_segments_in(client.as_fd()).unwrap() - before);
+    }
+    assert_eq!(segments, [1, 1, 1], "data segments per response");
+
+    stop.stop().unwrap();
+    assert_eq!(server.join().unwrap().unwrap(), super::Exit::Stopped);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

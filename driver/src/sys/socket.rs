@@ -238,6 +238,44 @@ pub fn buffer_sizes(fd: BorrowedFd<'_>) -> io::Result<BufferSizes> {
     })
 }
 
+/// The segments with payload a socket has received (`TCP_INFO`'s
+/// `tcpi_data_segs_in`, Linux 4.6): pure ACKs are not counted. Test-only.
+#[cfg(test)]
+pub fn data_segments_in(fd: BorrowedFd<'_>) -> io::Result<u32> {
+    /// The kernel's `struct tcp_info` up to `tcpi_data_segs_out`
+    /// (`linux/tcp.h`): the `libc` crate's struct stops earlier.
+    #[repr(C)]
+    #[derive(Default)]
+    struct TcpInfo {
+        _head: [u8; 8],
+        _words: [u32; 24],
+        _rates: [u64; 4],
+        _segs: [u32; 4],
+        data_segs_in: u32,
+        _data_segs_out: u32,
+    }
+    let mut info = TcpInfo::default();
+    let mut len = socklen::<TcpInfo>();
+    // SAFETY: `info` is writable for `len` bytes, and `len` is a valid
+    // in/out length.
+    cvt(unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            (&raw mut info).cast::<libc::c_void>(),
+            &mut len,
+        )
+    })?;
+    if len < socklen::<TcpInfo>() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TCP_INFO without tcpi_data_segs_in (Linux before 4.6)",
+        ));
+    }
+    Ok(info.data_segs_in)
+}
+
 /// Reads into `buf`. An empty `buf` returns `Done(0)` without a system
 /// call (a 0 from `read` would look like the end of stream).
 pub fn read(fd: BorrowedFd<'_>, buf: &mut [u8]) -> Io {
@@ -250,23 +288,37 @@ pub fn read(fd: BorrowedFd<'_>, buf: &mut [u8]) -> Io {
     })
 }
 
+/// Whether more data follows a write at once (NFR-PERF-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum More {
+    /// The write is pushed out as usual (`TCP_NODELAY`).
+    No,
+    /// `MSG_MORE`: the kernel holds a partial segment back for the data
+    /// that follows (a file's `sendfile`), which pushes both out. The
+    /// caller must send that data at once: a held segment otherwise waits
+    /// for the kernel's probe timer (at least 200 ms).
+    Yes,
+}
+
+/// The `send` flags for `more`: always `MSG_NOSIGNAL`.
+fn send_flags(more: More) -> libc::c_int {
+    match more {
+        More::No => libc::MSG_NOSIGNAL,
+        More::Yes => libc::MSG_NOSIGNAL | libc::MSG_MORE,
+    }
+}
+
 /// Writes from `buf` with `send(MSG_NOSIGNAL)`, so a closed peer is an
-/// `EPIPE` error, never a `SIGPIPE`. An empty `buf` returns `Done(0)`
-/// without a system call.
-pub fn write(fd: BorrowedFd<'_>, buf: &[u8]) -> Io {
+/// `EPIPE` error, never a `SIGPIPE`; with `MSG_MORE` too for
+/// [`More::Yes`]. An empty `buf` returns `Done(0)` without a system call.
+pub fn write(fd: BorrowedFd<'_>, buf: &[u8], more: More) -> Io {
     if buf.is_empty() {
         return Io::Done(0);
     }
+    let flags = send_flags(more);
     transfer(|| {
         // SAFETY: `buf` is readable for `buf.len()` bytes.
-        unsafe {
-            libc::send(
-                fd.as_raw_fd(),
-                buf.as_ptr().cast(),
-                buf.len(),
-                libc::MSG_NOSIGNAL,
-            )
-        }
+        unsafe { libc::send(fd.as_raw_fd(), buf.as_ptr().cast(), buf.len(), flags) }
     })
 }
 
@@ -473,8 +525,8 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Probe, accept_nonblocking, from_sockaddr, get_int_option, local_addr, steer_reuseport,
-        tcp_listen, to_sockaddr,
+        More, Probe, accept_nonblocking, from_sockaddr, get_int_option, local_addr, send_flags,
+        steer_reuseport, tcp_listen, to_sockaddr,
     };
 
     use super::ipv6;
@@ -492,6 +544,14 @@ pub(crate) mod tests {
         assert_eq!(sin6.sin6_flowinfo, 0x0001_2345);
         assert_eq!(sin6.sin6_scope_id, 7);
         assert_eq!(from_sockaddr(&storage).unwrap(), addr);
+    }
+
+    /// NFR-PERF-06: `MSG_MORE` only for [`More::Yes`]; `MSG_NOSIGNAL`
+    /// always.
+    #[test]
+    fn more_maps_to_msg_more() {
+        assert_eq!(send_flags(More::No), libc::MSG_NOSIGNAL);
+        assert_eq!(send_flags(More::Yes), libc::MSG_NOSIGNAL | libc::MSG_MORE);
     }
 
     #[test]

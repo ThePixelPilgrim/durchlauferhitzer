@@ -103,7 +103,8 @@ src/
                       ignore; SIGTERM turns a restart drain into the
                       shutdown drain)
     tests.rs          unit tests of the loop's decisions on a driver that
-                      is built but not run
+                      is built but not run; one run on loopback counts a
+                      1 KiB file's segments (MSG_MORE, NFR-PERF-06)
   conns.rs          epoll tokens (`Listener | Client | Upstream | Wake |
                     Signal | Log` in a `u64`), the per-client and per-upstream
                     records and the registration each wants
@@ -195,9 +196,11 @@ src/
                       SO_REUSEADDR + SO_REUSEPORT; IPv6 IPV6_V6ONLY),
                       `accept_nonblocking`, `connect_nonblocking`
                       (`ConnectStart`), `take_error`, `set_nodelay`, `read`,
-                      `write` (MSG_NOSIGNAL), `shutdown_write`, `local_addr`,
+                      `write` (MSG_NOSIGNAL; `More::Yes` adds MSG_MORE),
+                      `shutdown_write`, `local_addr`,
                       `is_listening_stream` (TCP only, `SO_PROTOCOL`),
-                      `ipv6_only` (`V6Only`), `buffer_sizes`,
+                      `ipv6_only` (`V6Only`), `buffer_sizes` and
+                      `data_segments_in` (TCP_INFO; test-only),
                       `steer_reuseport` (a one-instruction classic BPF
                       program choosing the port group's member by index,
                       `SO_ATTACH_REUSEPORT_CBPF`)

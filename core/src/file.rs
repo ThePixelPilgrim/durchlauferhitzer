@@ -63,6 +63,17 @@ pub struct FileSegment {
     pub len: u64,
 }
 
+/// Whether file data follows the send buffer at once (NFR-PERF-06): the
+/// driver then writes the buffer with `MSG_MORE`, so a head leaves in one
+/// segment with the file's first bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileFollows {
+    /// The connection sends a file body that is not all sent yet.
+    Yes,
+    /// Nothing, or no file data, follows the send buffer.
+    No,
+}
+
 /// How much of a file one `Readahead` covers.
 pub(crate) const FILE_CHUNK: u64 = 256 * 1024;
 
