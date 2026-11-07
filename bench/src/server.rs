@@ -76,6 +76,18 @@ pub fn config(addr: SocketAddr, root: &Path, backend: SocketAddr, as_root: bool)
     )
 }
 
+/// Whether the server whose `/proc/<pid>/fd` is `fds` has its signalfd:
+/// startup has bound the real listeners, and its bind probe's listener
+/// is closed by then.
+pub fn past_the_bind(fds: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(fds) else {
+        return false;
+    };
+    entries.flatten().any(|fd| {
+        fs::read_link(fd.path()).is_ok_and(|link| link.as_os_str() == "anon_inode:[signalfd]")
+    })
+}
+
 /// Where the server runs: on loopback, or behind the netem veth pair in
 /// its own namespace (`--netem`, netem.rs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +167,12 @@ impl Server {
                     server.last_lines()
                 ));
             }
-            if TcpStream::connect(addr).is_ok() {
+            // The connect alone is not enough: a normal start's bind
+            // probe listens for a moment first, and a connection it takes
+            // is reset when it closes. The signalfd is made after the
+            // real listeners are bound.
+            let fds = PathBuf::from(format!("/proc/{}/fd", server.pid()));
+            if past_the_bind(&fds) && TcpStream::connect(addr).is_ok() {
                 return Ok(server);
             }
             if Instant::now() > deadline {
@@ -238,6 +255,26 @@ mod tests {
             "listen 127.0.0.1:8080;\nuser nobody;\nlimits {\n  max_connections 2048;\n  max_connections_per_ip 2048;\n  keepalive_timeout 125m;\n}\nhost bench.test {\n  path / { static /tmp/x/www; }\n  path /proxy { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }\n}\n"
         );
         assert!(!config(addr, Path::new("/w"), backend, false).contains("user"));
+    }
+
+    /// A `/proc/<pid>/fd`-shaped directory: past the bind once one link
+    /// names the signalfd; missing or without it, not yet.
+    #[test]
+    fn past_the_bind_needs_the_signalfd() {
+        let dir = std::env::temp_dir().join(format!("dlh-bench-fdtest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!past_the_bind(&dir), "no directory");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!past_the_bind(&dir), "no descriptors");
+        std::os::unix::fs::symlink("socket:[1234]", dir.join("3")).unwrap();
+        std::os::unix::fs::symlink("anon_inode:[eventpoll]", dir.join("4")).unwrap();
+        assert!(
+            !past_the_bind(&dir),
+            "a listener and epoll only: the bind probe"
+        );
+        std::os::unix::fs::symlink("anon_inode:[signalfd]", dir.join("5")).unwrap();
+        assert!(past_the_bind(&dir));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The idle connections are held from before the warm-up to the end

@@ -43,7 +43,10 @@ serves every scenario of a run): `max_connections 2048` and
 the longest `--duration` (two windows plus about 8 s). The other
 scenarios hold a few connections, closed after each window, so neither
 change touches them. Default containment, `user nobody` when run as
-root. Per
+root. The server counts as started once `/proc/<pid>/fd` holds its
+signalfd (made after the real listeners are bound) and it accepts a
+connection: its bind probe listens for a moment first, and a connection
+the probe takes is reset when it closes. Per
 scenario: a warm-up (at most 1 s), the measured window (`duration`, 8
 client threads), then the strace pass (another `duration`).
 
