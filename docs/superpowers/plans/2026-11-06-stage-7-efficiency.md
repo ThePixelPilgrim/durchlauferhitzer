@@ -203,6 +203,8 @@ A POSIX `sh` script for `git bisect run`: it builds the release binary at the cu
 
 ### Task 6 (gated): `splice` for proxied bodies with a known `Content-Length`
 
+**Dropped (owner 2026-11-07) by measurement:** `docs/superpowers/measurements/2026-11-07-stage-7-stop.md`.
+
 Built only if the owner keeps it after Task 5. It needs:
 - a contract change (an upstream-to-client body move the driver performs with a pipe pair, reported as progress events);
 - a sim model for it;
@@ -213,6 +215,8 @@ The plan for it is written at that stop, from the measurement.
 
 ### Task 7 (gated): `threads N|auto`, default 1 (NFR-PERF-07)
 
+**Dropped (owner 2026-11-07) by measurement:** `docs/superpowers/measurements/2026-11-07-stage-7-stop.md`.
+
 Built only if the owner keeps it after Task 5. Its spec rules:
 - process-wide limits through shared counters;
 - every thread starts before the seccomp filter;
@@ -222,6 +226,8 @@ Built only if the owner keeps it after Task 5. Its spec rules:
 The plan for it is written at that stop.
 
 ### Task 8: `tc netem` measurements (NFR-PERF-05)
+
+*(Owner 2026-11-07:)* also compare 64 KiB against 16 KiB body buffers and remove the `epoll_ctl` re-arms per proxied chunk; any kept change gets the usual before/after numbers.
 
 **Files:** `bench/` (an `--netem <delay,loss>` option that sets up a network namespace with a veth pair and netem, as root), `bench/README.md`.
 

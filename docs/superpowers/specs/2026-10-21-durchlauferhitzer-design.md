@@ -2226,8 +2226,18 @@ and owner-approved).
 - **NFR-PERF-05** [stage 7] TCP behaviour under `tc netem` (delay, loss,
   recovery after pauses); fill-drain-refill vs. double buffering and the
   body buffer size decided by measurement: target to be set in stage 7.
+  *(Owner decision 2026-11-07, stage 7 stop measurement:)* Task 8 also
+  compares 64 KiB against 16 KiB body buffers (a 64 KiB buffer cut kernel
+  time for large proxied bodies by 17 % and calls by 4× in the stop
+  measurement) and removes the `epoll_ctl` re-arms per proxied chunk
+  (about 4 per 16 KiB chunk today).
 - **NFR-PERF-06** [stage 7] `MSG_MORE` to coalesce heads with file data;
-  `splice` for proxied bodies with a known `Content-Length`; readahead
+  ~~`splice` for proxied bodies with a known `Content-Length`~~
+  *(dropped, owner decision 2026-11-07, by measurement: copying is at
+  most 7 % of a large proxied body's CPU and `splice` saved nothing
+  measurable against the same chunk size, while costing a pipe pair per
+  connection, new allow-list entries and a contract change —
+  `docs/superpowers/measurements/2026-11-07-stage-7-stop.md`)*; readahead
   overlap with sending; deadline index instead of the O(n) scan.
   *(Stage 7 Task 3; owner-acknowledged trade-off 2026-11-07:)* a 200
   head whose file body follows is written with `MSG_MORE`, so head and
@@ -2235,8 +2245,13 @@ and owner-approved).
   less CPU per small request). The head is held while the chunk is read:
   time to first byte rises by the readahead time, bounded by the kernel's
   probe timer (max(RTO, 200 ms)); time to the last byte is unchanged.
-- **NFR-PERF-07** [stage 7] N driver threads with `SO_REUSEPORT`; backend
-  connection pooling. *(Owner decision 2026-11-06:)* the thread count is
+- **NFR-PERF-07** [stage 7] ~~N driver threads with `SO_REUSEPORT`~~
+  *(dropped, owner decision 2026-11-07, by measurement: one loop thread
+  serves about 19 000 requests per second at one core; at the expected 50
+  per second it uses under 1 % of a core, so threads would add capacity,
+  not efficiency per request. Revisit only if a deployment shows the loop
+  thread near 50 % of a core; the decisions below stay for that case)*;
+  backend connection pooling. *(Owner decision 2026-11-06:)* the thread count is
   a setting, a number or `auto` (the CPU count), with a default of 1: at
   the expected load one thread suffices, and more threads raise
   throughput, not efficiency per request; the benchmarks show whether
