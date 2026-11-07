@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-06, after stage 7 closed its tasks on `main`.
+Last updated 2026-11-07, after the stage 7 review.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -13,7 +13,8 @@ A new session should start from the latest `main`, read this file first, then `C
 | 4 epoll driver + binary | done (`7e1b18e..` this handoff) — record: `docs/superpowers/reviews/2026-10-29-stage-4-review.md` |
 | 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
 | 6 Restart | done (`22fd0ce..` this handoff) — record: `docs/superpowers/reviews/2026-11-06-stage-6-review.md` |
-| 7 Efficiency | done (`71d3867..` this handoff; plan `docs/superpowers/plans/2026-11-06-stage-7-efficiency.md`, Tasks 1–5 and 8 ✅, 6 and 7 dropped by measurement, statuses flipped and targets ratcheted from the nightly at `50fbd16`) — **next: the stage 7 whole-branch review** over `71d3867..main`, then its record `docs/superpowers/reviews/<date>-stage-7-review.md`. The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
+| 7 Efficiency | done (`71d3867..` this handoff) — record: `docs/superpowers/reviews/2026-11-07-stage-7-review.md`. The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
+| 8 Backend-directed file serving | **next: brainstorm and plan** (FR-PROXY-32, spec Timeline item 8) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -21,20 +22,22 @@ Key documents: spec `docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.
 
 Each stage's review record lists its owner decisions, rulings, final review, fix wave and accepted gaps.
 
-## Where things stand after stage 6 (details in the spec and the stage records)
+## Where things stand after stage 7 (details in the spec and the stage records)
 
 - The binary `durchlauferhitzer` (crate `driver`, `libc` its only dependency; `unsafe` only in `driver/src/sys/`, pinned by `driver/tests/unsafe_confined.rs`) serves static files and proxies over epoll, follows the contract (DRV-01…16), logs one `key=value` line per entry on a non-blocking stderr (FR-LOG-05/06), starts up in the A11 order with systemd sockets or its own binds, drops to `user` and clears every capability (FR-PROC-03), checks the descriptor budget (NFR-RES-05), and drains on SIGTERM / aborts on a second SIGTERM, SIGINT or `shutdown_timeout` (FR-PROC-05).
-- CI: x86_64 and arm64 run the same gate (fmt, clippy, tests with IPv6 required, deps check and self-test, docs with `-D warnings`); a root step runs the 9 server-starting test binaries under `sudo` with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`; a list check keeps that step complete; the workflow token is read-only and `actions/checkout` is pinned by commit.
+- CI: x86_64 and arm64 run the same gate (fmt, clippy, tests with IPv6 required, deps check and self-test, docs with `-D warnings`); a root step runs the 10 server-starting test binaries (`SERVER_TESTS` in `ci.yml`) under `sudo` with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`; a list check keeps that step complete; the workflow token is read-only and `actions/checkout` is pinned by commit.
 - Tests: an end-to-end smoke suite on the real binary; randomized sim nets that also drain and abort (`seed % 5 == 0`) and run late timers (`seed % 4 == 0`); the unanswered-request check runs on every static seed.
 - Containment (stage 5): Landlock (read-only beneath the roots; ABI ≥ 6 also scopes signals and abstract unix sockets) and a seccomp allow-list for x86_64 and aarch64 (`driver/src/containment/filter.rs`), each `off | best_effort | required` (FR-CFG-25, FR-PROC-06). The whole driver suite also runs under `seccomp_action kill` (`DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1`) in CI on both arches and in the root step. IPv6 peers are grouped by `ipv6_prefix`, NAT64 peers by their IPv4 (FR-CONN-13).
 - Nightly (`.github/workflows/nightly.yml`, 03:17 UTC and by hand): long sim runs, four fuzz targets, the suite under kill on Debian 12; failures file `nightly` issues by fingerprint.
 - Restart (stage 6): SIGHUP starts the restart drain (served with `Connection: close`, `restart_timeout`); without systemd `contrib/durchlauferhitzer-reload` (OpenRC `reload`) starts a `--ready-fd` process on shared ports (`SO_REUSEPORT`, steered with a classic-BPF reuseport program), waits for `ready` and a grace, then SIGHUPs the old one; `tcp_migrate_req` moves queued connections. musl builds and tests run on Alpine in CI (x86_64, arm64); a nightly restart soak runs on glibc and musl.
+- Efficiency (stage 7): `bench/` (std-only, excluded crate) measures CPU and system calls per request; the nightly publishes rows to the `benchmarks` branch, charted in its `BENCHMARKS.md` (Mermaid), and `bench/bisect.sh` finds a regressing commit. Conditional requests (FR-STATIC-18), `MSG_MORE` before files, a deadline index, backend pooling with a silence check and a safe GET/HEAD retry (FR-PROXY-02), eager I/O with deferred epoll registrations, a 32 KiB upstream buffer. NFR-PERF targets ratchet only towards better; an exception needs the owner's OK; security trumps performance.
 - This container boots with IPv6 disabled: IPv6 tests skip here and are required in CI. It runs as root, so root tests run here.
 
 ## Carry-forwards to later stages
 
-- Stage 7: N driver threads must start before the seccomp filter (musl `membarrier`); steering's 0/1 indices assume one listener per process per port group; double buffering vs fill-drain-refill measured with `tc netem`; per-request buffer allocation; `next_deadline` O(n); parse/route allocation nits; `sendfile` blocking on evicted pages (DRV-09).
-- Later: Landlock network rules (ABI 4: `CONNECT_TCP` to the backend ports, no `BIND_TCP`); report the reuseport close race to netdev.
+- After the stage 7 merge: check that the first scheduled nightly publish logs `refused 0`, and compare CPU against the NFR-PERF-01/02 targets over the next two nightlies (bisect if it stays high).
+- Efficiency, later: N driver threads only if the loop nears 50 % of a core (they must start before the seccomp filter, musl `membarrier`; steering's 0/1 indices assume one listener per process per port group); answering a silence check without deregistering; reusing buffers without zeroing; a syscall regression alarm; parse/route allocation nits; `sendfile` blocking on evicted pages (DRV-09).
+- Later: TLS (pure Rust); Landlock network rules (ABI 4: `CONNECT_TCP` to the backend ports, no `BIND_TCP`); report the reuseport close race to netdev.
 - Open: the driver-bug-close log kind is added with its first producer (FR-LOG-07); an NSS descriptor opened by the user lookup after the budget check is not counted (NFR-RES-05).
 - Nightly issue reporting (NFR-TEST-08, owner 2026-11-02): `scripts/nightly-report.py` (Python stdlib, tested in CI) files/updates issues labelled `nightly` keyed `[fp-xxxxxxxx]`. Known limits: a panic located in std/`registry` keys on that location alone (no backtraces in the nightly); if one arch's long-run job fails with a record while the other times out, only the recorded failure is filed. Issue #1 was the deliberate end-to-end test (closed, not planned).
 - Accepted gaps (stage 5 record): CI runners have Landlock ABI 4, so the ABI ≥ 6 scopes are proven only on newer kernels; Debian 12 under kill is x86_64 only; the disk timeout and a detached worker are not run under kill.
