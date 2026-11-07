@@ -28,7 +28,7 @@ The unit test counts `epoll_ctl` per proxied MiB: 265 before, 1–7 after.
 | proxy-medium (64 KiB) | 38.53 | **18.27** | 113.4 | **98.6** |
 | proxy-large (1 MiB) | 421.8 | **140.0** | 1326 | **1039** |
 
-## B. Upstream body buffer: 16 vs 32 vs 64 KiB (product not changed)
+## B. Upstream body buffer: 16 vs 32 vs 64 KiB (owner chose 32 KiB, `ad86dc3`)
 
 All three are measured with A in place.
 
@@ -59,6 +59,21 @@ Memory, with default limits:
 
 - The worst case is client recv 16 KiB + send 1 KiB + upstream recv + head buffer 16 612 B.
 - **Idle connections do not hold the buffer.** It exists only during an exchange, in the connection's proxy state. A keep-alive client and a pooled backend connection hold none, so NFR-PERF-03 (~20 KiB per idle connection, `static-small-1k-idle`) is unaffected.
+
+### Final: 32 KiB in the product (`ad86dc3`, owner decision 2026-11-07)
+
+Measured interleaved with the 16 KiB build (A in place in both), 5 rounds of one 5 s run each, medians. The host was a little busier than for the tables above.
+
+| Scenario | syscalls/req 16 KiB | 32 KiB | CPU µs/req 16 KiB | 32 KiB |
+|---|---|---|---|---|
+| static-small (control) | 17.93 | 17.93 | 62.2 | 60.7 |
+| proxy-small | 10.26 | 10.26 | 51.3 | 49.2 |
+| proxy-medium | 18.27 | **14.26** | 120.8 | **94.6** |
+| proxy-large | 140.0 | **75.0** | 1116 | **651** |
+
+With default limits, `worst_case_per_connection` (proxied) is now 66 788 B (was 50 404 B). 1024 × 66 788 = 68 390 912 B (about 65 MiB), and 16 076 such connections fit the 1 GiB `memory_limit` (was 21 302).
+
+From A and B together, against the stage 7 stop baseline (16 KiB, before A): proxy-large goes from 422 to 75 syscalls per request (5.6× fewer) and from about 1 330 to about 650 µs of CPU.
 
 ## C. `tc netem` (CI; netem on both veth ends)
 
@@ -93,7 +108,7 @@ No run had errors.
 ## Recommendations
 
 1. **A (kept):** eager I/O and deferred registrations. This drops per-request work in every proxy scenario and in static-large, with no contract change.
-2. **B (owner decision; product unchanged):** I recommend **32 KiB**.
+2. **B: 32 KiB, as the owner decided 2026-11-07 (implemented in `ad86dc3`; final numbers above).** The recommendation was:
    - Gain: proxy-large −40 % CPU and −46 % syscalls; proxy-medium −15 % CPU and −22 % syscalls; proxy-small unchanged.
    - Cost: +16 KiB per *active* proxied exchange. The worst case goes from 49.2 to 65.2 KiB, and the connections that fit 1 GiB from 21 302 to 16 076. Idle connections are unaffected.
    - Against 64 KiB: 64 KiB gains a little more on 1 MiB bodies (−51 %), but costs proxy-small about 5–10 % CPU, because the zeroed allocation happens on every request.
