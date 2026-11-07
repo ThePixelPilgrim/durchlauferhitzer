@@ -27,7 +27,7 @@ pub struct BackendId(pub u32);
 /// fill, drain, refill (NFR-RES-04), so it is also the largest piece of a
 /// body in flight per exchange. Well above the 35 bytes NFR-RES-04
 /// requires.
-pub(crate) const UPSTREAM_RECV_MIN: usize = 16 * 1024;
+pub(crate) const UPSTREAM_RECV_MIN: usize = 64 * 1024;
 
 // NFR-RES-04: every body buffer holds more than a chunked-framing tail.
 const _: () = assert!(UPSTREAM_RECV_MIN > 35);
