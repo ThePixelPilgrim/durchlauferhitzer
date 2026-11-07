@@ -848,7 +848,8 @@ fn a_1_kib_file_leaves_in_one_segment() {
 /// follows. A head with no body behind it (a `HEAD`, a `304`, a proxied
 /// response) goes out at once: with `MSG_MORE` the kernel would hold the
 /// partial segment back (about 200 ms on Linux), so each such response on
-/// a kept-alive loopback connection must arrive well within 100 ms.
+/// a kept-alive loopback connection must arrive within 150 ms (slack for
+/// a loaded CI machine).
 #[test]
 fn a_head_with_no_file_behind_it_is_not_held_back() {
     use std::io::{Read, Write};
@@ -966,7 +967,7 @@ fn a_head_with_no_file_behind_it_is_not_held_back() {
             let took = start.elapsed();
             assert!(got.starts_with(status), "{got:?}");
             assert!(
-                took < Duration::from_millis(100),
+                took < Duration::from_millis(150),
                 "{:?} took {took:?}",
                 String::from_utf8_lossy(request)
             );

@@ -1,5 +1,6 @@
 //! One random schedule, and the test over all seeds.
 
+use std::cell::Cell;
 use std::ops::Range;
 
 use super::*;
@@ -375,9 +376,10 @@ fn seeds_from(value: Option<&str>, default: Range<u64>) -> Range<u64> {
 }
 
 /// Run one seed; on failure, panic with `SIM_SEED=<seed>`, the seed's
-/// timer order, its shutdown plan and the original message (which
-/// carries the trace).
-pub(crate) fn run_reporting(seed: u64, plan: ShutdownPlan, run: impl FnOnce()) {
+/// timer order, its shutdown plan as it stood then (`plan`: the proxy net
+/// may bring a drain forward or add one, `proxy/drain.rs`) and the
+/// original message (which carries the trace).
+pub(crate) fn run_reporting(seed: u64, plan: &Cell<ShutdownPlan>, run: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(run)) {
         let message = payload
             .downcast_ref::<String>()
@@ -385,8 +387,9 @@ pub(crate) fn run_reporting(seed: u64, plan: ShutdownPlan, run: impl FnOnce()) {
             .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
             .unwrap_or_default();
         panic!(
-            "SIM_SEED={seed} failed (timer order {:?}, shutdown {plan:?}): {message}",
-            timer_order(seed)
+            "SIM_SEED={seed} failed (timer order {:?}, shutdown {:?}): {message}",
+            timer_order(seed),
+            plan.get()
         );
     }
 }
@@ -395,12 +398,12 @@ pub(crate) fn run_reporting(seed: u64, plan: ShutdownPlan, run: impl FnOnce()) {
 fn random_fault_schedules() {
     let mut coverage = Coverage::default();
     match replay_seed() {
-        Some(seed) => run_reporting(seed, shutdown_plan(seed, STATIC_SPAN), || {
+        Some(seed) => run_reporting(seed, &Cell::new(shutdown_plan(seed, STATIC_SPAN)), || {
             run_seed(seed, &mut coverage)
         }),
         None => {
             for seed in seed_range(0..SEEDS) {
-                run_reporting(seed, shutdown_plan(seed, STATIC_SPAN), || {
+                run_reporting(seed, &Cell::new(shutdown_plan(seed, STATIC_SPAN)), || {
                     run_seed(seed, &mut coverage)
                 });
             }

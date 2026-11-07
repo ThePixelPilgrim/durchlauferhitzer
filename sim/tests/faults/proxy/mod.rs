@@ -30,8 +30,10 @@ mod pool;
 mod request;
 mod response;
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::rc::Rc;
 use std::time::Duration;
 
 use durchlauferhitzer_core::http::chunked::ChunkedError;
@@ -387,13 +389,17 @@ impl ProxyCoverage {
 fn random_proxy_schedules() {
     let mut coverage = ProxyCoverage::default();
     match replay_seed() {
-        Some(seed) => run_reporting(seed, shutdown_plan(seed, PROXY_SPAN), || {
-            run_proxy_seed(seed, &mut coverage)
-        }),
+        Some(seed) => {
+            let plan = Rc::new(Cell::new(shutdown_plan(seed, PROXY_SPAN)));
+            run_reporting(seed, &plan, || {
+                run_proxy_seed(seed, &mut coverage, Rc::clone(&plan));
+            });
+        }
         None => {
             for seed in seed_range(0..PROXY_SEEDS) {
-                run_reporting(seed, shutdown_plan(seed, PROXY_SPAN), || {
-                    run_proxy_seed(seed, &mut coverage)
+                let plan = Rc::new(Cell::new(shutdown_plan(seed, PROXY_SPAN)));
+                run_reporting(seed, &plan, || {
+                    run_proxy_seed(seed, &mut coverage, Rc::clone(&plan));
                 });
             }
             eprintln!("PROXY COVERAGE {:?}", coverage.seen);

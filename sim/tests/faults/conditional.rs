@@ -312,13 +312,14 @@ pub(crate) fn random_conditional(rng: &mut fastrand::Rng, stamp: Option<FileStam
         9 => "If-None-Match: ,\r\n".to_owned(),
         // `*` on one line, a tag on another: malformed.
         10 => format!("If-None-Match: *\r\nIf-None-Match: {etag}\r\n"),
-        // The tag after 15 or 16 other distinct ones (one repeated, weak,
-        // in a third of the lists: it counts once). Only the long limits
-        // leave room for it.
+        // The tag after 15 or 16 other distinct ones, one of them repeated
+        // weak: it counts once, so behind 15 others the tag is still the
+        // 16th, a 304 (the repeat always behind 15, in a third of the
+        // lists behind 16). Only the long limits leave room for it.
         11 => {
             let others = rng.u8(15..17);
             let mut list: Vec<String> = (0..others).map(|n| format!("\"{n:x}\"")).collect();
-            if rng.u8(0..3) == 0 {
+            if others == 15 || rng.u8(0..3) == 0 {
                 list.push("W/\"0\"".to_owned());
             }
             list.push(etag.clone());

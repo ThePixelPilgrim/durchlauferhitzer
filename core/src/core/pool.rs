@@ -4,9 +4,10 @@
 //! - **Reuse.** A request on a pooled route from an HTTP/1.1 client, while
 //!   serving, asks the backend to keep its connection (no `Connection:
 //!   close`; in a restart's drain it says close) and takes the backend's
-//!   newest idle connection, if any (`forward` in `proxy.rs`). Its upstream goes back to the pool once the response is
-//!   complete and reusable on both sides: the whole request was written,
-//!   the response is HTTP/1.1 without `close`, framed by
+//!   newest idle connection, if any (`forward` in `proxy.rs`). Its
+//!   upstream goes back to the pool once the response is complete and
+//!   reusable on both sides: the whole request was written, the response
+//!   is HTTP/1.1 without `close`, framed by
 //!   `Content-Length` or chunked (or `Content-Length: 0`; never a
 //!   response to HEAD, a 204 or a 304, owner decision 2026-11-07), and
 //!   nothing came after its end in the read that completed it, which did
