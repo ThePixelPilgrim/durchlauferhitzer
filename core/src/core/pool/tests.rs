@@ -7,7 +7,8 @@ use std::net::IpAddr;
 use crate::conn::LINGER_SCRATCH;
 use crate::core::test_support::{PEER, accept, secs};
 use crate::core::{Action, ConnError, ConnId, Core, DrainTarget, Event, Interest};
-use crate::log::{BackendFailure, Log};
+use crate::http::request::Method;
+use crate::log::{BackendFailure, Log, RequestSummary};
 use crate::upstream::{BackendId, UpstreamHolder, UpstreamId};
 
 /// Two routes to one backend (one pooled, one not), one to another; at
@@ -365,7 +366,9 @@ fn no_pooling_after_head_204_or_304() {
 /// sent after a complete response, still unread when a request reuses
 /// the connection (the review's scenario: more than its
 /// `Content-Length`), make the silence check fail: the connection closes
-/// and the request connects afresh, for any method, with nothing logged.
+/// and the request connects afresh, for any method, logged as
+/// `BackendNotSilent` (stage 7 review: operators see a backend that
+/// writes after its responses).
 #[test]
 fn a_connection_that_is_not_silent_is_replaced_by_a_fresh_one() {
     for request in [
@@ -390,8 +393,32 @@ fn a_connection_that_is_not_silent_is_replaced_by_a_fresh_one() {
         let fresh = connects(&actions);
         assert_eq!(fresh.len(), 1, "{actions:?}");
         assert!(retried(&actions).is_empty() && failed(&actions).is_empty());
-        assert!(
-            !actions.iter().any(|a| matches!(a, Action::Log(_))),
+        let logs: Vec<&Log> = actions
+            .iter()
+            .filter_map(|a| {
+                if let Action::Log(log) = a {
+                    Some(log)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            logs,
+            [&Log::BackendNotSilent {
+                conn: b,
+                peer: PEER,
+                backend: BackendId(0),
+                request: RequestSummary {
+                    method: if request == GET {
+                        Method::Get
+                    } else {
+                        Method::Other("POST".to_owned())
+                    },
+                    host: Some("b.test".to_owned()),
+                    path: if request == GET { "/p/f" } else { "/p" }.to_owned(),
+                },
+            }],
             "{actions:?}"
         );
         handle(&mut core, 1, Event::UpstreamConnected { up: fresh[0] });
@@ -582,6 +609,11 @@ fn a_get_on_a_dead_reused_connection_is_retried_once_and_succeeds() {
                 peer: PEER,
                 backend: BackendId(0),
                 kind: expected,
+                request: RequestSummary {
+                    method: Method::Get,
+                    host: Some("b.test".to_owned()),
+                    path: "/p/f".to_owned(),
+                },
             }))
         );
         assert_eq!(closes(&actions), [up]);
@@ -745,6 +777,21 @@ fn drains_close_the_pool() {
     core.abort_all(&mut actions);
     assert_eq!(closes(&actions), [up]);
     assert!(core.is_drained());
+}
+
+/// In a restart's drain a request is still forwarded, but its upstream
+/// is closed after it: the backend is told so (`Connection: close`,
+/// stage 7 review), as for a route with `pool off`.
+#[test]
+fn a_request_forwarded_in_a_restart_drain_says_close() {
+    let (mut core, c, _) = with_idle();
+    let mut actions = Vec::new();
+    core.begin_drain(secs(0), DrainTarget::Restart, &mut actions);
+    let (up, fresh, got) = forward(&mut core, 0, c, GET);
+    assert!(fresh);
+    assert!(got.ends_with(b"connection: close\r\n\r\n"), "{got:?}");
+    let actions = backend_sends(&mut core, 0, up, OK);
+    assert_eq!(closes(&actions), [up]);
 }
 
 /// Every upstream, active or idle, counts against `max_connections`: a

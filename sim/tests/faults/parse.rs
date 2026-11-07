@@ -140,7 +140,8 @@ impl Drained<'_> {
             | Log::FileAborted { .. }
             | Log::ProxiedResponse { .. }
             | Log::BackendFailed { .. }
-            | Log::BackendRetried { .. } => Ok(()),
+            | Log::BackendRetried { .. }
+            | Log::BackendNotSilent { .. } => Ok(()),
         }
     }
 }

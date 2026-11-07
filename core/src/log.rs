@@ -68,15 +68,29 @@ pub enum Log {
         backend: BackendId,
         kind: BackendFailure,
     },
-    /// The request on `conn` went out on a reused (pooled) connection to
-    /// `backend`, which failed (`kind`: `Reset` or `ClosedEarly`) before any
-    /// response byte; it is replayed once on a fresh connection
-    /// (FR-PROXY-26). What the replay brings is logged as usual.
+    /// The request on `conn` (`request`) went out on a reused (pooled)
+    /// connection to `backend`, which failed (`kind`: `Reset` or
+    /// `ClosedEarly`) before any response byte; it is replayed once on a
+    /// fresh connection (FR-PROXY-26). What the replay brings is logged as
+    /// usual.
     BackendRetried {
         conn: ConnId,
         peer: IpAddr,
         backend: BackendId,
         kind: BackendFailure,
+        request: RequestSummary,
+    },
+    /// The pooled connection to `backend` that the request on `conn`
+    /// (`request`) was to reuse was not silent: its silence check found a
+    /// byte, the end of stream or an error (FR-PROXY-02, owner decision
+    /// 2026-11-07). It was closed and the request connects afresh, nothing
+    /// sent; what that brings is logged as usual. A backend that keeps
+    /// causing these writes after its responses.
+    BackendNotSilent {
+        conn: ConnId,
+        peer: IpAddr,
+        backend: BackendId,
+        request: RequestSummary,
     },
 }
 

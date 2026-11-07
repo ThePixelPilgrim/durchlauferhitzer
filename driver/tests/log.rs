@@ -198,11 +198,37 @@ fn backend_retried() {
         peer: PEER,
         backend: BackendId(0),
         kind: BackendFailure::ClosedEarly,
+        request: RequestSummary {
+            method: Method::Head,
+            host: Some("a.test".to_owned()),
+            path: "/x y".to_owned(),
+        },
     };
     assert_eq!(
         line(&entry),
         "kind=backend_retried conn=4 peer=192.0.2.7 backend=127.0.0.1:9000 \
-         failure=closed_early\n"
+         failure=closed_early method=HEAD host=a.test path=\"/x\\x20y\"\n"
+    );
+}
+
+/// FR-LOG-05: a pooled connection that was not silent when a request was
+/// to reuse it (stage 7 review) has its own kind.
+#[test]
+fn backend_not_silent() {
+    let entry = Log::BackendNotSilent {
+        conn: ConnId(5),
+        peer: PEER,
+        backend: BackendId(1),
+        request: RequestSummary {
+            method: Method::Get,
+            host: None,
+            path: "/p".to_owned(),
+        },
+    };
+    assert_eq!(
+        line(&entry),
+        "kind=backend_not_silent conn=5 peer=192.0.2.7 backend=[::1]:9000 \
+         method=GET path=/p\n"
     );
 }
 

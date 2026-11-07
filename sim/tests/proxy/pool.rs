@@ -127,6 +127,7 @@ fn a_stale_connection_is_retried_for_a_get() {
                 peer: peer(),
                 backend: BackendId(0),
                 kind: BackendFailure::ClosedEarly,
+                request: summary(Method::Get, "/api/x"),
             },
             proxied(a),
         ],
@@ -218,7 +219,7 @@ fn a_late_body_to_a_head_never_reaches_the_next_client() {
 /// Owner decision 2026-11-07: stray bytes after a complete response that
 /// the idle watch has not seen yet (`hold_idle_reads`) are caught by the
 /// silence check before the reuse: B's request connects afresh and gets
-/// its own response.
+/// its own response, the failed check logged.
 #[test]
 fn stray_bytes_fail_the_silence_check() {
     let mut sim = Sim::new(POOLED);
@@ -248,7 +249,19 @@ fn stray_bytes_fail_the_silence_check() {
     sim.backend_send(fresh, OK);
     sim.run_until_idle();
     assert_eq!(sim.take_received(b), RELAYED, "{}", sim.trace());
-    assert_eq!(sim.logs(), &[proxied(a), proxied(b)], "{}", sim.trace());
+    // The failed check is logged with B's request (stage 7 review).
+    let not_silent = Log::BackendNotSilent {
+        conn: b,
+        peer: peer(),
+        backend: BackendId(0),
+        request: summary(Method::Get, "/api/x"),
+    };
+    assert_eq!(
+        sim.logs(),
+        &[proxied(a), not_silent, proxied(b)],
+        "{}",
+        sim.trace()
+    );
 }
 
 /// One idle connection to `up`'s backend, after a first exchange of `c`.

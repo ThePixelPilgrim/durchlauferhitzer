@@ -109,6 +109,7 @@ impl Core {
         let send_deadline = now.saturating_add(limits.send_idle_timeout);
         let connect_deadline = now.saturating_add(limits.backend_connect_timeout);
         let (recv_capacity, head_capacity) = (self.upstream_recv_capacity, self.head_capacity);
+        let serving = self.mode == Mode::Serving;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -120,10 +121,14 @@ impl Core {
             pool,
         } = forward;
         // FR-PROXY-02, -04, -11: an HTTP/1.1 request on a pooled route
-        // keeps the backend connection; anything else asks it to close.
-        let toward = match (pool, head.version) {
-            (Pooling::On, Version::Http11) => Persistence::KeepAlive,
-            (Pooling::On, Version::Http10) | (Pooling::Off, _) => Persistence::Close,
+        // keeps the backend connection while serving; anything else asks
+        // it to close (in a restart's drain the upstream is closed after
+        // the exchange, stage 7 review).
+        let toward = match (pool, head.version, serving) {
+            (Pooling::On, Version::Http11, true) => Persistence::KeepAlive,
+            (Pooling::On, Version::Http11, false)
+            | (Pooling::On, Version::Http10, _)
+            | (Pooling::Off, _, _) => Persistence::Close,
         };
         let summary = RequestSummary {
             method: head.method.clone(),

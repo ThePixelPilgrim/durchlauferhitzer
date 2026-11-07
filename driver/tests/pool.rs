@@ -198,7 +198,8 @@ fn a_get_on_a_dead_reused_connection_is_retried() {
     assert!(
         log.lines().any(|line| {
             line.starts_with("kind=backend_retried conn=3 ")
-                && (line.ends_with(" failure=closed_early") || line.ends_with(" failure=reset"))
+                && (line.contains(" failure=closed_early ") || line.contains(" failure=reset "))
+                && line.ends_with(" method=GET host=example.test path=/x")
         }),
         "{log}"
     );
