@@ -658,6 +658,7 @@ impl Driver {
             }
             Action::CloseFile { file } => self.close_file(file),
             Action::Connect { up, backend } => self.connect(up, backend),
+            Action::CheckSilent { up } => self.check_silent(up),
             Action::SetUpstreamInterest { up, interest } => {
                 self.set_upstream_interest(up, interest)
             }

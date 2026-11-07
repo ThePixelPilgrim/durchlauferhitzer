@@ -3,7 +3,7 @@
 //! most a cap per backend, each until its idle deadline. An idle upstream
 //! holds no buffer; the pool holds only its id, backend and deadline.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::{BackendId, UpstreamId};
 use crate::time::Instant;
@@ -12,7 +12,7 @@ use crate::time::Instant;
 pub(super) struct Pool {
     /// Per backend, its idle upstreams oldest first (the last is reused
     /// first). No entry is empty.
-    stacks: BTreeMap<BackendId, Vec<UpstreamId>>,
+    stacks: BTreeMap<BackendId, VecDeque<UpstreamId>>,
     /// Every idle upstream by its deadline: the oldest first.
     by_deadline: BTreeSet<(Instant, UpstreamId)>,
     /// Each idle upstream's backend and deadline.
@@ -35,35 +35,49 @@ impl Pool {
         cap: usize,
     ) -> Option<UpstreamId> {
         self.remove(up);
-        self.stacks.entry(backend).or_default().push(up);
+        let stack = self.stacks.entry(backend).or_default();
+        stack.push_back(up);
         self.by_deadline.insert((deadline, up));
         self.entries.insert(up, (backend, deadline));
-        let over = self
-            .stacks
-            .get(&backend)
-            .is_some_and(|stack| stack.len() > cap);
-        let oldest = over
-            .then(|| self.stacks.get(&backend).and_then(|s| s.first().copied()))
-            .flatten()?;
-        self.remove(oldest);
+        if stack.len() <= cap {
+            return None;
+        }
+        // The oldest, at the front: O(1).
+        let oldest = stack.pop_front()?;
+        self.forget(oldest);
         Some(oldest)
     }
 
-    /// Take the newest idle upstream of `backend`.
+    /// Take the newest idle upstream of `backend` (the back: O(1)).
     pub(super) fn take(&mut self, backend: BackendId) -> Option<UpstreamId> {
-        let up = self.stacks.get(&backend)?.last().copied()?;
-        self.remove(up);
+        let stack = self.stacks.get_mut(&backend)?;
+        let up = stack.pop_back()?;
+        if stack.is_empty() {
+            self.stacks.remove(&backend);
+        }
+        self.forget(up);
         Some(up)
     }
 
-    /// Take `up` out of the pool; whether it was idle.
+    /// Drop `up`'s entry and deadline, its stack already updated.
+    fn forget(&mut self, up: UpstreamId) {
+        if let Some((_, deadline)) = self.entries.remove(&up) {
+            self.by_deadline.remove(&(deadline, up));
+        }
+    }
+
+    /// Take `up` out of the pool, wherever it is in its stack (an idle
+    /// event, a timeout: the oldest are at the front, so the search is
+    /// short); whether it was idle.
     pub(super) fn remove(&mut self, up: UpstreamId) -> bool {
         let Some((backend, deadline)) = self.entries.remove(&up) else {
             return false;
         };
         self.by_deadline.remove(&(deadline, up));
         if let Some(stack) = self.stacks.get_mut(&backend) {
-            stack.retain(|&idle| idle != up);
+            if let Some(at) = stack.iter().position(|&idle| idle == up) {
+                stack.remove(at);
+            }
             if stack.is_empty() {
                 self.stacks.remove(&backend);
             }

@@ -288,6 +288,32 @@ pub fn read(fd: BorrowedFd<'_>, buf: &mut [u8]) -> Io {
     })
 }
 
+/// The flags of [`peek`]: look without consuming, never wait. The
+/// seccomp filter allows `recvfrom` with exactly these.
+pub const PEEK_FLAGS: libc::c_int = libc::MSG_PEEK | libc::MSG_DONTWAIT;
+
+/// Whether the socket has anything to read, without taking it: one
+/// `recvfrom` of a byte with [`PEEK_FLAGS`]. `WouldBlock`: nothing (the
+/// connection is silent); `Done(1)`: a byte waits; `Closed`: the end of
+/// stream; `Err`: the socket's error.
+pub fn peek(fd: BorrowedFd<'_>) -> Io {
+    let mut byte = [0u8; 1];
+    transfer(|| {
+        // SAFETY: `byte` is writable for 1 byte; no address is asked for
+        // (both pointers null).
+        unsafe {
+            libc::recvfrom(
+                fd.as_raw_fd(),
+                byte.as_mut_ptr().cast(),
+                1,
+                PEEK_FLAGS,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }
+    })
+}
+
 /// Whether more data follows a write at once (NFR-PERF-06).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum More {
@@ -531,6 +557,33 @@ pub(crate) mod tests {
     };
 
     use super::ipv6;
+
+    /// FR-PROXY-02: the silence check sees nothing on a quiet connection, a
+    /// byte without taking it, then the end of stream.
+    #[test]
+    fn peek_tells_silent_from_bytes_and_the_end_of_stream() {
+        use super::{Io, peek, read};
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let (mut theirs, _) = listener.accept().unwrap();
+        assert!(matches!(peek(ours.as_fd()), Io::WouldBlock));
+        theirs.write_all(b"x").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while matches!(peek(ours.as_fd()), Io::WouldBlock) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(matches!(peek(ours.as_fd()), Io::Done(1)));
+        // Peeked, not taken.
+        let mut buf = [0u8; 4];
+        assert!(matches!(read(ours.as_fd(), &mut buf), Io::Done(1)));
+        drop(theirs);
+        while matches!(peek(ours.as_fd()), Io::WouldBlock) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(matches!(peek(ours.as_fd()), Io::Closed));
+    }
 
     #[test]
     fn ipv6_flowinfo_is_passed_raw_like_std() {

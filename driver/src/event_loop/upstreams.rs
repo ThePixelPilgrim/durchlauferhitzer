@@ -13,7 +13,7 @@ use crate::log::{DriverLog, LogEntry};
 use crate::sys::epoll::{Readiness, Trouble};
 use crate::sys::fd::Io;
 use crate::sys::socket::{
-    ConnectStart, More, connect_nonblocking, read, set_nodelay, take_error, write,
+    ConnectStart, More, connect_nonblocking, peek, read, set_nodelay, take_error, write,
 };
 
 /// Whether a failed write is reported at once or left to the reads.
@@ -106,6 +106,44 @@ impl Driver {
         if answering {
             self.answers.push_back(up);
         }
+        self.sync_upstream(up)?;
+        self.freed(freed)
+    }
+
+    /// `CheckSilent`: a pooled upstream about to carry a request again must
+    /// have nothing to read (FR-PROXY-02, owner decision 2026-11-07). One
+    /// non-blocking peek decides; the answer is queued like a connect's:
+    /// `UpstreamConnected` when silent, `UpstreamFailed` (the socket
+    /// closed now) for a byte, the end of stream or an error.
+    pub(super) fn check_silent(&mut self, up: UpstreamId) -> io::Result<()> {
+        let Some(upstream) = self.upstreams.get_mut(&up) else {
+            return Ok(());
+        };
+        let phase = std::mem::replace(&mut upstream.phase, Phase::Failed);
+        let mut freed = Freed::Nothing;
+        upstream.phase = match phase {
+            Phase::Open {
+                fd,
+                writes: Writes::Open,
+                eof: Eof::NotYet,
+            } => match peek(fd.as_fd()) {
+                Io::WouldBlock => Phase::Answering(Answer::Connected(fd)),
+                Io::Done(_) | Io::Closed | Io::Err(_) => {
+                    drop(fd);
+                    freed = Freed::Descriptor;
+                    Phase::Answering(Answer::Failed)
+                }
+            },
+            // Not a quiet open connection (a core bug): not silent.
+            other @ (Phase::Open { .. }
+            | Phase::Connecting(_)
+            | Phase::Answering(_)
+            | Phase::Failed) => {
+                freed = holds_fd(&other);
+                Phase::Answering(Answer::Failed)
+            }
+        };
+        self.answers.push_back(up);
         self.sync_upstream(up)?;
         self.freed(freed)
     }

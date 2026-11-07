@@ -316,6 +316,7 @@ impl Sim {
             | Action::Close { .. }
             | Action::Log(_)
             | Action::Connect { .. }
+            | Action::CheckSilent { .. }
             | Action::SetUpstreamInterest { .. }
             | Action::CloseUpstream { .. } => unreachable!("not a file action"),
         }

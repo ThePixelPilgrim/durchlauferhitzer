@@ -67,6 +67,11 @@ pub enum ConnectBehaviour {
 enum Phase {
     /// `Connect` not yet answered; answered by `behaviour` on the next pump.
     Connecting(ConnectBehaviour),
+    /// `CheckSilent` not yet answered (a pooled upstream about to be
+    /// reused): on the next pump `UpstreamConnected` if the backend sent
+    /// nothing, `UpstreamFailed` if it sent bytes, its end of stream or a
+    /// reset.
+    Checking,
     Connected,
     /// `UpstreamFailed` delivered; only `CloseUpstream` is still due.
     Failed,
@@ -230,6 +235,10 @@ pub(crate) struct Backends {
     upstreams: BTreeMap<UpstreamId, Upstream>,
     /// Connections that ever held an upstream (`note_holders`).
     served: BTreeSet<ConnId>,
+    /// Idle pooled upstreams are not read (`Sim::hold_idle_reads`).
+    pub(crate) hold_idle: bool,
+    /// A drain or the abort was called: nothing may be parked from now on.
+    pub(crate) drained: bool,
     /// The upstream receive buffer's capacity for this config, by the
     /// documented formula `max(16 KiB, max_head)`.
     pub(crate) recv_bound: usize,
@@ -247,6 +256,8 @@ impl Backends {
             default_window: Window::Unlimited,
             upstreams: BTreeMap::new(),
             served: BTreeSet::new(),
+            hold_idle: false,
+            drained: false,
             recv_bound: limits.max_head.max(16 * 1024),
             head_bound: limits.max_head + limits.max_headers + 128,
             forwarded_limits: HeadLimits {
@@ -441,6 +452,28 @@ impl Sim {
                     self.deliver(Event::UpstreamConnected { up });
                     progress = true;
                 }
+                (Phase::Checking, _) => {
+                    let u = self.upstream(up);
+                    let silent =
+                        u.to_core.is_empty() && u.eof == Eof::NotSent && u.reset == Reset::No;
+                    if silent {
+                        self.upstream_mut(up).phase = Phase::Connected;
+                        self.deliver(Event::UpstreamConnected { up });
+                    } else {
+                        self.upstream_mut(up).phase = Phase::Failed;
+                        *self.idle_closes.entry(crate::IdleClose::Busy).or_default() += 1;
+                        self.deliver(Event::UpstreamFailed {
+                            up,
+                            error: ConnError::Other,
+                        });
+                    }
+                    progress = true;
+                }
+                // The idle watch's readiness not yet handled
+                // (`Sim::hold_idle_reads`).
+                (Phase::Connected, Interest::Read)
+                    if self.backends.hold_idle
+                        && self.core.upstream_holder(up) == Some(UpstreamHolder::Pool) => {}
                 (Phase::Connecting(ConnectBehaviour::Refuse), _) => {
                     self.upstream_mut(up).phase = Phase::Failed;
                     self.deliver(Event::UpstreamFailed {
@@ -503,6 +536,19 @@ impl Sim {
         }
         self.pending_read = Some(Pending::Upstream(up));
         self.deliver(Event::UpstreamReceived { up, len: n });
+        // FR-PROXY-02: a read that filled the buffer may have left bytes in
+        // the socket; a body that ended with it is never parked.
+        let left = self
+            .backends
+            .upstreams
+            .get(&up)
+            .map_or(0, |u| u.to_core.len());
+        if left > 0 && self.core.upstream_holder(up) == Some(UpstreamHolder::Pool) {
+            self.violation(&format!(
+                "up={} parked after a full read with {left} bytes still unread",
+                up.0
+            ));
+        }
         true
     }
 
@@ -615,6 +661,15 @@ impl Sim {
                     },
                 );
             }
+            Action::CheckSilent { up } => match self.backends.upstreams.get_mut(&up) {
+                Some(u) if u.phase == Phase::Connected && u.forwarded == Forwarded::Done => {
+                    u.phase = Phase::Checking;
+                }
+                Some(_) | None => self.violation(&format!(
+                    "CheckSilent for up={}, which is not an idle upstream after a complete request",
+                    up.0
+                )),
+            },
             Action::SetUpstreamInterest { up, interest } => {
                 match self.backends.upstreams.get_mut(&up) {
                     Some(u) if u.phase != Phase::Closed => u.interest = interest,
@@ -673,8 +728,12 @@ impl Sim {
                     }
                 }
                 // Idle in the pool (FR-PROXY-02): only after a complete
-                // request, and watched for any byte or end of stream.
+                // request, and watched for any byte or end of stream;
+                // never parked once a drain began (Review Focus 5).
                 Some(UpstreamHolder::Pool) => {
+                    if self.backends.drained {
+                        self.violation(&format!("up={} parked during a drain", up.0));
+                    }
                     let u = self.upstream_mut(up);
                     u.idled = true;
                     if u.forwarded != Forwarded::Done || u.phase != Phase::Connected {

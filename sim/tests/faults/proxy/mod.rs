@@ -133,7 +133,7 @@ impl NetConfig {
                 backend: BackendId(1),
                 max_request_body: body_limit(rng),
                 max_response_body: body_limit(rng),
-                pool: rng.bool(),
+                pool: rng.u8(0..4) != 0,
             },
         ];
         let max_head = *rng.choice(&[2048, 4096, 16 * 1024]).unwrap_or(&4096);
@@ -339,6 +339,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "pool: idle close by timeout",
     "pool: idle close for room",
     "pool: idle close by a drain",
+    "pool: not silent at reuse",
     "retry: replayed, relayed",
     "retry: refused, 502",
     "retry: none after a response byte",

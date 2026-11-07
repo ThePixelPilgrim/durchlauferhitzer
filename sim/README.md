@@ -169,9 +169,16 @@ byte), and then must. Backends kill a reused connection as the request
 arrives (reset or end of stream, before or after the first bytes of a
 response head), end it right behind a response (the core may reuse it
 before it sees that), or write to, close or reset it while idle (which
-must close it at once, `Sim::idle_closes`). The coverage gates require
+must close it at once, `Sim::idle_closes`), or send stray response bytes
+after a complete one; in some rounds the idle watch lags
+(`Sim::hold_idle_reads`), so only the silence check before a reuse
+(`CheckSilent`, answered by the sim from what the backend queued) can see
+them (owner decision 2026-11-07). Some responses end exactly where a read
+fills the upstream's buffer, with stray bytes behind: the sim fails a
+core that parks after such a read, and one that parks during a drain. The coverage gates require
 reuse (also across clients), idle closes by a byte, an end of stream,
-an error, the idle timeout, the per-backend cap and a drain, a replay
+an error, the idle timeout, the per-backend cap and a drain, a failed
+silence check, a replay
 that is relayed, a refused retry and none after a response byte. Timed scenarios (connect, response, body, head and send timeouts)
 run alone in their round, so the clock only runs out deadlines the model
 knows. To replay one failing seed (of both nets):

@@ -11,6 +11,12 @@
 //!   response to HEAD, a 204 or a 304, owner decision 2026-11-07), and
 //!   nothing came after its end in the read that completed it, which did
 //!   not fill the buffer (`relay.rs`, `relay_body.rs`).
+//! - **Silence.** Before a request is written on a reused upstream, the
+//!   driver checks it has nothing to read (`Action::CheckSilent`, one
+//!   non-blocking peek; owner decision 2026-11-07): stray bytes a buggy
+//!   backend sent after a response never become the next response. A
+//!   failed check closes it and the request connects afresh
+//!   ([`Core::reconnect`]).
 //! - **Idle.** An idle upstream holds no buffer; it is read into the
 //!   shared scratch buffer, and any byte, end of stream or error closes it
 //!   ([`Core::idle_event`], Review Focus 1). At most `backend_idle_max`
@@ -132,6 +138,33 @@ impl Core {
         for up in self.upstreams.idle() {
             close_upstream(&mut self.upstreams, up, actions);
         }
+    }
+
+    /// The pooled upstream `conn` was to reuse is not silent (its
+    /// `CheckSilent` failed): close it and connect afresh with the whole
+    /// request, nothing sent, nothing logged (FR-PROXY-02).
+    pub(super) fn reconnect(&mut self, now: Instant, conn: ConnId, actions: &mut Vec<Action>) {
+        let limits = &self.config.limits;
+        let connect_deadline = now.saturating_add(limits.backend_connect_timeout);
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return;
+        };
+        let Some((dead, mut request, buffers)) = take_exchange(c) else {
+            return;
+        };
+        close_upstream(&mut self.upstreams, dead, actions);
+        make_room(&mut self.upstreams, limits, actions);
+        request.reuse = Reuse::Fresh;
+        let backend = request.backend;
+        let up = self.upstreams.allocate(conn);
+        actions.push(Action::Connect { up, backend });
+        c.state = ConnState::Connecting {
+            up,
+            request,
+            buffers,
+            deadline: connect_deadline,
+        };
+        self.sync_interest(conn, actions);
     }
 
     /// The upstream of `conn` failed (`kind`) while it awaited the response

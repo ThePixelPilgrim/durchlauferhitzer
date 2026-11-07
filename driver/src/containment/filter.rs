@@ -81,6 +81,10 @@ enum Rule {
     NoDelay,
     /// `getsockopt`: only `SOL_SOCKET`/`SO_ERROR` (a connect's outcome).
     SoError,
+    /// `recvfrom`: only with flags `MSG_PEEK | MSG_DONTWAIT` (argument 3),
+    /// the silence check of a pooled connection before it is reused
+    /// (FR-PROXY-02); reads use `read`.
+    Peek,
     /// `futex`: only the operations in [`FUTEX_OPERATIONS`].
     Futex,
     /// `tgkill`: only `SIGABRT` (glibc's `abort`) to the server's own
@@ -134,6 +138,9 @@ const X86_64: &[Entry] = &[
     e("getsockopt", 55, Rule::SoError),
     e("setsockopt", 54, Rule::NoDelay),
     e("sendto", 44, Rule::Allow),
+    // The silence check of a pooled upstream (`recv`: glibc and musl
+    // call `recvfrom`).
+    e("recvfrom", 45, Rule::Peek),
     e("shutdown", 48, Rule::Allow),
     e("sendfile", 40, Rule::Allow),
     // The log sink: `poll` in the bounded final flush; the status flags
@@ -210,6 +217,7 @@ const AARCH64: &[Entry] = &[
     e("getsockopt", 209, Rule::SoError),
     e("setsockopt", 208, Rule::NoDelay),
     e("sendto", 206, Rule::Allow),
+    e("recvfrom", 207, Rule::Peek),
     e("shutdown", 210, Rule::Allow),
     e("sendfile", 71, Rule::Allow),
     // The log sink.
@@ -396,6 +404,7 @@ fn body(rule: Rule, deny: u32, pid: u32) -> Vec<libc::sock_filter> {
         Rule::Futex => one_of(arg(1), FUTEX_OPERATIONS, deny),
         Rule::NoDelay => level_and_name(libc::IPPROTO_TCP, libc::TCP_NODELAY, deny),
         Rule::SoError => level_and_name(libc::SOL_SOCKET, libc::SO_ERROR, deny),
+        Rule::Peek => one_of(arg(3), &[crate::sys::socket::PEEK_FLAGS as u32], deny),
         Rule::Abort => {
             // `tgkill(tgid, tid, sig)`: `tgid` must be the server, then
             // `sig` SIGABRT.

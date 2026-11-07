@@ -633,6 +633,7 @@ impl Sim {
                 return self.apply_file(action);
             }
             Action::Connect { .. }
+            | Action::CheckSilent { .. }
             | Action::SetUpstreamInterest { .. }
             | Action::CloseUpstream { .. } => return self.apply_upstream(action),
         };
@@ -663,6 +664,7 @@ impl Sim {
             | Action::Readahead { .. }
             | Action::CloseFile { .. }
             | Action::Connect { .. }
+            | Action::CheckSilent { .. }
             | Action::SetUpstreamInterest { .. }
             | Action::CloseUpstream { .. } => {}
         }
@@ -836,6 +838,7 @@ fn action_text(action: &Action) -> String {
         Action::Connect { up, backend } => {
             format!("up={} -> Connect backend={}", up.0, backend.0)
         }
+        Action::CheckSilent { up } => format!("up={} -> CheckSilent", up.0),
         Action::SetUpstreamInterest { up, interest } => {
             format!("up={} -> SetUpstreamInterest {interest:?}", up.0)
         }

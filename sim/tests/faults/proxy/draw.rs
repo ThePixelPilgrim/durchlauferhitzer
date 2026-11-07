@@ -61,6 +61,7 @@ pub(crate) fn random_exchange(
             max_head: net.max_head,
             valid_only: false,
             clean: rng.u8(0..3) != 0,
+            exact: (rng.u8(0..12) == 0).then(|| net.upstream_recv_capacity()),
             need_body: false,
             large: rng.u8(0..3) == 0,
             // An eager backend may answer while the request head is still
@@ -83,9 +84,9 @@ pub(crate) fn random_exchange(
     }
     let stale = match rng.u8(0..10) {
         0 | 1 => Some(Stale::Reset),
-        2 | 3 => Some(Stale::Eof),
-        4 => Some(Stale::HalfReset),
-        5 => Some(Stale::HalfEof),
+        2 => Some(Stale::Eof),
+        3 | 4 => Some(Stale::HalfReset),
+        5 | 6 => Some(Stale::HalfEof),
         _ => None,
     };
     let mut ex = Exchange {
@@ -100,6 +101,7 @@ pub(crate) fn random_exchange(
             0 => Some(Poke::Byte),
             1 => Some(Poke::Eof),
             2 => Some(Poke::Reset),
+            3 => Some(Poke::Stray),
             _ => None,
         },
     };
@@ -138,6 +140,7 @@ fn timed_exchange(
         max_head: net.max_head,
         valid_only: true,
         clean: false,
+        exact: None,
         need_body: kind == 5,
         large: false,
         resets: Resets::Late,

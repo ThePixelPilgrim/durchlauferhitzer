@@ -39,7 +39,14 @@ enum Serve {
     /// Closes the connection when its second request arrives, without an
     /// answer (a connection that died just as it was reused).
     DieOnSecond,
+    /// A buggy backend: answers a HEAD with a `Content-Length: 2` head,
+    /// then, a moment later, sends the 2 body bytes anyway and a whole
+    /// stray response behind them.
+    BodyToHead,
 }
+
+/// What [`Serve::BodyToHead`] sends late.
+const STRAY: &[u8] = b"okHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nevil";
 
 /// A keep-alive stub backend: counts the connections it accepted; each
 /// connection's end is reported on `closed`.
@@ -88,7 +95,16 @@ fn serve_connection(mut stream: TcpStream, serve: Serve) {
     let mut served = 0;
     loop {
         while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            buf.drain(..end + 4);
+            let head: Vec<u8> = buf.drain(..end + 4).collect();
+            if serve == Serve::BodyToHead && head.starts_with(b"HEAD ") {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                    .unwrap();
+                thread::sleep(std::time::Duration::from_millis(50));
+                // The proxy may have closed it already.
+                let _ = stream.write_all(STRAY);
+                continue;
+            }
             if serve == Serve::DieOnSecond && served == 1 {
                 return;
             }
@@ -187,4 +203,32 @@ fn a_get_on_a_dead_reused_connection_is_retried() {
         "{log}"
     );
     assert!(!log.contains("kind=backend_failed"), "{log}");
+}
+
+/// Owner decision 2026-11-07 (FR-PROXY-02): a buggy backend's late body to
+/// a HEAD (and a stray response behind it) never reaches the next client:
+/// no connection is pooled after a response to HEAD.
+#[test]
+fn a_body_sent_to_a_head_never_reaches_the_next_client() {
+    let dir = TempDir::new();
+    let backend = Backend::start(Serve::BodyToHead);
+    let (running, addr) = server(&dir, backend.addr, true);
+    let mut client = TcpStream::connect(addr).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    client
+        .write_all(b"HEAD /x HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut head = Vec::new();
+    client.read_to_end(&mut head).unwrap();
+    assert!(head.starts_with(b"HTTP/1.1 200 OK\r\n"), "{head:?}");
+    assert!(head.ends_with(b"\r\n\r\n"), "{head:?}");
+    // The backend's late bytes come while the next client asks.
+    for _ in 0..3 {
+        ok(&get(addr, "/x"));
+    }
+    let log = running.kill();
+    assert!(
+        !log.contains("evil") && !log.contains("kind=backend_"),
+        "{log}"
+    );
 }

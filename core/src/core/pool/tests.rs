@@ -116,6 +116,19 @@ fn connects(actions: &[Action]) -> Vec<UpstreamId> {
         .collect()
 }
 
+fn checks(actions: &[Action]) -> Vec<UpstreamId> {
+    actions
+        .iter()
+        .filter_map(|a| {
+            if let Action::CheckSilent { up } = a {
+                Some(*up)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn closes(actions: &[Action]) -> Vec<UpstreamId> {
     actions
         .iter()
@@ -140,9 +153,13 @@ fn forward(core: &mut Core, t: u64, conn: ConnId, request: &[u8]) -> (UpstreamId
             handle(core, t, Event::UpstreamConnected { up: *up });
             *up
         }
-        [] => match core.conns.get(&conn).and_then(|c| c.state.upstream()) {
-            Some(up) => up,
-            None => panic!("no upstream for {conn:?}: {actions:?}"),
+        // A reused upstream: the driver finds it silent.
+        [] => match checks(&actions).as_slice() {
+            [up] => {
+                handle(core, t, Event::UpstreamConnected { up: *up });
+                *up
+            }
+            _ => panic!("no upstream for {conn:?}: {actions:?}"),
         },
         more => panic!("several connects {more:?}"),
     };
@@ -194,14 +211,20 @@ fn a_second_request_reuses_the_idle_upstream() {
     assert_eq!(client_takes(&mut core, 0, c), RELAYED);
     let actions = client_sends(&mut core, 1, c, GET);
     assert!(connects(&actions).is_empty(), "{actions:?}");
-    assert!(
-        actions.contains(&Action::SetUpstreamInterest {
+    // Owner decision 2026-11-07: first the driver checks it is silent;
+    // nothing is written meanwhile.
+    assert_eq!(checks(&actions), [up], "{actions:?}");
+    assert_eq!(core.upstream_holder(up), Some(UpstreamHolder::Conn(c)));
+    assert!(core.upstream_send_buffer(up).is_empty());
+    assert!(core.upstream_recv_buffer(up).is_empty());
+    let actions = handle(&mut core, 1, Event::UpstreamConnected { up });
+    assert_eq!(
+        actions,
+        [Action::SetUpstreamInterest {
             up,
             interest: Interest::Write
-        }),
-        "{actions:?}"
+        }]
     );
-    assert_eq!(core.upstream_holder(up), Some(UpstreamHolder::Conn(c)));
     assert!(backend_takes(&mut core, 1, up).starts_with(b"GET /p/f HTTP/1.1\r\n"));
     backend_sends(&mut core, 1, up, OK);
     assert_eq!(client_takes(&mut core, 1, c), RELAYED);
@@ -336,6 +359,52 @@ fn no_pooling_after_head_204_or_304() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
     );
     assert_eq!(core.upstream_holder(up), Some(UpstreamHolder::Pool));
+}
+
+/// Owner decision 2026-11-07 (FR-PROXY-02): stray bytes a buggy backend
+/// sent after a complete response, still unread when a request reuses
+/// the connection (the review's scenario: more than its
+/// `Content-Length`), make the silence check fail: the connection closes
+/// and the request connects afresh, for any method, with nothing logged.
+#[test]
+fn a_connection_that_is_not_silent_is_replaced_by_a_fresh_one() {
+    for request in [
+        GET,
+        &b"POST /p HTTP/1.1\r\nHost: b.test\r\nContent-Length: 2\r\n\r\nab"[..],
+    ] {
+        let (mut core, _, up) = with_idle();
+        let b = conn(&mut core, 2);
+        let actions = client_sends(&mut core, 1, b, request);
+        assert_eq!(checks(&actions), [up]);
+        // `HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nevil` waits in the
+        // socket: the peek sees a byte.
+        let actions = handle(
+            &mut core,
+            1,
+            Event::UpstreamFailed {
+                up,
+                error: ConnError::Other,
+            },
+        );
+        assert_eq!(closes(&actions), [up], "{actions:?}");
+        let fresh = connects(&actions);
+        assert_eq!(fresh.len(), 1, "{actions:?}");
+        assert!(retried(&actions).is_empty() && failed(&actions).is_empty());
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::Log(_))),
+            "{actions:?}"
+        );
+        handle(&mut core, 1, Event::UpstreamConnected { up: fresh[0] });
+        // The whole request, on the fresh connection.
+        let got = backend_takes(&mut core, 1, fresh[0]);
+        assert!(
+            got.starts_with(&request[..4])
+                && got.ends_with(if request == GET { b"\r\n\r\n" } else { b"ab" }),
+            "{got:?}"
+        );
+        backend_sends(&mut core, 1, fresh[0], OK);
+        assert_eq!(client_takes(&mut core, 1, b), RELAYED);
+    }
 }
 
 /// A response the backend sent before the whole request body was

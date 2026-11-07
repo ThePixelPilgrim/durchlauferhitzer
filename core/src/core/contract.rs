@@ -216,9 +216,16 @@
 //! - Pooling (FR-PROXY-02): once a response is complete and reusable,
 //!   the core may keep its upstream open instead of closing it, idle in
 //!   its pool, and later hand it to another request to the same backend,
-//!   from any connection: then no `Connect` comes, only a
-//!   `SetUpstreamInterest` for the reused id, whose events now serve the
-//!   new exchange. An idle upstream keeps interest `Read`; its
+//!   from any connection: then no `Connect` comes but an
+//!   [`Action::CheckSilent`] for the reused id, whose events now serve the
+//!   new exchange. The driver answers it like a connect (a later event,
+//!   nothing delivered if `CloseUpstream` comes first; the interest stays
+//!   `None` meanwhile): one non-blocking peek of a byte (`recv` with
+//!   `MSG_PEEK | MSG_DONTWAIT`, which consumes nothing); `UpstreamConnected`
+//!   if nothing is readable, `UpstreamFailed` for a byte, the end of
+//!   stream or an error (the core then closes it and connects afresh;
+//!   owner decision 2026-11-07: a buggy backend's stray bytes after a
+//!   response never become the next client's). An idle upstream keeps interest `Read`; its
 //!   [`Core::upstream_recv_buffer`] is a scratch buffer whose contents are
 //!   never looked at, and any `UpstreamReceived`, `UpstreamReadClosed` or
 //!   `UpstreamFailed` for it is answered with its `CloseUpstream` (so is
@@ -684,6 +691,13 @@ pub enum Action {
     /// [`Core::backends`]) as upstream `up`; answer it with
     /// [`Event::UpstreamConnected`] or [`Event::UpstreamFailed`].
     Connect { up: UpstreamId, backend: BackendId },
+    /// Upstream `up`, open and idle, is about to carry a request again
+    /// (FR-PROXY-02): before anything is written on it, check that it is
+    /// silent, with one non-blocking peek of a byte (`recv` with
+    /// `MSG_PEEK | MSG_DONTWAIT`). Answer it like a connect, as a later
+    /// event: [`Event::UpstreamConnected`] when nothing is readable,
+    /// [`Event::UpstreamFailed`] for a byte, the end of stream or an error.
+    CheckSilent { up: UpstreamId },
     /// Change what the driver waits for on upstream `up`.
     SetUpstreamInterest { up: UpstreamId, interest: Interest },
     /// Close upstream `up`'s socket (also while its connect is pending).

@@ -69,7 +69,15 @@ pub(crate) enum Poke {
     Byte,
     Eof,
     Reset,
+    /// Stray bytes that look like a response (a buggy backend's body to a
+    /// HEAD, more than its `Content-Length`), queued without the sim
+    /// running: the idle watch or the silence check before a reuse must
+    /// keep them from every client (owner decision 2026-11-07).
+    Stray,
 }
+
+/// What a stray backend sends ([`Poke::Stray`]).
+const STRAY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nevil";
 
 /// What the net knows of the round's upstreams.
 #[derive(Debug, Default)]
@@ -81,6 +89,9 @@ pub(crate) struct Assign {
     last: BTreeMap<UpstreamId, (ConnId, usize, usize)>,
     /// Upstreams their backend wrote to while idle (`poke`).
     dirty: BTreeSet<UpstreamId>,
+    /// The sim does not read idle upstreams this round
+    /// (`Sim::hold_idle_reads`).
+    pub(crate) hold: bool,
 }
 
 impl Assign {
@@ -144,6 +155,22 @@ fn replay_of(sim: &Sim, story: &Story) -> Option<(usize, BackendFailure)> {
     Some((last, kind))
 }
 
+/// The exchange of `story` whose reused connection failed its silence
+/// check, if a fresh connect follows: its latest exchange went out on a
+/// reused connection that is closed now, got no byte of the request and
+/// logged no retry.
+fn busy_check(sim: &Sim, story: &Story) -> Option<usize> {
+    let last = story.runs.iter().rposition(|r| r.up.is_some())?;
+    let run = &story.runs[last];
+    let up = run.up?;
+    (run.reused.is_some()
+        && run.retried.is_none()
+        && run.got.is_empty()
+        && sim.upstream_holder(up).is_none()
+        && replay_of(sim, story).is_none())
+    .then_some(last)
+}
+
 /// `up`, held by `conn`, carries request `seq` on its connection (`None`:
 /// whichever it carries now): the latest exchange of `conn`'s story
 /// already has it, or a reuse begins and the next exchange takes it. A
@@ -172,6 +199,11 @@ fn reuse(
         None => prev_conn == conn,
     };
     if same {
+        return false;
+    }
+    // A dirty connection held while its silence check runs is not reused
+    // yet: only a byte written on it would be.
+    if seq.is_none() && assign.dirty.contains(&up) {
         return false;
     }
     let i = next_exchange(story, sim, up);
@@ -278,7 +310,21 @@ pub(crate) fn sync(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) {
                     run.accepted = false;
                     i
                 }
-                None => next_exchange(story, sim, up),
+                None => match busy_check(sim, story) {
+                    // The silence check failed: the same exchange, fresh.
+                    Some(i) => {
+                        let run = &mut story.runs[i];
+                        run.reused = None;
+                        run.busy = true;
+                        run.stale = None;
+                        run.stale_done = false;
+                        run.sent = 0;
+                        run.ended = false;
+                        run.accepted = false;
+                        i
+                    }
+                    None => next_exchange(story, sim, up),
+                },
             };
             story.runs[i].up = Some(up);
             story.runs[i].seq = 1;
@@ -344,7 +390,12 @@ fn poke(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) -> bool {
             // Only the exchange that left it idle.
             let last = assign.last.get(&up) == Some(&(conn, i, run.seq));
             let Some(what) = ex.poke else { continue };
-            if run.poked || !last || sim.upstream_holder(up) != Some(UpstreamHolder::Pool) {
+            // A backend that already ended the connection sends nothing.
+            if run.poked
+                || !last
+                || closed_after(ex).is_some()
+                || sim.upstream_holder(up) != Some(UpstreamHolder::Pool)
+            {
                 continue;
             }
             run.poked = true;
@@ -353,6 +404,14 @@ fn poke(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) -> bool {
                 Poke::Byte => sim.backend_send(up, b"x"),
                 Poke::Eof => sim.backend_eof(up),
                 Poke::Reset => sim.backend_reset(up),
+                // Left for whatever runs next.
+                Poke::Stray => {
+                    sim.backend_send(up, STRAY);
+                    continue;
+                }
+            }
+            if assign.hold {
+                continue;
             }
             sim.run_until_idle();
             assert_eq!(

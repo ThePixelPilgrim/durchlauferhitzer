@@ -299,7 +299,7 @@ Structure and values:
   | `restart_timeout` | 10m (the restart drain, FR-PROC-07; owner decision 2026-11-04) | [done] |
   | `memory_limit` | 1GiB (budget for per-connection buffers, FR-CFG-21) | [done] |
   | `ipv6_prefix` | 64 (per-IP grouping of IPv6 peers, FR-CONN-13; (owner decision 2026-10-29, stage 5 brainstorm)) | [done] |
-  | `backend_idle_timeout` | 2s (an idle pooled backend connection closes after it, FR-PROXY-02; stage 7) | [stage 7] |
+  | `backend_idle_timeout` | 2s (an idle pooled backend connection closes after it, FR-PROXY-02; keep it well below the backend's own keep-alive timeout; stage 7) | [stage 7] |
   | `backend_idle_max` | 8, or `max_connections` if smaller (idle pooled connections per backend, FR-PROXY-02; stage 7) | [stage 7] |
 
 - **FR-CFG-21** [done] Counts and sizes in `limits` are ≥ 1, durations are
@@ -1648,6 +1648,8 @@ Failures, persistence, timeouts:
     abort path; the pid check, stage 5 Task 5); *(owner decision
     2026-11-02, stage 5 final review:)* `setsockopt` only
     `IPPROTO_TCP`/`TCP_NODELAY`, `getsockopt` only `SOL_SOCKET`/`SO_ERROR`,
+    *(stage 7 Task 5, FR-PROXY-02's silence check:)* `recvfrom` only with
+    flags `MSG_PEEK|MSG_DONTWAIT`,
     `futex` only the private wait and wake operations the server uses,
     plus `pthread_join`'s shared `FUTEX_WAIT_BITSET|FUTEX_CLOCK_REALTIME`
     wait on a thread id (glibc ≥ 2.34; owner decision 2026-11-02) — no

@@ -19,6 +19,9 @@ pub(crate) struct Run {
     /// `up` was reused (FR-PROXY-02): the client and exchange it served
     /// before.
     pub(crate) reused: Option<(ConnId, usize)>,
+    /// The reuse's silence check failed: the request went out on a fresh
+    /// connection instead (`up`).
+    pub(crate) busy: bool,
     /// The reused `up` turned out dead this way (`Stale`), and whether
     /// the backend did it yet.
     pub(crate) stale: Option<Stale>,
@@ -404,7 +407,12 @@ fn do_step(
                 return;
             };
             if run.sent < target {
-                let mut n = rng.usize(1..=target - run.sent);
+                // An `exact` script goes in one piece (`Ctx::exact`).
+                let mut n = if script.exact {
+                    target - run.sent
+                } else {
+                    rng.usize(1..=target - run.sent)
+                };
                 // What a backend sends after a response's end (bytes, its
                 // end of stream, a reset) goes with the response's last
                 // byte, before anything else happens: a real backend writes
@@ -751,6 +759,10 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
         } else {
             sim.set_default_backend_window(Window::Unlimited);
         }
+        // Now and then the idle watch lags: only the silence check before
+        // a reuse sees what a backend sent to an idle connection.
+        assign.hold = rng.u8(0..3) == 0;
+        sim.hold_idle_reads(assign.hold);
         used_peer = stories.first().map_or(used_peer, |s| s.peer);
         run_round(
             &mut sim,
@@ -856,6 +868,7 @@ pub(crate) fn run_proxy_seed(seed: u64, coverage: &mut ProxyCoverage) {
             IdleClose::Timeout => "pool: idle close by timeout",
             IdleClose::Room => "pool: idle close for room",
             IdleClose::Drain => "pool: idle close by a drain",
+            IdleClose::Busy => "pool: not silent at reuse",
         };
         for _ in 0..*n {
             coverage.add(what);

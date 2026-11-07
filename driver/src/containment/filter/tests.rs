@@ -408,6 +408,33 @@ fn setsockopt_only_for_tcp_nodelay() {
     });
 }
 
+/// FR-PROXY-02 (owner decision 2026-11-07): the silence check before a
+/// pooled connection is reused, `recvfrom(fd, buf, 1, MSG_PEEK |
+/// MSG_DONTWAIT, NULL, NULL)`; no other flags (a consuming or blocking
+/// receive).
+#[test]
+fn recvfrom_only_to_peek_without_waiting() {
+    each(|arch, action, prog| {
+        let recvfrom = nr(arch, "recvfrom");
+        let run = |flags: i32| {
+            let args = [5, 0x1000, 1, flags as u64, 0, 0];
+            run(prog, &call(arch, recvfrom, args))
+        };
+        assert_eq!(run(libc::MSG_PEEK | libc::MSG_DONTWAIT), ALLOW);
+        for flags in [
+            0,
+            libc::MSG_PEEK,
+            libc::MSG_DONTWAIT,
+            libc::MSG_WAITALL,
+            libc::MSG_PEEK | libc::MSG_WAITALL,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT | libc::MSG_TRUNC,
+            libc::MSG_ERRQUEUE,
+        ] {
+            assert_eq!(run(flags), expected(action), "{flags:#x}");
+        }
+    });
+}
+
 #[test]
 fn getsockopt_only_for_so_error() {
     each(|arch, action, prog| {
@@ -674,6 +701,7 @@ fn common_number(name: &str) -> i64 {
         "getsockopt" => libc::SYS_getsockopt,
         "setsockopt" => libc::SYS_setsockopt,
         "sendto" => libc::SYS_sendto,
+        "recvfrom" => libc::SYS_recvfrom,
         "shutdown" => libc::SYS_shutdown,
         "sendfile" => libc::SYS_sendfile,
         "fcntl" => libc::SYS_fcntl,

@@ -36,6 +36,8 @@ pub(crate) struct Script {
     /// The backend keeps its connection after it (FR-PROXY-02): HTTP/1.1
     /// and no `close` among its `Connection` tokens.
     pub(crate) keeps: bool,
+    /// Sent in one piece (`Ctx::exact`).
+    pub(crate) exact: bool,
     /// Coverage tag of the hostile or edge case it carries, if any.
     pub(crate) tag: Option<&'static str>,
 }
@@ -113,6 +115,11 @@ pub(crate) struct Ctx {
     /// A response the backend keeps its connection after, framed, with
     /// nothing after it: reusable (FR-PROXY-02), so pooling gets going.
     pub(crate) clean: bool,
+    /// With a clean one: head and `Content-Length` body exactly this many
+    /// bytes (the upstream's receive buffer), then stray bytes; sent in one
+    /// piece, so the read that ends the body fills the buffer and leaves
+    /// the strays in the socket (FR-PROXY-02's full-read rule).
+    pub(crate) exact: Option<usize>,
     pub(crate) need_body: bool,
     /// Allow a large body (the client's window is not tiny).
     pub(crate) large: bool,
@@ -398,7 +405,24 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         Some(_) | None => {}
     }
     // The body and its framing header.
-    let len = if ctx.need_body {
+    let exact = ctx.exact.filter(|_| {
+        ctx.clean
+            && framing == BodyKind::Length
+            && interim == 0
+            && !ctx.head_only
+            && !matches!(code, 204 | 304)
+    });
+    let exact_len = exact.and_then(|cap| {
+        // `Content-Length: <n>\r\n`, then the blank line.
+        let head = wire.len() - head_start + "Content-Length: \r\n\r\n".len();
+        (1..=7).find_map(|digits| {
+            let n = cap.checked_sub(head + digits)?;
+            (n > 0 && n.to_string().len() == digits).then_some(n)
+        })
+    });
+    let len = if let Some(n) = exact_len {
+        n
+    } else if ctx.need_body {
         response_len(rng, ctx.large).max(1)
     } else {
         response_len(rng, ctx.large)
@@ -407,9 +431,10 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     let mut body_wire = body.clone();
     let mut chunk = None;
     let mut cl_value = None;
+    let mut exact_line = None;
     match framing {
         BodyKind::Length => {
-            let zeros = if rng.u8(0..5) == 0 {
+            let zeros = if exact_len.is_none() && rng.u8(0..5) == 0 {
                 rng.usize(1..3)
             } else {
                 0
@@ -427,6 +452,10 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
                 Some(HeadDefect::ClTe) => {
                     header(&mut wire, rng, "Content-Length", value.as_bytes());
                     header(&mut wire, rng, "Transfer-Encoding", b"chunked");
+                }
+                Some(_) | None if exact_len.is_some() => {
+                    wire.extend_from_slice(format!("Content-Length: {value}\r\n").as_bytes());
+                    exact_line = Some(("content-length".to_owned(), value.clone().into_bytes()));
                 }
                 Some(_) | None => push(&mut wire, rng, "Content-Length", value.as_bytes()),
             }
@@ -462,6 +491,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
             too_large = wire.len() - head_start + 2 > ctx.max_head;
         }
     }
+    lines.extend(exact_line);
     wire.extend_from_slice(b"\r\n");
     let head_end = wire.len();
     // A 204, 304 or a response to HEAD has no body, whatever it declares.
@@ -480,7 +510,9 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         BodyKind::None => head_end,
         BodyKind::Length | BodyKind::Chunked | BodyKind::UntilClose => wire.len(),
     };
-    if kind != BodyKind::UntilClose && !ctx.clean && rng.u8(0..5) == 0 {
+    if exact_len.is_some() {
+        wire.extend_from_slice(AFTER[0]);
+    } else if kind != BodyKind::UntilClose && !ctx.clean && rng.u8(0..5) == 0 {
         wire.extend_from_slice(rng.choice(AFTER).copied().unwrap_or_default());
     }
     let mut tag = defect.map(|d| match d {
@@ -604,6 +636,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         ending,
         reply,
         keeps: !http10 && !says_close,
+        exact: exact_len.is_some(),
         tag: match (too_large, padded) {
             (true, _) => Some("backend head just too large"),
             (false, true) => Some("backend head at the limit"),

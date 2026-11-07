@@ -26,9 +26,20 @@ pub enum IdleClose {
     Room,
     /// A drain or the abort closed the pool.
     Drain,
+    /// Not idle any more but about to be reused: its silence check found
+    /// bytes, an end of stream or a reset (FR-PROXY-02).
+    Busy,
 }
 
 impl Sim {
+    /// While `hold` is set, the sim does not read idle pooled upstreams:
+    /// what a backend sends to one waits, as when the driver has not yet
+    /// handled its readiness, so only the silence check before a reuse
+    /// (`CheckSilent`) can see it.
+    pub fn hold_idle_reads(&mut self, hold: bool) {
+        self.backends.hold_idle = hold;
+    }
+
     /// Pump the upstreams alone until nothing moves, before any client or
     /// disk acts: what a backend sent last (a response's end and whatever
     /// follows it, its end of stream or reset) is read in one readiness
@@ -71,9 +82,14 @@ impl Sim {
             let why = match (target, cause) {
                 (Some(t), _) if t == *up => cause,
                 (_, IdleClose::Timeout) => IdleClose::Timeout,
-                (_, IdleClose::Byte | IdleClose::Eof | IdleClose::Error | IdleClose::Room) => {
-                    IdleClose::Room
-                }
+                (
+                    _,
+                    IdleClose::Byte
+                    | IdleClose::Eof
+                    | IdleClose::Error
+                    | IdleClose::Room
+                    | IdleClose::Busy,
+                ) => IdleClose::Room,
                 (_, IdleClose::Drain) => IdleClose::Drain,
             };
             *self.idle_closes.entry(why).or_default() += 1;
@@ -88,6 +104,7 @@ impl Sim {
 
     /// Review Focus 5: a drain closes the idle pool at once.
     pub(crate) fn drained_pool(&mut self, pooled: &[UpstreamId]) {
+        self.backends.drained = true;
         if let Some(up) = self.pooled_upstreams().first() {
             self.violation(&format!("up={} stays idle in the pool after a drain", up.0));
         }

@@ -205,9 +205,18 @@ impl Core {
             replay,
         };
         c.state = match idle {
+            // Owner decision 2026-11-07: before anything is written on
+            // it, the driver checks the connection is silent; its answer
+            // comes like a connect's.
             Some(up) => {
                 request.reuse = Reuse::Pooled;
-                awaiting(c, up, request, buffers, now, limits)
+                actions.push(Action::CheckSilent { up });
+                ConnState::Connecting {
+                    up,
+                    request,
+                    buffers,
+                    deadline: connect_deadline,
+                }
             }
             None => {
                 make_room(&mut self.upstreams, limits, actions);
@@ -331,7 +340,12 @@ impl Core {
         let Some(c) = self.conns.get(&conn) else {
             return;
         };
-        match c.state {
+        match &c.state {
+            // A pooled connection that was not silent: nothing was sent,
+            // so the request connects afresh, whatever its method.
+            ConnState::Connecting { request, .. } if request.reuse == Reuse::Pooled => {
+                self.reconnect(now, conn, actions);
+            }
             ConnState::Connecting { .. } => {
                 self.fail_before_head(now, conn, BackendFailure::Refused, actions);
             }

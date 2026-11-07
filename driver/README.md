@@ -145,6 +145,8 @@ src/
                       `clone` with the libc's thread flags, `prctl`
                       PR_SET_NAME, `fcntl` F_GETFD/F_GETFL/F_SETFL,
                       `setsockopt` TCP_NODELAY, `getsockopt` SO_ERROR,
+                      `recvfrom` MSG_PEEK|MSG_DONTWAIT (the silence
+                      check of a reused upstream),
                       `futex` private wait/wake and `pthread_join`'s wait,
                       `tgkill` SIGABRT to `pid`; `clone3` ENOSYS;
                       musl's own entries under `cfg(target_env = "musl")`:
@@ -330,7 +332,8 @@ tests/
                     one connection for 10 sequential requests (10 with
                     `pool off`), an idle connection the backend closes
                     is not reused, a GET on a reused connection that dies
-                    is retried and logged (`kind=backend_retried`)
+                    is retried and logged (`kind=backend_retried`), a
+                    backend's late body to a HEAD reaches no client
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process
