@@ -14,8 +14,9 @@
 //! - a reused upstream must have been left reusable by the exchange that
 //!   used it last ([`left_reusable`]): a pooled route, an HTTP/1.1
 //!   client, the whole request written, a relayed HTTP/1.1 response
-//!   without `close`, framed by `Content-Length` or chunked (or without
-//!   a body), nothing sent after it, no end of stream or reset, no byte
+//!   without `close`, framed by `Content-Length` or chunked (or with a
+//!   `Content-Length: 0`; never one to HEAD, a 204 or a 304), nothing sent
+//!   after it, no end of stream or reset, no byte
 //!   while idle;
 //! - a request is retried only if it went out on a reused connection,
 //!   is a GET or HEAD without a body, and that connection failed before
@@ -451,6 +452,18 @@ pub(crate) fn left_reusable(
         Reply::Relay(r) if r.fails.is_none() && r.cut.is_none() => {
             if r.kind == BodyKind::UntilClose {
                 return Err("its response ended with the connection".to_owned());
+            }
+            // Owner decision 2026-11-07: never after HEAD, 204 or 304.
+            if prev.req.head_only || matches!(r.status, 204 | 304) {
+                return Err(format!(
+                    "it answered {} {}",
+                    if prev.req.head_only {
+                        "HEAD with"
+                    } else {
+                        "with"
+                    },
+                    r.status
+                ));
             }
         }
         Reply::Relay(_) | Reply::Fail(_) => return Err("its response failed".to_owned()),

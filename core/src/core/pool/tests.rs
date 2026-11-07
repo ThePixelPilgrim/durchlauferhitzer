@@ -296,6 +296,48 @@ fn unread_bytes_or_an_unfinished_chunked_body_prevent_reuse() {
     assert_eq!(closes(&actions), [up], "{actions:?}");
 }
 
+/// Owner decision 2026-11-07 (FR-PROXY-02): never pooled after a
+/// response to HEAD, or a 204 or 304: a buggy backend may send a body
+/// anyway. The review's scenario: A's HEAD is answered head-only, B's GET
+/// must not get the late `evil` response.
+#[test]
+fn no_pooling_after_head_204_or_304() {
+    for (request, response) in [
+        (
+            &b"HEAD /p HTTP/1.1\r\nHost: b.test\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n"[..],
+        ),
+        (GET, b"HTTP/1.1 204 No Content\r\n\r\n"),
+        (
+            GET,
+            b"HTTP/1.1 304 Not Modified\r\nContent-Length: 4\r\n\r\n",
+        ),
+    ] {
+        let mut core = pooled_core();
+        let a = conn(&mut core, 1);
+        let b = conn(&mut core, 2);
+        let (up, _, actions, _) = exchange(&mut core, 0, a, request, response);
+        assert_eq!(closes(&actions), [up], "{response:?}: {actions:?}");
+        let (next, fresh, _) = forward(&mut core, 0, b, GET);
+        assert!(fresh && next != up);
+        // The late bytes on the old connection go nowhere.
+        assert!(core.upstream_recv_buffer(up).is_empty());
+        backend_sends(&mut core, 0, next, OK);
+        assert_eq!(client_takes(&mut core, 0, b), RELAYED);
+    }
+    // `Content-Length: 0` is a framed, empty body: pooled.
+    let mut core = pooled_core();
+    let a = conn(&mut core, 1);
+    let (up, _, _, _) = exchange(
+        &mut core,
+        0,
+        a,
+        GET,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert_eq!(core.upstream_holder(up), Some(UpstreamHolder::Pool));
+}
+
 /// A response the backend sent before the whole request body was
 /// written leaves the backend with a partial request: no reuse.
 #[test]
