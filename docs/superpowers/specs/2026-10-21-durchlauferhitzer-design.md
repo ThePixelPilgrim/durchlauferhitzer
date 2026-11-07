@@ -596,7 +596,10 @@ Core-generated responses:
   `If-Modified-Since` give 304 per RFC 9110 (`If-None-Match` wins), a
   malformed one is ignored as the RFC requires; `If-Match`,
   `If-Unmodified-Since` and `If-Range` are ignored (no 412, no ranges).
-  *(Stage 7 Task 2, builder calls and controller ruling:)* a malformed
+  *(Owner decision 2026-11-07, stage 7 review:)* at most 16 distinct
+  entity tags of an `If-None-Match` are kept; further ones are ignored
+  (worst case a 200 instead of a 304), so the request's state stays
+  within the memory budget (NFR-RES-01). *(Stage 7 Task 2, builder calls and controller ruling:)* a malformed
   `If-None-Match` counts as present and matches nothing, so
   `If-Modified-Since` is then ignored (RFC 9110 §13.1.3 "contains"); a
   well-formed empty list does the same. `If-Modified-Since` is ignored
@@ -641,7 +644,7 @@ Forwarding and identity:
   the idle pool once the response is complete and reusable on both
   sides: the whole request (head and body) was written, the response is
   HTTP/1.1 without a `close` token, framed by `Content-Length` or chunked
-  (or has no body: HEAD, 204, 304, `Content-Length: 0`), and nothing
+  (or `Content-Length: 0`; never after HEAD, 204 or 304, below), and nothing
   followed its end in the read that completed it, which did not fill the
   receive buffer either (more bytes may wait in the socket then); anything else
   (HTTP/1.0 either side, `close`, a close-delimited body, an early
@@ -671,7 +674,14 @@ Forwarding and identity:
   response. An end of stream or reset that arrives late is harmless: the
   reusing request fails before any response byte, which the retry rule
   handles. The retry (FR-PROXY-26) is logged as `BackendRetried`
-  (FR-LOG-02).
+  (FR-LOG-02). *(Stage 7 review, documented:)* pooling turns a backend's
+  own framing quirks into a cross-client risk (a delayed response to a
+  request the backend misframed would reach the next client); the
+  proxy's own request framing is strict (FR-PROXY-*), so `pool off` is
+  the switch for a backend that cannot be trusted to frame, and
+  `backend_idle_timeout` bounds the exposure as well as idle cost. The
+  safe retry sends a GET or HEAD twice, so a request that crashes a
+  backend worker reaches it twice (RFC 9110 idempotency).
 - **FR-PROXY-03** [done] `Core::backends()` lists the distinct backend
   addresses (IP and port, FR-CFG-16) in config order (`BackendId` =
   index); the driver connects by id to the address as it is, with no
@@ -2189,7 +2199,11 @@ does not change stage 7's choices.
   the owner's approval, and each optimisation is kept only if it
   measurably saves CPU or system calls per request at the expected load
   (N threads or `splice` may be dropped); results are charted, with no
-  regression alarm yet.
+  regression alarm yet. *(Builder calls, stage 7:)* only scheduled runs
+  and runs on the default branch with the default budget publish (a
+  branch or reduced-budget dispatch keeps its rows as an artifact); a
+  row with errors is published but never charted; the publish job
+  accepts only rows for the run's own commit.
 
 *(Owner decisions 2026-11-06, stage 7 Task 1 baseline:)* targets are
 work per request measured by `bench` (NFR-PERF-08). System calls per
@@ -2213,12 +2227,18 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   (1 KiB, keep-alive) at most 18.3 system calls and about 42 µs CPU;
   `static-fresh` at most 27.0 and about 69 µs; `static-large` (1 MiB) at
   most 38.0 and about 270 µs; `conditional-hit` at most 11.8 and about
-  30 µs. (Stage 7 start: 19.0 / 46, 27.3 / 77, 44.5 / 285, 19.0 / 45.)
+  30 µs. (Stage 7 start, from a short 2-run branch dispatch: 19.0 / 46,
+  27.3 / 77, 44.5 / 285, 19.0 / 45.) *(Owner decision 2026-11-07, stage 7
+  review:)* the CPU targets are checked against the next two scheduled
+  nightlies (static-large and static-fresh CPU rose between nightlies
+  while system calls fell); if CPU stays high, it is bisected before
+  stage 8 relies on these targets.
 - **NFR-PERF-02** [done] Proxy, per request: `proxy-small` (keep-alive,
   pooled) at most 10.8 system calls and about 37 µs CPU; `proxy-fresh`
   at most 19.3 and about 77 µs; `proxy-large` (1 MiB) at most 76.5 and
-  about 534 µs. (Stage 7 start: 18.8 / 85 and 27.3 / 118; `proxy-large`
-  was first measured at 422 system calls.)
+  about 534 µs (`proxy-large` from a single nightly run). (Stage 7 start:
+  18.8 / 85 and 27.3 / 118; `proxy-large` was first measured at 422
+  system calls.)
 - **NFR-PERF-03** [done] Concurrent connections *(owner decision
   2026-11-07, from Task 4's measurement)*: with 1 000 idle keep-alive
   connections (`bench` `static-small-1k-idle`, nightly with one run), a
