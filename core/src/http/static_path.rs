@@ -51,7 +51,7 @@ pub fn relative_segments(path: &str, skip: usize) -> Result<Vec<Vec<u8>>, Static
         if index < skip {
             continue;
         }
-        let decoded = decode(segment)?;
+        let decoded = decode_segment(segment.as_bytes())?;
         if decoded.first() == Some(&b'.') {
             return Err(StaticPathError::DotSegment);
         }
@@ -72,9 +72,11 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-fn decode(segment: &str) -> Result<Vec<u8>, StaticPathError> {
+/// Percent-decodes one segment exactly once (FR-STATIC-02); a `%` not
+/// followed by two hex digits is `BadEscape`.
+pub(crate) fn decode_segment(segment: &[u8]) -> Result<Vec<u8>, StaticPathError> {
     let mut out = Vec::with_capacity(segment.len());
-    let mut iter = segment.bytes();
+    let mut iter = segment.iter().copied();
     while let Some(b) = iter.next() {
         if b == b'%' {
             let hi = iter.next().and_then(hex_value);

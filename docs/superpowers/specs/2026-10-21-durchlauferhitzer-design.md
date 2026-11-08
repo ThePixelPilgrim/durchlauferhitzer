@@ -1182,6 +1182,12 @@ Failures, persistence, timeouts:
     upstream closed. *Controller call:* a trailing `/` and an empty rest
     (the root or prefix alone) are not bad paths: they are served as a
     static route serves them, so a 404 (FR-STATIC-02, -08).
+    *Planner calls (stage 8 plan):* a malformed `%` escape in an
+    `X-Accel-Redirect` value is a bad path (502): the 404 list below is
+    what a static route answers, and a static route never sees one. For
+    `x-sendfile`, the root without its `/` counts as "the root alone"
+    (404). A decoded `.`-segment (`%2e…`) is a dotfile (404), while a raw
+    `.` or `..` segment is a bad path (502).
   - **Missing file → 404.** Whatever a static route answers 404 is a
     `404` here (FR-STATIC-09), logged like any `Response`.
   - **The client's response** is the file as a static route sends it

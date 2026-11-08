@@ -104,6 +104,8 @@ src/
                         (FR-PROXY-32)
     target.rs           request-target validation (traversal, encodings)
     static_path.rs      decoding paths to file-system segments
+    backend_path.rs     `X-Sendfile` / `X-Accel-Redirect` values to
+                        segments, 404 or bad path (FR-PROXY-32)
     response.rs         rendering fixed responses, file heads (200 and
                         206), 416s, 304s, redirects
     status.rs           status codes
