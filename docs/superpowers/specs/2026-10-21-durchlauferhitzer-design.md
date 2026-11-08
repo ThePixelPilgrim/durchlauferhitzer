@@ -2104,7 +2104,12 @@ Failures, persistence, timeouts:
     buffer is `max(32 KiB, max_head)` (it holds a whole response head;
     16 KiB until the owner decision of 2026-11-07, NFR-PERF-05);
     the send ("head") buffer is `max_head + max_headers + 128`, enough for
-    any rewritten head within the limits; it carries the request head to
+    any rewritten head within the limits, *(stage 8, controller ruling at
+    Task 3)* plus the longest Rack hint lines any `internal_files` route
+    adds to a request head (FR-PROXY-32: 29 bytes for `x-sendfile`,
+    56 + root + prefix for `x-accel-redirect`; 0 without
+    `internal_files`), computed once at load, so a head at the limits
+    on such a route still fits; it carries the request head to
     the backend, then the response head to the client, since a backend
     head may exceed the client's 1 KiB send buffer;
   - a refused (503) connection: the send buffer only;

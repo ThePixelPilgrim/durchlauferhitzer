@@ -42,7 +42,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use std::net::SocketAddr;
 
-use durchlauferhitzer_core::config::Limits;
+use durchlauferhitzer_core::config::{Config, FileHeader, RouteAction};
 use durchlauferhitzer_core::http::chunked::{ChunkedValidator, Done, MAX_UNCONSUMED};
 use durchlauferhitzer_core::http::request::{BodyFraming, HeadLimits, ParseStatus, parse_head};
 use durchlauferhitzer_core::{
@@ -242,7 +242,8 @@ pub(crate) struct Backends {
     /// The upstream receive buffer's capacity for this config, by the
     /// documented formula `max(32 KiB, max_head)` (NFR-RES-01).
     pub(crate) recv_bound: usize,
-    /// The head buffer's capacity, `max_head + max_headers + 128`.
+    /// The head buffer's capacity, `max_head + max_headers + 128` plus the
+    /// longest Rack hints of the config's `internal_files` routes.
     pub(crate) head_bound: usize,
     /// Limits to judge a forwarded request head by: the head buffer's
     /// capacity, and room for the proxy's own header lines.
@@ -250,7 +251,30 @@ pub(crate) struct Backends {
 }
 
 impl Backends {
-    pub(crate) fn new(limits: &Limits) -> Backends {
+    pub(crate) fn new(config: &Config) -> Backends {
+        let limits = &config.limits;
+        // NFR-RES-01: room for the longest Rack hints of an
+        // `internal_files` route (FR-PROXY-32), by their documented sizes:
+        // `x-sendfile-type: X-Sendfile\r\n` (29), or
+        // `x-sendfile-type: X-Accel-Redirect\r\n` (35) and
+        // `x-accel-mapping: <root>/=<prefix>\r\n` (21 + root + prefix).
+        let hints = config
+            .hosts
+            .iter()
+            .flat_map(|h| &h.routes)
+            .filter_map(|r| match &r.action {
+                RouteAction::Proxy(p) => p.internal_files.as_ref(),
+                RouteAction::Static { .. } => None,
+            })
+            .map(|f| match &f.header {
+                FileHeader::XSendfile => 29,
+                FileHeader::XAccelRedirect { prefix } => {
+                    35 + 21 + f.root.as_os_str().len() + prefix.len()
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        let head = limits.max_head + limits.max_headers + 128 + hints;
         Backends {
             connect: BTreeMap::new(),
             default_window: Window::Unlimited,
@@ -259,11 +283,13 @@ impl Backends {
             hold_idle: false,
             drained: false,
             recv_bound: limits.max_head.max(32 * 1024),
-            head_bound: limits.max_head + limits.max_headers + 128,
+            head_bound: head,
             forwarded_limits: HeadLimits {
-                max_request_line: limits.max_head + limits.max_headers + 128,
-                max_head: limits.max_head + limits.max_headers + 128,
-                max_headers: limits.max_headers + 3,
+                max_request_line: head,
+                max_head: head,
+                // The proxy's own lines: `x-forwarded-for`,
+                // `x-forwarded-proto`, `connection` and two hints.
+                max_headers: limits.max_headers + 5,
             },
         }
     }

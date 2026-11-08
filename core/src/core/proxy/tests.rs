@@ -301,14 +301,18 @@ fn own_send_buffer_goes_out_before_the_relayed_response() {
 /// that the budget does not follow fails here.
 #[test]
 fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
-    use crate::config::{load, worst_case_per_connection};
+    use crate::config::{RouteMix, load, worst_case_per_connection};
+    const PROXY: RouteMix = RouteMix::Proxy { hint_bytes: 0 };
     // The budget and the core share their capacity functions, so equality
     // alone follows any constant. The defaults are therefore also pinned to
     // the NFR-RES-01 numbers (also in the example config): changing a core
     // buffer constant must be a deliberate spec change.
     let defaults = crate::config::Limits::default();
-    assert_eq!(worst_case_per_connection(&defaults, false), 17_408);
-    assert_eq!(worst_case_per_connection(&defaults, true), 66_788);
+    assert_eq!(
+        worst_case_per_connection(&defaults, RouteMix::StaticOnly),
+        17_408
+    );
+    assert_eq!(worst_case_per_connection(&defaults, PROXY), 66_788);
     let get = b"GET /p/f HTTP/1.1\r\nHost: b.test\r\n\r\n";
     for limits in [
         "",
@@ -331,7 +335,10 @@ fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
         accept(&mut core, secs(0), 1, PEER);
         let c = core.conns.get(&CONN).unwrap();
         let held = c.recv.len() + c.send.capacity();
-        assert_eq!(worst_case_per_connection(&limits, false), held as u64);
+        assert_eq!(
+            worst_case_per_connection(&limits, RouteMix::StaticOnly),
+            held as u64
+        );
 
         // Proxy: the same plus a connected exchange's upstream receive and
         // send ("head") buffers.
@@ -343,6 +350,30 @@ fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
             panic!("expected AwaitingResponse, got {:?}", c.state);
         };
         let held = c.recv.len() + c.send.capacity() + buffers.recv.len() + buffers.head.capacity();
-        assert_eq!(worst_case_per_connection(&limits, true), held as u64);
+        assert_eq!(worst_case_per_connection(&limits, PROXY), held as u64);
+
+        // An `internal_files` route: the head buffer also holds the
+        // longest Rack hints (FR-PROXY-32), as the budget counts them.
+        let files = proxy.replace(
+            "max_response_body 1MiB;",
+            "max_response_body 1MiB; internal_files x-accel-redirect /protected/ /srv/files;",
+        );
+        let config = load(&files).unwrap();
+        let mix = config.route_mix();
+        assert_eq!(
+            mix,
+            RouteMix::Proxy {
+                hint_bytes: 56 + "/srv/files".len() + "/protected/".len()
+            }
+        );
+        let mut core = Core::new(config);
+        request(&mut core, secs(0), 1, get);
+        handle(&mut core, 0, Event::UpstreamConnected { up: UP });
+        let c = core.conns.get(&CONN).unwrap();
+        let ConnState::AwaitingResponse { buffers, .. } = &c.state else {
+            panic!("expected AwaitingResponse, got {:?}", c.state);
+        };
+        let held = c.recv.len() + c.send.capacity() + buffers.recv.len() + buffers.head.capacity();
+        assert_eq!(worst_case_per_connection(&limits, mix), held as u64);
     }
 }

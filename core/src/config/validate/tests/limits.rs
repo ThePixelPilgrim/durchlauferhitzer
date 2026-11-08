@@ -332,15 +332,68 @@ fn backend_idle_max_may_not_exceed_max_connections() {
     assert_eq!(top.limits.backend_idle_max, 1024);
 }
 
+/// A proxy route without `internal_files`.
+const PROXY: RouteMix = RouteMix::Proxy { hint_bytes: 0 };
+
+/// NFR-RES-01, FR-PROXY-32: the head buffer, and so the worst case per
+/// connection, grows by exactly the longest Rack hint lines of the
+/// config's `internal_files` routes: 29 bytes for `x-sendfile`
+/// (`x-sendfile-type: X-Sendfile` and CRLF), 56 plus root and prefix for
+/// `x-accel-redirect` (`x-sendfile-type: X-Accel-Redirect` and
+/// `x-accel-mapping: <root>/=<prefix>`, each with CRLF).
+#[test]
+fn worst_case_grows_by_the_longest_hints() {
+    let route = |path: &str, files: &str| {
+        format!(
+            "  path {path} {{ proxy 127.0.0.1:3000; max_request_body 1; \
+             max_response_body 1;{files} }}\n"
+        )
+    };
+    let root = "/srv/a-rather-long-root/for-the-files";
+    let prefix = "/protected/and/deeper/";
+    let sendfile = " internal_files x-sendfile /srv/f;";
+    let accel = format!(" internal_files x-accel-redirect {prefix} {root};");
+    let cases = [
+        ("  path / { static /s; }\n".to_owned(), RouteMix::StaticOnly),
+        (route("/p", ""), PROXY),
+        (
+            route("/p", "") + &route("/q", sendfile),
+            RouteMix::Proxy { hint_bytes: 29 },
+        ),
+        (
+            route("/p", sendfile) + &route("/q", &accel),
+            RouteMix::Proxy {
+                hint_bytes: 56 + root.len() + prefix.len(),
+            },
+        ),
+    ];
+    for (routes, mix) in cases {
+        let config = ok(&cfg(&format!("host a {{\n{routes}}}\n")));
+        assert_eq!(config.route_mix(), mix, "{routes}");
+        let (base, grown) = match mix {
+            RouteMix::StaticOnly => (RouteMix::StaticOnly, 0),
+            RouteMix::Proxy { hint_bytes } => (PROXY, hint_bytes as u64),
+        };
+        assert_eq!(
+            worst_case_per_connection(&config.limits, mix),
+            worst_case_per_connection(&config.limits, base) + grown,
+            "{routes}"
+        );
+    }
+}
+
 /// NFR-RES-01 by hand, for the defaults: the client's receive buffer
 /// max(16384, 8192 + 2) + send 1024; proxy adds upstream receive max(32768, 16384) and the head
 /// buffer 16384 + 100 + 128.
 #[test]
 fn worst_case_per_connection_for_defaults() {
     let limits = Limits::default();
-    assert_eq!(worst_case_per_connection(&limits, false), 16384 + 1024);
     assert_eq!(
-        worst_case_per_connection(&limits, true),
+        worst_case_per_connection(&limits, RouteMix::StaticOnly),
+        16384 + 1024
+    );
+    assert_eq!(
+        worst_case_per_connection(&limits, PROXY),
         16384 + 1024 + 32768 + (16384 + 100 + 128)
     );
     // A large max_head dominates every term; a tiny one is floored.
@@ -349,7 +402,7 @@ fn worst_case_per_connection_for_defaults() {
         ..Limits::default()
     };
     assert_eq!(
-        worst_case_per_connection(&big, true),
+        worst_case_per_connection(&big, PROXY),
         (1 << 20) + 1024 + (1 << 20) + ((1 << 20) + 100 + 128)
     );
     let tiny = Limits {
@@ -357,11 +410,36 @@ fn worst_case_per_connection_for_defaults() {
         max_head: 100,
         ..Limits::default()
     };
-    assert_eq!(worst_case_per_connection(&tiny, false), 102 + 1024);
     assert_eq!(
-        worst_case_per_connection(&tiny, true),
+        worst_case_per_connection(&tiny, RouteMix::StaticOnly),
+        102 + 1024
+    );
+    assert_eq!(
+        worst_case_per_connection(&tiny, PROXY),
         102 + 1024 + 32768 + (100 + 100 + 128)
     );
+}
+
+/// FR-CFG-21 with FR-PROXY-32: the memory budget counts the hints' room
+/// in the head buffer (29 bytes for an `x-sendfile` route here).
+#[test]
+fn memory_budget_counts_the_hints() {
+    let text = |limit: u64| {
+        cfg(&format!(
+            "limits {{\n  max_connections 1000;\n  max_connections_per_ip 1;\n  \
+             memory_limit {limit};\n}}\nhost a {{ path /p {{ proxy 127.0.0.1:3000; \
+             max_request_body 1; max_response_body 1; internal_files x-sendfile /srv/f; }} }}\n"
+        ))
+    };
+    let needed = 1000 * (66_788 + 29);
+    assert_eq!(
+        err(&text(needed - 1)).0,
+        ConfigErrorKind::MemoryBudget {
+            needed,
+            limit: needed - 1
+        }
+    );
+    ok(&text(needed));
 }
 
 #[test]

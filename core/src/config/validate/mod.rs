@@ -9,7 +9,7 @@ use crate::routing::same_segments;
 use super::lexer::Pos;
 use super::model::{
     BodyLimit, Config, ConfigError, ConfigErrorKind, Containment, Layer, Limits, Route,
-    RouteAction, SeccompAction, VirtualHost, worst_case_per_connection,
+    SeccompAction, VirtualHost, worst_case_per_connection,
 };
 use super::syntax::{Block, Item, Setting, parse};
 use super::units::{parse_duration, parse_size};
@@ -470,14 +470,9 @@ fn parse_containment(block: &Block) -> Result<Containment, ConfigError> {
 /// FR-CFG-21 (owner decision 2026-10-27): `max_connections` times the worst
 /// case per connection must fit in `memory_limit`.
 fn check_memory_budget(config: &Config, pos: Pos) -> Result<(), ConfigError> {
-    let proxied = config.hosts.iter().any(|host| {
-        host.routes
-            .iter()
-            .any(|route| matches!(route.action, RouteAction::Proxy(_)))
-    });
     let limits = &config.limits;
     let needed = u64::from(limits.max_connections)
-        .saturating_mul(worst_case_per_connection(limits, proxied));
+        .saturating_mul(worst_case_per_connection(limits, config.route_mix()));
     if needed > limits.memory_limit {
         return fail(
             ConfigErrorKind::MemoryBudget {

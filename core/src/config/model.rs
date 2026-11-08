@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::conn::SEND_CAPACITY;
 use crate::core::client_recv_capacity;
+use crate::http::forward::hints_len;
 use crate::upstream::{head_capacity, recv_capacity};
 
 use super::lexer::Pos;
@@ -110,21 +111,61 @@ pub struct Limits {
 /// - client receive buffer `max(max_head, max_request_line + 2)`
 ///   (`client_recv_capacity`);
 /// - client send buffer 1 KiB (`conn::SEND_CAPACITY`);
-/// - only when `proxied` (the config has a proxy route) an active exchange
-///   adds the upstream receive buffer `max(32 KiB, max_head)`
-///   (`upstream::recv_capacity`) and the head buffer
-///   `max_head + max_headers + 128` (`upstream::head_capacity`).
+/// - only for [`RouteMix::Proxy`] (the config has a proxy route) an
+///   active exchange adds the upstream receive buffer
+///   `max(32 KiB, max_head)` (`upstream::recv_capacity`) and the head
+///   buffer `max_head + max_headers + 128 + hint_bytes`
+///   (`upstream::head_capacity`).
 ///
 /// Saturating arithmetic: the result never wraps.
-pub fn worst_case_per_connection(limits: &Limits, proxied: bool) -> u64 {
+pub fn worst_case_per_connection(limits: &Limits, mix: RouteMix) -> u64 {
     let widen = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
     let client = widen(client_recv_capacity(limits)).saturating_add(widen(SEND_CAPACITY));
-    if !proxied {
-        return client;
+    match mix {
+        RouteMix::StaticOnly => client,
+        RouteMix::Proxy { hint_bytes } => client
+            .saturating_add(widen(recv_capacity(limits.max_head)))
+            .saturating_add(widen(head_capacity(
+                limits.max_head,
+                limits.max_headers,
+                hint_bytes,
+            ))),
     }
-    client
-        .saturating_add(widen(recv_capacity(limits.max_head)))
-        .saturating_add(widen(head_capacity(limits.max_head, limits.max_headers)))
+}
+
+/// What a config's routes add to each connection's buffers (NFR-RES-01).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteMix {
+    /// No proxy route: no exchange buffers.
+    StaticOnly,
+    /// Some proxy route. `hint_bytes` is the longest Rack hint lines any
+    /// `internal_files` route adds to a request head (FR-PROXY-32;
+    /// `x-sendfile-type: X-Sendfile`, 29 bytes, or `x-sendfile-type:
+    /// X-Accel-Redirect` and `x-accel-mapping: <root>/=<prefix>`, 56 bytes
+    /// plus root and prefix); 0 without `internal_files`.
+    Proxy { hint_bytes: usize },
+}
+
+impl Config {
+    /// The config's [`RouteMix`], computed from its routes (once, at load
+    /// and in `Core::new`).
+    pub fn route_mix(&self) -> RouteMix {
+        let mut mix = RouteMix::StaticOnly;
+        for route in self.hosts.iter().flat_map(|h| &h.routes) {
+            match &route.action {
+                RouteAction::Static { .. } => {}
+                RouteAction::Proxy(proxy) => {
+                    let hints = proxy.internal_files.as_ref().map_or(0, hints_len);
+                    let hint_bytes = match mix {
+                        RouteMix::StaticOnly => hints,
+                        RouteMix::Proxy { hint_bytes } => hint_bytes.max(hints),
+                    };
+                    mix = RouteMix::Proxy { hint_bytes };
+                }
+            }
+        }
+        mix
+    }
 }
 
 impl Default for Limits {

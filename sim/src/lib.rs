@@ -179,7 +179,7 @@ impl Sim {
             Ok(c) => c,
             Err(e) => panic!("invalid sim config: {e:?}"),
         };
-        let limits = config.limits.clone();
+        let backends = Backends::new(&config);
         Sim {
             core: Core::new(config),
             now: Instant::from_nanos(0),
@@ -195,7 +195,7 @@ impl Sim {
             disk: VecDeque::new(),
             files: BTreeMap::new(),
             context: None,
-            backends: Backends::new(&limits),
+            backends,
             timer_order: TimerOrder::OnTime,
             idle_closes: BTreeMap::new(),
         }

@@ -40,7 +40,9 @@ const _: () = assert!(UPSTREAM_RECV_MIN > 35);
 /// core's `date` line for a backend that sent none (37, FR-HTTP-22a) and
 /// a standard reason in place of an unprintable one (at most 31), 87 in
 /// all. Every header line may grow by one byte (`name:value` becomes
-/// `name: value`).
+/// `name: value`). The Rack hints of an `internal_files` route
+/// (FR-PROXY-32) depend on its root and prefix: [`head_capacity`] adds
+/// them on top.
 const HEAD_SLACK: usize = 128;
 
 /// Capacity of an upstream's receive buffer for heads of at most
@@ -50,11 +52,14 @@ pub(crate) fn recv_capacity(max_head: usize) -> usize {
 }
 
 /// Capacity of an exchange's head buffer: room for any rewritten head
-/// whose original obeyed `max_head` and `max_headers`.
-pub(crate) fn head_capacity(max_head: usize, max_headers: usize) -> usize {
+/// whose original obeyed `max_head` and `max_headers`, with `hint_bytes`
+/// for the longest Rack hints of the config's `internal_files` routes
+/// (FR-PROXY-32, [`RouteMix`](crate::config::RouteMix)).
+pub(crate) fn head_capacity(max_head: usize, max_headers: usize, hint_bytes: usize) -> usize {
     max_head
         .saturating_add(max_headers)
         .saturating_add(HEAD_SLACK)
+        .saturating_add(hint_bytes)
 }
 
 /// The buffers of one proxied exchange, allocated when it connects and
@@ -295,6 +300,7 @@ mod tests {
     fn capacities_hold_a_head_and_exceed_the_chunked_tail() {
         assert_eq!(recv_capacity(1024), UPSTREAM_RECV_MIN);
         assert_eq!(recv_capacity(64 * 1024), 64 * 1024);
-        assert_eq!(head_capacity(100, 10), 238);
+        assert_eq!(head_capacity(100, 10, 0), 238);
+        assert_eq!(head_capacity(100, 10, 29), 267);
     }
 }

@@ -2,7 +2,7 @@
 
 use super::super::model::{
     BodyLimit, Containment, Limits, OnFileChange, Pooling, ProxyRoute, Route, RouteAction,
-    StripPrefix, VirtualHost, worst_case_per_connection,
+    RouteMix, StripPrefix, VirtualHost, worst_case_per_connection,
 };
 use super::super::syntax::SyntaxErrorKind;
 use super::route::RouteKey;

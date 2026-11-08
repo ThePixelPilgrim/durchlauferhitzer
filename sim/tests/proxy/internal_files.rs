@@ -135,3 +135,48 @@ fn the_other_header_on_a_200_is_dropped_and_ignored() {
     assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
 }
+
+/// NFR-RES-01, FR-PROXY-32: the head buffer has room for the longest hints
+/// of the config, so a request head right at `max_head` on an
+/// `x-accel-redirect` route with a long root and prefix is forwarded
+/// whole, hints and all (not a 431).
+#[test]
+fn a_head_at_the_limit_is_forwarded_with_long_hints() {
+    let root = format!("/srv/{}files", "long-segment-name/".repeat(6));
+    let prefix = format!("/protected/{}", "deeper-level/".repeat(4));
+    let config = format!(
+        "listen 127.0.0.1:8080;
+host example.test {{
+  path /accel {{ proxy 127.0.0.1:3000; pool off; strip_prefix; max_request_body 1MiB; max_response_body 1MiB;
+    internal_files x-accel-redirect {prefix} {root}; }}
+}}"
+    );
+    let mut sim = Sim::new(&config);
+    // Default `max_head`: 16 KiB, the blank line included.
+    let start = "GET /accel/a HTTP/1.1\r\nHost: example.test\r\nX-Pad: ";
+    let pad = "p".repeat(16 * 1024 - start.len() - "\r\n\r\n".len());
+    let wire = format!("{start}{pad}\r\n\r\n");
+    assert_eq!(wire.len(), 16 * 1024);
+    let c = request(&mut sim, wire.as_bytes());
+    let up = only_upstream(&sim);
+    let forwarded = format!(
+        "GET /a HTTP/1.1\r\nhost: example.test\r\nx-pad: {pad}\r\n\
+         x-forwarded-for: 192.0.2.1\r\nx-forwarded-proto: http\r\n\
+         x-sendfile-type: X-Accel-Redirect\r\nx-accel-mapping: {root}/={prefix}\r\n\
+         connection: close\r\n\r\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&sim.take_backend_request(up)),
+        forwarded,
+        "{}",
+        sim.trace()
+    );
+    sim.backend_send(up, b"HTTP/1.1 204 No Content\r\n\r\n");
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(c),
+        b"HTTP/1.1 204 No Content\r\n\r\n",
+        "{}",
+        sim.trace()
+    );
+}

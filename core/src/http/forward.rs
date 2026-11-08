@@ -330,6 +330,14 @@ fn put_hints(sink: &mut impl Sink, files: &InternalFiles) {
     }
 }
 
+/// The bytes [`put_hints`] writes for `files`: the head buffer's room for
+/// them (NFR-RES-01).
+pub(crate) fn hints_len(files: &InternalFiles) -> usize {
+    let mut count = Count(0);
+    put_hints(&mut count, files);
+    count.0
+}
+
 /// A validated `Content-Length` value (decimal digits only) without its
 /// leading zeros; all zeros become `0`.
 fn without_leading_zeros(value: &[u8]) -> &[u8] {

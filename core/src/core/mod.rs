@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use crate::config::{Config, InternalFiles, Limits, ProxyRoute, RouteAction};
+use crate::config::{Config, InternalFiles, Limits, ProxyRoute, RouteAction, RouteMix};
 use crate::conn::{ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 use crate::file::{Chunk, FileFollows, FileSegment, FileTable, RootId};
 use crate::http::date::{ImfFixdate, imf_fixdate};
@@ -170,7 +170,12 @@ impl Core {
         }
         let limits = &config.limits;
         let upstream_recv_capacity = recv_capacity(limits.max_head);
-        let head_capacity = head_capacity(limits.max_head, limits.max_headers);
+        // FR-PROXY-32: the head buffer has room for the longest hints.
+        let hint_bytes = match config.route_mix() {
+            RouteMix::StaticOnly => 0,
+            RouteMix::Proxy { hint_bytes } => hint_bytes,
+        };
+        let head_capacity = head_capacity(limits.max_head, limits.max_headers, hint_bytes);
         Core {
             router: Router::new(&config.hosts),
             head_limits: HeadLimits::from(&config.limits),

@@ -153,9 +153,8 @@ impl Core {
             path: head.target.path.clone(),
         };
         // Never beyond the head buffer's capacity. A head within the limits
-        // always fits (see `head_capacity`); this guards that bound. The
-        // hints of an `internal_files` route (FR-PROXY-32) are not in that
-        // bound: a head they push over it is a 431.
+        // always fits (see `head_capacity`, which has room for the route's
+        // Rack hints, FR-PROXY-32); this guards that bound.
         if backend_request_len(&head, &path, c.peer, toward, files) > head_capacity {
             let status = Status::RequestHeaderFieldsTooLarge;
             render_fixed(
