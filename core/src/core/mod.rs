@@ -24,11 +24,9 @@ mod upload;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use crate::config::{
-    Config, FileHeader, InternalFiles, Limits, OnFileChange, ProxyRoute, Route, RouteAction,
-    RouteMix,
-};
+use crate::config::{Config, InternalFiles, Limits, ProxyRoute, Route, RouteAction, RouteMix};
 use crate::conn::{ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 use crate::file::{Chunk, FileFollows, FileSegment, FileTable, RootId};
 use crate::http::date::{ImfFixdate, imf_fixdate};
@@ -68,16 +66,14 @@ pub struct Core {
     /// a `RootId` indexes it.
     static_roots: Vec<PathBuf>,
     /// The distinct `internal_files` settings of the proxy routes, in
-    /// config order (FR-PROXY-32); an [`InternalRouteId`] indexes it.
-    internal_routes: Vec<InternalRoute>,
+    /// config order (FR-PROXY-32); an [`InternalRouteId`] indexes it. A
+    /// forwarded request shares its route's entry (an `Arc`: nothing is
+    /// allocated per request, and nothing is looked up again).
+    internal_routes: Vec<Arc<InternalRoute>>,
     /// For each config route, `[host][route]` (a
     /// [`RouteIndex`](crate::routing::RouteIndex)), the id
     /// of its `internal_files`, resolved once here; `None` without.
     route_internal: Vec<Vec<Option<InternalRouteId>>>,
-    /// The `internal_files` that strips the most from a response (every
-    /// `x-accel-*` and `x-sendfile`): what an exchange whose id does not
-    /// resolve is relayed under (fail closed; unreachable in practice).
-    strictest: InternalFiles,
     files: FileTable,
     /// Distinct backends in config order; a `BackendId` indexes it.
     backends: Vec<SocketAddr>,
@@ -98,8 +94,8 @@ pub struct Core {
     mode: Mode,
 }
 
-/// An index into [`Core`]'s `internal_routes`: the `internal_files` of
-/// the proxy route a request was forwarded on.
+/// An index into [`Core`]'s `internal_routes`: a proxy route's
+/// `internal_files`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InternalRouteId(pub(crate) u32);
 
@@ -117,7 +113,7 @@ pub(crate) struct InternalRoute {
 fn internal_route(
     route: &Route,
     static_roots: &mut Vec<PathBuf>,
-    internal_routes: &mut Vec<InternalRoute>,
+    internal_routes: &mut Vec<Arc<InternalRoute>>,
 ) -> Option<InternalRouteId> {
     let RouteAction::Proxy(ProxyRoute {
         internal_files: Some(internal),
@@ -136,11 +132,11 @@ fn internal_route(
     let index = match internal_routes.iter().position(|r| r.files == *internal) {
         Some(index) => index,
         None => {
-            internal_routes.push(InternalRoute {
+            internal_routes.push(Arc::new(InternalRoute {
                 files: internal.clone(),
                 // A config holds far fewer than `u32::MAX` roots.
                 root: RootId(u32::try_from(root).unwrap_or(u32::MAX)),
-            });
+            }));
             internal_routes.len() - 1
         }
     };
@@ -191,7 +187,7 @@ impl Core {
         }
         // FR-CFG-26: the `internal_files` roots follow all the static ones
         // (so a static root's id does not depend on them).
-        let mut internal_routes: Vec<InternalRoute> = Vec::new();
+        let mut internal_routes: Vec<Arc<InternalRoute>> = Vec::new();
         let mut route_internal: Vec<Vec<Option<InternalRouteId>>> = Vec::new();
         for host in &config.hosts {
             let mut ids = Vec::new();
@@ -225,13 +221,6 @@ impl Core {
             static_roots,
             internal_routes,
             route_internal,
-            strictest: InternalFiles {
-                header: FileHeader::XAccelRedirect {
-                    prefix: String::new(),
-                },
-                root: PathBuf::new(),
-                on_file_change: OnFileChange::Abort,
-            },
             files: FileTable::new(),
             backends,
             upstreams: UpstreamTable::new(),

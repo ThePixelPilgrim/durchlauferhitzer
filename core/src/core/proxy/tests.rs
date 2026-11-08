@@ -377,3 +377,61 @@ fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
         assert_eq!(worst_case_per_connection(&limits, mix), held as u64);
     }
 }
+
+/// FR-PROXY-32: `plan` hands a route's `internal_files` to the request
+/// from the one lookup made for it; a route with `internal_files` whose id
+/// does not resolve fails closed (502, nothing forwarded), like a backend
+/// that is not listed.
+#[test]
+fn plan_takes_the_routes_internal_files_or_fails_closed() {
+    use super::{ProxyPlan, plan};
+    use crate::config::{RouteAction, load};
+    use crate::core::{InternalRoute, InternalRouteId};
+    use crate::file::RootId;
+    use crate::http::request::{HeadLimits, ParseStatus, Persistence, parse_head};
+    use crate::http::status::Status;
+    use std::sync::Arc;
+    let config = load(
+        "listen 127.0.0.1:80; host a.test { path /p { proxy 127.0.0.1:3000; \
+         max_request_body 1; max_response_body 1; internal_files x-sendfile /srv/f; } }",
+    )
+    .unwrap();
+    let route = &config.hosts[0].routes[0];
+    let RouteAction::Proxy(target) = &route.action else {
+        panic!("a proxy route");
+    };
+    let raw = b"GET /p/f HTTP/1.1\r\nHost: a.test\r\n\r\n";
+    let Ok(ParseStatus::Complete { head, .. }) = parse_head(raw, &HeadLimits::from(&config.limits))
+    else {
+        panic!("a complete head");
+    };
+    let backends = [target.backend];
+    let entry = Arc::new(InternalRoute {
+        files: target.internal_files.clone().unwrap(),
+        root: RootId(0),
+    });
+    let routes = [Arc::clone(&entry)];
+    match plan(
+        route,
+        target,
+        &head,
+        &backends,
+        Some(InternalRouteId(0)),
+        &routes,
+    ) {
+        ProxyPlan::Forward(forward) => assert!(
+            forward
+                .internal
+                .as_ref()
+                .is_some_and(|r| Arc::ptr_eq(r, &entry)),
+            "{forward:?}"
+        ),
+        other => panic!("expected a forward, got {other:?}"),
+    }
+    for (id, routes) in [(None, &routes[..]), (Some(InternalRouteId(0)), &[][..])] {
+        assert_eq!(
+            plan(route, target, &head, &backends, id, routes),
+            ProxyPlan::Respond(Status::BadGateway, Persistence::KeepAlive)
+        );
+    }
+}

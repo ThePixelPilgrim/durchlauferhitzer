@@ -1,6 +1,6 @@
 use crate::conn::SEND_CAPACITY;
-use crate::core::test_support::{PEER, core, request, secs};
-use crate::core::{Action, ConnError, ConnId, Core, Event, InternalRouteId};
+use crate::core::test_support::{PEER, core};
+use crate::core::{ConnError, ConnId, Core, Event, InternalRouteId};
 use crate::file::{FileStamp, RootId};
 use crate::http::conditional::Validators;
 use crate::http::request::Persistence;
@@ -8,8 +8,6 @@ use crate::http::response::{
     BodyMode, Part, render_file_head, render_fixed, render_not_modified,
     render_range_not_satisfiable,
 };
-use crate::http::status::Status;
-use crate::log::Log;
 use crate::time::Instant;
 use std::path::PathBuf;
 
@@ -221,75 +219,6 @@ fn each_route_maps_to_its_internal_files() {
     assert_eq!(
         core.route_internal,
         [vec![id(0), id(1), id(1), None], vec![None]]
-    );
-}
-
-/// A route with `internal_files` whose id does not resolve is never
-/// forwarded without its file-header rules: 502, no connect (fail
-/// closed, like a backend that is not listed).
-#[test]
-fn an_unresolved_internal_files_id_is_502() {
-    let corruptions: [fn(&mut Core); 2] = [
-        |core| core.route_internal[0][0] = None,
-        |core| core.internal_routes.clear(),
-    ];
-    for corrupt in corruptions {
-        let mut core = Core::new(crate::config::load(INTERNAL).unwrap());
-        corrupt(&mut core);
-        let actions = request(
-            &mut core,
-            secs(0),
-            1,
-            b"GET /p/f HTTP/1.1\r\nHost: a.test\r\n\r\n",
-        );
-        assert!(
-            !actions.iter().any(|a| matches!(a, Action::Connect { .. })),
-            "{actions:?}"
-        );
-        assert!(
-            actions.iter().any(|a| matches!(
-                a,
-                Action::Log(Log::Response {
-                    status: Status::BadGateway,
-                    ..
-                })
-            )),
-            "{actions:?}"
-        );
-    }
-}
-
-/// An exchange whose `internal_files` id no longer resolves when its
-/// response arrives is relayed stripped the most (fail closed): on an
-/// `x-sendfile` route `x-accel-expires` would pass, here it goes.
-#[test]
-fn an_unresolved_id_at_the_response_strips_the_most() {
-    use crate::upstream::UpstreamId;
-    let up = UpstreamId(1);
-    let mut core = Core::new(crate::config::load(INTERNAL).unwrap());
-    request(
-        &mut core,
-        secs(0),
-        1,
-        b"GET /q/f HTTP/1.1\r\nHost: a.test\r\n\r\n",
-    );
-    let mut actions = Vec::new();
-    core.handle(secs(0), Event::UpstreamConnected { up }, &mut actions);
-    let len = core.upstream_send_buffer(up).len();
-    core.handle(secs(0), Event::UpstreamSent { up, len }, &mut actions);
-    core.internal_routes.clear();
-    let response = b"HTTP/1.1 404 Not Found\r\nX-Accel-Expires: 10\r\nX-Sendfile: /a\r\n\
-        Content-Length: 0\r\n\r\n";
-    core.upstream_recv_buffer(up)
-        .get_mut(..response.len())
-        .unwrap()
-        .copy_from_slice(response);
-    let len = response.len();
-    core.handle(secs(0), Event::UpstreamReceived { up, len }, &mut actions);
-    assert_eq!(
-        core.send_buffer(ConnId(1)),
-        b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n",
-        "{actions:?}"
     );
 }
 

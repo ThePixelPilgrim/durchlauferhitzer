@@ -6,6 +6,7 @@
 //! `relay.rs`.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use super::pool::make_room;
 use super::relay::{ClientSide, client_side};
@@ -39,7 +40,7 @@ pub(super) enum ProxyPlan {
 /// Forward a request to `backend` with `path` as its (possibly stripped)
 /// raw path; a chunked body may carry at most `limit` payload bytes, the
 /// response body at most `response_limit` bytes. `internal` is the route's
-/// `internal_files`, if it has one (FR-PROXY-32).
+/// `internal_files`, if it has one (FR-PROXY-32), shared with the core.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Forward {
     backend: BackendId,
@@ -47,7 +48,7 @@ pub(super) struct Forward {
     limit: BodyLimit,
     response_limit: BodyLimit,
     pool: Pooling,
-    internal: Option<InternalRouteId>,
+    internal: Option<Arc<InternalRoute>>,
 }
 
 /// The proxy route rules that need no backend: the request must be
@@ -61,7 +62,7 @@ pub(super) fn plan(
     head: &RequestHead,
     backends: &[SocketAddr],
     internal: Option<InternalRouteId>,
-    internal_routes: &[InternalRoute],
+    internal_routes: &[Arc<InternalRoute>],
 ) -> ProxyPlan {
     if let Err(error) = check_forwardable(head) {
         return ProxyPlan::Respond(error.status(), Persistence::Close);
@@ -86,15 +87,18 @@ pub(super) fn plan(
         StripPrefix::Strip => strip_segments(&head.target.path, route.segments.len()),
         StripPrefix::Keep => head.target.path.clone(),
     };
-    // `internal` was resolved for this route in `Core::new`. A route with
-    // `internal_files` whose id does not resolve (unreachable in practice)
-    // fails closed: nothing is forwarded without its file-header rules.
+    // `internal` was resolved for this route in `Core::new`; this is the
+    // one lookup of its setting, which the request then carries. A route
+    // with `internal_files` whose id does not resolve (unreachable in
+    // practice) fails closed: nothing is forwarded without its
+    // file-header rules, like an unlisted backend.
     let internal = match (&target.internal_files, internal) {
         (None, _) => None,
-        (Some(_), Some(id)) if internal_routes.get(id.0 as usize).is_some() => Some(id),
-        (Some(_), Some(_) | None) => {
-            return ProxyPlan::Respond(Status::BadGateway, head.persistence);
-        }
+        (Some(_), Some(id)) => match internal_routes.get(id.0 as usize) {
+            Some(route) => Some(Arc::clone(route)),
+            None => return ProxyPlan::Respond(Status::BadGateway, head.persistence),
+        },
+        (Some(_), None) => return ProxyPlan::Respond(Status::BadGateway, head.persistence),
     };
     ProxyPlan::Forward(Forward {
         backend,
@@ -125,7 +129,6 @@ impl Core {
         let connect_deadline = now.saturating_add(limits.backend_connect_timeout);
         let (recv_capacity, head_capacity) = (self.upstream_recv_capacity, self.head_capacity);
         let serving = self.mode == Mode::Serving;
-        let internal_routes = &self.internal_routes;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -137,12 +140,7 @@ impl Core {
             pool,
             internal,
         } = forward;
-        // `plan` checked the id; should it not resolve, nothing is
-        // forwarded (502, fail closed).
-        let files = internal
-            .and_then(|id| internal_routes.get(id.0 as usize))
-            .map(|r| &r.files);
-        let unresolved = internal.is_some() && files.is_none();
+        let files = internal.as_deref().map(|r| &r.files);
         // FR-PROXY-02, -04, -11: an HTTP/1.1 request on a pooled route
         // keeps the backend connection while serving; anything else asks
         // it to close (in a restart's drain the upstream is closed after
@@ -161,14 +159,8 @@ impl Core {
         // Never beyond the head buffer's capacity. A head within the limits
         // always fits (see `head_capacity`, which has room for the route's
         // Rack hints, FR-PROXY-32); this guards that bound.
-        let refused = if unresolved {
-            Some(Status::BadGateway)
-        } else if backend_request_len(&head, &path, c.peer, toward, files) > head_capacity {
-            Some(Status::RequestHeaderFieldsTooLarge)
-        } else {
-            None
-        };
-        if let Some(status) = refused {
+        if backend_request_len(&head, &path, c.peer, toward, files) > head_capacity {
+            let status = Status::RequestHeaderFieldsTooLarge;
             render_fixed(
                 status,
                 Persistence::Close,
@@ -238,7 +230,7 @@ impl Core {
             toward,
             reuse: Reuse::Fresh,
             replay,
-            internal,
+            internal: internal.clone(),
         };
         c.state = match idle {
             // Owner decision 2026-11-07: before anything is written on

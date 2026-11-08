@@ -41,8 +41,9 @@ impl Router {
         self.locate(host, path).map(|(_, route)| route)
     }
 
-    /// As [`Router::route`], with where the route sits in the config: its
-    /// host's index and its own within that host's routes.
+    /// As [`Router::route`], with where the route sits in the `hosts`
+    /// passed to [`Router::new`]: its host's index and its own within that
+    /// host's routes.
     pub fn locate(
         &self,
         host: Option<&str>,
@@ -66,7 +67,9 @@ impl Router {
     }
 }
 
-/// Where a route sits in the config: `hosts[host].routes[route]`.
+/// Where a route sits in the `hosts` slice passed to [`Router::new`]:
+/// `hosts[host].routes[route]`. It indexes the config's hosts only because
+/// `Core::new` passes `&config.hosts`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RouteIndex {
     pub host: usize,

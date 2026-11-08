@@ -36,8 +36,6 @@ impl Core {
     ) {
         let head_capacity = self.head_capacity;
         let date = self.date;
-        let internal_routes = &self.internal_routes;
-        let strictest = &self.strictest;
         let mode = self.mode;
         let limits = &self.config.limits;
         let Some(c) = self.conns.get_mut(&conn) else {
@@ -55,13 +53,6 @@ impl Core {
             return;
         };
         let unread_continue = *unread_continue;
-        // An id that does not resolve (unreachable: `plan` checked it)
-        // strips the most, fail closed.
-        let files = request.internal.map(|id| {
-            internal_routes
-                .get(id.0 as usize)
-                .map_or(strictest, |r| &r.files)
-        });
         // The persistence of the request, if its body was fully read (else
         // the backend answered early and the body stays unread, FR-PROXY-27);
         // a close-delimited response closes the client (FR-PROXY-28).
@@ -80,8 +71,12 @@ impl Core {
                 Err(BackendFailure::TransferEncodingToHttp10)
             }
             Version::Http10 | Version::Http11
-                if client_response_len(&head, persistence, date.as_ref(), files)
-                    > head_capacity =>
+                if client_response_len(
+                    &head,
+                    persistence,
+                    date.as_ref(),
+                    request.internal.as_deref().map(|r| &r.files),
+                ) > head_capacity =>
             {
                 Err(BackendFailure::BadResponse(ResponseError::HeadTooLarge))
             }
@@ -146,7 +141,13 @@ impl Core {
             request: request.summary,
         }));
         buffers.clear_head();
-        render_client_response(&head, persistence, date.as_ref(), files, &mut buffers.head);
+        render_client_response(
+            &head,
+            persistence,
+            date.as_ref(),
+            request.internal.as_deref().map(|r| &r.files),
+            &mut buffers.head,
+        );
         match closing {
             // Every body byte is here: anything after it is dropped.
             Closing::Upstream(up, rest) => release_upstream(

@@ -1,11 +1,12 @@
 //! Per-connection state owned by the core.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use std::time::Duration;
 
 use crate::config::{BodyLimit, OnFileChange};
-use crate::core::{Interest, InternalRouteId};
+use crate::core::{Interest, InternalRoute};
 use crate::file::{Chunk, FileId, FileStamp, RootId};
 use crate::http::conditional::Conditional;
 use crate::http::range::RangeRequest;
@@ -211,8 +212,9 @@ pub(crate) struct ProxyRequest {
     /// reused one fails before any response byte (FR-PROXY-26).
     pub(crate) replay: Replay,
     /// The route's `internal_files`, if it has one: which file headers the
-    /// response loses (FR-PROXY-32).
-    pub(crate) internal: Option<InternalRouteId>,
+    /// response loses (FR-PROXY-32). Shared with the core, kept across a
+    /// retry.
+    pub(crate) internal: Option<Arc<InternalRoute>>,
 }
 
 /// Whether a proxied request went out on a fresh connection or one taken

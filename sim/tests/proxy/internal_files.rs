@@ -77,7 +77,8 @@ fn backend_sees_the_hints() {
 }
 
 /// FR-PROXY-32 Trigger: on any status but `200` the route's header is
-/// removed and the response passes unchanged, body and all.
+/// removed and the response passes unchanged, body and all (Stripping:
+/// on an `x-accel-redirect` route every `X-Accel-*` goes too).
 #[test]
 fn non_200_with_the_route_header_is_relayed_without_it() {
     let mut sim = Sim::new(FILES);
@@ -88,7 +89,7 @@ fn non_200_with_the_route_header_is_relayed_without_it() {
     let up = only_upstream(&sim);
     sim.backend_send(
         up,
-        b"HTTP/1.1 404 Not Found\r\nX-Accel-Redirect: /protected/a\r\n\
+        b"HTTP/1.1 404 Not Found\r\nX-Accel-Redirect: /protected/a\r\nX-Accel-Expires: 10\r\n\
           Content-Type: text/plain\r\nContent-Length: 4\r\n\r\nnope",
     );
     sim.run_until_idle();
