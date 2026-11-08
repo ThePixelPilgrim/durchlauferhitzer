@@ -1218,6 +1218,56 @@ Failures, persistence, timeouts:
   - **The backend's body** is never read. The file starts as soon as the
     backend head is complete. The backend connection is pooled only after
     `Content-Length: 0` (FR-PROXY-02), else closed.
+  - *Planner calls (stage 8 plan, Task 5):*
+    - Logging: the served file's kind is `BackendFile` (`backend_file`,
+      FR-LOG-02, -05) for a `200`, `206` and `304`; a `416` and a `404`
+      are `Response`s, the backend's headers dropped (the `416` like the
+      `404`, its plain fixed form of FR-STATIC-19); the bad path's
+      failure is `BadFilePath` (`bad_file_path`), with no sub-reason.
+    - The merged head: the core's status line, not the backend's
+      reason; then `Date` (the core's, only if the backend sent none)
+      and the backend's kept lines in order, as relayed (lowercase,
+      FR-PROXY-12, the file headers stripped); then the core's lines in
+      the order of FR-STATIC-19 (capitalised): `Content-Type` only if
+      the backend sent none, `Content-Length`, `Content-Range` (206),
+      `ETag`, `Last-Modified`, `Accept-Ranges`, and
+      `X-Content-Type-Options: nosniff` only if the backend sent none
+      (the backend's wins like its `Content-Type`); `Connection: close`
+      only when closing. The backend's `Content-Length`,
+      `Transfer-Encoding`, `ETag`, `Last-Modified`, `Accept-Ranges` and
+      `Content-Range` are dropped. A `304` adds only `ETag` and
+      `Last-Modified` to the kept lines.
+    - `Range` counts for a `GET` only (a `POST` answered with a file
+      gets the whole `200`). The client keeps the request's
+      persistence, or closes when its body was not fully read
+      (FR-PROXY-27, -28).
+    - The upstream is pooled only if the head says `Content-Length: 0`,
+      the exchange is reusable as for a relayed response (FR-PROXY-02:
+      the whole request written, HTTP/1.1 without `close`, never after
+      a `HEAD`) and nothing came behind the head; else it is closed.
+    - Bounds and request state: a merged head that would not fit the
+      head buffer (NFR-RES-01) is a `502` (`BadResponse(HeadTooLarge)`,
+      NFR-RES-03), judged before the open, against the most the core
+      adds (`FILE_HEAD_EXTRA`, 401 bytes); with the head buffer grown by
+      that much it is unreachable by a head within the limits. The
+      route's settings travel by the handle `plan` resolved for the
+      request (stage 8 Task 3), not by copy or a second lookup; the
+      client's conditional headers and range travel with the request on
+      an `internal_files` route only.
+  - *Implementer calls (stage 8 Task 5):*
+    - The conditional headers count for a `GET` or `HEAD` only (RFC
+      9110 section 13.1.2: a `304` answers nothing else), so a `POST`
+      answered with a file gets it whatever its `If-None-Match`.
+    - A name a static route answers 404 without opening anything (a
+      dotfile, a decoded `/` or NUL) is answered at once, its upstream
+      released by the same rule as for an opened file.
+    - The merged head stays in the head buffer that held the backend's
+      kept lines (the status line and `Date` are moved in front of
+      them, nothing allocated) and is written from there before the
+      file; a `HEAD` and a `304` keep the file open until that head is
+      written, then close it.
+    - "Given more than once" counts every line of the route's header,
+      one the backend named in `Connection` included.
 
 ### FR-CONN — Connections: keep-alive, pipelining, close, timeouts, caps
 
@@ -1314,9 +1364,13 @@ Failures, persistence, timeouts:
   check, so a backend that writes after its responses shows) and
   `BackendFailed { backend, kind }`
   (`kind` per FR-PROXY-31, `ClosedEarly`, `BodyTimeout`, `BadChunk`,
-  `BodyTooLarge` and `TransferEncodingToHttp10` included). A 502 or 504 the core
-  generates for a failed backend is a `Response`, preceded by its
-  `BackendFailed`. [Stage 3 Task 6:] `Rejected` also covers a request body
+  `BodyTooLarge`, `TransferEncodingToHttp10` and, stage 8, `BadFilePath`
+  included), `BackendFile { backend, status, request }` (stage 8,
+  FR-PROXY-32: a backend-directed file's `200`, `206` or `304` was
+  queued, logged once with the client's status instead of a
+  `ProxiedResponse`; its `404` and `416` are `Response`s). A 502 or
+  504 the core generates for a failed backend is a `Response`, preceded
+  by its `BackendFailed`. [Stage 3 Task 6:] `Rejected` also covers a request body
   that broke a rule (`Body(Chunked(..) | TooLarge)`), a stalled request
   body (`Timeout(RequestBody)`) and (owner decision 2026-10-27) a client
   that ended its stream mid-body (`Body(ClosedEarly)`, FR-PROXY-26).
@@ -1363,6 +1417,9 @@ Failures, persistence, timeouts:
     - `kind=reset conn peer`
     - `kind=file_aborted conn peer error`
     - `kind=proxied_response conn peer backend status method [host] path`
+    - `kind=backend_file conn peer backend status method [host] path`
+      (stage 8, FR-PROXY-32: a backend-directed file's `200`, `206` or
+      `304`, `status` the client's)
     - `kind=backend_failed conn peer backend failure`
     - `kind=backend_retried conn peer backend failure method [host] path`
       (stage 7, FR-PROXY-26: `failure` is why the reused connection was
@@ -1405,7 +1462,8 @@ Failures, persistence, timeouts:
     `failure` is `refused`, `reset`, `closed_early`,
     `bad_response.<response error>`, `connect_timeout`,
     `response_timeout`, `body_timeout`, `bad_chunk.<chunked error>`,
-    `body_too_large`, `transfer_encoding_to_http10`; `error` (a file
+    `body_too_large`, `transfer_encoding_to_http10`, `bad_file_path`
+    (stage 8, FR-PROXY-32: no sub-reason); `error` (a file
     error) is `not_found`, `symlink`, `permission_denied`, `truncated`,
     `changed`, `other`. Each enum variant's name is its snake_case
     spelling (`HttpError::BadHeaderValue` → `bad_header_value`).
@@ -2118,8 +2176,17 @@ Failures, persistence, timeouts:
     adds to a request head (FR-PROXY-32: 29 bytes for `x-sendfile`,
     56 + root + prefix for `x-accel-redirect`; 0 without
     `internal_files`), computed once at load, so a head at the limits
-    on such a route still fits; it carries the request head to
-    the backend, then the response head to the client, since a backend
+    on such a route still fits, *(stage 8 Task 5, planner call)* plus
+    401 bytes (`FILE_HEAD_EXTRA`) on a config with any
+    `internal_files` route, for the core's lines around a backend's
+    kept lines in a backend-directed file's merged head (status line,
+    `Date`, `Content-Type` of the longest FR-STATIC-12 type,
+    `Content-Length` and `Content-Range` with 20-digit numbers, `ETag`,
+    `Last-Modified`, `Accept-Ranges`, `X-Content-Type-Options`,
+    `Connection: close`, the blank line; FR-PROXY-32); it carries the
+    request head to the backend, then the response head to the client
+    (or a file's merged head, kept until written; the upstream's
+    receive buffer is freed as soon as the file is asked for), since a backend
     head may exceed the client's 1 KiB send buffer;
   - a refused (503) connection: the send buffer only;
   - a lingering connection: no buffer of its own; all lingering

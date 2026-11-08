@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::conn::SEND_CAPACITY;
 use crate::core::client_recv_capacity;
 use crate::http::forward::hints_len;
+use crate::http::response::FILE_HEAD_EXTRA;
 use crate::upstream::{head_capacity, recv_capacity};
 
 use super::lexer::Pos;
@@ -114,7 +115,7 @@ pub struct Limits {
 /// - only for [`RouteMix::Proxy`] (the config has a proxy route) an
 ///   active exchange adds the upstream receive buffer
 ///   `max(32 KiB, max_head)` (`upstream::recv_capacity`) and the head
-///   buffer `max_head + max_headers + 128 + hint_bytes`
+///   buffer `max_head + max_headers + 128 + hint_bytes + file_head`
 ///   (`upstream::head_capacity`).
 ///
 /// Saturating arithmetic: the result never wraps.
@@ -123,12 +124,15 @@ pub fn worst_case_per_connection(limits: &Limits, mix: RouteMix) -> u64 {
     let client = widen(client_recv_capacity(limits)).saturating_add(widen(SEND_CAPACITY));
     match mix {
         RouteMix::StaticOnly => client,
-        RouteMix::Proxy { hint_bytes } => client
+        RouteMix::Proxy {
+            hint_bytes,
+            file_head,
+        } => client
             .saturating_add(widen(recv_capacity(limits.max_head)))
             .saturating_add(widen(head_capacity(
                 limits.max_head,
                 limits.max_headers,
-                hint_bytes,
+                hint_bytes.saturating_add(file_head),
             ))),
     }
 }
@@ -142,8 +146,11 @@ pub enum RouteMix {
     /// `internal_files` route adds to a request head (FR-PROXY-32;
     /// `x-sendfile-type: X-Sendfile`, 29 bytes, or `x-sendfile-type:
     /// X-Accel-Redirect` and `x-accel-mapping: <root>/=<prefix>`, 56 bytes
-    /// plus root and prefix); 0 without `internal_files`.
-    Proxy { hint_bytes: usize },
+    /// plus root and prefix); 0 without `internal_files`. `file_head` is
+    /// what the core adds around a backend's kept lines in a
+    /// backend-directed file's merged head (FR-PROXY-32,
+    /// [`FILE_HEAD_EXTRA`]) when any route has `internal_files`, else 0.
+    Proxy { hint_bytes: usize, file_head: usize },
 }
 
 impl Config {
@@ -156,11 +163,23 @@ impl Config {
                 RouteAction::Static { .. } => {}
                 RouteAction::Proxy(proxy) => {
                     let hints = proxy.internal_files.as_ref().map_or(0, hints_len);
-                    let hint_bytes = match mix {
-                        RouteMix::StaticOnly => hints,
-                        RouteMix::Proxy { hint_bytes } => hint_bytes.max(hints),
+                    let file = match proxy.internal_files {
+                        Some(_) => FILE_HEAD_EXTRA,
+                        None => 0,
                     };
-                    mix = RouteMix::Proxy { hint_bytes };
+                    mix = match mix {
+                        RouteMix::StaticOnly => RouteMix::Proxy {
+                            hint_bytes: hints,
+                            file_head: file,
+                        },
+                        RouteMix::Proxy {
+                            hint_bytes,
+                            file_head,
+                        } => RouteMix::Proxy {
+                            hint_bytes: hint_bytes.max(hints),
+                            file_head: file_head.max(file),
+                        },
+                    };
                 }
             }
         }

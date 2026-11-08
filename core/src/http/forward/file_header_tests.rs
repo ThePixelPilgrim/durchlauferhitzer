@@ -208,3 +208,64 @@ fn len_twins_match_with_files() {
         }
     }
 }
+
+/// FR-PROXY-32: a backend-directed file keeps the backend's lines as the
+/// relay would (hop-by-hop and file headers gone), without the framing
+/// and validator headers the core replaces, and says which of
+/// `content-type`, `x-content-type-options` and `date` it kept; the length
+/// twin agrees.
+#[test]
+fn kept_lines_drop_framing_validators_and_file_headers() {
+    let head = response(
+        b"HTTP/1.1 200 OK\r\nConnection: x-hop\r\nX-Hop: 1\r\nKeep-Alive: 5\r\n\
+          Content-Type: text/x\r\nContent-Length: 0\r\nETag: \"b\"\r\n\
+          Last-Modified: Sun, 06 Nov 1994 08:49:37 GMT\r\nAccept-Ranges: none\r\n\
+          Content-Range: bytes 0-0/1\r\nX-Accel-Redirect: /protected/a\r\nX-Accel-Expires: 9\r\n\
+          X-Sendfile: /srv/files/a\r\nVary: Accept\r\n\r\n",
+    );
+    for (files, kept) in [
+        (
+            x_accel_redirect(),
+            "content-type: text/x\r\nvary: Accept\r\n",
+        ),
+        (
+            x_sendfile(),
+            "content-type: text/x\r\nx-accel-expires: 9\r\nvary: Accept\r\n",
+        ),
+    ] {
+        let mut out = b"x".to_vec();
+        let has = render_kept_lines(&head, &files, &mut out);
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            format!("x{kept}"),
+            "{files:?}"
+        );
+        assert_eq!(kept_lines_len(&head, &files), out.len() - 1);
+        assert_eq!(
+            has,
+            Kept {
+                content_type: Sent::Yes,
+                nosniff: Sent::No,
+                date: Sent::No,
+            }
+        );
+    }
+    let head = response(
+        b"HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n\
+          X-Content-Type-Options: nosniff\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+    let mut out = Vec::new();
+    let has = render_kept_lines(&head, &x_sendfile(), &mut out);
+    assert_eq!(
+        String::from_utf8_lossy(&out),
+        "date: Sun, 06 Nov 1994 08:49:37 GMT\r\nx-content-type-options: nosniff\r\n"
+    );
+    assert_eq!(
+        has,
+        Kept {
+            content_type: Sent::No,
+            nosniff: Sent::Yes,
+            date: Sent::Yes,
+        }
+    );
+}

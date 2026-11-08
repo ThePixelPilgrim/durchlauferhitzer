@@ -89,8 +89,14 @@
 //! - The core allocates [`FileId`]s, sequentially from 1, and never reuses
 //!   one. A [`RootId`] indexes [`Core::static_roots`]: the driver opens each
 //!   root once at startup.
+//! - `OpenFile` comes for a static route's request, or from a proxy
+//!   exchange: a backend's `200` on an `internal_files` route that names a
+//!   file (FR-PROXY-32) opens it below that route's root, its upstream
+//!   already closed or pooled. The driver treats both alike.
 //! - `OpenFile { root, path }` names a path as relative segments (decoded
-//!   bytes, never `.`, `..`, empty, or containing `/` or NUL). The driver
+//!   bytes, never `.`, `..`, empty, or containing `/` or NUL; a decoded
+//!   backend path may hold other control bytes or `\`, still one name
+//!   beneath the root). The driver
 //!   resolves it beneath the root, without following symlinks anywhere in
 //!   the path and without ever leaving the root (`openat2` with
 //!   `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), and reports the metadata
@@ -365,8 +371,19 @@
 //!   the rewritten response head for the client, which `send_buffer`
 //!   hands out before the body. Its capacity, `max_head + max_headers +
 //!   128` plus the longest Rack hint lines of the config's
-//!   `internal_files` routes (FR-PROXY-32, NFR-RES-01), holds any rewrite
+//!   `internal_files` routes and, with any, 401 bytes for the core's lines
+//!   of a file's merged head (FR-PROXY-32, NFR-RES-01), holds any rewrite
 //!   of a head within the limits.
+//! - A backend-directed file (FR-PROXY-32): the backend's body is never
+//!   read; once its head names a file, the upstream is closed or parked
+//!   and its receive buffer freed, and the file is opened as for a static
+//!   route. The file's merged head stays in the head buffer: while it is
+//!   not all written, [`Core::send_buffer`] hands out the connection's own
+//!   send buffer first (a `100 Continue` not yet taken), then that head,
+//!   and [`Core::send_capacity`] reports the head buffer's capacity;
+//!   [`Core::send_file`] offers the file's bytes only once both are
+//!   empty. A `HEAD` or `304` of such a file keeps the file open until
+//!   its head is written, then closes it.
 //! - Descriptor budget: at most one upstream socket is open or connecting
 //!   per counted connection, and active and idle pooled upstreams together
 //!   are at most `max_connections` (a new connect at that count first

@@ -244,7 +244,7 @@ pub(crate) struct Backends {
     /// The upstream receive buffer's capacity for this config, by the
     /// documented formula `max(32 KiB, max_head)` (NFR-RES-01).
     pub(crate) recv_bound: usize,
-    /// The head buffer's capacity, `max_head + max_headers + 128 + hint_room`.
+    /// The head buffer's capacity, `max_head + max_headers + 128 + head_room`.
     pub(crate) head_bound: usize,
     /// Limits to judge a forwarded request head by: the head buffer's
     /// capacity, and room for the proxy's own header lines.
@@ -254,7 +254,7 @@ pub(crate) struct Backends {
 impl Backends {
     pub(crate) fn new(config: &Config) -> Backends {
         let limits = &config.limits;
-        let head = limits.max_head + limits.max_headers + 128 + hints::hint_room(config);
+        let head = limits.max_head + limits.max_headers + 128 + hints::head_room(config);
         Backends {
             connect: BTreeMap::new(),
             default_window: Window::Unlimited,

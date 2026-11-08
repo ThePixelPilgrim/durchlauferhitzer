@@ -59,6 +59,19 @@ pub enum Log {
         status: u16,
         request: RequestSummary,
     },
+    /// A backend-directed file (FR-PROXY-32) was answered: its merged
+    /// head (`status` `200`, `206` or `304`) was queued for the client,
+    /// for the request `request` that `backend` answered with the route's
+    /// file header. Logged once, instead of a [`Log::ProxiedResponse`]; a
+    /// `404` or `416` for such a file is a plain [`Log::Response`], and a
+    /// later failure (a cut transfer) is logged as its own entry.
+    BackendFile {
+        conn: ConnId,
+        peer: IpAddr,
+        backend: BackendId,
+        status: Status,
+        request: RequestSummary,
+    },
     /// Talking to `backend` failed for the request on `conn`. Before the
     /// response head was queued it is followed by the [`Log::Response`] of
     /// the 502 or 504 the client gets; after it, the connection is cut.
@@ -126,6 +139,12 @@ pub enum BackendFailure {
     /// to an HTTP/1.0 client's request, which cannot take one (FR-PROXY-04,
     /// owner decisions 2026-10-27).
     TransferEncodingToHttp10,
+    /// The route's file header names no file the backend may name
+    /// (FR-PROXY-32 Bad path): it does not match the route's root or
+    /// prefix, is empty, holds a byte outside visible ASCII, a `?`, an
+    /// empty, `.` or `..` segment or a malformed `%` escape, or the header
+    /// came more than once.
+    BadFilePath,
 }
 
 /// The parts of a request worth logging. `host` and `path` come from the

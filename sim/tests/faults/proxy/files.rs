@@ -3,8 +3,9 @@
 //! file headers in backend responses, and the spec's rules for each,
 //! written independently of the core: no client's file header reaches a
 //! backend, an `internal_files` route's backend gets Rack's hints, and no
-//! backend's file header reaches a client. Until the trigger exists a
-//! backend sends its route's own header only on a non-`200`.
+//! backend's file header reaches a client. A backend here sends its route's
+//! own header only on a non-`200`: the file a `200` names is not modelled
+//! in this net (see `sim/tests/proxy/backend_files.rs`).
 
 /// A route's `internal_files` (FR-CFG-26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

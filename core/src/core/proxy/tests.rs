@@ -302,7 +302,10 @@ fn own_send_buffer_goes_out_before_the_relayed_response() {
 #[test]
 fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
     use crate::config::{RouteMix, load, worst_case_per_connection};
-    const PROXY: RouteMix = RouteMix::Proxy { hint_bytes: 0 };
+    const PROXY: RouteMix = RouteMix::Proxy {
+        hint_bytes: 0,
+        file_head: 0,
+    };
     // The budget and the core share their capacity functions, so equality
     // alone follows any constant. The defaults are therefore also pinned to
     // the NFR-RES-01 numbers (also in the example config): changing a core
@@ -353,7 +356,8 @@ fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
         assert_eq!(worst_case_per_connection(&limits, PROXY), held as u64);
 
         // An `internal_files` route: the head buffer also holds the
-        // longest Rack hints (FR-PROXY-32), as the budget counts them.
+        // longest Rack hints and the core's lines of a file's merged head
+        // (FR-PROXY-32), as the budget counts them.
         let files = proxy.replace(
             "max_response_body 1MiB;",
             "max_response_body 1MiB; internal_files x-accel-redirect /protected/ /srv/files;",
@@ -363,7 +367,8 @@ fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
         assert_eq!(
             mix,
             RouteMix::Proxy {
-                hint_bytes: 56 + "/srv/files".len() + "/protected/".len()
+                hint_bytes: 56 + "/srv/files".len() + "/protected/".len(),
+                file_head: crate::http::response::FILE_HEAD_EXTRA,
             }
         );
         let mut core = Core::new(config);

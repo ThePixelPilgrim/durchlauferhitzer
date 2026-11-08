@@ -101,7 +101,14 @@ tests/
                         clients, idle hygiene and timeout, the safe retry
     internal_files.rs   `internal_files` routes: file headers stripped
                         both ways, Rack's hints for the backend
-                        (the other files' routes say `pool off;`)
+                        (the routes but those of `pool.rs` and
+                        `backend_files.rs` say `pool off;`)
+    backend_files.rs    the file a backend's 200 names (FR-PROXY-32):
+                        the exact bytes behind the merged head, 304,
+                        206, 416, HEAD, POST, 404s, bad paths (502),
+                        no proxy limits, file changes, a slow disk and
+                        client, pipelining, the upstream pooled after
+                        `Content-Length: 0`
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers
     split.rs            deterministic split, byte-by-byte and pipelined runs

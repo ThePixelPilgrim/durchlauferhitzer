@@ -9,6 +9,7 @@ use crate::config::{BodyLimit, OnFileChange};
 use crate::core::{Interest, InternalRoute};
 use crate::file::{Chunk, FileId, FileStamp, RootId};
 use crate::http::conditional::Conditional;
+use crate::http::forward::Kept;
 use crate::http::range::RangeRequest;
 use crate::http::request::{Expect, HeadParser, Persistence, Version};
 use crate::http::response::BodyMode;
@@ -57,6 +58,9 @@ pub(crate) enum OpenStep {
     Requested,
     /// The `index.html` of the requested directory (path ended in `/`).
     Index,
+    /// The file a backend named (FR-PROXY-32): a directory is a 404 and
+    /// opens no index.
+    Backend,
 }
 
 /// Where a connection is in its lifecycle. Each variant carries only the data
@@ -101,11 +105,13 @@ pub(crate) enum ConnState {
         deadline: Instant,
         request: StaticRequest,
     },
-    /// A file response: the head is in `Conn::send`, then the open `file`'s
-    /// bytes from `offset` up to `end` (exclusive: the size at open for a
-    /// whole file, one past the last byte of a range, FR-STATIC-19) follow
-    /// chunk by chunk. Every chunk's stamp is checked against `opened` (the
-    /// whole file's stamp at open) under the route's `on_change`.
+    /// A file response: the head is in `Conn::send` or, for a
+    /// backend-directed file, of its own (`head`, FR-PROXY-32); then the
+    /// open `file`'s bytes from `offset` up to `end` (exclusive: the size at
+    /// open for a whole file, one past the last byte of a range,
+    /// FR-STATIC-19) follow chunk by chunk. Every chunk's stamp is checked
+    /// against `opened` (the whole file's stamp at open) under the
+    /// route's `on_change`.
     /// `deadline` is the send idle deadline, reset on progress (of the
     /// socket or the disk).
     SendingFile {
@@ -118,6 +124,7 @@ pub(crate) enum ConnState {
         persistence: Persistence,
         buffered: usize,
         deadline: Instant,
+        head: FileHead,
     },
     /// A request on a proxy route: the `Connect` for `up` is in flight and
     /// the rewritten request head waits in `buffers.head` (its body, if
@@ -212,9 +219,37 @@ pub(crate) struct ProxyRequest {
     /// reused one fails before any response byte (FR-PROXY-26).
     pub(crate) replay: Replay,
     /// The route's `internal_files`, if it has one: which file headers the
-    /// response loses (FR-PROXY-32). Shared with the core, kept across a
-    /// retry.
+    /// response loses, and where a file the backend names is opened
+    /// (FR-PROXY-32). Shared with the core, kept across a retry.
     pub(crate) internal: Option<Arc<InternalRoute>>,
+    /// The request's conditional headers and range, for a file the
+    /// backend names (FR-PROXY-32): kept on an `internal_files` route
+    /// only, else [`Conditional::NONE`] and [`RangeRequest::NONE`].
+    pub(crate) conditional: Conditional,
+    pub(crate) range: RangeRequest,
+}
+
+/// Where a file response's head waits to be written (FR-PROXY-32).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FileHead {
+    /// In `Conn::send`, like every head the core renders itself (or
+    /// already written).
+    SendBuffer,
+    /// A backend-directed file's merged head, in the exchange's head
+    /// buffer, which it keeps (it may be larger than `Conn::send`). The
+    /// first `sent` bytes are written; at least one is left (once all are
+    /// out, the head is `SendBuffer` and the buffer is freed).
+    Own { bytes: Vec<u8>, sent: usize },
+}
+
+impl FileHead {
+    /// The head's bytes not yet written.
+    pub(crate) fn unsent(&self) -> &[u8] {
+        match self {
+            FileHead::SendBuffer => &[],
+            FileHead::Own { bytes, sent } => bytes.get(*sent..).unwrap_or_default(),
+        }
+    }
 }
 
 /// Whether a proxied request went out on a fresh connection or one taken
@@ -413,6 +448,28 @@ pub(crate) struct StaticRequest {
     /// The request's `Range` and `If-Range`, judged after the conditional
     /// headers (FR-STATIC-19).
     pub(crate) range: RangeRequest,
+    /// A static route's own file, or one a backend named.
+    pub(crate) source: FileSource,
+}
+
+/// Who asked for a file response's file.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FileSource {
+    /// The request's static route.
+    Route,
+    /// A backend's answer on an `internal_files` route (FR-PROXY-32).
+    Backend(BackendFile),
+}
+
+/// A backend's answer naming a file (FR-PROXY-32), kept while the file is
+/// opened: the backend (logged), and its kept lines (`head`, in the
+/// exchange's head buffer, with room for the core's lines) and what they
+/// carry (`kept`).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BackendFile {
+    pub(crate) backend: BackendId,
+    pub(crate) head: Vec<u8>,
+    pub(crate) kept: Kept,
 }
 
 /// One open connection. Dropping it frees both buffers.
@@ -501,9 +558,12 @@ impl Conn {
             ConnState::Responding { .. } => Interest::None,
             // Waiting on the disk.
             ConnState::OpeningFile { .. } => Interest::None,
-            ConnState::SendingFile { chunk, .. } => match chunk {
-                Chunk::Ready { .. } => Interest::Write,
-                Chunk::Reading { .. } | Chunk::Done => Interest::None,
+            // Its own head first, then the file's bytes.
+            ConnState::SendingFile { head, chunk, .. } => match (head, chunk) {
+                (FileHead::Own { .. }, _) | (FileHead::SendBuffer, Chunk::Ready { .. }) => {
+                    Interest::Write
+                }
+                (FileHead::SendBuffer, Chunk::Reading { .. } | Chunk::Done) => Interest::None,
             },
             // Reading the request body, once the head was written and every
             // earlier body byte too. There is always room behind a chunked

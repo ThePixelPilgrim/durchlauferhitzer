@@ -15,7 +15,9 @@ use super::upload::body_idle_deadline;
 use super::{Action, ConnId, Core, InternalRoute, InternalRouteId, Mode};
 use crate::config::{BodyLimit, Limits, Pooling, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, Replay, Reuse, UnreadBody};
+use crate::http::conditional::Conditional;
 use crate::http::forward::{backend_request_len, check_forwardable, render_backend_request};
+use crate::http::range::RangeRequest;
 use crate::http::request::{BodyFraming, Expect, Method, Persistence, RequestHead, Version};
 use crate::http::response::{BodyMode, render_fixed};
 use crate::http::response_head::{
@@ -230,6 +232,17 @@ impl Core {
             toward,
             reuse: Reuse::Fresh,
             replay,
+            // FR-PROXY-32: a file the backend names is answered like a
+            // static route's, by the client's conditional headers and
+            // range; other routes need neither.
+            conditional: match internal {
+                Some(_) => head.conditional,
+                None => Conditional::NONE,
+            },
+            range: match internal {
+                Some(_) => head.range,
+                None => RangeRequest::NONE,
+            },
             internal,
         };
         c.state = match idle {
@@ -591,7 +604,8 @@ impl Core {
             | BackendFailure::BadResponse(_)
             | BackendFailure::BadChunk(_)
             | BackendFailure::BodyTooLarge
-            | BackendFailure::TransferEncodingToHttp10 => Status::BadGateway,
+            | BackendFailure::TransferEncodingToHttp10
+            | BackendFailure::BadFilePath => Status::BadGateway,
             BackendFailure::ConnectTimeout
             | BackendFailure::ResponseTimeout
             | BackendFailure::BodyTimeout => Status::GatewayTimeout,

@@ -24,6 +24,22 @@ const TABLE: &[(&[&str], &str)] = &[
 
 const FALLBACK: &str = "application/octet-stream";
 
+/// The length of the longest type [`content_type`] returns
+/// (`text/javascript; charset=utf-8`, 30 bytes).
+pub const LONGEST_CONTENT_TYPE: usize = longest();
+
+const fn longest() -> usize {
+    let mut max = FALLBACK.len();
+    let mut rows = TABLE;
+    while let [(_, ty), rest @ ..] = rows {
+        if ty.len() > max {
+            max = ty.len();
+        }
+        rows = rest;
+    }
+    max
+}
+
 /// Content type for a file name, by the extension after the last `.`
 /// (ASCII case-insensitive). No extension, or only a leading dot, yields
 /// `application/octet-stream`.
@@ -76,6 +92,10 @@ mod tests {
         for (name, want) in rows {
             assert_eq!(content_type(name.as_bytes()), *want, "{name}");
         }
+        // The bound of FILE_HEAD_EXTRA: the longest of them all.
+        let longest = rows.iter().map(|(_, ty)| ty.len()).max().unwrap();
+        assert_eq!(LONGEST_CONTENT_TYPE, longest);
+        assert_eq!(LONGEST_CONTENT_TYPE, 30);
     }
 
     #[test]

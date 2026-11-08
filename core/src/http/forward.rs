@@ -390,6 +390,81 @@ fn client_response(
     sink.put(b"\r\n");
 }
 
+/// Whether the backend's kept lines carry a header (FR-PROXY-32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    Yes,
+    No,
+}
+
+/// Which headers a backend-directed file's kept lines carry, so the core
+/// adds its own only where the backend sent none (FR-PROXY-32):
+/// `Content-Type`, `X-Content-Type-Options` and `Date`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kept {
+    pub content_type: Sent,
+    pub nosniff: Sent,
+    pub date: Sent,
+}
+
+/// The backend headers a backend-directed file's head never keeps
+/// (FR-PROXY-32): they describe the backend's body, not the file, and the
+/// core sends its own.
+const FILE_REPLACED: [&str; 6] = [
+    "content-length",
+    "transfer-encoding",
+    "etag",
+    "last-modified",
+    "accept-ranges",
+    "content-range",
+];
+
+/// Appends the lines of a backend's response `head` that a
+/// backend-directed file's head keeps (FR-PROXY-32): its headers in order
+/// as `name: value` (names lowercased), without the hop-by-hop ones
+/// (FR-PROXY-12), the file headers of the route `files` (as
+/// [`render_client_response`] drops them), and `content-length`,
+/// `transfer-encoding`, `etag`, `last-modified`, `accept-ranges` and
+/// `content-range`, which the core replaces. No status line, no blank
+/// line. Returns which of `content-type`, `x-content-type-options` and
+/// `date` it kept.
+pub fn render_kept_lines(head: &ResponseHead, files: &InternalFiles, out: &mut Vec<u8>) -> Kept {
+    kept_lines(head, files, out)
+}
+
+/// The exact number of bytes [`render_kept_lines`] appends.
+pub fn kept_lines_len(head: &ResponseHead, files: &InternalFiles) -> usize {
+    let mut count = Count(0);
+    kept_lines(head, files, &mut count);
+    count.0
+}
+
+fn kept_lines(head: &ResponseHead, files: &InternalFiles, sink: &mut impl Sink) -> Kept {
+    let listed = listed_tokens(&head.headers);
+    let mut kept = Kept {
+        content_type: Sent::No,
+        nosniff: Sent::No,
+        date: Sent::No,
+    };
+    for header in &head.headers {
+        let name = header.name.as_str();
+        if is_hop_by_hop_bytes(name.as_bytes(), &listed)
+            || is_file_response_header(name, Some(files))
+            || FILE_REPLACED.contains(&name)
+        {
+            continue;
+        }
+        match name {
+            "content-type" => kept.content_type = Sent::Yes,
+            "x-content-type-options" => kept.nosniff = Sent::Yes,
+            "date" => kept.date = Sent::Yes,
+            _ => {}
+        }
+        put_header(sink, name, &header.value);
+    }
+    kept
+}
+
 /// The standard reason phrase for `code`: those of RFC 9110 section 15,
 /// plus 103 (RFC 8297) and 428, 429, 431 and 511 (RFC 6585). Empty for any
 /// other code (FR-PROXY-12).

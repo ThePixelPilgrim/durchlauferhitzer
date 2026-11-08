@@ -2,8 +2,11 @@
 //! queueing the rewritten head, then relaying the body to the client
 //! straight out of the upstream's receive buffer, fill, drain, refill
 //! (FR-PROXY-19…22, -24, -28; NFR-RES-04), and the failures after the head
-//! (FR-PROXY-26: the connection is cut).
+//! (FR-PROXY-26: the connection is cut). A `200` that names a file on an
+//! `internal_files` route branches off first, to `backend_file.rs`
+//! (FR-PROXY-32).
 
+use super::backend_file::named_file;
 use super::pool::release as release_upstream;
 use super::proxy::{close_upstream, queued_send_deadline, take_exchange};
 use super::request::{AfterResponse, finish};
@@ -34,6 +37,16 @@ impl Core {
         consumed: usize,
         actions: &mut Vec<Action>,
     ) {
+        // FR-PROXY-32: a `200` naming a file is answered with the file,
+        // before any check of the relay (its body is never read).
+        if let Some(ConnState::AwaitingResponse { request, .. }) =
+            self.conns.get(&conn).map(|c| &c.state)
+        {
+            if let Some(named) = named_file(request, &head) {
+                self.backend_file(now, conn, head, consumed, named, actions);
+                return;
+            }
+        }
         let head_capacity = self.head_capacity;
         let date = self.date;
         let mode = self.mode;

@@ -460,6 +460,7 @@ pub(crate) fn check_story(
             Log::Reset { .. }
             | Log::FileAborted { .. }
             | Log::ProxiedResponse { .. }
+            | Log::BackendFile { .. }
             | Log::BackendFailed { .. }
             | Log::BackendRetried { .. }
             | Log::BackendNotSilent { .. } => None,

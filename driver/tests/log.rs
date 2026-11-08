@@ -190,6 +190,36 @@ fn backend_failed() {
     );
 }
 
+/// FR-LOG-05, FR-PROXY-32: a backend-directed file has its own kind, with
+/// the client's status, the backend and the request summary.
+#[test]
+fn backend_file() {
+    let entry = Log::BackendFile {
+        conn: ConnId(3),
+        peer: PEER,
+        backend: BackendId(0),
+        status: Status::PartialContent,
+        request: summary(Method::Get, Some("example.com"), "/dl/a"),
+    };
+    assert_eq!(
+        line(&entry),
+        "kind=backend_file conn=3 peer=192.0.2.7 backend=127.0.0.1:9000 status=206 \
+         method=GET host=example.com path=/dl/a\n"
+    );
+    let entry = Log::BackendFile {
+        conn: ConnId(3),
+        peer: PEER,
+        backend: BackendId(1),
+        status: Status::NotModified,
+        request: summary(Method::Other("POST".to_owned()), None, "/dl/a"),
+    };
+    assert_eq!(
+        line(&entry),
+        "kind=backend_file conn=3 peer=192.0.2.7 backend=[::1]:9000 status=304 \
+         method=POST path=/dl/a\n"
+    );
+}
+
 /// FR-LOG-05: the safe retry of FR-PROXY-26 (stage 7) has its own kind.
 #[test]
 fn backend_retried() {
@@ -599,6 +629,7 @@ fn every_backend_failure_value() {
             BackendFailure::TransferEncodingToHttp10,
             "transfer_encoding_to_http10".to_owned(),
         ),
+        (BackendFailure::BadFilePath, "bad_file_path".to_owned()),
     ];
     for (error, name) in CHUNKED {
         cases.push((BackendFailure::BadChunk(error), format!("bad_chunk.{name}")));

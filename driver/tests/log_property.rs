@@ -84,7 +84,7 @@ impl Rng {
         };
         // One past the list too: the index fallback.
         let backend = BackendId(self.below(4) as u32);
-        match self.below(5) {
+        match self.below(6) {
             0 => Log::Response {
                 conn,
                 peer,
@@ -113,6 +113,13 @@ impl Rng {
                 conn,
                 peer,
                 backend,
+                request,
+            },
+            4 => Log::BackendFile {
+                conn,
+                peer,
+                backend,
+                status: Status::PartialContent,
                 request,
             },
             _ => Log::Rejected {
@@ -255,7 +262,7 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
                 .chain(host_key(r))
                 .chain(["path"])
                 .collect(),
-            Log::ProxiedResponse { request: r, .. } => {
+            Log::ProxiedResponse { request: r, .. } | Log::BackendFile { request: r, .. } => {
                 ["kind", "conn", "peer", "backend", "status", "method"]
                     .into_iter()
                     .chain(host_key(r))
@@ -293,6 +300,7 @@ fn any_entry_is_one_line_without_raw_control_bytes() {
                 request: Some(r), ..
             }
             | Log::ProxiedResponse { request: r, .. }
+            | Log::BackendFile { request: r, .. }
             | Log::BackendRetried { request: r, .. }
             | Log::BackendNotSilent { request: r, .. } => (&r.method, r.host.clone(), &r.path),
             Log::Rejected {

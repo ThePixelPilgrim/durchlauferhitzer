@@ -52,14 +52,16 @@ pub(crate) fn recv_capacity(max_head: usize) -> usize {
 }
 
 /// Capacity of an exchange's head buffer: room for any rewritten head
-/// whose original obeyed `max_head` and `max_headers`, with `hint_bytes`
-/// for the longest Rack hints of the config's `internal_files` routes
-/// (FR-PROXY-32, [`RouteMix`](crate::config::RouteMix)).
-pub(crate) fn head_capacity(max_head: usize, max_headers: usize, hint_bytes: usize) -> usize {
+/// whose original obeyed `max_head` and `max_headers`, with `extra` for
+/// what the config's `internal_files` routes add (FR-PROXY-32,
+/// [`RouteMix`](crate::config::RouteMix)): the longest Rack hints of a
+/// request head plus, for a backend-directed file's merged head, the
+/// core's lines ([`FILE_HEAD_EXTRA`](crate::http::response::FILE_HEAD_EXTRA)).
+pub(crate) fn head_capacity(max_head: usize, max_headers: usize, extra: usize) -> usize {
     max_head
         .saturating_add(max_headers)
         .saturating_add(HEAD_SLACK)
-        .saturating_add(hint_bytes)
+        .saturating_add(extra)
 }
 
 /// The buffers of one proxied exchange, allocated when it connects and
@@ -113,6 +115,13 @@ impl ExchangeBuffers {
     pub(crate) fn clear_head(&mut self) {
         self.head.clear();
         self.head_sent = 0;
+    }
+
+    /// The head buffer alone, its capacity kept; the receive buffer is
+    /// freed (a backend-directed file, FR-PROXY-32, never reads the
+    /// backend's body).
+    pub(crate) fn into_head(self) -> Vec<u8> {
+        self.head
     }
 }
 

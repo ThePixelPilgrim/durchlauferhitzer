@@ -1,7 +1,7 @@
 //! `internal_files` routes (FR-PROXY-32 Stripping and Hints): the backend
 //! is told which file header the route trusts, a client's forged file
 //! headers never reach it, and a response's file headers never reach the
-//! client. (Serving the file a `200` names comes with the trigger.)
+//! client. (Serving the file a `200` names: `backend_files.rs`.)
 
 use durchlauferhitzer_core::http::request::Method;
 use durchlauferhitzer_core::{BackendId, Log};

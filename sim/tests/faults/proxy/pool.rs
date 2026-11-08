@@ -179,6 +179,7 @@ fn replay_of(sim: &Sim, story: &Story) -> Option<(usize, BackendFailure)> {
             | Log::Reset { .. }
             | Log::FileAborted { .. }
             | Log::ProxiedResponse { .. }
+            | Log::BackendFile { .. }
             | Log::BackendFailed { .. } => None,
         })
         .collect();

@@ -5,7 +5,7 @@ use super::proxy::{self, ProxyPlan};
 use super::static_files::{Plan, plan};
 use super::{Action, ConnId, Core, DrainTarget, Mode};
 use crate::config::{Limits, RouteAction};
-use crate::conn::{Conn, ConnState, LINGER_TIMEOUT, UnreadBody};
+use crate::conn::{Conn, ConnState, FileHead, LINGER_TIMEOUT, UnreadBody};
 use crate::file::Chunk;
 use crate::http::request::{
     BodyFraming, HeadParser, HttpError, KnownMethod, ParseStatus, Persistence, RequestHead,
@@ -93,8 +93,32 @@ impl Core {
             self.relay_sent(now, conn, len, actions);
             return;
         }
-        let len = len.min(c.send.len());
-        c.send.drain(..len);
+        // The send buffer first; behind it a backend-directed file's head
+        // of its own (FR-PROXY-32), freed once it is all out.
+        let len = match &mut c.state {
+            ConnState::SendingFile { head, .. } if c.send.is_empty() => {
+                let unsent = head.unsent().len();
+                let len = len.min(unsent);
+                match head {
+                    FileHead::Own { sent, .. } if len < unsent => *sent = sent.saturating_add(len),
+                    FileHead::Own { .. } | FileHead::SendBuffer => *head = FileHead::SendBuffer,
+                }
+                len
+            }
+            ConnState::ReadingHead { .. }
+            | ConnState::Idle { .. }
+            | ConnState::Responding { .. }
+            | ConnState::OpeningFile { .. }
+            | ConnState::SendingFile { .. }
+            | ConnState::Connecting { .. }
+            | ConnState::AwaitingResponse { .. }
+            | ConnState::Relaying { .. }
+            | ConnState::Lingering { .. } => {
+                let len = len.min(c.send.len());
+                c.send.drain(..len);
+                len
+            }
+        };
         // Progress resets the send idle deadline; a `100 Continue` that is
         // out stops it while a response is awaited.
         if len > 0 {
@@ -129,6 +153,7 @@ impl Core {
                 ConnState::SendingFile {
                     file,
                     chunk: Chunk::Done,
+                    head: FileHead::SendBuffer,
                     persistence,
                     buffered,
                     ..

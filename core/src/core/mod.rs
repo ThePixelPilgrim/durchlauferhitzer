@@ -5,8 +5,10 @@
 //! module documentation of `contract.rs`, next to its vocabulary
 //! ([`Event`], [`Action`], [`Interest`], [`ConnId`], [`ConnError`]).
 
+mod backend_file;
 mod conns;
 mod contract;
+mod file_answer;
 mod limits;
 mod pool;
 mod proxy;
@@ -27,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::{Config, InternalFiles, Limits, ProxyRoute, Route, RouteAction, RouteMix};
-use crate::conn::{ConnState, LINGER_SCRATCH, SEND_CAPACITY};
+use crate::conn::{ConnState, FileHead, LINGER_SCRATCH, SEND_CAPACITY};
 use crate::file::{Chunk, FileFollows, FileSegment, FileTable, RootId};
 use crate::http::date::{ImfFixdate, imf_fixdate};
 use crate::http::request::HeadLimits;
@@ -202,12 +204,16 @@ impl Core {
         }
         let limits = &config.limits;
         let upstream_recv_capacity = recv_capacity(limits.max_head);
-        // FR-PROXY-32: the head buffer has room for the longest hints.
-        let hint_bytes = match config.route_mix() {
+        // FR-PROXY-32: the head buffer has room for the longest hints and,
+        // with `internal_files`, the core's lines of a file's merged head.
+        let extra = match config.route_mix() {
             RouteMix::StaticOnly => 0,
-            RouteMix::Proxy { hint_bytes } => hint_bytes,
+            RouteMix::Proxy {
+                hint_bytes,
+                file_head,
+            } => hint_bytes.saturating_add(file_head),
         };
-        let head_capacity = head_capacity(limits.max_head, limits.max_headers, hint_bytes);
+        let head_capacity = head_capacity(limits.max_head, limits.max_headers, extra);
         Core {
             router: Router::new(&config.hosts),
             head_limits: HeadLimits::from(&config.limits),
@@ -372,7 +378,9 @@ impl Core {
     /// are any bytes of the connection's own send buffer first (a `100
     /// Continue` of the core's own not yet fully written), then the
     /// response's rewritten head, then its body bytes straight out of the
-    /// upstream's receive buffer.
+    /// upstream's receive buffer. A backend-directed file's merged head
+    /// (FR-PROXY-32) is likewise its own: it follows the send buffer's
+    /// bytes, before the file.
     pub fn send_buffer(&self, conn: ConnId) -> &[u8] {
         match self.conns.get(&conn) {
             Some(c) => match &c.state {
@@ -385,6 +393,9 @@ impl Core {
                         body.unsent(&buffers.recv)
                     }
                 }
+                // A backend-directed file's head of its own goes out
+                // after any bytes of the send buffer (a `100 Continue`).
+                ConnState::SendingFile { head, .. } if c.send.is_empty() => head.unsent(),
                 ConnState::ReadingHead { .. }
                 | ConnState::Idle { .. }
                 | ConnState::Responding { .. }
@@ -419,8 +430,9 @@ impl Core {
     }
 
     /// The file range the driver may `sendfile` to `conn` now: only once
-    /// [`Core::send_buffer`] is empty and the chunk's `ChunkReady` has
-    /// arrived. `None` when there is none or the connection is unknown.
+    /// [`Core::send_buffer`] is empty (a backend-directed file's head of
+    /// its own included) and the chunk's `ChunkReady` has arrived. `None`
+    /// when there is none or the connection is unknown.
     pub fn send_file(&self, conn: ConnId) -> Option<FileSegment> {
         let c = self.conns.get(&conn)?;
         if !c.send.is_empty() {
@@ -430,6 +442,7 @@ impl Core {
             file,
             offset,
             chunk,
+            head: FileHead::SendBuffer,
             ..
         } = c.state
         else {
@@ -465,7 +478,9 @@ impl Core {
     /// The most [`Core::send_buffer`] can currently hand out for `conn`:
     /// its own send buffer's capacity, or while a proxied response is
     /// relayed, the capacity of the exchange buffer it writes from (the
-    /// head buffer, then the upstream's receive buffer); 0 for unknown
+    /// head buffer, then the upstream's receive buffer), and the head
+    /// buffer's while a backend-directed file's head of its own is
+    /// pending (FR-PROXY-32); 0 for unknown
     /// connections. It can change with the connection's state. For
     /// drivers' invariant checks (the simulation), not for I/O.
     #[doc(hidden)]
@@ -480,6 +495,10 @@ impl Core {
                     self.head_capacity
                 }
             }
+            ConnState::SendingFile {
+                head: FileHead::Own { .. },
+                ..
+            } if c.send.is_empty() => self.head_capacity,
             ConnState::ReadingHead { .. }
             | ConnState::Idle { .. }
             | ConnState::Responding { .. }

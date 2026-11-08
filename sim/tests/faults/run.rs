@@ -183,6 +183,7 @@ pub(crate) fn run_seed(seed: u64, coverage: &mut Coverage) {
             | Log::Reset { .. }
             | Log::FileAborted { .. }
             | Log::ProxiedResponse { .. }
+            | Log::BackendFile { .. }
             | Log::BackendFailed { .. }
             | Log::BackendRetried { .. }
             | Log::BackendNotSilent { .. } => {}

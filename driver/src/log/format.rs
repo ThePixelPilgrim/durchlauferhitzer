@@ -94,6 +94,18 @@ pub fn format_entry(entry: &Log, backends: &[SocketAddr], out: &mut Vec<u8>) {
             number(out, "status", *status);
             summary(out, request);
         }
+        Log::BackendFile {
+            conn,
+            peer,
+            backend,
+            status,
+            request,
+        } => {
+            head(out, "backend_file", *conn, *peer);
+            backend_field(out, backends, *backend);
+            number(out, "status", status.code());
+            summary(out, request);
+        }
         Log::BackendFailed {
             conn,
             peer,
@@ -350,6 +362,7 @@ fn backend_failure(out: &mut Vec<u8>, failure: BackendFailure) {
         BackendFailure::BadChunk(error) => put(&["bad_chunk", chunked_error(error)]),
         BackendFailure::BodyTooLarge => put(&["body_too_large"]),
         BackendFailure::TransferEncodingToHttp10 => put(&["transfer_encoding_to_http10"]),
+        BackendFailure::BadFilePath => put(&["bad_file_path"]),
     }
 }
 

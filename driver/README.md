@@ -128,6 +128,8 @@ src/
                     `DriverLog` (FR-LOG-07), `KeptReason`, `ShutdownPhase`
     format.rs         the line format (FR-LOG-05): `format_entry` (a
                       backend by its address in `Core::backends`),
+                      `kind=backend_file` and `failure=bad_file_path`
+                      for backend-directed files (FR-PROXY-32),
                       `format_driver`, the escaping; untrusted values
                       cut at 4 KiB as written, then `<key>_truncated=N`
                       (OA4)

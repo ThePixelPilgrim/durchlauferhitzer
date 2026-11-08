@@ -263,7 +263,7 @@ pub(crate) fn announced<'t>(
         | Log::BackendNotSilent { .. } => {
             return Ok(None);
         }
-        Log::ProxiedResponse { .. } => {
+        Log::ProxiedResponse { .. } | Log::BackendFile { .. } => {
             return Err(format!("{log:?}, but every backend refuses"));
         }
     };
@@ -388,6 +388,7 @@ pub(crate) fn log_conn(log: &Log) -> ConnId {
         | Log::Reset { conn, .. }
         | Log::FileAborted { conn, .. }
         | Log::ProxiedResponse { conn, .. }
+        | Log::BackendFile { conn, .. }
         | Log::BackendFailed { conn, .. }
         | Log::BackendRetried { conn, .. }
         | Log::BackendNotSilent { conn, .. } => *conn,
@@ -477,6 +478,7 @@ pub(crate) fn check_client(
         | Log::Reset { .. }
         | Log::FileAborted { .. }
         | Log::ProxiedResponse { .. }
+        | Log::BackendFile { .. }
         | Log::BackendFailed { .. }
         | Log::BackendRetried { .. }
         | Log::BackendNotSilent { .. } => false,

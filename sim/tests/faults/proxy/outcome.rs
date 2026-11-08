@@ -364,7 +364,8 @@ fn forward_alts(
             | BackendFailure::BadResponse(_)
             | BackendFailure::BadChunk(_)
             | BackendFailure::BodyTooLarge
-            | BackendFailure::TransferEncodingToHttp10 => Status::BadGateway,
+            | BackendFailure::TransferEncodingToHttp10
+            | BackendFailure::BadFilePath => Status::BadGateway,
         };
         let mut tags = tags.to_vec();
         tags.push(fail_tag(kind));
@@ -781,6 +782,7 @@ fn fail_tag(kind: BackendFailure) -> &'static str {
         BackendFailure::BadChunk(_) => "502 BadChunk",
         BackendFailure::BodyTooLarge => "502 BodyTooLarge",
         BackendFailure::TransferEncodingToHttp10 => "502 TransferEncodingToHttp10",
+        BackendFailure::BadFilePath => "502 BadFilePath",
     }
 }
 
@@ -795,6 +797,7 @@ fn cut_tag(kind: BackendFailure) -> &'static str {
         | BackendFailure::BadResponse(_)
         | BackendFailure::ConnectTimeout
         | BackendFailure::BodyTimeout
-        | BackendFailure::TransferEncodingToHttp10 => "cut (other)",
+        | BackendFailure::TransferEncodingToHttp10
+        | BackendFailure::BadFilePath => "cut (other)",
     }
 }

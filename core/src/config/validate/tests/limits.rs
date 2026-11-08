@@ -1,6 +1,7 @@
 //! Tests for the `limits` block.
 
 use super::*;
+use crate::http::response::FILE_HEAD_EXTRA;
 
 #[test]
 fn loads_all_limits() {
@@ -333,14 +334,18 @@ fn backend_idle_max_may_not_exceed_max_connections() {
 }
 
 /// A proxy route without `internal_files`.
-const PROXY: RouteMix = RouteMix::Proxy { hint_bytes: 0 };
+const PROXY: RouteMix = RouteMix::Proxy {
+    hint_bytes: 0,
+    file_head: 0,
+};
 
 /// NFR-RES-01, FR-PROXY-32: the head buffer, and so the worst case per
 /// connection, grows by exactly the longest Rack hint lines of the
 /// config's `internal_files` routes: 29 bytes for `x-sendfile`
 /// (`x-sendfile-type: X-Sendfile` and CRLF), 56 plus root and prefix for
 /// `x-accel-redirect` (`x-sendfile-type: X-Accel-Redirect` and
-/// `x-accel-mapping: <root>/=<prefix>`, each with CRLF).
+/// `x-accel-mapping: <root>/=<prefix>`, each with CRLF); plus, once, the
+/// core's lines of a file's merged head (`FILE_HEAD_EXTRA`).
 #[test]
 fn worst_case_grows_by_the_longest_hints() {
     let route = |path: &str, files: &str| {
@@ -358,12 +363,16 @@ fn worst_case_grows_by_the_longest_hints() {
         (route("/p", ""), PROXY),
         (
             route("/p", "") + &route("/q", sendfile),
-            RouteMix::Proxy { hint_bytes: 29 },
+            RouteMix::Proxy {
+                hint_bytes: 29,
+                file_head: FILE_HEAD_EXTRA,
+            },
         ),
         (
             route("/p", sendfile) + &route("/q", &accel),
             RouteMix::Proxy {
                 hint_bytes: 56 + root.len() + prefix.len(),
+                file_head: FILE_HEAD_EXTRA,
             },
         ),
     ];
@@ -372,7 +381,10 @@ fn worst_case_grows_by_the_longest_hints() {
         assert_eq!(config.route_mix(), mix, "{routes}");
         let (base, grown) = match mix {
             RouteMix::StaticOnly => (RouteMix::StaticOnly, 0),
-            RouteMix::Proxy { hint_bytes } => (PROXY, hint_bytes as u64),
+            RouteMix::Proxy {
+                hint_bytes,
+                file_head,
+            } => (PROXY, (hint_bytes + file_head) as u64),
         };
         assert_eq!(
             worst_case_per_connection(&config.limits, mix),
@@ -418,10 +430,22 @@ fn worst_case_per_connection_for_defaults() {
         worst_case_per_connection(&tiny, PROXY),
         102 + 1024 + 32768 + (100 + 100 + 128)
     );
+    // FR-PROXY-32: with `internal_files` the head buffer also has room for
+    // the core's 401 bytes around a backend's kept lines (and the hints).
+    assert_eq!(FILE_HEAD_EXTRA, 401);
+    let files = RouteMix::Proxy {
+        hint_bytes: 29,
+        file_head: FILE_HEAD_EXTRA,
+    };
+    assert_eq!(
+        worst_case_per_connection(&limits, files),
+        16384 + 1024 + 32768 + (16384 + 100 + 128 + 29 + 401)
+    );
 }
 
-/// FR-CFG-21 with FR-PROXY-32: the memory budget counts the hints' room
-/// in the head buffer (29 bytes for an `x-sendfile` route here).
+/// FR-CFG-21 with FR-PROXY-32: the memory budget counts the room of the
+/// hints (29 bytes for an `x-sendfile` route here) and of a file's merged
+/// head (401) in the head buffer.
 #[test]
 fn memory_budget_counts_the_hints() {
     let text = |limit: u64| {
@@ -431,7 +455,7 @@ fn memory_budget_counts_the_hints() {
              max_request_body 1; max_response_body 1; internal_files x-sendfile /srv/f; }} }}\n"
         ))
     };
-    let needed = 1000 * (66_788 + 29);
+    let needed = 1000 * (66_788 + 29 + 401);
     assert_eq!(
         err(&text(needed - 1)).0,
         ConfigErrorKind::MemoryBudget {

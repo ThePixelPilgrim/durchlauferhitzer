@@ -40,12 +40,21 @@ src/
                         conditional request, the 206 or 416 of a range
                         request, send (a whole file or one range),
                         abort
+    file_answer.rs      the answer to an open regular file (304, 200,
+                        206, 416), its head (a static route's or a
+                        backend file's merged head) and the state after
+                        it, shared by static routes and backend files
+    backend_file.rs     backend-directed files (FR-PROXY-32): the
+                        trigger on a backend's 200, bad paths (502), a
+                        404 before the open, the upstream's fate, the
+                        kept lines, the open below the route's root
     proxy.rs            proxy routes: plan, connect, `100 Continue`, judge
                         the response head (interim heads dropped), 502/504
                         before it, timeouts (`expire_proxy` decides 408 vs
                         504 `BodyTimeout`, the head cap, send timeouts)
-    relay.rs            the response side: queue the rewritten head, relay
-                        the body, end the exchange, cut on a failure
+    relay.rs            the response side: branch to a backend file,
+                        queue the rewritten head, relay the body, end the
+                        exchange, cut on a failure
     upload.rs           the request side once connected: write the head
                         and body to the backend, read the body from the
                         client, body errors (400, cut), a client end of
@@ -100,14 +109,15 @@ src/
                         time library: days-from-civil arithmetic)
     forward.rs          proxy head rewriting: request head to the backend,
                         response head to the client, hop-by-hop rules,
-                        file headers stripped and Rack's hints
-                        (FR-PROXY-32)
+                        file headers stripped and Rack's hints, a backend
+                        file's kept lines (FR-PROXY-32)
     target.rs           request-target validation (traversal, encodings)
     static_path.rs      decoding paths to file-system segments
     backend_path.rs     `X-Sendfile` / `X-Accel-Redirect` values to
                         segments, 404 or bad path (FR-PROXY-32)
     response.rs         rendering fixed responses, file heads (200 and
-                        206), 416s, 304s, redirects
+                        206), 416s, 304s, redirects, a backend file's
+                        merged head and its bound `FILE_HEAD_EXTRA`
     status.rs           status codes
     mime.rs             content types
 ```

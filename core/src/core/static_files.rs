@@ -1,25 +1,24 @@
 //! Static routes: the rules decided before opening, opening the path (and
 //! a directory's index), sending the file chunk by chunk, and aborting a
-//! transfer that fails.
+//! transfer that fails. A file a backend named (FR-PROXY-32,
+//! `backend_file.rs`) is answered here too once its open is in.
 
 use std::path::{Path, PathBuf};
 
+use super::file_answer::{FileAnswer, Queued, Rendering, after_head, queue_head};
 use super::request::{AfterResponse, finish};
 use super::{Action, ConnId, Core};
 use crate::config::{OnFileChange, Route};
-use crate::conn::{Conn, ConnState, OpenStep, SEND_CAPACITY, StaticRequest, UnreadBody};
+use crate::conn::{
+    Conn, ConnState, FileHead, FileSource, OpenStep, SEND_CAPACITY, StaticRequest, UnreadBody,
+};
 use crate::file::{
     Chunk, FILE_CHUNK, FileError, FileId, FileKind, FileMeta, FileStamp, Owner, RootId, check_stamp,
 };
-use crate::http::conditional::{Freshness, Validators};
+use crate::http::conditional::Validators;
 use crate::http::date::ImfFixdate;
-use crate::http::mime::content_type;
-use crate::http::range::Ranged;
 use crate::http::request::{BodyFraming, Method, Persistence, RequestHead};
-use crate::http::response::{
-    BodyMode, Part, redirect_len, render_file_head, render_fixed, render_not_modified,
-    render_range_not_satisfiable, render_redirect,
-};
+use crate::http::response::{BodyMode, redirect_len, render_fixed, render_redirect};
 use crate::http::static_path::{TrailingSlash, relative_segments, trailing_slash};
 use crate::http::status::Status;
 use crate::log::{Log, RequestSummary};
@@ -69,137 +68,50 @@ impl Core {
                 Opened::NotServed(NotServed::Redirect)
             }
             (FileKind::Directory, OpenStep::Requested, TrailingSlash::Present) => Opened::OpenIndex,
-            (FileKind::Regular, OpenStep::Requested, TrailingSlash::Present)
+            // FR-PROXY-32: a backend's file is served as a static route
+            // serves its decoded path, but a directory is a 404.
+            (FileKind::Regular, OpenStep::Backend, TrailingSlash::Absent) => Opened::Serve,
+            (
+                FileKind::Regular,
+                OpenStep::Requested | OpenStep::Backend,
+                TrailingSlash::Present,
+            )
             | (
                 FileKind::Directory,
-                OpenStep::Index,
+                OpenStep::Index | OpenStep::Backend,
                 TrailingSlash::Present | TrailingSlash::Absent,
             )
             | (
                 FileKind::Other,
-                OpenStep::Requested | OpenStep::Index,
+                OpenStep::Requested | OpenStep::Index | OpenStep::Backend,
                 TrailingSlash::Present | TrailingSlash::Absent,
             ) => Opened::NotServed(NotServed::NotFound),
         };
         c.state = match outcome {
-            // FR-STATIC-18: judged on the stamp of the opened descriptor,
-            // so a file changed since the client's copy is sent anew.
             Opened::Serve => {
                 let validators = Validators::of(meta.stamp);
-                match request.conditional.not_modified(meta.stamp, self.clock) {
-                    Freshness::NotModified => {
-                        actions.push(Action::Log(Log::Response {
-                            conn,
-                            peer: c.peer,
-                            status: Status::NotModified,
-                            request: Some(request.summary),
-                        }));
-                        render_not_modified(
-                            &validators,
-                            persistence,
-                            self.date.as_ref(),
-                            &mut c.send,
-                        );
-                        // Like HEAD: the head is all; nothing is read.
-                        self.files.release(file);
-                        actions.push(Action::CloseFile { file });
-                        ConnState::Responding {
-                            persistence,
-                            unread_body: UnreadBody::None,
-                            buffered,
-                            deadline,
-                        }
-                    }
-                    // FR-STATIC-19: then the range, if any.
-                    Freshness::Modified => {
-                        let size = meta.stamp.size;
-                        let ranged =
-                            request
-                                .range
-                                .judge(&request.summary.method, &validators, size);
-                        let (status, answer) = match ranged {
-                            Ranged::Whole => (Status::Ok, Answer::File(Part::Whole { size })),
-                            Ranged::Part { first, last } => (
-                                Status::PartialContent,
-                                Answer::File(Part::Range { first, last, size }),
-                            ),
-                            Ranged::Unsatisfiable => {
-                                (Status::RangeNotSatisfiable, Answer::Unsatisfiable)
-                            }
-                        };
-                        actions.push(Action::Log(Log::Response {
-                            conn,
-                            peer: c.peer,
-                            status,
-                            request: Some(request.summary),
-                        }));
-                        let date = self.date.as_ref();
-                        match answer {
-                            Answer::File(part) => {
-                                let name =
-                                    request.path.last().map(Vec::as_slice).unwrap_or_default();
-                                render_file_head(
-                                    content_type(name),
-                                    part,
-                                    &validators,
-                                    persistence,
-                                    date,
-                                    &mut c.send,
-                                );
-                            }
-                            Answer::Unsatisfiable => render_range_not_satisfiable(
-                                size,
-                                persistence,
-                                body,
-                                date,
-                                &mut c.send,
-                            ),
-                        }
-                        // A HEAD (never ranged) and a 416 are the head
-                        // alone, like a 304: nothing is read.
-                        match (answer, body) {
-                            (Answer::File(part), BodyMode::Full) => {
-                                let (offset, end) = match part {
-                                    Part::Whole { size } => (0, size),
-                                    Part::Range { first, last, .. } => {
-                                        (first, last.saturating_add(1))
-                                    }
-                                };
-                                let chunk = if offset >= end {
-                                    Chunk::Done
-                                } else {
-                                    let len = end.saturating_sub(offset).min(FILE_CHUNK);
-                                    actions.push(Action::Readahead { file, offset, len });
-                                    Chunk::Reading {
-                                        end: offset.saturating_add(len),
-                                    }
-                                };
-                                ConnState::SendingFile {
-                                    file,
-                                    end,
-                                    opened: meta.stamp,
-                                    on_change: request.on_change,
-                                    offset,
-                                    chunk,
-                                    persistence,
-                                    buffered,
-                                    deadline,
-                                }
-                            }
-                            (Answer::Unsatisfiable, BodyMode::Full | BodyMode::HeadOnly)
-                            | (Answer::File(_), BodyMode::HeadOnly) => {
-                                self.files.release(file);
-                                actions.push(Action::CloseFile { file });
-                                ConnState::Responding {
-                                    persistence,
-                                    unread_body: UnreadBody::None,
-                                    buffered,
-                                    deadline,
-                                }
-                            }
-                        }
-                    }
-                }
+                let answer = FileAnswer::of(&request, &validators, meta.stamp, self.clock);
+                let on_change = request.on_change;
+                let with = Rendering {
+                    validators: &validators,
+                    size: meta.stamp.size,
+                    body,
+                    persistence,
+                    date: self.date.as_ref(),
+                };
+                let head = queue_head(c, conn, request, answer, &with, actions);
+                let queued = Queued {
+                    file,
+                    answer,
+                    body,
+                    opened: meta.stamp,
+                    on_change,
+                    persistence,
+                    buffered,
+                    deadline,
+                    head,
+                };
+                after_head(&mut self.files, queued, actions)
             }
             Opened::OpenIndex => {
                 // One file per connection: the directory goes first.
@@ -414,8 +326,17 @@ impl Core {
         else {
             return;
         };
-        // No segment was offered while the send buffer held bytes.
-        if !c.send.is_empty() {
+        // No segment was offered while the send buffer, or the head of its
+        // own, held bytes.
+        if !c.send.is_empty()
+            || matches!(
+                c.state,
+                ConnState::SendingFile {
+                    head: FileHead::Own { .. },
+                    ..
+                }
+            )
+        {
             return;
         }
         let len = len.min(chunk_end.saturating_sub(offset));
@@ -485,16 +406,6 @@ enum Opened {
     /// A directory requested with `/`: open its `index.html` next.
     OpenIndex,
     NotServed(NotServed),
-}
-
-/// What the response to a modified regular file carries, by its range
-/// (FR-STATIC-19).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Answer {
-    /// The file's head, then (for a `GET`) its bytes: whole or one range.
-    File(Part),
-    /// The `416`, its file unread.
-    Unsatisfiable,
 }
 
 /// Why a static request is answered without a file.
@@ -740,6 +651,7 @@ impl Core {
                 path,
                 conditional: head.conditional,
                 range: head.range,
+                source: FileSource::Route,
             },
         };
     }

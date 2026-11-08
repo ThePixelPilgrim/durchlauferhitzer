@@ -1,13 +1,18 @@
 //! Response heads: fixed plain-text responses (status line plus short text
 //! body), `301` redirects, the head of a `200 OK` or `206 Partial Content`
 //! file response, the `416 Range Not Satisfiable` of a range request and
-//! the `304 Not Modified` of a conditional request.
+//! the `304 Not Modified` of a conditional request, and the merged head of
+//! a backend-directed file (FR-PROXY-32).
 //!
 //! Each takes the core's current IMF-fixdate, if the driver has set one,
 //! and then carries `Date` right after the status line (FR-HTTP-22a).
 
-use super::conditional::Validators;
+use std::io::Write as _;
+
+use super::conditional::{ETAG_MAX_LEN, Validators};
 use super::date::{IMF_FIXDATE_LEN, ImfFixdate};
+use super::forward::{Kept, Sent};
+use super::mime::LONGEST_CONTENT_TYPE;
 use super::request::{Method, Persistence};
 use super::status::Status;
 
@@ -288,6 +293,125 @@ pub fn render_not_modified(
         Persistence::KeepAlive => {}
     }
     out.extend_from_slice(b"\r\n");
+}
+
+/// The most bytes [`render_backend_file_head`] adds around a backend's
+/// kept lines (FR-PROXY-32, NFR-RES-01): the longest status line (`206
+/// Partial Content`, 30), `Date` (37), `Content-Type` with the longest
+/// type of FR-STATIC-12 (46), `Content-Length` (38) and `Content-Range`
+/// (85) with 20-digit numbers (`u64::MAX`), the longest `ETag` (43),
+/// `Last-Modified` (46), `Accept-Ranges` (22), `X-Content-Type-Options`
+/// (33), `Connection: close` (19) and the blank line (2): 401 bytes.
+pub const FILE_HEAD_EXTRA: usize = "HTTP/1.1 206 Partial Content\r\n".len()
+    + DATE_LINE_LEN
+    + "Content-Type: \r\n".len()
+    + LONGEST_CONTENT_TYPE
+    + "Content-Length: \r\n".len()
+    + U64_DIGITS
+    + "Content-Range: bytes -/\r\n".len()
+    + 3 * U64_DIGITS
+    + "ETag: \r\n".len()
+    + ETAG_MAX_LEN
+    + "Last-Modified: \r\n".len()
+    + IMF_FIXDATE_LEN
+    + ACCEPT_RANGES.len()
+    + NOSNIFF.len()
+    + CONNECTION_CLOSE.len()
+    + "\r\n".len();
+
+/// The digits of `u64::MAX`.
+const U64_DIGITS: usize = 20;
+
+const NOSNIFF: &str = "X-Content-Type-Options: nosniff\r\n";
+
+/// What a backend-directed file's response is (FR-PROXY-32): the file (a
+/// `200` or a `206`), or a `304`. A `416` and a `404` are plain fixed
+/// responses instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStatus {
+    File(Part),
+    NotModified,
+}
+
+/// Turns `head`, which holds exactly a backend's kept lines
+/// ([`render_kept_lines`](super::forward::render_kept_lines), whose
+/// [`Kept`] is `has`), into the merged head of a backend-directed file
+/// (FR-PROXY-32), in place: the core's status line and `Date` (only when
+/// `date` is set and the backend sent none) go before the kept lines, the
+/// core's lines in the order of FR-STATIC-11 after them. A `200` or `206`
+/// adds `Content-Type` (`content_type`, only if the backend sent none),
+/// `Content-Length`, `Content-Range` (206 only), `ETag`, `Last-Modified`,
+/// `Accept-Ranges` and `X-Content-Type-Options` (only if the backend sent
+/// none); a `304` adds `ETag` and `Last-Modified`. Then `Connection:
+/// close` (only when closing) and the blank line.
+///
+/// It adds at most [`FILE_HEAD_EXTRA`] bytes, so a caller that checked
+/// that `head` has that much spare capacity never makes it grow
+/// (NFR-RES-03), and it allocates nothing else.
+pub fn render_backend_file_head(
+    status: FileStatus,
+    head: &mut Vec<u8>,
+    has: Kept,
+    content_type: &str,
+    validators: &Validators,
+    persistence: Persistence,
+    date: Option<&ImfFixdate>,
+) {
+    let line: &[u8] = match status {
+        FileStatus::File(Part::Whole { .. }) => b"HTTP/1.1 200 OK\r\n",
+        FileStatus::File(Part::Range { .. }) => b"HTTP/1.1 206 Partial Content\r\n",
+        FileStatus::NotModified => b"HTTP/1.1 304 Not Modified\r\n",
+    };
+    let date = match has.date {
+        Sent::Yes => None,
+        Sent::No => date,
+    };
+    // The status line and `Date` go in front of the kept lines, which move
+    // up within the buffer: nothing is allocated.
+    let kept = head.len();
+    let front = line.len() + date.map_or(0, |_| DATE_LINE_LEN);
+    head.resize(kept + front, 0);
+    head.copy_within(..kept, front);
+    if let Some(mut slot) = head.get_mut(..front) {
+        // Exactly `front` bytes: writing them into the slot never fails.
+        let _infallible = slot.write_all(line);
+        if let Some(date) = date {
+            let _infallible = slot.write_all(b"Date: ");
+            let _infallible = slot.write_all(date);
+            let _infallible = slot.write_all(b"\r\n");
+        }
+    }
+    match status {
+        FileStatus::File(part) => {
+            if let Sent::No = has.content_type {
+                head.extend_from_slice(b"Content-Type: ");
+                head.extend_from_slice(content_type.as_bytes());
+                head.extend_from_slice(b"\r\n");
+            }
+            // Writing to a `Vec` never fails.
+            let _infallible = match part {
+                Part::Whole { size } => write!(head, "Content-Length: {size}\r\n"),
+                Part::Range { first, last, size } => {
+                    let len = last.saturating_sub(first).saturating_add(1);
+                    write!(
+                        head,
+                        "Content-Length: {len}\r\nContent-Range: bytes {first}-{last}/{size}\r\n"
+                    )
+                }
+            };
+            put_validators(validators, head);
+            head.extend_from_slice(ACCEPT_RANGES.as_bytes());
+            if let Sent::No = has.nosniff {
+                head.extend_from_slice(NOSNIFF.as_bytes());
+            }
+        }
+        FileStatus::NotModified => put_validators(validators, head),
+    }
+    match persistence {
+        Persistence::Close => head.extend_from_slice(CONNECTION_CLOSE.as_bytes()),
+        Persistence::KeepAlive => {}
+    }
+    head.extend_from_slice(b"\r\n");
 }
 
 #[cfg(test)]

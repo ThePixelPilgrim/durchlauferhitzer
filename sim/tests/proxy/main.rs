@@ -5,10 +5,12 @@
 //! half-close in `timeouts.rs`, backend resets behind readable bytes in
 //! `resets.rs`, backend connection pooling and the safe retry in
 //! `pool.rs`, the file headers of `internal_files` routes in
-//! `internal_files.rs`. The routes outside `pool.rs` say `pool off;`: they pin the
-//! one-connection-per-request path (FR-PROXY-02), which the first request
-//! on a pooled route takes too.
+//! `internal_files.rs`, the files a backend names in `backend_files.rs`.
+//! The routes outside `pool.rs` and `backend_files.rs` say `pool off;`:
+//! they pin the one-connection-per-request path (FR-PROXY-02), which the
+//! first request on a pooled route takes too.
 
+mod backend_files;
 mod bodies;
 mod expect;
 mod internal_files;
