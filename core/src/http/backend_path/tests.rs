@@ -48,11 +48,13 @@ fn sendfile_table() {
 #[test]
 fn accel_table() {
     use TrailingSlash::{Absent, Present};
-    let cases: [(&[u8], Result<Located, BadPath>); 17] = [
+    let cases: [(&[u8], Result<Located, BadPath>); 19] = [
         (b"/protected/a/b.pdf", open(&[b"a", b"b.pdf"], Absent)),
         (b"/protected/a%20b", open(&[b"a b"], Absent)),
         (b"/protected/%C3%A4", open(&[&[0xC3, 0xA4]], Absent)),
         (b"/protected/%252e", open(&[b"%2e"], Absent)),
+        (b"/protected/%2525", open(&[b"%25"], Absent)),
+        (b"/protected/%252F", open(&[b"%2F"], Absent)),
         (b"/protected/", open(&[], Absent)),
         (b"/protected/a/", open(&[b"a"], Present)),
         (b"/protected", Err(BadPath::NoMatch)),
@@ -187,14 +189,34 @@ fn value_byte() -> impl Strategy<Value = u8> {
             Just(b'f'),
             Just(b'F'),
             Just(b'0'),
+            Just(b'5'),
         ],
         3 => b'a'..=b'c',
         1 => any::<u8>(),
     ]
 }
 
+/// Whole escapes, so that `%25` followed by another escape (which a
+/// second decoding pass would turn into one byte) is common.
+fn escape() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        Just(b"%25".to_vec()),
+        Just(b"%2e".to_vec()),
+        Just(b"%2F".to_vec()),
+        Just(b"%00".to_vec()),
+        Just(b"%41".to_vec()),
+    ]
+}
+
+fn piece() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        4 => value_byte().prop_map(|b| vec![b]),
+        1 => escape(),
+    ]
+}
+
 fn tail() -> impl Strategy<Value = Vec<u8>> {
-    proptest::collection::vec(value_byte(), 0..24)
+    proptest::collection::vec(piece(), 0..16).prop_map(|pieces| pieces.concat())
 }
 
 fn with_start(start: &'static [u8]) -> impl Strategy<Value = Vec<u8>> {
@@ -228,6 +250,67 @@ fn check_segments(located: &Located) -> Result<(), TestCaseError> {
     }
 }
 
+/// `accel_path(PREFIX, value)`: every `Open` is safe, starts with the
+/// prefix, has the right trailing slash, and is decoded exactly once.
+fn check_accel(value: &[u8]) -> Result<(), TestCaseError> {
+    let Ok(located) = accel_path(PREFIX, value) else {
+        return Ok(());
+    };
+    check_segments(&located)?;
+    match located {
+        Located::Open { segments, slash } => {
+            prop_assert!(value.starts_with(PREFIX));
+            prop_assert!(visible(value));
+            let rest = &value[PREFIX.len()..];
+            let expected_slash = match rest.last() {
+                Some(b'/') => TrailingSlash::Present,
+                None | Some(_) => TrailingSlash::Absent,
+            };
+            prop_assert_eq!(slash, expected_slash);
+            // Decoded exactly once: one decoded segment per non-empty raw
+            // one, each `%XX` turned into one byte.
+            let raw: Vec<&[u8]> = rest
+                .split(|&b| b == b'/')
+                .filter(|s| !s.is_empty())
+                .collect();
+            prop_assert_eq!(segments.len(), raw.len());
+            for (decoded, raw) in segments.iter().zip(&raw) {
+                prop_assert!(decoded.len() <= raw.len());
+                let escapes = raw.iter().filter(|&&b| b == b'%').count();
+                prop_assert_eq!(
+                    decoded.len() + 2 * escapes,
+                    raw.len(),
+                    "{}",
+                    raw.escape_ascii()
+                );
+            }
+            Ok(())
+        }
+        Located::NotFound => Ok(()),
+    }
+}
+
+/// `PREFIX` and up to four `/`-separated segments of escapes, hex digits
+/// and letters.
+fn accel_value() -> impl Strategy<Value = Vec<u8>> {
+    let part = prop_oneof![
+        Just(&b"%25"[..]),
+        Just(&b"%41"[..]),
+        Just(&b"4"[..]),
+        Just(&b"1"[..]),
+        Just(&b"a"[..]),
+        Just(&b"z"[..]),
+    ];
+    let segment = proptest::collection::vec(part, 1..6).prop_map(|parts| parts.concat());
+    (proptest::collection::vec(segment, 0..4), any::<bool>()).prop_map(|(segments, slash)| {
+        let mut value = [PREFIX, &segments.join(&b'/')[..]].concat();
+        if slash && !segments.is_empty() {
+            value.push(b'/');
+        }
+        value
+    })
+}
+
 fn visible(value: &[u8]) -> bool {
     value.iter().all(|b| (0x21..=0x7E).contains(b))
 }
@@ -238,20 +321,27 @@ proptest! {
         if let Ok(located) = sendfile_path(ROOT, &value) {
             check_segments(&located)?;
             match located {
-                Located::Open { segments, .. } => {
+                Located::Open { segments, slash } => {
                     prop_assert!(
                         value == ROOT || value.starts_with(b"/srv/files/"),
                         "{}",
                         value.escape_ascii()
                     );
                     prop_assert!(visible(&value));
-                    // Taken as bytes: the segments are the value's own.
-                    let rebuilt: Vec<u8> = segments
+                    // Taken as bytes: the segments, each after a `/`, and
+                    // the trailing `/` rebuild exactly what follows the
+                    // root (`ROOT` alone: Absent; `ROOT/`: Present).
+                    let mut rebuilt: Vec<u8> = segments
                         .iter()
                         .flat_map(|s| [&b"/"[..], s].concat())
                         .collect();
-                    prop_assert!(
-                        value[ROOT.len()..].starts_with(&rebuilt),
+                    match slash {
+                        TrailingSlash::Present => rebuilt.push(b'/'),
+                        TrailingSlash::Absent => {}
+                    }
+                    prop_assert_eq!(
+                        &value[ROOT.len()..],
+                        &rebuilt[..],
                         "{}",
                         value.escape_ascii()
                     );
@@ -263,16 +353,15 @@ proptest! {
 
     #[test]
     fn accel_open_is_safe(value in value()) {
-        if let Ok(located) = accel_path(PREFIX, &value) {
-            check_segments(&located)?;
-            match located {
-                Located::Open { .. } => {
-                    prop_assert!(value.starts_with(PREFIX));
-                    prop_assert!(visible(&value));
-                }
-                Located::NotFound => {}
-            }
-        }
+        check_accel(&value)?;
+    }
+
+    /// Values made of escapes and hex digits, so that `%25` followed by
+    /// two hex digits (one byte after a second decoding pass) is common
+    /// and still opens.
+    #[test]
+    fn accel_decodes_once(value in accel_value()) {
+        check_accel(&value)?;
     }
 
     /// Arbitrary roots, prefixes and values never panic, and every `Open`
