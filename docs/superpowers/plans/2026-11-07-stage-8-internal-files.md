@@ -272,7 +272,7 @@ Planner calls (into FR-CFG-26):
 - Produces:
   - `pub(crate) struct InternalRouteId(u32)`, indexing `Core.internal_routes: Vec<InternalRoute>`;
   - `pub(crate) struct InternalRoute { files: InternalFiles, root: RootId }`, built once in `Core::new` (no per-request allocation);
-  - `ProxyRequest.internal: Option<InternalRouteId>`.
+  - `ProxyRequest.internal: Option<Arc<InternalRoute>>` *(as built in Task 3: `plan` does the one lookup; the handle carries the setting and its `RootId`)*.
 - In `http::forward`:
   - `render_backend_request(head, path, peer, persistence, files: Option<&InternalFiles>, out)`;
   - `render_client_response(head, persistence, date, files: Option<&InternalFiles>, out)`;
@@ -408,8 +408,8 @@ Planner calls (into FR-PROXY-32):
   - `BackendFailure::BadFilePath`.
   - Driver format: `kind=backend_file conn peer backend status method [host] path`, and failure `bad_file_path`.
 - **In `config::model`:**
-  - `pub enum RouteMix { StaticOnly, Proxy, InternalFiles }`;
-  - `worst_case_per_connection(limits: &Limits, mix: RouteMix) -> u64`, where `InternalFiles` is `Proxy` plus `FILE_HEAD_EXTRA`.
+  - extend Task 3's `pub enum RouteMix { StaticOnly, Proxy { hint_bytes } }` (from `Config::route_mix()`) with the file-head term, e.g. `Proxy { hint_bytes, file_head: usize }` (`FILE_HEAD_EXTRA` when any route has `internal_files`, else 0);
+  - `worst_case_per_connection(limits: &Limits, mix: RouteMix) -> u64` adds it.
 - **In `http::response`:**
   - `pub const FILE_HEAD_EXTRA: usize`: the most bytes the core adds around a backend's kept lines — status line, `Date`, `Content-Type` (longest MIME), `Content-Length`, `Content-Range` (`u64::MAX` values), `ETag`, `Last-Modified`, `Accept-Ranges`, `X-Content-Type-Options`, `Connection: close`;
   - `render_backend_file_head(status: FileStatus, kept: &[u8], has: Kept, content_type: &str, part: Part, validators, persistence, date, out)`, with `pub enum FileStatus { Ok, Partial, NotModified }`.
@@ -479,7 +479,7 @@ Planner calls (into FR-PROXY-32):
   - **Bounds:**
     - `merged_head_bound_is_502`: the pure check `fits_backend_file(kept_len, capacity)` at the boundary: `capacity - FILE_HEAD_EXTRA` fits, one more does not. (The branch is unreachable by events once the capacity grows; said in its doc comment.)
     - `file_head_extra_bounds_the_core_lines`: the worst-case 206 core lines (`u64::MAX` range and size, `text/javascript; charset=utf-8`, a `Date`, close) take at most `FILE_HEAD_EXTRA` bytes.
-    - `worst_case_per_connection_for_defaults` (extended): `InternalFiles` = `16384 + 1024 + 32768 + (16384 + 100 + 128) + FILE_HEAD_EXTRA`. The memory budget uses `InternalFiles` when any route has `internal_files`.
+    - `worst_case_per_connection_for_defaults` (extended): with `internal_files`, the Task 3 worst case plus `FILE_HEAD_EXTRA`; the memory budget uses `Config::route_mix()`.
   - **Review Focus 5:**
     - `shutdown_drain_finishes_a_sending_backend_file`;
     - `abort_all_cuts_an_opening_backend_file`;
@@ -502,7 +502,7 @@ Planner calls (into FR-PROXY-32 and FR-LOG-02/-05):
   - header order as above (the backend's lines lowercase, the core's capitalised).
 - **Bounds and request state:**
   - the 502 for an oversized merged head is judged before the open, against `FILE_HEAD_EXTRA`;
-  - the route's settings travel by `InternalRouteId`, not by copy.
+  - the route's settings travel by the `Arc<InternalRoute>` handle `plan` resolved (Task 3), not by copy or a second lookup.
 
 ### Task 6: Through the real binary, the random proxy net, and a bench scenario
 
