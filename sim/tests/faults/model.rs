@@ -517,3 +517,59 @@ impl Tree {
         }
     }
 }
+
+/// `expected_abort` on a range that starts mid-file (FR-STATIC-19): the
+/// range's chunks, not the file's, decide whether a change is seen, and a
+/// shrink cuts the range's body where it strikes within it.
+#[test]
+fn a_range_aborts_by_its_own_chunks_and_offsets() {
+    let size = 4 * CHUNK;
+    let file = |fault| ModelFile {
+        bytes: vec![0; usize::try_from(size).unwrap_or(0)],
+        stamp: FileStamp {
+            size,
+            modified_ns: 1,
+        },
+        content_type: "application/octet-stream",
+        fault,
+    };
+    // Two chunks of a four-chunk file, from its middle.
+    let span = Span {
+        first: 2 * CHUNK + 10,
+        end: 3 * CHUNK + 20,
+    };
+    assert_eq!(span.chunks(), 2);
+    let new = FileStamp {
+        size,
+        modified_ns: 2,
+    };
+    // A change after 2 chunks: the range is sent by then; the whole file
+    // (4 chunks) would see it.
+    let late = file(Fault::Change { after: 2, new });
+    assert_eq!(late.expected_abort(Policy::Abort, span), None);
+    assert_eq!(
+        late.expected_abort(Policy::Abort, Span::whole(size)),
+        Some((FileError::Changed, Some(2 * CHUNK)))
+    );
+    // After 1 chunk: the range's second chunk sees it, one chunk sent.
+    let early = file(Fault::Change { after: 1, new });
+    assert_eq!(
+        early.expected_abort(Policy::Abort, span),
+        Some((FileError::Changed, Some(CHUNK)))
+    );
+    // A shrink within the range: what lies before it of the range is
+    // sent; one before the range sends none of it; one after it, all.
+    let at = 2 * CHUNK + 1000;
+    assert_eq!(
+        file(Fault::Shrink(at)).expected_abort(Policy::Abort, span),
+        Some((FileError::Truncated, Some(990)))
+    );
+    assert_eq!(
+        file(Fault::Shrink(CHUNK)).expected_abort(Policy::Abort, span),
+        Some((FileError::Truncated, Some(0)))
+    );
+    assert_eq!(
+        file(Fault::Shrink(3 * CHUNK + 20)).expected_abort(Policy::Abort, span),
+        None
+    );
+}
