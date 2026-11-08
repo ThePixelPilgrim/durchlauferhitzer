@@ -362,7 +362,10 @@ Structure and values:
   valid prefix; a missing `internal_files` root is the startup error of a
   missing static root and keeps its wording (`static root <path>: …`);
   the root `/` is refused: it would make the whole filesystem readable by
-  backend direction.
+  backend direction; a root holding `?` is refused (every `X-Sendfile`
+  value would be a bad path, FR-PROXY-32), and so is a root holding `=`
+  or `,` or a prefix holding `,` (Rack splits `X-Accel-Mapping` on `,`
+  and then on the first `=`, so the hint would break).
 - **FR-CFG-22** [done] Durations are `<u64>` followed by `ms`, `s` or `m`;
   sizes are plain bytes or `<u64>` followed by `KiB`, `MiB` or `GiB`; any
   other form, or an overflowing value, is an error.

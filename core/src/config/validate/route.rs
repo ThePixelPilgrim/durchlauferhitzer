@@ -53,15 +53,25 @@ impl RouteKey {
 /// An `internal_files` root: FR-CFG-15, and visible ASCII only (bytes
 /// 0x21 to 0x7E), so that no `X-Sendfile` value can equal another root and
 /// the root can go into `X-Accel-Mapping` (FR-CFG-26). `/` is refused: it
-/// would make the whole filesystem readable.
+/// would make the whole filesystem readable. `?` is refused (every
+/// `X-Sendfile` value would be a bad path), and so are `=` and `,` (Rack
+/// splits `X-Accel-Mapping` on `,` and then on the first `=`).
 fn valid_internal_root(root: &str) -> bool {
-    root != "/" && valid_root(root) && root.bytes().all(|b| (0x21..=0x7E).contains(&b))
+    root != "/"
+        && valid_root(root)
+        && root
+            .bytes()
+            .all(|b| (0x21..=0x7E).contains(&b) && !matches!(b, b'?' | b'=' | b','))
 }
 
 /// An `internal_files` prefix: starts and ends with `/` and is a valid path
-/// (FR-CFG-13). `/` alone is fine.
+/// (FR-CFG-13), without `,` (Rack splits `X-Accel-Mapping` on it). `/`
+/// alone is fine.
 fn valid_prefix(prefix: &str) -> bool {
-    prefix.starts_with('/') && prefix.ends_with('/') && validate_path(prefix).is_ok()
+    prefix.starts_with('/')
+        && prefix.ends_with('/')
+        && !prefix.contains(',')
+        && validate_path(prefix).is_ok()
 }
 
 /// `x-sendfile <root>` or `x-accel-redirect <prefix> <root>`; the

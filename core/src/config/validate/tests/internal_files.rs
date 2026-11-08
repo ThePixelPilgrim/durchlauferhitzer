@@ -151,6 +151,15 @@ fn bad_values() {
         ("x-accel-redirect /a//b/ /srv", "/a//b/"),
         ("x-accel-redirect /%61/ /srv", "/%61/"),
         ("x-accel-redirect /./ /srv", "/./"),
+        // `?` makes every X-Sendfile value a 502; Rack splits
+        // X-Accel-Mapping on `,` and then on the first `=`.
+        ("x-sendfile \"/srv/a?b\"", "/srv/a?b"),
+        ("x-sendfile \"/srv/a=b\"", "/srv/a=b"),
+        ("x-sendfile \"/srv/a,b\"", "/srv/a,b"),
+        ("x-accel-redirect /p/ \"/srv/a?b\"", "/srv/a?b"),
+        ("x-accel-redirect /p/ \"/srv/a=b\"", "/srv/a=b"),
+        ("x-accel-redirect /p/ \"/srv/a,b\"", "/srv/a,b"),
+        ("x-accel-redirect \"/a,b/\" /srv", "/a,b/"),
     ];
     for (setting, value) in cases {
         assert_eq!(
