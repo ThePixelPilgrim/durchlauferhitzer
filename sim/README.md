@@ -108,7 +108,8 @@ tests/
                         206, 416, HEAD, POST, 404s, bad paths (502),
                         no proxy limits, file changes, a slow disk and
                         client, pipelining, the upstream pooled after
-                        `Content-Length: 0`
+                        `Content-Length: 0`, drain, abort and reset
+                        around a file
   faults/             fault injection and randomized runs (see below)
     main.rs             shared configs and helpers
     split.rs            deterministic split, byte-by-byte and pipelined runs

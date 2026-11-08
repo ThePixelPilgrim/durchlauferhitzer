@@ -11,7 +11,7 @@ use durchlauferhitzer_core::http::request::{Method, Persistence};
 use durchlauferhitzer_core::http::response::BodyMode;
 use durchlauferhitzer_core::http::status::Status;
 use durchlauferhitzer_core::{
-    BackendFailure, BackendId, ConnId, FileError, FileStamp, Log, UpstreamHolder,
+    BackendFailure, BackendId, ConnId, DrainTarget, FileError, FileStamp, Log, UpstreamHolder,
 };
 use durchlauferhitzer_sim::{Sim, SimConnState, Window};
 
@@ -529,5 +529,76 @@ fn pipelined_request_is_answered_after_the_file() {
             backend_file(c, Status::Ok, Method::Get, "/dl/x"),
             backend_file(c, Status::Ok, Method::Get, "/dl/y"),
         ]
+    );
+}
+
+/// A client taking `window` bytes per write asks for `big.bin`; the
+/// backend names it. Pumped until idle: the head and part of the file
+/// are out.
+fn sending_big(sim: &mut Sim) -> ConnId {
+    let c = sim.connect(peer());
+    sim.set_client_window(c, Window::Budget(64 * 1024));
+    sim.send(c, GET);
+    sim.run_until_idle();
+    let up = only_upstream(sim);
+    sim.take_backend_request(up);
+    sim.backend_send(
+        up,
+        b"HTTP/1.1 200 OK\r\nX-Accel-Redirect: /protected/big.bin\r\nContent-Length: 0\r\n\r\n",
+    );
+    sim.run_until_idle();
+    c
+}
+
+/// Review Focus 5: a shutdown drain lets a backend file being sent
+/// finish, then closes; the fast shutdown cuts a backend file being
+/// opened or sent, and the late open is closed as an orphan; a client
+/// reset mid-file closes the file once (the sim checks every file is
+/// closed with its connection).
+#[test]
+fn drain_abort_and_reset_around_a_backend_file() {
+    let mut sim = sim();
+    let c = sending_big(&mut sim);
+    assert_eq!(sim.open_files(), 1, "{}", sim.trace());
+    sim.begin_drain(DrainTarget::Shutdown);
+    sim.set_client_window(c, Window::Unlimited);
+    sim.run_until_idle();
+    let received = sim.take_received(c);
+    assert!(received.ends_with(&pattern(600 * 1024)), "{}", sim.trace());
+    assert_ne!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0);
+
+    let mut sim = self::sim();
+    let _ = sending_big(&mut sim);
+    sim.abort_all();
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+    assert!(sim.is_drained(), "{}", sim.trace());
+
+    let mut sim = self::sim();
+    sim.set_disk_delay(Duration::from_millis(50));
+    let c = request(&mut sim, GET);
+    let up = only_upstream(&sim);
+    sim.take_backend_request(up);
+    sim.backend_send(up, NAMES_A);
+    sim.run_until_idle();
+    assert!(sim.opening_file(c), "{}", sim.trace());
+    sim.abort_all();
+    assert!(!sim.is_drained(), "the open is unanswered");
+    sim.advance(Duration::from_millis(50));
+    sim.run_until_idle();
+    assert!(sim.is_drained(), "{}", sim.trace());
+
+    let mut sim = self::sim();
+    let c = sending_big(&mut sim);
+    sim.reset(c);
+    sim.run_until_idle();
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+    assert_eq!(sim.state(c), SimConnState::Closed);
+    assert_eq!(
+        sim.logs().last(),
+        Some(&Log::Reset {
+            conn: c,
+            peer: peer(),
+        })
     );
 }
