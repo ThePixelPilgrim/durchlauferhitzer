@@ -381,20 +381,6 @@ pub(crate) fn announced<'t>(
     Ok(Some(announced))
 }
 
-pub(crate) fn log_conn(log: &Log) -> ConnId {
-    match log {
-        Log::Response { conn, .. }
-        | Log::Rejected { conn, .. }
-        | Log::Reset { conn, .. }
-        | Log::FileAborted { conn, .. }
-        | Log::ProxiedResponse { conn, .. }
-        | Log::BackendFile { conn, .. }
-        | Log::BackendFailed { conn, .. }
-        | Log::BackendRetried { conn, .. }
-        | Log::BackendNotSilent { conn, .. } => *conn,
-    }
-}
-
 /// The persistences a response to request `template` may have
 /// (FR-HTTP-09, FR-CONN-04): close for HTTP/1.0, for `Connection: close`
 /// and for a body the core does not read; keep-alive otherwise. A proxied
@@ -446,7 +432,7 @@ pub(crate) fn check_client(
         .logs()
         .iter()
         .enumerate()
-        .filter(|(_, l)| log_conn(l) == client.id)
+        .filter(|(_, l)| l.conn() == client.id)
         .map(|(i, l)| (l, marks.phase(i)))
         .collect();
     // The connection's first log written during the drain answers the
@@ -459,7 +445,7 @@ pub(crate) fn check_client(
         .logs()
         .iter()
         .enumerate()
-        .filter(|(_, l)| log_conn(l) == client.id)
+        .filter(|(_, l)| l.conn() == client.id)
         .position(|(i, _)| marks.drain.is_some_and(|d| i >= d));
     let logs: Vec<&Log> = phased.iter().map(|(l, _)| *l).collect();
     // A connection refused (over a limit, or while shutting down) has no

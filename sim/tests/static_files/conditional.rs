@@ -60,7 +60,7 @@ fn assert_304(sim: &mut Sim, method: Method, headers: &str) {
         "{headers}\n{}",
         sim.trace()
     );
-    let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+    let logs: Vec<&Log> = sim.logs().iter().filter(|l| l.conn() == c).collect();
     assert_eq!(
         logs,
         [&response_log(c, Status::NotModified, method, "/f.txt")],
@@ -81,7 +81,7 @@ fn assert_200(sim: &mut Sim, headers: &str) {
         "{headers}\n{}",
         sim.trace()
     );
-    let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+    let logs: Vec<&Log> = sim.logs().iter().filter(|l| l.conn() == c).collect();
     assert_eq!(
         logs,
         [&response_log(c, Status::Ok, Method::Get, "/f.txt")],
@@ -209,7 +209,7 @@ fn a_directory_index_gets_a_304() {
         "{}",
         sim.trace()
     );
-    let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+    let logs: Vec<&Log> = sim.logs().iter().filter(|l| l.conn() == c).collect();
     assert_eq!(
         logs,
         [&response_log(c, Status::NotModified, Method::Get, "/d/")],

@@ -107,6 +107,23 @@ pub enum Log {
     },
 }
 
+impl Log {
+    /// The connection the entry is about.
+    pub fn conn(&self) -> ConnId {
+        match self {
+            Log::Response { conn, .. }
+            | Log::Rejected { conn, .. }
+            | Log::Reset { conn, .. }
+            | Log::FileAborted { conn, .. }
+            | Log::ProxiedResponse { conn, .. }
+            | Log::BackendFile { conn, .. }
+            | Log::BackendFailed { conn, .. }
+            | Log::BackendRetried { conn, .. }
+            | Log::BackendNotSilent { conn, .. } => *conn,
+        }
+    }
+}
+
 /// How talking to a backend failed (FR-PROXY-31).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendFailure {
@@ -226,4 +243,79 @@ pub enum TimeoutKind {
 pub enum LimitKind {
     Connections,
     ConnectionsPerIp,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
+
+    /// Every entry names the connection it is about.
+    #[test]
+    fn every_entry_names_its_connection() {
+        let conn = ConnId(7);
+        let peer = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let backend = BackendId(0);
+        let request = RequestSummary {
+            method: Method::Get,
+            host: None,
+            path: "/".to_owned(),
+        };
+        let entries = [
+            Log::Response {
+                conn,
+                peer,
+                status: Status::Ok,
+                request: None,
+            },
+            Log::Rejected {
+                conn,
+                peer,
+                reason: RejectReason::ShuttingDown,
+            },
+            Log::Reset { conn, peer },
+            Log::FileAborted {
+                conn,
+                peer,
+                error: FileError::Changed,
+            },
+            Log::ProxiedResponse {
+                conn,
+                peer,
+                backend,
+                status: 200,
+                request: request.clone(),
+            },
+            Log::BackendFile {
+                conn,
+                peer,
+                backend,
+                status: Status::Ok,
+                request: request.clone(),
+            },
+            Log::BackendFailed {
+                conn,
+                peer,
+                backend,
+                kind: BackendFailure::BadFilePath,
+            },
+            Log::BackendRetried {
+                conn,
+                peer,
+                backend,
+                kind: BackendFailure::Reset,
+                request: request.clone(),
+            },
+            Log::BackendNotSilent {
+                conn,
+                peer,
+                backend,
+                request,
+            },
+        ];
+        for entry in entries {
+            assert_eq!(entry.conn(), conn, "{entry:?}");
+        }
+    }
 }

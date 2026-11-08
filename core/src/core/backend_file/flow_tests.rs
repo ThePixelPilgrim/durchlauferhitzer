@@ -196,8 +196,13 @@ fn continue_goes_before_the_merged_head() {
     );
     let len = core.upstream_send_buffer(UP).len();
     handle(&mut core, Event::UpstreamSent { up: UP, len });
-    // The backend answers before the body: the client's body stays unread.
-    answer(&mut core, NAMES_A);
+    // The backend answers before the body: the client's body stays unread,
+    // and the upstream, with part of a request, is closed (FR-PROXY-02).
+    let actions = answer(&mut core, NAMES_A);
+    assert!(
+        actions.contains(&Action::CloseUpstream { up: UP }),
+        "{actions:?}"
+    );
     opened(&mut core, regular(1000));
     assert_eq!(
         text(core.send_buffer(CONN)),

@@ -51,7 +51,7 @@ pub(crate) fn assert_404(sim: &mut Sim, path: &str) {
         sim.trace()
     );
     assert_eq!(sim.state(c), SimConnState::Open, "{path}\n{}", sim.trace());
-    let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+    let logs: Vec<&Log> = sim.logs().iter().filter(|l| l.conn() == c).collect();
     assert_eq!(
         logs,
         [&response_log(c, Status::NotFound, Method::Get, path)],
@@ -59,20 +59,6 @@ pub(crate) fn assert_404(sim: &mut Sim, path: &str) {
         sim.trace()
     );
     assert_eq!(sim.open_files(), 0, "{path}\n{}", sim.trace());
-}
-
-pub(crate) fn log_conn(log: &Log) -> ConnId {
-    match log {
-        Log::Response { conn, .. }
-        | Log::Rejected { conn, .. }
-        | Log::Reset { conn, .. }
-        | Log::FileAborted { conn, .. }
-        | Log::ProxiedResponse { conn, .. }
-        | Log::BackendFile { conn, .. }
-        | Log::BackendFailed { conn, .. }
-        | Log::BackendRetried { conn, .. }
-        | Log::BackendNotSilent { conn, .. } => *conn,
-    }
 }
 
 pub(crate) fn opens(trace: &str) -> usize {

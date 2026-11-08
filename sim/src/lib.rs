@@ -628,7 +628,7 @@ impl Sim {
             Action::SetInterest { conn, .. }
             | Action::ShutdownWrite { conn }
             | Action::Close { conn } => *conn,
-            Action::Log(log) => log_conn(log),
+            Action::Log(log) => log.conn(),
             Action::OpenFile { .. } | Action::Readahead { .. } | Action::CloseFile { .. } => {
                 return self.apply_file(action);
             }
@@ -774,20 +774,6 @@ impl Sim {
     }
 }
 
-fn log_conn(log: &Log) -> ConnId {
-    match log {
-        Log::Response { conn, .. }
-        | Log::Rejected { conn, .. }
-        | Log::Reset { conn, .. }
-        | Log::FileAborted { conn, .. }
-        | Log::ProxiedResponse { conn, .. }
-        | Log::BackendFile { conn, .. }
-        | Log::BackendFailed { conn, .. }
-        | Log::BackendRetried { conn, .. }
-        | Log::BackendNotSilent { conn, .. } => *conn,
-    }
-}
-
 fn event_text(event: &Event) -> String {
     match event {
         Event::Accepted { conn, peer } => format!("conn={} Accepted peer={peer}", conn.0),
@@ -825,7 +811,7 @@ fn action_text(action: &Action) -> String {
         }
         Action::ShutdownWrite { conn } => format!("conn={} -> ShutdownWrite", conn.0),
         Action::Close { conn } => format!("conn={} -> Close", conn.0),
-        Action::Log(log) => format!("conn={} -> Log {log:?}", log_conn(log).0),
+        Action::Log(log) => format!("conn={} -> Log {log:?}", log.conn().0),
         Action::OpenFile { file, root, path } => {
             let path: Vec<String> = path
                 .iter()

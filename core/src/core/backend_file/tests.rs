@@ -15,8 +15,8 @@ use crate::upstream::{BackendId, UpstreamHolder, UpstreamId};
 
 /// `/dl` and `/grow` serve `x-accel-redirect /protected/` below
 /// `/srv/files` (`/grow` with `allow_growth`), `/sf` `x-sendfile` below
-/// the same root; `/plain` has no `internal_files`. Every route caps the
-/// response body at 10 bytes.
+/// the same root, `/nopool` too with `pool off`; `/plain` has no
+/// `internal_files`. Every route caps the response body at 10 bytes.
 pub(super) const CONFIG: &str = "listen 127.0.0.1:8080; host a.test { \
     path /dl { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body 10; \
       internal_files x-accel-redirect /protected/ /srv/files; } \
@@ -24,6 +24,8 @@ pub(super) const CONFIG: &str = "listen 127.0.0.1:8080; host a.test { \
       internal_files x-accel-redirect /protected/ /srv/files; on_file_change allow_growth; } \
     path /sf { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body 10; \
       internal_files x-sendfile /srv/files; } \
+    path /nopool { proxy 127.0.0.1:3000; pool off; max_request_body 1MiB; \
+      max_response_body 10; internal_files x-accel-redirect /protected/ /srv/files; } \
     path /plain { proxy 127.0.0.1:3000; max_request_body 1MiB; max_response_body 10; } }";
 
 pub(super) const CONN: ConnId = ConnId(1);
@@ -255,7 +257,7 @@ fn upstream_parked_only_after_content_length_0() {
     assert!(opens(&actions), "{actions:?}");
 
     let named = "X-Accel-Redirect: /protected/a.pdf\r\n";
-    let closing: [(&[u8], String); 6] = [
+    let closing: [(&[u8], String); 10] = [
         (
             GET,
             format!("HTTP/1.1 200 OK\r\n{named}Content-Length: 5\r\n\r\n"),
@@ -277,14 +279,34 @@ fn upstream_parked_only_after_content_length_0() {
             GET,
             format!("HTTP/1.1 200 OK\r\n{named}Content-Length: 0\r\n\r\nHTTP/1.1"),
         ),
+        // The request side (FR-PROXY-02): an HTTP/1.0 client, a `pool off`
+        // route, a body the backend answered before it was all written.
+        (
+            b"GET /dl/x HTTP/1.0\r\nHost: a.test\r\nConnection: keep-alive\r\n\r\n",
+            format!("HTTP/1.1 200 OK\r\n{named}Content-Length: 0\r\n\r\n"),
+        ),
+        (
+            b"GET /nopool/x HTTP/1.1\r\nHost: a.test\r\n\r\n",
+            format!("HTTP/1.1 200 OK\r\n{named}Content-Length: 0\r\n\r\n"),
+        ),
+        (
+            b"POST /dl/x HTTP/1.1\r\nHost: a.test\r\nContent-Length: 5\r\n\r\nab",
+            format!("HTTP/1.1 200 OK\r\n{named}Content-Length: 0\r\n\r\n"),
+        ),
+        // The response side: an HTTP/1.0 backend never keeps it.
+        (
+            GET,
+            format!("HTTP/1.0 200 OK\r\n{named}Content-Length: 0\r\n\r\n"),
+        ),
     ];
     for (wire, backend) in closing {
         let mut core = self::core();
         forwarded(&mut core, wire);
         let actions = answer(&mut core, backend.as_bytes());
-        assert!(closes_upstream(&actions), "{backend}: {actions:?}");
-        assert_eq!(core.upstream_holder(UP), None, "{backend}");
-        assert!(opens(&actions), "{backend}: {actions:?}");
+        let case = format!("{}{backend}", text(wire));
+        assert!(closes_upstream(&actions), "{case}: {actions:?}");
+        assert_eq!(core.upstream_holder(UP), None, "{case}");
+        assert!(opens(&actions), "{case}: {actions:?}");
     }
 }
 

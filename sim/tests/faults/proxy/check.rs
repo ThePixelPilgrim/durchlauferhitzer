@@ -209,7 +209,7 @@ pub(crate) fn check_story(
         .logs()
         .iter()
         .enumerate()
-        .filter(|(_, l)| conn_of(l) == story.conn)
+        .filter(|(_, l)| l.conn() == story.conn)
         .map(|(i, l)| (l.clone(), marks.phase(i)))
         .unzip();
     let fail = |what: String| -> ! {

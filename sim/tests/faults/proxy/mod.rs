@@ -32,6 +32,7 @@ mod outcome;
 mod pool;
 mod request;
 mod response;
+mod round_end;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -54,6 +55,7 @@ use outcome::*;
 use pool::*;
 use request::*;
 use response::*;
+use round_end::*;
 
 /// Seeds the proxy net runs (debug build: about 15 s; 1000 so the thin
 /// pool, retry and drain gates each see more than a handful).

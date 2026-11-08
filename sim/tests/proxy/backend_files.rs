@@ -163,6 +163,52 @@ fn the_named_file_is_served() {
     assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
 }
 
+/// FR-PROXY-02: after `Content-Length: 0` the upstream is still closed
+/// unless the exchange is reusable on both sides: an HTTP/1.0 client, an
+/// HTTP/1.0 backend, a request body the backend answered before it was
+/// all written. The file is served all the same.
+#[test]
+fn the_upstream_closes_unless_the_exchange_is_reusable() {
+    let cases: [(&[u8], &[u8]); 3] = [
+        (
+            b"GET /dl/x HTTP/1.0\r\nHost: example.test\r\nConnection: keep-alive\r\n\r\n",
+            NAMES_A,
+        ),
+        (
+            GET,
+            b"HTTP/1.0 200 OK\r\nX-Accel-Redirect: /protected/a.pdf\r\nContent-Length: 0\r\n\r\n",
+        ),
+        (
+            b"POST /dl/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nab",
+            NAMES_A,
+        ),
+    ];
+    for (wire, backend) in cases {
+        let mut sim = sim();
+        let c = served(&mut sim, wire, backend);
+        assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+        assert!(
+            sim.take_received(c).ends_with(&pattern(1000)),
+            "{}",
+            sim.trace()
+        );
+        assert_eq!(
+            sim.logs().first(),
+            Some(&backend_file(c, Status::Ok, method_of(wire), "/dl/x")),
+            "{}",
+            sim.trace()
+        );
+    }
+}
+
+fn method_of(wire: &[u8]) -> Method {
+    if wire.starts_with(b"POST") {
+        Method::Other("POST".to_owned())
+    } else {
+        Method::Get
+    }
+}
+
 /// `x-sendfile` names the file by its path below the root.
 #[test]
 fn x_sendfile_serves_the_file() {

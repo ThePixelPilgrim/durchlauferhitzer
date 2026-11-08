@@ -38,11 +38,14 @@
 use super::proxy::{close_upstream, take_exchange};
 use super::{Action, ConnId, Core, Event, Interest, Mode};
 use crate::config::Limits;
-use crate::conn::{ConnState, Release, Replay, Reuse};
+use crate::conn::{ConnState, ProxyRequest, Release, Replay, Reuse};
+use crate::http::request::Persistence;
+use crate::http::response_head::ResponseHead;
 use crate::log::{BackendFailure, Log};
 use crate::relay_body::Rest;
+use crate::request_body::Stage;
 use crate::time::Instant;
-use crate::upstream::{UpstreamId, UpstreamTable};
+use crate::upstream::{BackendId, ExchangeBuffers, UpstreamId, UpstreamTable};
 
 /// Before a fresh connect: with `max_connections` upstreams open, close
 /// the oldest idle one, so active and idle upstreams together never
@@ -52,6 +55,61 @@ pub(super) fn make_room(upstreams: &mut UpstreamTable, limits: &Limits, actions:
     if upstreams.len() >= max {
         if let Some(oldest) = upstreams.oldest_idle() {
             close_upstream(upstreams, oldest, actions);
+        }
+    }
+}
+
+/// What decides whether an exchange's upstream may be reused
+/// (FR-PROXY-02), one rule for a relayed response and a backend-directed
+/// file (FR-PROXY-32): the request asked to keep the connection and was
+/// written whole (a backend that answered early has part of a request),
+/// and the response keeps it (HTTP/1.1, no `close`). Each caller adds its
+/// own rule for the response's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Exchange {
+    /// What the request asked of the backend's connection.
+    pub(super) toward: Persistence,
+    pub(super) request_head: Written,
+    pub(super) body: Stage,
+    /// Whether the backend keeps the connection after its response.
+    pub(super) response: Persistence,
+}
+
+/// How much of the request head reached the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Written {
+    Whole,
+    Partly,
+}
+
+impl Exchange {
+    /// The exchange of `request`, its head buffer `buffers`, answered by
+    /// `head`.
+    pub(super) fn of(
+        request: &ProxyRequest,
+        buffers: &ExchangeBuffers,
+        head: &ResponseHead,
+    ) -> Exchange {
+        Exchange {
+            toward: request.toward,
+            request_head: if buffers.head_pending() {
+                Written::Partly
+            } else {
+                Written::Whole
+            },
+            body: request.body.stage(),
+            response: head.persistence(),
+        }
+    }
+
+    /// Park the upstream in `backend`'s pool once the response is done if
+    /// the exchange is reusable on both sides, else close it.
+    pub(super) fn release(self, backend: BackendId) -> Release {
+        match (self.toward, self.request_head, self.body, self.response) {
+            (Persistence::KeepAlive, Written::Whole, Stage::Written, Persistence::KeepAlive) => {
+                Release::Park(backend)
+            }
+            (Persistence::KeepAlive | Persistence::Close, _, _, _) => Release::Close,
         }
     }
 }
@@ -238,5 +296,7 @@ impl Core {
     }
 }
 
+#[cfg(test)]
+mod reuse_tests;
 #[cfg(test)]
 mod tests;

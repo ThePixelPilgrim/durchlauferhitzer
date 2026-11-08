@@ -300,7 +300,7 @@ impl RelayBody {
 /// What follows a body that ends at `end` of `filled` bytes in a buffer
 /// of `capacity`: bytes already read after it, or a full buffer, whose
 /// read may have left more in the socket, are unread.
-fn rest_after(end: usize, filled: usize, capacity: usize) -> Rest {
+pub(crate) fn rest_after(end: usize, filled: usize, capacity: usize) -> Rest {
     if end < filled || filled >= capacity {
         Rest::Unread
     } else {

@@ -206,7 +206,7 @@ impl Story {
         let logged = sim
             .logs()
             .iter()
-            .filter(|l| conn_of(l) == self.conn && !matches!(l, Log::BackendNotSilent { .. }))
+            .filter(|l| l.conn() == self.conn && !matches!(l, Log::BackendNotSilent { .. }))
             .count();
         self.received.len() >= bytes && logged >= logs
     }
@@ -678,62 +678,6 @@ fn run_timed(
         Timing::Normal | Timing::Early { .. } | Timing::Eager => {}
     }
     sim.run_until_idle();
-}
-
-/// End a round: windows open, every client ends its stream.
-pub(crate) fn wind_down(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) {
-    for story in stories.iter() {
-        if story.reset.is_none() && sim.state(story.conn) != SimConnState::Closed {
-            sim.set_client_window(story.conn, Window::Unlimited);
-        }
-        for run in &story.runs {
-            if let Some(up) = run.up {
-                sim.set_backend_window(up, Window::Unlimited);
-            }
-        }
-    }
-    sim.run_until_idle();
-    sync(sim, stories, assign);
-    for story in stories.iter() {
-        if story.reset.is_none() {
-            sim.send_eof(story.conn);
-        }
-    }
-    sim.run_until_idle();
-    sync(sim, stories, assign);
-}
-
-/// Every connection and upstream of a round is closed.
-pub(crate) fn assert_closed(sim: &Sim, stories: &[Story]) {
-    for story in stories {
-        assert_eq!(
-            sim.state(story.conn),
-            SimConnState::Closed,
-            "conn={} still open at the end of its round\ntrace:\n{}",
-            story.conn.0,
-            sim.trace()
-        );
-    }
-    assert_eq!(
-        sim.open_upstreams(),
-        0,
-        "upstreams left open\ntrace:\n{}",
-        sim.trace()
-    );
-}
-
-pub(crate) fn conn_of(log: &Log) -> ConnId {
-    match log {
-        Log::Response { conn, .. }
-        | Log::Rejected { conn, .. }
-        | Log::Reset { conn, .. }
-        | Log::FileAborted { conn, .. }
-        | Log::ProxiedResponse { conn, .. }
-        | Log::BackendFile { conn, .. }
-        | Log::BackendFailed { conn, .. }
-        | Log::BackendRetried { conn, .. }
-        | Log::BackendNotSilent { conn, .. } => *conn,
-    }
 }
 
 /// One seed of the proxy net.

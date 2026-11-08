@@ -7,7 +7,7 @@
 //! is decided and its merged head rendered in `file_answer.rs`, as for a
 //! static route.
 
-use super::pool::release;
+use super::pool::{Exchange, release};
 use super::proxy::{queued_send_deadline, take_exchange};
 use super::{Action, ConnId, Core, InternalRoute};
 use crate::config::FileHeader;
@@ -21,8 +21,8 @@ use crate::http::response::{BodyMode, FILE_HEAD_EXTRA, render_fixed};
 use crate::http::response_head::{RequestKind, ResponseBody, ResponseError, ResponseHead};
 use crate::http::status::Status;
 use crate::log::{BackendFailure, Log};
-use crate::relay_body::Rest;
-use crate::request_body::{BodyEnd, Stage};
+use crate::relay_body::rest_after;
+use crate::request_body::BodyEnd;
 use crate::time::Instant;
 
 /// What a backend's response head names on an `internal_files` route.
@@ -137,33 +137,19 @@ impl Core {
             Located::Open { .. } | Located::NotFound => {}
         }
         // FR-PROXY-02: the upstream is reused only if the exchange is
-        // reusable on both sides, as for a relayed response, and the
-        // backend sent no body (`Content-Length: 0`; never after a HEAD,
-        // whose response says nothing of its body) and nothing behind its
-        // head. The body is never read: anything else closes it.
+        // reusable on both sides (`Exchange`, as for a relayed response)
+        // and the backend sent no body (`Content-Length: 0`; never after a
+        // HEAD, whose response says nothing of its body) and nothing behind
+        // its head. The body is never read: anything else closes it.
         let release_to = match (
             request.kind,
-            request.toward,
-            buffers.head_pending(),
-            request.body.stage(),
-            head.persistence(),
             head.body,
+            Exchange::of(request, buffers, &head).release(request.backend),
         ) {
-            (
-                RequestKind::Other,
-                Persistence::KeepAlive,
-                false,
-                Stage::Written,
-                Persistence::KeepAlive,
-                ResponseBody::None,
-            ) => Release::Park(request.backend),
-            (RequestKind::Head | RequestKind::Other, _, _, _, _, _) => Release::Close,
+            (RequestKind::Other, ResponseBody::None, park @ Release::Park(_)) => park,
+            (RequestKind::Head | RequestKind::Other, _, _) => Release::Close,
         };
-        let rest = if consumed < *filled || *filled >= buffers.recv.len() {
-            Rest::Unread
-        } else {
-            Rest::Clean
-        };
+        let rest = rest_after(consumed, *filled, buffers.recv.len());
         let deadline = queued_send_deadline(*unread_continue, now, limits);
         let Some((up, mut request, mut buffers)) = take_exchange(c) else {
             return;

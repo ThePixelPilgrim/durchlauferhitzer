@@ -7,7 +7,7 @@
 //! (FR-PROXY-32).
 
 use super::backend_file::named_file;
-use super::pool::release as release_upstream;
+use super::pool::{Exchange, release as release_upstream};
 use super::proxy::{close_upstream, queued_send_deadline, take_exchange};
 use super::request::{AfterResponse, finish};
 use super::{Action, ConnId, Core};
@@ -18,7 +18,7 @@ use crate::http::request::{Persistence, Version};
 use crate::http::response_head::{RequestKind, ResponseBody, ResponseError, ResponseHead};
 use crate::log::{BackendFailure, Log};
 use crate::relay_body::{Closing, RelayBody};
-use crate::request_body::{Arrived, BodyEnd, Stage};
+use crate::request_body::{Arrived, BodyEnd};
 use crate::time::Instant;
 use crate::upstream::{ExchangeBuffers, UpstreamId};
 
@@ -111,31 +111,23 @@ impl Core {
             }
         };
         // FR-PROXY-02: the upstream may be reused once the body is
-        // complete only if the exchange is reusable on both sides: the
-        // request asked to keep the connection and was written whole (a
-        // backend that answered early has part of a request), and the
-        // response keeps it (HTTP/1.1, no `close`) and ends at its
-        // framing, not at the end of stream.
+        // complete only if the exchange is reusable on both sides
+        // (`Exchange`) and the response ends at its framing, not at the
+        // end of stream.
         // Owner decision 2026-11-07: never after a response to HEAD, a 204
         // or a 304, whose body a buggy backend may send anyway.
         let bodiless = request.kind == RequestKind::Head || matches!(head.status, 204 | 304);
         let release = match (
             bodiless,
-            request.toward,
-            buffers.head_pending(),
-            request.body.stage(),
-            head.persistence(),
             head.body,
+            Exchange::of(request, buffers, &head).release(request.backend),
         ) {
             (
                 false,
-                Persistence::KeepAlive,
-                false,
-                Stage::Written,
-                Persistence::KeepAlive,
                 ResponseBody::None | ResponseBody::Length(_) | ResponseBody::Chunked,
-            ) => Release::Park(request.backend),
-            (_, Persistence::KeepAlive | Persistence::Close, _, _, _, _) => Release::Close,
+                park @ Release::Park(_),
+            ) => park,
+            (_, _, Release::Park(_) | Release::Close) => Release::Close,
         };
         let Some((_, mut request, mut buffers)) = take_exchange(c) else {
             return;

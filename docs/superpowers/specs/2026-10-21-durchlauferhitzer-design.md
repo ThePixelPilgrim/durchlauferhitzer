@@ -1211,8 +1211,8 @@ Failures, persistence, timeouts:
     error here (its `Transfer-Encoding` is replaced). The backend head
     is kept until the open finishes, so the per-connection worst case
     (NFR-RES-01) grows by the file headers the core adds; a merged head
-    that would not fit the send buffer is a `502` (NFR-RES-03).
-    A served file (`200` or `304`) is logged once, as its own kind with
+    that would not fit the head buffer is a `502` (NFR-RES-03).
+    A served file (`200`, `206` or `304`) is logged once, as its own kind with
     the client's status, the backend and the request summary
     (FR-LOG-02, -03).
   - **The backend's body** is never read. The file starts as soon as the

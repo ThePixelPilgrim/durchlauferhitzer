@@ -299,7 +299,7 @@ fn encoded_unreserved_character_in_the_path_is_400() {
             "{target}\n{}",
             sim.trace()
         );
-        let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+        let logs: Vec<&Log> = sim.logs().iter().filter(|l| l.conn() == c).collect();
         assert_eq!(
             logs,
             [&Log::Rejected {
@@ -472,7 +472,7 @@ fn escaped_spellings_reach_the_specific_route() {
         let mut expected = head("text/plain; charset=utf-8", stamp, Persistence::KeepAlive);
         expected.extend_from_slice(body);
         assert_eq!(received, expected, "{path}\n{}", sim.trace());
-        let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+        let logs: Vec<&Log> = sim.logs().iter().filter(|l| l.conn() == c).collect();
         assert_eq!(
             logs,
             [&response_log(c, Status::Ok, Method::Get, path)],
@@ -497,7 +497,7 @@ fn encoded_semicolon_in_the_path_is_400() {
             "{target}\n{}",
             sim.trace()
         );
-        let logs: Vec<&Log> = sim.logs().iter().filter(|l| log_conn(l) == c).collect();
+        let logs: Vec<&Log> = sim.logs().iter().filter(|l| l.conn() == c).collect();
         assert_eq!(
             logs,
             [&Log::Rejected {

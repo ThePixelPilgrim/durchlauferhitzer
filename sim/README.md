@@ -145,6 +145,8 @@ tests/
       outcome.rs          exchanges, timings and the outcomes they allow
       draw.rs             drawing an exchange: plain ones, timed scenarios
       drive.rs            stories, rounds, backends, timed scenarios
+      round_end.rs        the end of a round: windows open, streams end,
+                          nothing left open
       check.rs            the oracle: each story against the model
       drain.rs            the shutdown in this net: when it falls, and
                           the outcomes a drain (shutdown or restart)
