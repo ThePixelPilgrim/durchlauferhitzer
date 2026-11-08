@@ -58,10 +58,11 @@ no static root is opened.
 ## Try it
 
 The example config listens on `127.0.0.1:8080` and runs as any normal user
-(no root). Its static and `internal_files` roots must exist. They are under `/tmp`, which every
-user can write to: on a shared machine another user could create
-`/tmp/durchlauferhitzer` first (or a symlink there), so use roots you own
-instead and change them in the config. On your own machine:
+(no root). Its static and `internal_files` roots must exist. They are
+under `/tmp`, which every user can write to: on a shared machine another
+user could create `/tmp/durchlauferhitzer` first (or a symlink there), so
+use roots you own instead and change them in the config. On your own
+machine:
 
 ```sh
 mkdir -p /tmp/durchlauferhitzer/www /tmp/durchlauferhitzer/well-known \
@@ -85,12 +86,13 @@ Logging never blocks: lines stderr cannot take are dropped and counted
 (`kind=dropped count=N`).
 
 Startup checks, in this order, and fails with one `durchlauferhitzer:
-<message>` line and exit 2: `openat2` support, every static and `internal_files` root (it must be
-a directory), binding every `listen` address in config order, the descriptor
-budget (`RLIMIT_NOFILE`: a low soft limit is raised to what is needed when
-the hard limit allows, else the error names both numbers; raise the limit or
-lower `max_connections`), the privileges (below), and a containment layer
-set `required` that the kernel cannot apply (below).
+<message>` line and exit 2: `openat2` support, every static and
+`internal_files` root (it must be a directory), binding every `listen`
+address in config order, the descriptor budget (`RLIMIT_NOFILE`: a low soft
+limit is raised to what is needed when the hard limit allows, else the
+error names both numbers; raise the limit or lower `max_connections`), the
+privileges (below), and a containment layer set `required` that the kernel
+cannot apply (below).
 
 ## Privileges
 
@@ -100,9 +102,9 @@ set `required` that the kernel cannot apply (below).
   or socket activation; a refused bind is a startup error naming the
   address.
 - Started as root (any of the real, effective or saved uid 0), `user` is
-  required: after binding and opening the static and `internal_files` roots the server drops to
-  that user and group for good, and refuses to run as root otherwise
-  (exit 2).
+  required: after binding and opening the static and `internal_files`
+  roots the server drops to that user and group for good, and refuses to
+  run as root otherwise (exit 2).
 
 ## Containment
 
@@ -122,11 +124,11 @@ journalctl -k | grep seccomp    # or, without systemd: dmesg | grep seccomp
 
 Use Linux 6.2 or later (6.10 or later restricts every right with
 Landlock alone; before 6.2 truncation is not restricted), and static and
-`internal_files` roots the server's user cannot write. Landlock never restricts `O_PATH`
-opens: the existence and metadata (size, owner, times) of paths outside
-the roots stay visible to the server process itself, not their contents.
-Clients cannot see them: requests resolve beneath the roots (`openat2`
-`RESOLVE_BENEATH`).
+`internal_files` roots the server's user cannot write. Landlock never
+restricts `O_PATH` opens: the existence and metadata (size, owner, times)
+of paths outside the roots stay visible to the server process itself, not
+their contents. Clients cannot see them: requests resolve beneath the roots
+(`openat2` `RESOLVE_BENEATH`).
 
 Under containment a panic's backtrace (`RUST_BACKTRACE`) is not
 symbolized; with `seccomp_action kill` the attempt ends the process by

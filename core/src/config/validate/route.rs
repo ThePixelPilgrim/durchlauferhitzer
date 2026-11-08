@@ -52,9 +52,10 @@ impl RouteKey {
 
 /// An `internal_files` root: FR-CFG-15, and visible ASCII only (bytes
 /// 0x21 to 0x7E), so that no `X-Sendfile` value can equal another root and
-/// the root can go into `X-Accel-Mapping` (FR-CFG-26).
+/// the root can go into `X-Accel-Mapping` (FR-CFG-26). `/` is refused: it
+/// would make the whole filesystem readable.
 fn valid_internal_root(root: &str) -> bool {
-    valid_root(root) && root.bytes().all(|b| (0x21..=0x7E).contains(&b))
+    root != "/" && valid_root(root) && root.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 
 /// An `internal_files` prefix: starts and ends with `/` and is a valid path

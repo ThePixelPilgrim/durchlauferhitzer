@@ -360,7 +360,9 @@ Structure and values:
   ASCII (bytes 0x21 to 0x7E), so no `X-Sendfile` value can match any
   other root and the root can go into `X-Accel-Mapping`; `/` alone is a
   valid prefix; a missing `internal_files` root is the startup error of a
-  missing static root and keeps its wording (`static root <path>: …`).
+  missing static root and keeps its wording (`static root <path>: …`);
+  the root `/` is refused: it would make the whole filesystem readable by
+  backend direction.
 - **FR-CFG-22** [done] Durations are `<u64>` followed by `ms`, `s` or `m`;
   sizes are plain bytes or `<u64>` followed by `KiB`, `MiB` or `GiB`; any
   other form, or an overflowing value, is an error.
