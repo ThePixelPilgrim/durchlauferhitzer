@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-08, after stage 8 Task 1.
+Last updated 2026-11-08, after stage 8 Task 2.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -14,7 +14,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
 | 6 Restart | done (`22fd0ce..` this handoff) — record: `docs/superpowers/reviews/2026-11-06-stage-6-review.md` |
 | 7 Efficiency | done (`71d3867..` this handoff) — record: `docs/superpowers/reviews/2026-11-07-stage-7-review.md`. The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
-| 8 Backend-directed file serving | in progress (`862e951..`; plan `docs/superpowers/plans/2026-11-07-stage-8-internal-files.md`): Task 1 ✅ (ranges, FR-STATIC-19) — **next: Task 2** (`internal_files` config, FR-CFG-26) |
+| 8 Backend-directed file serving | in progress (`862e951..`; plan `docs/superpowers/plans/2026-11-07-stage-8-internal-files.md`): Tasks 1 ✅ (ranges, FR-STATIC-19), 2 ✅ (`internal_files` config, FR-CFG-26; the example config already documents the finished stage 8 behaviour) — **next: Task 3** (file headers stripped both ways, Rack hints) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 

@@ -280,7 +280,7 @@ Planner calls (into FR-CFG-26):
 - **Toward the backend:**
   - `x-sendfile`, `x-accel-redirect`, `x-sendfile-type` and `x-accel-mapping` are dropped on every proxy route, like `CLIENT_IDENTITY`.
   - On an `internal_files` route, after `x-forwarded-proto`, the proxy appends `x-sendfile-type: X-Sendfile` or `x-sendfile-type: X-Accel-Redirect`.
-  - On an `x-accel-redirect` route it also appends `x-accel-mapping: <root>/=<prefix>`; for root `/` that is `/=<prefix>` (planner call).
+  - On an `x-accel-redirect` route it also appends `x-accel-mapping: <root>/=<prefix>` (a root is never `/`: FR-CFG-26, controller ruling at Task 2).
 - **Toward the client:** `x-sendfile` and `x-accel-redirect` are dropped on every route; on an `x-accel-redirect` route, every `x-accel-*` too.
 - Until Task 5 every response is relayed. The trigger does not exist yet, so a `200` with the route's header is relayed without it. Task 5 changes exactly that case.
 
@@ -288,7 +288,7 @@ Planner calls (into FR-CFG-26):
   - **`forward/file_header_tests.rs`:**
     - `forged_file_headers_never_reach_the_backend`, on a plain, an `x-sendfile` and an `x-accel-redirect` route. The client head carries `X-Sendfile: /etc/passwd`, `x-accel-redirect: /x`, `X-SENDFILE-TYPE: X-Sendfile`, `X-Accel-Mapping: /=/x/`, plus `Connection: x-sendfile`. The rendered head holds none of the four names, except the hints, each exactly once.
     - `hints_on_an_x_sendfile_route`: exactly one `x-sendfile-type: X-Sendfile\r\n`, and no `x-accel-mapping`.
-    - `hints_on_an_x_accel_redirect_route`: `x-sendfile-type: X-Accel-Redirect\r\nx-accel-mapping: /srv/files/=/protected/\r\n`; root `/` gives `x-accel-mapping: /=/protected/\r\n`.
+    - `hints_on_an_x_accel_redirect_route`: `x-sendfile-type: X-Accel-Redirect\r\nx-accel-mapping: /srv/files/=/protected/\r\n`.
     - `file_headers_never_reach_the_client`:
       - A backend `404` with `X-Sendfile: /a`, `X-Accel-Redirect: /b`, `X-Accel-Expires: 10`, `X-Accel-Buffering: no`: on plain and `x-sendfile` routes the first two go, and `x-accel-expires` and `x-accel-buffering` stay.
       - On an `x-accel-redirect` route all four go.
@@ -306,7 +306,7 @@ Planner calls (into FR-CFG-26):
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Gate (sim nets incl. `SIM_SEEDS=0..20000`), commit** "Proxy: strip file headers both ways, set Rack's sendfile hints (FR-PROXY-32)", push.
 
-Planner call: `x-accel-mapping` for root `/` is `/=<prefix>`.
+No planner call (the root `/` case is refused by FR-CFG-26).
 
 ### Task 4: Backend file paths (FR-PROXY-32 Path, Bad path)
 
@@ -327,7 +327,7 @@ A pure module; security-critical, reviewed on its own.
   2. any byte outside 0x21–0x7E gives `BadByte`;
   3. `?` gives `Query`;
   4. the start must match, else `NoMatch`:
-     - `x-sendfile`: the root followed by `/`, or exactly the root; for root `/`, any value starting with `/`;
+     - `x-sendfile`: the root followed by `/`, or exactly the root (a root is never `/`, FR-CFG-26);
      - `x-accel-redirect`: the prefix, by raw bytes, case-sensitive;
   5. the rest's raw segments: an empty segment other than the trailing one, `.` or `..` gives `BadSegment`;
   6. `x-accel-redirect` only: each segment is percent-decoded once; a malformed escape gives `BadEscape`;
@@ -360,7 +360,6 @@ A pure module; security-critical, reviewed on its own.
     | `/srv/files/.env` | `NotFound` |
     | `/srv/files/a/.git/x` | `NotFound` |
 
-    With root `/`: `/etc/hosts` gives `Open{[etc, hosts]}`; `//etc` gives `BadSegment`.
   - **`accel_path(b"/protected/", …)`:**
 
     | Value | Result |
@@ -389,7 +388,6 @@ A pure module; security-critical, reviewed on its own.
 Planner calls (into FR-PROXY-32):
 - A malformed `%` escape in an `X-Accel-Redirect` value is a bad path (502): the spec's 404 list is what a static route answers, and a static route never sees one.
 - For `x-sendfile`, the root without its `/` counts as "the root alone" (404).
-- Root `/` needs no second `/`.
 - A decoded `.`-segment (`%2e…`) is a dotfile (404), while a raw `.` or `..` segment is a bad path (502).
 
 ### Task 5: Serving the backend's file (FR-PROXY-32 Trigger, 404, client's response, backend body)
