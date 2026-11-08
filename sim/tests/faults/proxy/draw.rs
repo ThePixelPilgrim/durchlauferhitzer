@@ -67,6 +67,7 @@ pub(crate) fn random_exchange(
             exact: (rng.u8(0..12) == 0).then(|| net.upstream_recv_capacity()),
             need_body: false,
             large: rng.u8(0..3) == 0,
+            files: net.routes[fwd.route].files,
             // An eager backend may answer while the request head is still
             // being written: a reset then fails that write at once.
             resets: match timing {
@@ -150,6 +151,7 @@ fn timed_exchange(
         need_body: kind == 5,
         large: false,
         resets: Resets::Late,
+        files: net.routes[fwd.route].files,
     };
     let script = matches!(kind, 2 | 5 | 6 | 7).then(|| random_script(rng, &ctx));
     let (connect, timing) = match kind {

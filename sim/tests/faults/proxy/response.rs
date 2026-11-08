@@ -40,6 +40,8 @@ pub(crate) struct Script {
     pub(crate) exact: bool,
     /// Coverage tag of the hostile or edge case it carries, if any.
     pub(crate) tag: Option<&'static str>,
+    /// Coverage of the file headers it carries, if relayed (FR-PROXY-32).
+    pub(crate) file_tags: Vec<&'static str>,
 }
 
 /// What the client must get.
@@ -124,6 +126,9 @@ pub(crate) struct Ctx {
     /// Allow a large body (the client's window is not tiny).
     pub(crate) large: bool,
     pub(crate) resets: Resets,
+    /// The route's `internal_files`: which file headers the client never
+    /// gets (FR-PROXY-32).
+    pub(crate) files: Option<RouteFiles>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +373,15 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         if let Some(&(name, value)) = rng.choice(EXTRA) {
             push(&mut wire, rng, name, value);
         }
+    }
+    // FR-PROXY-32: file headers; the route's own only off a parsed `200`.
+    let parsed = match defect {
+        Some(HeadDefect::BadCode | HeadDefect::NoReasonSpace | HeadDefect::Upgrade101) => None,
+        Some(_) | None => Some(code),
+    };
+    let (file_lines, mut file_tags) = response_lines(rng, ctx.files, parsed);
+    for (name, value) in file_lines {
+        push(&mut wire, rng, name, value);
     }
     if rng.u8(0..5) == 0 {
         push(&mut wire, rng, "Connection", b"X-Secret, keep-alive");
@@ -628,6 +642,10 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         Ending::Eof(k) if k < head_end => Reply::Fail(BackendFailure::ClosedEarly),
         Ending::Reset(_) | Ending::ResetAfter(_) | Ending::Eof(_) | Ending::Done { .. } => reply,
     };
+    match reply {
+        Reply::Relay(_) => {}
+        Reply::Fail(_) => file_tags.clear(),
+    }
     Script {
         wire,
         head_end,
@@ -637,6 +655,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         reply,
         keeps: !http10 && !says_close,
         exact: exact_len.is_some(),
+        file_tags,
         tag: match (too_large, padded) {
             (true, _) => Some("backend head just too large"),
             (false, true) => Some("backend head at the limit"),
@@ -680,7 +699,7 @@ fn relay(
     head.extend_from_slice(b"\r\n");
     let mut backend_date = false;
     for (name, value) in lines {
-        if is_hop(name, &tokens) {
+        if is_hop(name, &tokens) || is_stripped(name, ctx.files) {
             continue;
         }
         backend_date |= name == "date";

@@ -8,7 +8,9 @@
 //! body bytes, a cut connection with its log, or the predicted 4xx/5xx;
 //! nothing after a framing end is ever forwarded (NFR-SEC-02, NFR-SEC-03).
 //! Backend connections are pooled on the routes a seed draws pooled, and
-//! every reuse and retry is judged by the spec's rules (`pool.rs`).
+//! every reuse and retry is judged by the spec's rules (`pool.rs`). Routes
+//! drawn with `internal_files` get Rack's hints; file headers are forged
+//! by clients and sent by backends, and never pass (`files.rs`).
 //!
 //! A seed is a series of rounds: several stories (one client connection
 //! each, a series of exchanges on it) interleaved at random without time
@@ -25,6 +27,7 @@ mod chunks;
 mod drain;
 mod draw;
 mod drive;
+mod files;
 mod outcome;
 mod pool;
 mod request;
@@ -46,6 +49,7 @@ use chunks::*;
 use drain::*;
 use draw::*;
 use drive::*;
+use files::*;
 use outcome::*;
 use pool::*;
 use request::*;
@@ -69,6 +73,8 @@ pub(crate) struct RouteConfig {
     pub(crate) max_response_body: Option<u64>,
     /// Backend connections are pooled (FR-PROXY-02); else `pool off;`.
     pub(crate) pool: bool,
+    /// The route's `internal_files` (FR-CFG-26), if any.
+    pub(crate) files: Option<RouteFiles>,
 }
 
 /// A random config: two proxy routes next to a static one.
@@ -128,6 +134,7 @@ impl NetConfig {
                 max_request_body: body_limit(rng),
                 max_response_body: body_limit(rng),
                 pool: rng.u8(0..4) != 0,
+                files: RouteFiles::random(rng),
             },
             RouteConfig {
                 prefix: "/raw",
@@ -137,6 +144,7 @@ impl NetConfig {
                 max_request_body: body_limit(rng),
                 max_response_body: body_limit(rng),
                 pool: rng.u8(0..4) != 0,
+                files: RouteFiles::random(rng),
             },
         ];
         let max_head = *rng.choice(&[2048, 4096, 16 * 1024]).unwrap_or(&4096);
@@ -151,13 +159,14 @@ impl NetConfig {
         let max_connections_per_ip = 4;
         let route = |r: &RouteConfig| {
             format!(
-                "  path {} {{ proxy {};{}{} max_request_body {}; max_response_body {}; }}\n",
+                "  path {} {{ proxy {};{}{} max_request_body {}; max_response_body {};{} }}\n",
                 r.prefix,
                 r.addr,
                 if r.pool { "" } else { " pool off;" },
                 if r.strip { " strip_prefix;" } else { "" },
                 limit_text(r.max_request_body),
-                limit_text(r.max_response_body)
+                limit_text(r.max_response_body),
+                RouteFiles::setting(r.files),
             )
         };
         let text = format!(
@@ -352,6 +361,11 @@ pub(crate) const REQUIRED: &[&str] = &[
     "restart: plain drain",
     "restart: drain cut by the abort",
     "restart: served with close",
+    // File headers (FR-PROXY-32, `files.rs`).
+    "forged-file-header",
+    "file-header-on-non-200",
+    "other-file-header-on-200",
+    "x-accel-star-stripped",
 ];
 
 /// Branches the nets allow but no seed is known to reach: counted and

@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::config::{BodyLimit, OnFileChange};
-use crate::core::Interest;
+use crate::core::{Interest, InternalRouteId};
 use crate::file::{Chunk, FileId, FileStamp, RootId};
 use crate::http::conditional::Conditional;
 use crate::http::range::RangeRequest;
@@ -210,6 +210,9 @@ pub(crate) struct ProxyRequest {
     /// Whether it may be replayed once on a fresh connection if its
     /// reused one fails before any response byte (FR-PROXY-26).
     pub(crate) replay: Replay,
+    /// The route's `internal_files`, if it has one: which file headers the
+    /// response loses (FR-PROXY-32).
+    pub(crate) internal: Option<InternalRouteId>,
 }
 
 /// Whether a proxied request went out on a fresh connection or one taken

@@ -1,7 +1,7 @@
 use crate::conn::SEND_CAPACITY;
 use crate::core::test_support::{PEER, core};
 use crate::core::{ConnError, ConnId, Core, Event};
-use crate::file::FileStamp;
+use crate::file::{FileStamp, RootId};
 use crate::http::conditional::Validators;
 use crate::http::request::Persistence;
 use crate::http::response::{
@@ -192,4 +192,33 @@ fn static_roots_include_internal_roots() {
     let text = text.replace("/srv/files", "/srv/www");
     let core = Core::new(crate::config::load(&text).unwrap());
     assert_eq!(core.static_roots(), [PathBuf::from("/srv/www")]);
+}
+
+/// FR-PROXY-32: each distinct `internal_files` setting is listed once, in
+/// config order, with its root's id in `static_roots`.
+#[test]
+fn internal_routes_point_at_their_roots() {
+    let text = "listen 127.0.0.1:80;\n\
+        host a.test {\n\
+          path /p { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1;\n\
+            internal_files x-accel-redirect /x/ /srv/files; }\n\
+          path /q { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1;\n\
+            internal_files x-sendfile /srv/www; }\n\
+          path /r { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1;\n\
+            internal_files x-sendfile /srv/www; }\n\
+          path / { static /srv/www; }\n\
+        }\n";
+    let core = Core::new(crate::config::load(text).unwrap());
+    let listed: Vec<(PathBuf, RootId)> = core
+        .internal_routes
+        .iter()
+        .map(|r| (r.files.root.clone(), r.root))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (PathBuf::from("/srv/files"), RootId(1)),
+            (PathBuf::from("/srv/www"), RootId(0)),
+        ]
+    );
 }

@@ -520,6 +520,11 @@ fn forward_alts(
                 tags.push("early response");
             }
             tags.extend(script.tag);
+            tags.extend(&script.file_tags);
+            // The backend got the whole head, forged lines stripped.
+            if up.min >= fwd.head_len {
+                tags.extend(ex.req.file_tag);
+            }
             if let Ending::ResetAfter(k) = script.ending {
                 let cut = match &script.reply {
                     Reply::Relay(r) => r.cut.is_some(),

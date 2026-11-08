@@ -11,7 +11,7 @@ use super::pool::make_room;
 use super::relay::{ClientSide, client_side};
 use super::request::HeadEnd;
 use super::upload::body_idle_deadline;
-use super::{Action, ConnId, Core, Mode};
+use super::{Action, ConnId, Core, InternalRoute, InternalRouteId, Mode};
 use crate::config::{BodyLimit, Limits, Pooling, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, Replay, Reuse, UnreadBody};
 use crate::http::forward::{backend_request_len, check_forwardable, render_backend_request};
@@ -38,7 +38,8 @@ pub(super) enum ProxyPlan {
 
 /// Forward a request to `backend` with `path` as its (possibly stripped)
 /// raw path; a chunked body may carry at most `limit` payload bytes, the
-/// response body at most `response_limit` bytes.
+/// response body at most `response_limit` bytes. `internal` is the route's
+/// `internal_files`, if it has one (FR-PROXY-32).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Forward {
     backend: BackendId,
@@ -46,6 +47,7 @@ pub(super) struct Forward {
     limit: BodyLimit,
     response_limit: BodyLimit,
     pool: Pooling,
+    internal: Option<InternalRouteId>,
 }
 
 /// The proxy route rules that need no backend: the request must be
@@ -58,6 +60,7 @@ pub(super) fn plan(
     target: &ProxyRoute,
     head: &RequestHead,
     backends: &[SocketAddr],
+    internal_routes: &[InternalRoute],
 ) -> ProxyPlan {
     if let Err(error) = check_forwardable(head) {
         return ProxyPlan::Respond(error.status(), Persistence::Close);
@@ -82,12 +85,21 @@ pub(super) fn plan(
         StripPrefix::Strip => strip_segments(&head.target.path, route.segments.len()),
         StripPrefix::Keep => head.target.path.clone(),
     };
+    // Every route's `internal_files` is listed (identical ones once).
+    let internal = target.internal_files.as_ref().and_then(|files| {
+        internal_routes
+            .iter()
+            .position(|r| r.files == *files)
+            .and_then(|index| u32::try_from(index).ok())
+            .map(InternalRouteId)
+    });
     ProxyPlan::Forward(Forward {
         backend,
         path,
         limit,
         response_limit: target.max_response_body,
         pool: target.pool,
+        internal,
     })
 }
 
@@ -110,6 +122,7 @@ impl Core {
         let connect_deadline = now.saturating_add(limits.backend_connect_timeout);
         let (recv_capacity, head_capacity) = (self.upstream_recv_capacity, self.head_capacity);
         let serving = self.mode == Mode::Serving;
+        let internal_routes = &self.internal_routes;
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
@@ -119,7 +132,11 @@ impl Core {
             limit,
             response_limit,
             pool,
+            internal,
         } = forward;
+        let files = internal
+            .and_then(|id| internal_routes.get(id.0 as usize))
+            .map(|r| &r.files);
         // FR-PROXY-02, -04, -11: an HTTP/1.1 request on a pooled route
         // keeps the backend connection while serving; anything else asks
         // it to close (in a restart's drain the upstream is closed after
@@ -136,8 +153,10 @@ impl Core {
             path: head.target.path.clone(),
         };
         // Never beyond the head buffer's capacity. A head within the limits
-        // always fits (see `head_capacity`); this guards that bound.
-        if backend_request_len(&head, &path, c.peer, toward) > head_capacity {
+        // always fits (see `head_capacity`); this guards that bound. The
+        // hints of an `internal_files` route (FR-PROXY-32) are not in that
+        // bound: a head they push over it is a 431.
+        if backend_request_len(&head, &path, c.peer, toward, files) > head_capacity {
             let status = Status::RequestHeaderFieldsTooLarge;
             render_fixed(
                 status,
@@ -186,7 +205,7 @@ impl Core {
             (Method::Get | Method::Head | Method::Other(_), _) => Replay::Never,
         };
         let mut buffers = ExchangeBuffers::new(recv_capacity, head_capacity);
-        render_backend_request(&head, &path, c.peer, toward, &mut buffers.head);
+        render_backend_request(&head, &path, c.peer, toward, files, &mut buffers.head);
         // A request that keeps the backend connection (only while serving:
         // a drain closed the pool) takes the backend's newest idle one.
         let idle = match toward {
@@ -208,6 +227,7 @@ impl Core {
             toward,
             reuse: Reuse::Fresh,
             replay,
+            internal,
         };
         c.state = match idle {
             // Owner decision 2026-11-07: before anything is written on

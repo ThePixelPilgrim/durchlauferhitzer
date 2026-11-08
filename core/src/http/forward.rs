@@ -1,6 +1,7 @@
 //! Renders the heads a reverse proxy forwards: the request head sent to the
 //! backend (FR-PROXY-04…11) and the response head sent to the client
-//! (FR-PROXY-12).
+//! (FR-PROXY-12), the file headers of FR-PROXY-32 stripped both ways and
+//! Rack's hints set on an `internal_files` route.
 //!
 //! Both renderers work from heads the parsers already validated, so they
 //! only rewrite. Header names are written lowercased as `name: value`, in
@@ -16,6 +17,7 @@
 //! before rendering. Both are built on the same code path (a `Sink` that
 //! either counts or appends), so they cannot disagree.
 
+use crate::config::{FileHeader, InternalFiles};
 use crate::http::date::ImfFixdate;
 use crate::http::head_line::connection_tokens;
 use crate::http::request::{Header, Method, Persistence, RequestHead, Version};
@@ -92,6 +94,30 @@ const CLIENT_IDENTITY: [&str; 5] = [
     "x-forwarded-port",
 ];
 
+/// The file headers no client may send a backend (FR-PROXY-32): a forged
+/// `X-Sendfile` or `X-Accel-Redirect` would be a backend's word, a forged
+/// `X-Sendfile-Type` or `X-Accel-Mapping` steers Rack's choice of path.
+/// Request only, on every proxy route. Names are the parser's lowercased
+/// ones.
+const FILE_REQUEST: [&str; 4] = [
+    "x-sendfile",
+    "x-accel-redirect",
+    "x-sendfile-type",
+    "x-accel-mapping",
+];
+
+/// Whether a backend's response header is a file header that never
+/// reaches a client (FR-PROXY-32): `x-sendfile` and `x-accel-redirect` on
+/// every route, every `x-accel-*` on an `x-accel-redirect` route. Names
+/// are the parser's lowercased ones.
+fn is_file_response_header(name: &str, files: Option<&InternalFiles>) -> bool {
+    const ACCEL: &str = "x-accel-";
+    match files.map(|f| &f.header) {
+        Some(FileHeader::XAccelRedirect { .. }) => name.starts_with(ACCEL) || name == "x-sendfile",
+        Some(FileHeader::XSendfile) | None => matches!(name, "x-sendfile" | "x-accel-redirect"),
+    }
+}
+
 /// Appends the head sent to the backend (FR-PROXY-04…11). `path` is the
 /// raw path as forwarded (after `strip_prefix`, see
 /// [`strip_segments`](crate::routing::strip_segments)); `peer` is the
@@ -101,14 +127,19 @@ const CLIENT_IDENTITY: [&str; 5] = [
 /// unchanged and the client's version: `HTTP/1.0` for an HTTP/1.0 client,
 /// so the backend never answers it with a chunked body (owner decision
 /// 2026-10-27), `HTTP/1.1` otherwise. The client's headers follow in
-/// order without the hop-by-hop ones, `x-forwarded-for` and the client
+/// order without the hop-by-hop ones, `x-forwarded-for`, the client
 /// identity headers (`x-forwarded-proto`, `forwarded`, `x-real-ip`,
-/// `x-forwarded-host`, `x-forwarded-port`);
+/// `x-forwarded-host`, `x-forwarded-port`) and the file headers
+/// (`x-sendfile`, `x-accel-redirect`, `x-sendfile-type`,
+/// `x-accel-mapping`, FR-PROXY-32);
 /// `content-length` is
 /// re-rendered without leading zeros, everything else (`host`,
 /// `transfer-encoding`, …) as received. Then come `x-forwarded-for` (the
 /// client's non-empty value, `, `, the peer in canonical form),
-/// `x-forwarded-proto: http` and, when `persistence` is `Close`,
+/// `x-forwarded-proto: http`, on a route with `files` Rack's hints
+/// (`x-sendfile-type` naming the route's header and, for
+/// `x-accel-redirect`, `x-accel-mapping: <root>/=<prefix>`; FR-PROXY-32)
+/// and, when `persistence` is `Close`,
 /// `connection: close` (FR-PROXY-11); a request on a pooled route says
 /// nothing of the connection, which HTTP/1.1 keeps (FR-PROXY-02).
 ///
@@ -120,9 +151,10 @@ pub fn render_backend_request(
     path: &str,
     peer: IpAddr,
     persistence: Persistence,
+    files: Option<&InternalFiles>,
     out: &mut Vec<u8>,
 ) {
-    backend_request(head, path, peer, persistence, out);
+    backend_request(head, path, peer, persistence, files, out);
 }
 
 /// The exact number of bytes [`render_backend_request`] appends.
@@ -131,16 +163,19 @@ pub fn backend_request_len(
     path: &str,
     peer: IpAddr,
     persistence: Persistence,
+    files: Option<&InternalFiles>,
 ) -> usize {
     let mut count = Count(0);
-    backend_request(head, path, peer, persistence, &mut count);
+    backend_request(head, path, peer, persistence, files, &mut count);
     count.0
 }
 
 /// Appends the head sent to the client (FR-PROXY-12): the status line as
 /// `HTTP/1.1 <code> <reason>`, the backend's headers in order without the
-/// hop-by-hop ones (`content-length`, `date`, `server` and all others pass
-/// through as received), then `date: <date>` if `date` is set and none of
+/// hop-by-hop ones and the file headers of a route with `files`
+/// (`x-sendfile` and `x-accel-redirect` on every route, every `x-accel-*`
+/// on an `x-accel-redirect` route; FR-PROXY-32), `content-length`,
+/// `date`, `server` and all others passing through as received, then `date: <date>` if `date` is set and none of
 /// the backend's `date` headers passes through (FR-HTTP-22a; one the
 /// backend named in `Connection` is hop-by-hop and does not), and
 /// `connection: close` when `persistence` is `Close`.
@@ -153,9 +188,10 @@ pub fn render_client_response(
     head: &ResponseHead,
     persistence: Persistence,
     date: Option<&ImfFixdate>,
+    files: Option<&InternalFiles>,
     out: &mut Vec<u8>,
 ) {
-    client_response(head, persistence, date, out);
+    client_response(head, persistence, date, files, out);
 }
 
 /// The exact number of bytes [`render_client_response`] appends.
@@ -163,9 +199,10 @@ pub fn client_response_len(
     head: &ResponseHead,
     persistence: Persistence,
     date: Option<&ImfFixdate>,
+    files: Option<&InternalFiles>,
 ) -> usize {
     let mut count = Count(0);
-    client_response(head, persistence, date, &mut count);
+    client_response(head, persistence, date, files, &mut count);
     count.0
 }
 
@@ -222,6 +259,7 @@ fn backend_request(
     path: &str,
     peer: IpAddr,
     persistence: Persistence,
+    files: Option<&InternalFiles>,
     sink: &mut impl Sink,
 ) {
     sink.put(match &head.method {
@@ -244,6 +282,7 @@ fn backend_request(
     let forwardable = head.headers.iter().filter(|h| {
         !is_hop_by_hop_bytes(h.name.as_bytes(), &listed)
             && !CLIENT_IDENTITY.contains(&h.name.as_str())
+            && !FILE_REQUEST.contains(&h.name.as_str())
     });
     for header in forwardable.clone() {
         match header.name.as_str() {
@@ -265,11 +304,30 @@ fn backend_request(
     }
     put_display(sink, peer.to_canonical());
     sink.put(b"\r\nx-forwarded-proto: http\r\n");
+    if let Some(files) = files {
+        put_hints(sink, files);
+    }
     match persistence {
         Persistence::KeepAlive => {}
         Persistence::Close => sink.put(b"connection: close\r\n"),
     }
     sink.put(b"\r\n");
+}
+
+/// Rack's hints for an `internal_files` route (FR-PROXY-32), from the
+/// config: nothing is allocated per request.
+fn put_hints(sink: &mut impl Sink, files: &InternalFiles) {
+    match &files.header {
+        FileHeader::XSendfile => sink.put(b"x-sendfile-type: X-Sendfile\r\n"),
+        FileHeader::XAccelRedirect { prefix } => {
+            // The root is visible ASCII and never `/` (FR-CFG-26).
+            sink.put(b"x-sendfile-type: X-Accel-Redirect\r\nx-accel-mapping: ");
+            sink.put(files.root.as_os_str().as_encoded_bytes());
+            sink.put(b"/=");
+            sink.put(prefix.as_bytes());
+            sink.put(b"\r\n");
+        }
+    }
 }
 
 /// A validated `Content-Length` value (decimal digits only) without its
@@ -286,6 +344,7 @@ fn client_response(
     head: &ResponseHead,
     persistence: Persistence,
     date: Option<&ImfFixdate>,
+    files: Option<&InternalFiles>,
     sink: &mut impl Sink,
 ) {
     sink.put(b"HTTP/1.1 ");
@@ -305,7 +364,9 @@ fn client_response(
     let listed = listed_tokens(&head.headers);
     let mut backend_date = false;
     for header in &head.headers {
-        if !is_hop_by_hop_bytes(header.name.as_bytes(), &listed) {
+        if !is_hop_by_hop_bytes(header.name.as_bytes(), &listed)
+            && !is_file_response_header(&header.name, files)
+        {
             backend_date |= header.name == "date";
             put_header(sink, &header.name, &header.value);
         }
@@ -378,5 +439,7 @@ fn standard_reason(code: u16) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod file_header_tests;
 #[cfg(test)]
 mod tests;

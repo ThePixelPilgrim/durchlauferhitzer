@@ -38,6 +38,9 @@ pub(crate) struct Request {
     pub(crate) chunk_ends: Vec<usize>,
     /// Coverage tag of the smuggling or edge case it carries, if any.
     pub(crate) tag: Option<&'static str>,
+    /// `forged-file-header` when it carries a file header and is
+    /// forwarded (FR-PROXY-32); counted once the backend got the head.
+    pub(crate) file_tag: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +341,14 @@ pub(crate) fn random_proxy_request(
             lines.push(l);
         }
     }
+    // FR-PROXY-32: forged file headers.
+    let forged = forged_lines(rng);
+    let forged_any = forged
+        .iter()
+        .any(|(name, _)| is_forged(&name.to_ascii_lowercase()));
+    for (name, value) in forged {
+        lines.push(Line { name, value });
+    }
     if defect == Some(Defect::DupXff) {
         lines.push(line("X-Forwarded-For", b"203.0.113.1"));
         lines.push(line(&random_case(rng, "x-forwarded-for"), b"203.0.113.2"));
@@ -533,6 +544,12 @@ pub(crate) fn random_proxy_request(
             persistence,
         })
     };
+    let file_tag = match &verdict {
+        Verdict::Forward(_) if forged_any => Some("forged-file-header"),
+        Verdict::Forward(_) | Verdict::BadBody { .. } | Verdict::Parse(_) | Verdict::Answer(..) => {
+            None
+        }
+    };
     let chunked = matches!(body, Body::Chunked(_));
     let chunk_ends = chunk_info.as_ref().map(unit_ends).unwrap_or_default();
     Request {
@@ -546,6 +563,7 @@ pub(crate) fn random_proxy_request(
         chunked,
         chunk_ends,
         tag,
+        file_tag,
     }
 }
 
@@ -722,8 +740,9 @@ fn forward(j: &Judged, route: &RouteConfig) -> Forward {
         let name = l.name.to_ascii_lowercase();
         // FR-PROXY-06, -09: hop-by-hop headers and the client's identity
         // headers (`X-Forwarded-Proto`, `Forwarded`, `X-Real-IP`,
-        // `X-Forwarded-Host`, `X-Forwarded-Port`) are not forwarded.
-        if is_hop(&name, j.tokens) || CLIENT_IDENTITY.contains(&name.as_str()) {
+        // `X-Forwarded-Host`, `X-Forwarded-Port`) are not forwarded, nor
+        // are the file headers (FR-PROXY-32).
+        if is_hop(&name, j.tokens) || CLIENT_IDENTITY.contains(&name.as_str()) || is_forged(&name) {
             continue;
         }
         let value = trim_ows(&l.value);
@@ -755,6 +774,7 @@ fn forward(j: &Judged, route: &RouteConfig) -> Forward {
     }
     out.extend_from_slice(j.peer.as_bytes());
     out.extend_from_slice(b"\r\nx-forwarded-proto: http\r\n");
+    hints(route.files, &mut out);
     // FR-PROXY-02, -11: only a pooled route's HTTP/1.1 request keeps the
     // backend connection.
     if j.http10 || !route.pool {

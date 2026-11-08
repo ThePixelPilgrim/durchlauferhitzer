@@ -29,9 +29,9 @@ fn response(raw: &[u8]) -> ResponseHead {
 /// is exactly the number of bytes rendered.
 fn render_request(head: &RequestHead, path: &str, peer: IpAddr) -> String {
     let mut out = Vec::new();
-    render_backend_request(head, path, peer, Persistence::Close, &mut out);
+    render_backend_request(head, path, peer, Persistence::Close, None, &mut out);
     assert_eq!(
-        backend_request_len(head, path, peer, Persistence::Close),
+        backend_request_len(head, path, peer, Persistence::Close, None),
         out.len()
     );
     String::from_utf8(out).unwrap()
@@ -51,8 +51,11 @@ fn render_dated_response(
     date: Option<&ImfFixdate>,
 ) -> String {
     let mut out = Vec::new();
-    render_client_response(head, persistence, date, &mut out);
-    assert_eq!(client_response_len(head, persistence, date), out.len());
+    render_client_response(head, persistence, date, None, &mut out);
+    assert_eq!(
+        client_response_len(head, persistence, date, None),
+        out.len()
+    );
     String::from_utf8(out).unwrap()
 }
 
@@ -260,11 +263,18 @@ fn chunked_request_keeps_transfer_encoding() {
 fn rendering_appends_to_the_buffer() {
     let head = request(b"GET /p HTTP/1.1\r\nHost: a\r\n\r\n");
     let mut out = b"keep".to_vec();
-    render_backend_request(&head, "/p", v4(1, 2, 3, 4), Persistence::Close, &mut out);
+    render_backend_request(
+        &head,
+        "/p",
+        v4(1, 2, 3, 4),
+        Persistence::Close,
+        None,
+        &mut out,
+    );
     assert!(out.starts_with(b"keepGET /p HTTP/1.1\r\n"));
     let head = response(b"HTTP/1.1 204 No Content\r\n\r\n");
     let mut out = b"keep".to_vec();
-    render_client_response(&head, Persistence::KeepAlive, None, &mut out);
+    render_client_response(&head, Persistence::KeepAlive, None, None, &mut out);
     assert_eq!(out, b"keepHTTP/1.1 204 No Content\r\n\r\n");
 }
 
@@ -279,6 +289,7 @@ fn a_keep_alive_request_says_nothing_of_connection() {
         "/p",
         v4(1, 2, 3, 4),
         Persistence::KeepAlive,
+        None,
         &mut out,
     );
     assert_eq!(
@@ -287,7 +298,7 @@ fn a_keep_alive_request_says_nothing_of_connection() {
           x-forwarded-proto: http\r\n\r\n"
     );
     assert_eq!(
-        backend_request_len(&head, "/p", v4(1, 2, 3, 4), Persistence::KeepAlive),
+        backend_request_len(&head, "/p", v4(1, 2, 3, 4), Persistence::KeepAlive, None),
         out.len()
     );
 }
@@ -738,8 +749,8 @@ proptest! {
         raw.extend_from_slice(b"\r\n");
         if let Ok(ParseStatus::Complete { head, .. }) = parse_head(&raw, &limits()) {
             let mut out = Vec::new();
-            render_backend_request(&head, path, peer, Persistence::Close, &mut out);
-            prop_assert_eq!(backend_request_len(&head, path, peer, Persistence::Close), out.len());
+            render_backend_request(&head, path, peer, Persistence::Close, None, &mut out);
+            prop_assert_eq!(backend_request_len(&head, path, peer, Persistence::Close, None), out.len());
             prop_assert_eq!(String::from_utf8(out).unwrap(), model_request(&head, path, peer));
         }
 
@@ -756,8 +767,8 @@ proptest! {
             for persistence in [Persistence::KeepAlive, Persistence::Close] {
                 for (date, model_date) in dates {
                     let mut out = Vec::new();
-                    render_client_response(&head, persistence, date, &mut out);
-                    prop_assert_eq!(client_response_len(&head, persistence, date), out.len());
+                    render_client_response(&head, persistence, date, None, &mut out);
+                    prop_assert_eq!(client_response_len(&head, persistence, date, None), out.len());
                     prop_assert_eq!(
                         String::from_utf8(out).unwrap(),
                         model_response(&head, persistence, model_date)
@@ -775,8 +786,8 @@ proptest! {
         let reason = String::from_utf8_lossy(&reason).into_owned();
         let head = head_with_reason(status, &reason);
         let mut out = Vec::new();
-        render_client_response(&head, Persistence::KeepAlive, None, &mut out);
-        prop_assert_eq!(client_response_len(&head, Persistence::KeepAlive, None), out.len());
+        render_client_response(&head, Persistence::KeepAlive, None, None, &mut out);
+        prop_assert_eq!(client_response_len(&head, Persistence::KeepAlive, None, None), out.len());
         let text = String::from_utf8(out).unwrap();
         let line = text.strip_suffix("\r\n\r\n").unwrap();
         prop_assert!(!line.contains('\r') && !line.contains('\n'));

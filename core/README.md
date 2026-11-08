@@ -99,7 +99,9 @@ src/
                         `Last-Modified`, the parser of all three forms (no
                         time library: days-from-civil arithmetic)
     forward.rs          proxy head rewriting: request head to the backend,
-                        response head to the client, hop-by-hop rules
+                        response head to the client, hop-by-hop rules,
+                        file headers stripped and Rack's hints
+                        (FR-PROXY-32)
     target.rs           request-target validation (traversal, encodings)
     static_path.rs      decoding paths to file-system segments
     response.rs         rendering fixed responses, file heads (200 and

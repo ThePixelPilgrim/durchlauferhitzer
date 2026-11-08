@@ -382,7 +382,7 @@ impl Core {
                     Plan::Respond(status, persistence) => (status, persistence),
                 },
                 RouteAction::Proxy(target) => {
-                    match proxy::plan(route, target, &head, &self.backends) {
+                    match proxy::plan(route, target, &head, &self.backends, &self.internal_routes) {
                         ProxyPlan::Forward(forward) => {
                             self.forward(now, conn, head, forward, after, actions);
                             return;

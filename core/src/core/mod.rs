@@ -25,11 +25,9 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use crate::config::{Config, Limits, ProxyRoute, RouteAction};
+use crate::config::{Config, InternalFiles, Limits, ProxyRoute, RouteAction};
 use crate::conn::{ConnState, LINGER_SCRATCH, SEND_CAPACITY};
-#[cfg(doc)]
-use crate::file::RootId;
-use crate::file::{Chunk, FileFollows, FileSegment, FileTable};
+use crate::file::{Chunk, FileFollows, FileSegment, FileTable, RootId};
 use crate::http::date::{ImfFixdate, imf_fixdate};
 use crate::http::request::HeadLimits;
 use crate::log::Log;
@@ -66,6 +64,9 @@ pub struct Core {
     /// Distinct static roots, then `internal_files` roots, in config order;
     /// a `RootId` indexes it.
     static_roots: Vec<PathBuf>,
+    /// The distinct `internal_files` settings of the proxy routes, in
+    /// config order (FR-PROXY-32); an [`InternalRouteId`] indexes it.
+    internal_routes: Vec<InternalRoute>,
     files: FileTable,
     /// Distinct backends in config order; a `BackendId` indexes it.
     backends: Vec<SocketAddr>,
@@ -84,6 +85,19 @@ pub struct Core {
     clock: Option<u64>,
     /// Serving, or draining for a shutdown or a restart (FR-PROC-05).
     mode: Mode,
+}
+
+/// An index into [`Core`]'s `internal_routes`: the `internal_files` of
+/// the proxy route a request was forwarded on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InternalRouteId(pub(crate) u32);
+
+/// A proxy route's `internal_files` (FR-CFG-26, FR-PROXY-32), built once in
+/// [`Core::new`]: the setting, and its root's [`RootId`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InternalRoute {
+    pub(crate) files: InternalFiles,
+    pub(crate) root: RootId,
 }
 
 /// Whether the core takes new work.
@@ -130,14 +144,27 @@ impl Core {
         }
         // FR-CFG-26: the `internal_files` roots follow all the static ones
         // (so a static root's id does not depend on them).
+        let mut internal_routes: Vec<InternalRoute> = Vec::new();
         for route in config.hosts.iter().flat_map(|h| &h.routes) {
             if let RouteAction::Proxy(ProxyRoute {
                 internal_files: Some(internal),
                 ..
             }) = &route.action
             {
-                if !static_roots.contains(&internal.root) {
-                    static_roots.push(internal.root.clone());
+                let index = match static_roots.iter().position(|r| *r == internal.root) {
+                    Some(index) => index,
+                    None => {
+                        static_roots.push(internal.root.clone());
+                        static_roots.len() - 1
+                    }
+                };
+                // A config holds far fewer than `u32::MAX` roots.
+                let root = RootId(u32::try_from(index).unwrap_or(u32::MAX));
+                if !internal_routes.iter().any(|r| r.files == *internal) {
+                    internal_routes.push(InternalRoute {
+                        files: internal.clone(),
+                        root,
+                    });
                 }
             }
         }
@@ -155,6 +182,7 @@ impl Core {
             refused_per_group: BTreeMap::new(),
             scratch: vec![0; LINGER_SCRATCH].into_boxed_slice(),
             static_roots,
+            internal_routes,
             files: FileTable::new(),
             backends,
             upstreams: UpstreamTable::new(),
