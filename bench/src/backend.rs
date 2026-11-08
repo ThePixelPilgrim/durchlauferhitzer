@@ -3,7 +3,9 @@
 //! request head gets a 200 response whose body size follows the path
 //! ([`body_len`]: `/medium` [`MEDIUM`], `/large` [`LARGE`], else
 //! [`SMALL`]); the connection stays open unless the request asked to
-//! close it, so a pooling server can reuse it.
+//! close it, so a pooling server can reuse it. `/1k` (`proxy-file`) is
+//! answered with [`FILE_RESPONSE`] instead: no body, the file named by
+//! `X-Accel-Redirect` (FR-PROXY-32), which the server sends.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -25,6 +27,15 @@ pub fn body_len(path: &str) -> u64 {
         _ => SMALL,
     }
 }
+
+/// `proxy-file`'s backend path (the route strips `/file`).
+pub const FILE_PATH: &str = "/1k";
+
+/// The answer to [`FILE_PATH`]: a `200` naming the 1 KiB file below the
+/// route's `internal_files` root, with an empty body, so the server may
+/// pool the connection after it (FR-PROXY-02, -32).
+pub const FILE_RESPONSE: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Accel-Redirect: /protected/1k.bin\r\n\r\n";
 
 /// The whole response with a `len`-byte body, built once.
 fn response(len: u64) -> &'static [u8] {
@@ -51,6 +62,9 @@ impl Responses {
             .next()
             .and_then(|l| l.split(' ').nth(1))
             .unwrap_or_default();
+        if path == FILE_PATH {
+            return FILE_RESPONSE;
+        }
         match body_len(path) {
             MEDIUM => self.medium,
             LARGE => self.large,
@@ -142,6 +156,41 @@ mod tests {
             assert!(t.requests > 10, "{t:?}");
             assert_eq!(t.errors, 0, "{t:?}");
         }
+    }
+
+    /// `proxy-file`'s stub (FR-PROXY-32): a `200` naming the 1 KiB file
+    /// by `X-Accel-Redirect`, with `Content-Length: 0` and nothing behind
+    /// the head, so the server may pool the connection; it stays open.
+    #[test]
+    fn the_file_stub_names_the_file_with_an_empty_body() {
+        let backend = Backend::start([127, 0, 0, 1].into()).unwrap();
+        let mut stream = TcpStream::connect(backend.addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        for _ in 0..2 {
+            stream
+                .write_all(b"GET /1k HTTP/1.1\r\nHost: b\r\n\r\n")
+                .unwrap();
+            let mut got = Vec::new();
+            let mut chunk = [0u8; 256];
+            while !got.ends_with(b"\r\n\r\n") {
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0, "closed after {got:?}");
+                got.extend_from_slice(&chunk[..n]);
+            }
+            assert_eq!(
+                String::from_utf8_lossy(&got),
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\
+                 X-Accel-Redirect: /protected/1k.bin\r\n\r\n"
+            );
+        }
+        // Nothing behind the head.
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut more = [0u8; 16];
+        assert!(stream.read(&mut more).is_err());
     }
 
     #[test]

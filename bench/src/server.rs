@@ -1,5 +1,6 @@
 //! The server under test: a temp dir with the two files and the config
-//! (one static root, one proxy route to the stub backend, default limits
+//! (one static root, one proxy route to the stub backend and, for
+//! `proxy-file`, a second one serving the backend's files, default limits
 //! but three for the idle connections, default containment, `user nobody` when run as
 //! root), the binary started
 //! on a free loopback port, its stderr drained in a thread (the bench's
@@ -17,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::measure;
-use crate::scenario::{HOST, LARGE, SMALL};
+use crate::scenario::{HOST, LARGE, Routes, SMALL};
 
 /// How long the server may take to listen.
 const START_PATIENCE: Duration = Duration::from_secs(10);
@@ -68,10 +69,26 @@ pub const KEEPALIVE_MINUTES: u64 = 125;
 /// few connections, and their clients close every connection after the
 /// window, so no limit is reached and no keep-alive deadline expires
 /// there either way.
-pub fn config(addr: SocketAddr, root: &Path, backend: SocketAddr, as_root: bool) -> String {
+///
+/// With `files`, also the `/file` route of `proxy-file`: a proxy route
+/// to the same backend whose `X-Accel-Redirect: /protected/<name>`
+/// names a file below `files` (FR-PROXY-32, FR-CFG-26).
+pub fn config(
+    addr: SocketAddr,
+    root: &Path,
+    backend: SocketAddr,
+    as_root: bool,
+    files: Option<&Path>,
+) -> String {
     let user = if as_root { "user nobody;\n" } else { "" };
+    let file_route = files.map_or_else(String::new, |files| {
+        format!(
+            "  path /file {{ proxy {backend}; strip_prefix; max_request_body 1MiB; max_response_body unlimited; internal_files x-accel-redirect /protected/ {}; }}\n",
+            files.display()
+        )
+    });
     format!(
-        "listen {addr};\n{user}limits {{\n  max_connections 2048;\n  max_connections_per_ip 2048;\n  keepalive_timeout {KEEPALIVE_MINUTES}m;\n}}\nhost {HOST} {{\n  path / {{ static {root}; }}\n  path /proxy {{ proxy {backend}; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }}\n}}\n",
+        "listen {addr};\n{user}limits {{\n  max_connections 2048;\n  max_connections_per_ip 2048;\n  keepalive_timeout {KEEPALIVE_MINUTES}m;\n}}\nhost {HOST} {{\n  path / {{ static {root}; }}\n  path /proxy {{ proxy {backend}; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }}\n{file_route}}}\n",
         root = root.display()
     )
 }
@@ -102,6 +119,7 @@ impl Server {
         backend: SocketAddr,
         tag: &str,
         place: Place,
+        routes: Routes,
     ) -> Result<Server, String> {
         let dir = std::env::temp_dir().join(format!("dlh-bench-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -114,13 +132,25 @@ impl Server {
             .map_err(io("small.bin"))?;
         write_world_readable(&root.join("large.bin"), &vec![b'l'; LARGE as usize])
             .map_err(io("large.bin"))?;
+        let files = match routes {
+            Routes::Plain => None,
+            Routes::WithFiles => {
+                let files = dir.join("files");
+                fs::create_dir_all(&files).map_err(io("temp dir"))?;
+                fs::set_permissions(&files, fs::Permissions::from_mode(0o755))
+                    .map_err(io("temp dir"))?;
+                write_world_readable(&files.join("1k.bin"), &vec![b'f'; SMALL as usize])
+                    .map_err(io("1k.bin"))?;
+                Some(files)
+            }
+        };
         let addr = match place {
             Place::Loopback => free_addr().map_err(io("free port"))?,
             Place::Netns => crate::netem::Net::server_addr(),
         };
         let conf = dir.join("bench.conf");
-        write_world_readable(&conf, config(addr, &root, backend, is_root()).as_bytes())
-            .map_err(io("config"))?;
+        let text = config(addr, &root, backend, is_root(), files.as_deref());
+        write_world_readable(&conf, text.as_bytes()).map_err(io("config"))?;
         // `ip netns exec` execs the binary (no fork): the child's pid is
         // the server's.
         let mut command = match place {
@@ -249,12 +279,36 @@ mod tests {
     fn the_config() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let backend: SocketAddr = "127.0.0.1:3000".parse().unwrap();
-        let text = config(addr, Path::new("/tmp/x/www"), backend, true);
+        let text = config(addr, Path::new("/tmp/x/www"), backend, true, None);
         assert_eq!(
             text,
             "listen 127.0.0.1:8080;\nuser nobody;\nlimits {\n  max_connections 2048;\n  max_connections_per_ip 2048;\n  keepalive_timeout 125m;\n}\nhost bench.test {\n  path / { static /tmp/x/www; }\n  path /proxy { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; max_response_body unlimited; }\n}\n"
         );
-        assert!(!config(addr, Path::new("/w"), backend, false).contains("user"));
+        assert!(!config(addr, Path::new("/w"), backend, false, None).contains("user"));
+    }
+
+    /// `proxy-file`'s route (FR-PROXY-32, FR-CFG-26): the backend's
+    /// `X-Accel-Redirect: /protected/1k.bin` names `1k.bin` below the
+    /// files root.
+    #[test]
+    fn the_config_with_the_file_route() {
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let backend: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        let text = config(
+            addr,
+            Path::new("/tmp/x/www"),
+            backend,
+            false,
+            Some(Path::new("/tmp/x/files")),
+        );
+        assert!(
+            text.ends_with(
+                "  path /file { proxy 127.0.0.1:3000; strip_prefix; max_request_body 1MiB; \
+                 max_response_body unlimited; internal_files x-accel-redirect /protected/ \
+                 /tmp/x/files; }\n}\n"
+            ),
+            "{text}"
+        );
     }
 
     /// A `/proc/<pid>/fd`-shaped directory: past the bind once one link

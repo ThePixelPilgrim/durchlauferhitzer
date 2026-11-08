@@ -529,7 +529,7 @@ fn forward_alts(
             if let Ending::ResetAfter(k) = script.ending {
                 let cut = match &script.reply {
                     Reply::Relay(r) => r.cut.is_some(),
-                    Reply::Fail(_) => false,
+                    Reply::Fail(_) | Reply::File(_) => false,
                 };
                 tags.push(if k == 0 {
                     "reset with bytes: none"
@@ -562,6 +562,7 @@ fn forward_alts(
             };
             let alts = match &script.reply {
                 Reply::Fail(kind) => core_fail(*kind, bases, cont, up, &tags),
+                Reply::File(f) => file_alts(req, f, &bases, cont, &up, who, backend, &tags),
                 Reply::Relay(r) => {
                     let mut out = relay_alts(
                         req,

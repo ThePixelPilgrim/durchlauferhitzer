@@ -10,7 +10,10 @@
 //! Backend connections are pooled on the routes a seed draws pooled, and
 //! every reuse and retry is judged by the spec's rules (`pool.rs`). Routes
 //! drawn with `internal_files` get Rack's hints; file headers are forged
-//! by clients and sent by backends, and never pass (`files.rs`).
+//! by clients and sent by backends, and never pass (`files.rs`); their
+//! backends' `200`s name files of a random tree below the route's root,
+//! which the client gets as the spec says (`internal.rs`,
+//! `file_model.rs`).
 //!
 //! A seed is a series of rounds: several stories (one client connection
 //! each, a series of exchanges on it) interleaved at random without time
@@ -27,12 +30,15 @@ mod chunks;
 mod drain;
 mod draw;
 mod drive;
+mod file_model;
 mod files;
+mod internal;
 mod outcome;
 mod pool;
 mod request;
 mod response;
 mod round_end;
+mod timed;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -50,12 +56,15 @@ use chunks::*;
 use drain::*;
 use draw::*;
 use drive::*;
+use file_model::*;
 use files::*;
+use internal::*;
 use outcome::*;
 use pool::*;
 use request::*;
 use response::*;
 use round_end::*;
+use timed::*;
 
 /// Seeds the proxy net runs (debug build: about 15 s; 1000 so the thin
 /// pool, retry and drain gates each see more than a handful).
@@ -77,6 +86,10 @@ pub(crate) struct RouteConfig {
     pub(crate) pool: bool,
     /// The route's `internal_files` (FR-CFG-26), if any.
     pub(crate) files: Option<RouteFiles>,
+    /// Its `on_file_change` (FR-STATIC-14; set only with `files`).
+    pub(crate) policy: Policy,
+    /// The file tree below its root (shared by routes with one root).
+    pub(crate) tree: Option<Rc<FileTree>>,
 }
 
 /// A random config: two proxy routes next to a static one.
@@ -126,8 +139,24 @@ impl NetConfig {
         self.max_head.max(32 * 1024)
     }
 
+    /// A sim of this config, its clock set (`dated_sim`), the routes'
+    /// file trees made.
+    pub(crate) fn sim(&self) -> Sim {
+        let mut sim = dated_sim(&self.text);
+        let mut done: Vec<&'static str> = Vec::new();
+        for route in &self.routes {
+            if let (Some(files), Some(tree)) = (route.files, &route.tree) {
+                if !done.contains(&files.root()) {
+                    tree.install(&mut sim);
+                    done.push(files.root());
+                }
+            }
+        }
+        sim
+    }
+
     pub(crate) fn random(rng: &mut fastrand::Rng) -> NetConfig {
-        let routes = [
+        let mut routes = [
             RouteConfig {
                 prefix: "/api",
                 strip: true,
@@ -137,6 +166,8 @@ impl NetConfig {
                 max_response_body: body_limit(rng),
                 pool: rng.u8(0..4) != 0,
                 files: RouteFiles::random(rng),
+                policy: Policy::Abort,
+                tree: None,
             },
             RouteConfig {
                 prefix: "/raw",
@@ -147,8 +178,20 @@ impl NetConfig {
                 max_response_body: body_limit(rng),
                 pool: rng.u8(0..4) != 0,
                 files: RouteFiles::random(rng),
+                policy: Policy::Abort,
+                tree: None,
             },
         ];
+        // A tree per root, from a stream of its own; `allow_growth` on a
+        // file route now and then.
+        let mut trees = fastrand::Rng::with_seed(rng.u64(..));
+        let [a, b] = route_trees(&mut trees, [routes[0].files, routes[1].files]);
+        for (route, tree) in routes.iter_mut().zip([a, b]) {
+            route.tree = tree;
+            if route.files.is_some() && trees.u8(0..3) == 0 {
+                route.policy = Policy::AllowGrowth;
+            }
+        }
         let max_head = *rng.choice(&[2048, 4096, 16 * 1024]).unwrap_or(&4096);
         let secs = |rng: &mut fastrand::Rng, lo, hi| Duration::from_secs(rng.u64(lo..=hi));
         let connect = secs(rng, 1, 3);
@@ -161,7 +204,7 @@ impl NetConfig {
         let max_connections_per_ip = 4;
         let route = |r: &RouteConfig| {
             format!(
-                "  path {} {{ proxy {};{}{} max_request_body {}; max_response_body {};{} }}\n",
+                "  path {} {{ proxy {};{}{} max_request_body {}; max_response_body {};{}{} }}\n",
                 r.prefix,
                 r.addr,
                 if r.pool { "" } else { " pool off;" },
@@ -169,6 +212,10 @@ impl NetConfig {
                 limit_text(r.max_request_body),
                 limit_text(r.max_response_body),
                 RouteFiles::setting(r.files),
+                match r.policy {
+                    Policy::Abort => "",
+                    Policy::AllowGrowth => " on_file_change allow_growth;",
+                },
             )
         };
         let text = format!(
@@ -391,7 +438,10 @@ impl ProxyCoverage {
             .collect()
     }
 
-    pub(crate) fn check(&self) {
+    /// Every `REQUIRED` name reached; each file name (`file_model.rs`) as
+    /// often as `seeds` seeds call for.
+    pub(crate) fn check(&self, seeds: u64) {
+        check_file_coverage(&self.seen, seeds);
         for what in REQUIRED {
             assert!(
                 self.seen.get(what).copied().unwrap_or(0) > 0,
@@ -412,7 +462,9 @@ fn random_proxy_schedules() {
             });
         }
         None => {
-            for seed in seed_range(0..PROXY_SEEDS) {
+            let range = seed_range(0..PROXY_SEEDS);
+            let seeds = range.end - range.start;
+            for seed in range {
                 let plan = Rc::new(Cell::new(shutdown_plan(seed, PROXY_SPAN)));
                 run_reporting(seed, &plan, || {
                     run_proxy_seed(seed, &mut coverage, Rc::clone(&plan));
@@ -422,7 +474,7 @@ fn random_proxy_schedules() {
             for line in coverage.rare() {
                 eprintln!("{line}");
             }
-            coverage.check();
+            coverage.check(seeds);
         }
     }
 }

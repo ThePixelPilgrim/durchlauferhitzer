@@ -140,11 +140,23 @@ tests/
       chunks.rs           payloads and chunked bodies, with framing defects
       files.rs            `internal_files` routes, forged and backend file
                           headers, Rack's hints (FR-PROXY-32)
+      internal.rs         backend-directed files, what is drawn: a random
+                          file tree per root, the clients' conditional
+                          and range lines for one of its files, the
+                          header values a backend's `200` names a file
+                          with (bad paths and traversals among them)
+      file_model.rs       backend-directed files, the model: bad path
+                          (502), 404 or file; 200/206/304/416, the
+                          merged head, the exact bytes or the abort, the
+                          logs; parked only after `Content-Length: 0`
+                          (checked whenever an upstream idles or is
+                          reused); the file coverage gate
       response.rs         random backend responses (hostile ones among
                           them) and the model of what the client receives
       outcome.rs          exchanges, timings and the outcomes they allow
       draw.rs             drawing an exchange: plain ones, timed scenarios
-      drive.rs            stories, rounds, backends, timed scenarios
+      drive.rs            stories, rounds, backends
+      timed.rs            the timed scenarios, each alone in its round
       round_end.rs        the end of a round: windows open, streams end,
                           nothing left open
       check.rs            the oracle: each story against the model
@@ -172,7 +184,14 @@ and hostile heads; bytes after the body; resets and ends of stream anywhere,
 a reset also queued right behind the bytes before it, `backend_reset_after`;
 random windows), on two proxy routes beside a static one, with random body
 limits and timeouts, and now and then `internal_files` (FR-PROXY-32: forged
-file headers from clients, file headers from backends, Rack's hints). Each
+file headers from clients, file headers from backends, Rack's hints, and
+backends' `200`s naming files of a random tree below the route's root:
+valid paths, every bad-path class, traversals, the header twice, any
+body framing; clients add `Range`, `If-Range` and conditional lines for
+those files; the file arrives byte-exact behind the merged head, or as
+its 304, 416, 404 or 502, or cut by a file that changes while sent, and
+an upstream is parked after a file only after `Content-Length: 0`;
+each file coverage name is required at least 15 times per 1000 seeds). Each
 exchange is predicted by a model written from the spec, not from the core:
 the backend must receive exactly the rewritten request and the client's
 body, and the client exactly the rewritten head and the backend's body

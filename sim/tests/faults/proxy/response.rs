@@ -1,6 +1,8 @@
 //! Random backend responses, hostile ones among them, and the model of
 //! what the client must get for each (FR-PROXY-12…24): a 502, or the
-//! rewritten head and exactly the backend's body bytes, maybe cut.
+//! rewritten head and exactly the backend's body bytes, maybe cut; or,
+//! for a `200` naming a file on an `internal_files` route, the file
+//! (FR-PROXY-32, `internal.rs`).
 
 use super::*;
 
@@ -38,10 +40,26 @@ pub(crate) struct Script {
     pub(crate) keeps: bool,
     /// Sent in one piece (`Ctx::exact`).
     pub(crate) exact: bool,
+    /// Its head is sent alone first, then the rest (a file's backend
+    /// flushing its head before its body: never a reason to park,
+    /// FR-PROXY-32).
+    pub(crate) head_first: bool,
     /// Coverage tag of the hostile or edge case it carries, if any.
     pub(crate) tag: Option<&'static str>,
     /// Coverage of the file headers it carries, if relayed (FR-PROXY-32).
     pub(crate) file_tags: Vec<&'static str>,
+}
+
+impl Script {
+    /// Large enough to scale the client's windows up: its bytes, or the
+    /// file it names.
+    pub(crate) fn large(&self) -> bool {
+        let file = match &self.reply {
+            Reply::File(f) => f.size(),
+            Reply::Fail(_) | Reply::Relay(_) => 0,
+        };
+        self.wire.len() > 20_000 || file > 20_000
+    }
 }
 
 /// What the client must get.
@@ -50,6 +68,9 @@ pub(crate) enum Reply {
     /// A 502 before any response byte, for this failure.
     Fail(BackendFailure),
     Relay(Relay),
+    /// A `200` naming a file (FR-PROXY-32): its outcome by the request
+    /// (`file_model::file_alts`).
+    File(FileReply),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +150,11 @@ pub(crate) struct Ctx {
     /// The route's `internal_files`: which file headers the client never
     /// gets (FR-PROXY-32).
     pub(crate) files: Option<RouteFiles>,
+    /// The route's file tree and `on_file_change`, and the file the
+    /// client's conditional and range lines are for (`internal.rs`).
+    pub(crate) tree: Option<Rc<FileTree>>,
+    pub(crate) policy: Policy,
+    pub(crate) wish: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,7 +335,13 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         interim_ends.push(wire.len());
     }
     let head_start = wire.len();
-    let (mut code, reason) = rng.choice(CODES).copied().unwrap_or((200, "OK"));
+    let (mut code, mut reason) = rng.choice(CODES).copied().unwrap_or((200, "OK"));
+    // An `internal_files` route's backend answers `200` more often, so
+    // files are named often (FR-PROXY-32, `internal.rs`).
+    let files = ctx.tree.is_some() && !ctx.valid_only;
+    if files && rng.bool() {
+        (code, reason) = (200, "OK");
+    }
     // No framing header (`UntilClose`) is the end of stream, unless the
     // status or method rule out a body.
     let mut framing = match rng.u8(0..10) {
@@ -383,6 +415,24 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     for (name, value) in file_lines {
         push(&mut wire, rng, name, value);
     }
+    // FR-PROXY-32: three `200`s in four of an `internal_files` route name
+    // a file, with lines the merged head keeps, drops or defers to.
+    let trigger = match (ctx.files, parsed) {
+        (Some(route), Some(200)) if files && rng.u8(0..4) != 0 => {
+            let t = random_trigger(rng, route, ctx.wish.as_deref());
+            let name = any_case(rng, route.own_name());
+            for value in &t.values {
+                push(&mut wire, rng, &name, value);
+            }
+            for _ in 0..rng.usize(0..3) {
+                if let Some(&(name, value)) = rng.choice(FILE_EXTRA) {
+                    push(&mut wire, rng, name, value);
+                }
+            }
+            Some(t)
+        }
+        (Some(_) | None, _) => None,
+    };
     if rng.u8(0..5) == 0 {
         push(&mut wire, rng, "Connection", b"X-Secret, keep-alive");
         push(&mut wire, rng, "X-Secret", b"internal");
@@ -434,8 +484,15 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
             (n > 0 && n.to_string().len() == digits).then_some(n)
         })
     });
+    // A file's backend mostly says `Content-Length: 0` (FR-PROXY-02:
+    // only then is its connection pooled), else often a tiny body.
     let len = if let Some(n) = exact_len {
         n
+    } else if trigger.is_some() && (rng.bool() || (ctx.clean && rng.bool())) {
+        0
+    } else if trigger.is_some() && rng.u8(0..3) == 0 {
+        // A tiny body, often split from its head: never a reason to park.
+        rng.usize(1..=8)
     } else if ctx.need_body {
         response_len(rng, ctx.large).max(1)
     } else {
@@ -634,6 +691,20 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
             body_end,
         )
     };
+    // A `200` naming a file: the body is never read, so neither its limit
+    // nor HTTP/1.0's ban on chunking applies (FR-PROXY-32).
+    let zero = framing == BodyKind::Length && cl_value == Some(0);
+    let reply = match (&trigger, reply) {
+        (
+            Some(t),
+            Reply::Relay(_)
+            | Reply::Fail(BackendFailure::BodyTooLarge | BackendFailure::TransferEncodingToHttp10),
+        ) => match FileReply::new(t, &lines, &tokens_of(&lines), ctx, zero) {
+            Some(f) => Reply::File(f),
+            None => unreachable!("a trigger needs the route's files and tree"),
+        },
+        (_, reply) => reply,
+    };
     // A failure before the head is complete is a 502 too.
     let reply = match ending {
         Ending::Reset(k) | Ending::ResetAfter(k) if k < head_end => {
@@ -643,9 +714,10 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         Ending::Reset(_) | Ending::ResetAfter(_) | Ending::Eof(_) | Ending::Done { .. } => reply,
     };
     match reply {
-        Reply::Relay(_) => {}
+        Reply::Relay(_) | Reply::File(_) => {}
         Reply::Fail(_) => file_tags.clear(),
     }
+    let head_first = matches!(reply, Reply::File(_)) && body_end > head_end && rng.bool();
     Script {
         wire,
         head_end,
@@ -655,6 +727,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         reply,
         keeps: !http10 && !says_close,
         exact: exact_len.is_some(),
+        head_first,
         file_tags,
         tag: match (too_large, padded) {
             (true, _) => Some("backend head just too large"),

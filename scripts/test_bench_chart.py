@@ -95,6 +95,20 @@ class Validation(unittest.TestCase):
         self.assertIn("proxy-medium", latest)
         self.assertIn("proxy-large", latest)
 
+    def test_the_proxy_file_scenario_is_accepted_and_charted(self):
+        text = "\n".join(
+            [
+                HEADER,
+                row("2026-11-08", "proxy-file", 40.0, 12.0),
+                row("2026-11-09", "proxy-file", 41.0, 12.0),
+            ]
+        )
+        rows, dropped = bc.parse(text)
+        self.assertEqual((len(rows), dropped), (2, 0))
+        md = bc.render(rows)
+        self.assertEqual(len(blocks(md)), 2)
+        self.assertIn("proxy-file", md.split("Latest", 1)[-1])
+
     def test_untrusted_fields_drop_the_row(self):
         bad = [
             row("2026-11-06", '"static-small""]\nline [1"', 1, 1),

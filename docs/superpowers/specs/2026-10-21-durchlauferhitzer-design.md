@@ -2432,6 +2432,13 @@ does not change stage 7's choices.
   branch or reduced-budget dispatch keeps its rows as an artifact); a
   row with errors is published but never charted; the publish job
   accepts only rows for the run's own commit.
+  *Planner calls (stage 8 plan, Task 6):* the scenario `proxy-file`
+  (a keep-alive stub backend answers `200`, `Content-Length: 0` and
+  `X-Accel-Redirect: /protected/1k.bin`; the server sends the 1 KiB
+  file, FR-PROXY-32) is in the default set, so the nightly records it;
+  it gets no NFR-PERF target until the owner sets one from its first
+  nightly. This path exists to save backend work, and a nightly row is
+  how a regression would show.
 
 *(Owner decisions 2026-11-06, stage 7 Task 1 baseline:)* targets are
 work per request measured by `bench` (NFR-PERF-08). System calls per

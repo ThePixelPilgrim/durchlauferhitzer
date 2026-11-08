@@ -3,9 +3,9 @@
 //! file headers in backend responses, and the spec's rules for each,
 //! written independently of the core: no client's file header reaches a
 //! backend, an `internal_files` route's backend gets Rack's hints, and no
-//! backend's file header reaches a client. A backend here sends its route's
-//! own header only on a non-`200`: the file a `200` names is not modelled
-//! in this net (see `sim/tests/proxy/backend_files.rs`).
+//! backend's file header reaches a client. The route's own header on a
+//! `200` names a file, modelled in `internal.rs`; here a backend sends it
+//! only on a non-`200`.
 
 /// A route's `internal_files` (FR-CFG-26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +46,21 @@ impl RouteFiles {
             Some(RouteFiles::XAccelRedirect { prefix, root }) => {
                 format!(" internal_files x-accel-redirect {prefix} {root};")
             }
+        }
+    }
+
+    /// The route's root.
+    pub(crate) fn root(self) -> &'static str {
+        match self {
+            RouteFiles::XSendfile { root } | RouteFiles::XAccelRedirect { root, .. } => root,
+        }
+    }
+
+    /// The response header the route trusts, as the spec spells it.
+    pub(crate) fn own_name(self) -> &'static str {
+        match self {
+            RouteFiles::XSendfile { .. } => "X-Sendfile",
+            RouteFiles::XAccelRedirect { .. } => "X-Accel-Redirect",
         }
     }
 
@@ -101,7 +116,7 @@ pub(crate) fn forged_lines(rng: &mut fastrand::Rng) -> Vec<(String, Vec<u8>)> {
     lines
 }
 
-fn any_case(rng: &mut fastrand::Rng, name: &str) -> String {
+pub(crate) fn any_case(rng: &mut fastrand::Rng, name: &str) -> String {
     match rng.u8(0..3) {
         0 => name.to_ascii_uppercase(),
         1 => name.to_ascii_lowercase(),

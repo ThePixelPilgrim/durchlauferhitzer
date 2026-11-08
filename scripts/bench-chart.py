@@ -55,6 +55,7 @@ SCENARIOS = (
     "proxy-fresh",
     "proxy-medium",
     "proxy-large",
+    "proxy-file",
     "conditional-hit",
     "static-small-1k-idle",
 )

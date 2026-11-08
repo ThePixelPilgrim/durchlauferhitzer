@@ -35,7 +35,14 @@ The nightly runs this only when dispatched with `bench_netem`.
 
 Per run a fresh server: a temp static root with a 1 KiB and a 1 MiB file,
 one proxy route to the in-process stub backend (keep-alive; the body is
-64 KiB for `/medium`, 1 MiB for `/large`, else 1 KiB),
+64 KiB for `/medium`, 1 MiB for `/large`, else 1 KiB), and, when
+`proxy-file` runs, a second proxy route to it, `/file` with
+`internal_files x-accel-redirect /protected/ <files>` (FR-PROXY-32): the
+backend answers `/1k` with `200`, `Content-Length: 0` and
+`X-Accel-Redirect: /protected/1k.bin`, and the server sends the 1 KiB
+`1k.bin` of `<files>` (the route only with that scenario, so
+`bisect.sh` still runs every other scenario on a binary from before
+stage 8),
 default limits except three for `static-small-1k-idle` (one server
 serves every scenario of a run): `max_connections 2048` and
 `max_connections_per_ip 2048` (every client shares 127.0.0.1), and
@@ -61,6 +68,7 @@ client threads), then the strace pass (another `duration`).
 | `static-small-1k-idle` | as `static-small`, with 1 000 idle keep-alive connections held open (nightly: one run) |
 | `proxy-medium` | as `proxy-small`, a 64 KiB response (on demand) |
 | `proxy-large` | as `proxy-small`, a 1 MiB response (nightly: one run) |
+| `proxy-file` | as `proxy-small`, but the backend names a 1 KiB file (`X-Accel-Redirect`, `Content-Length: 0`) that the server sends; no NFR-PERF target until the owner sets one from its first nightly |
 
 Without `--scenarios` all but `static-small-1k-idle`, `proxy-medium` and
 `proxy-large` run. The nightly runs the 1k-idle and `proxy-large`

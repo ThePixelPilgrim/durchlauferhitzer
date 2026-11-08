@@ -116,6 +116,7 @@ fn describe(ex: &Exchange) -> String {
     let script = ex.script.as_ref().map(|s| {
         let reply = match &s.reply {
             Reply::Fail(k) => format!("Fail({k:?})"),
+            Reply::File(f) => format!("File({:?} zero {} kept {:?})", f.target, f.zero, f.kept),
             Reply::Relay(r) => format!(
                 "Relay({} {:?} {:?} fails {:?} cut {:?} head {:?})",
                 r.status,
@@ -349,6 +350,10 @@ pub(crate) fn check_story(
         // part of the request.
         if let Err(e) = check_reuse(story.conn, ex, run, stories, net, coverage) {
             fail(format!("exchange {i}: {e}"));
+        }
+        // FR-PROXY-32: parked after a file (`file_model::check_parked`).
+        if run.parked {
+            coverage.add("file-parked");
         }
         // Once the server shut down, what the exchange may show depends on
         // when its first log was written (a retry's comes first).

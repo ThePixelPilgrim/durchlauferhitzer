@@ -23,14 +23,20 @@ pub enum Scenario {
     StaticSmall1kIdle,
     ProxyMedium,
     ProxyLarge,
+    ProxyFile,
 }
+
+/// `proxy-file`'s request path: the `/file` route (`strip_prefix`, so
+/// the backend sees `/1k`), whose backend names the 1 KiB file
+/// (FR-PROXY-32, [`crate::backend`]).
+pub const FILE_PATH: &str = "/file/1k";
 
 /// The idle keep-alive connections `static-small-1k-idle` holds open.
 pub const IDLE: usize = 1000;
 
 impl Scenario {
     /// Every scenario.
-    pub const ALL: [Scenario; 9] = [
+    pub const ALL: [Scenario; 10] = [
         Scenario::StaticSmall,
         Scenario::StaticLarge,
         Scenario::StaticFresh,
@@ -40,18 +46,20 @@ impl Scenario {
         Scenario::StaticSmall1kIdle,
         Scenario::ProxyMedium,
         Scenario::ProxyLarge,
+        Scenario::ProxyFile,
     ];
 
     /// The scenarios run without `--scenarios` (the nightly's set):
     /// all but `static-small-1k-idle`, `proxy-medium` and `proxy-large`,
     /// which are run on demand.
-    pub const DEFAULT: [Scenario; 6] = [
+    pub const DEFAULT: [Scenario; 7] = [
         Scenario::StaticSmall,
         Scenario::StaticLarge,
         Scenario::StaticFresh,
         Scenario::ProxySmall,
         Scenario::ProxyFresh,
         Scenario::ConditionalHit,
+        Scenario::ProxyFile,
     ];
 
     pub fn name(self) -> &'static str {
@@ -65,6 +73,7 @@ impl Scenario {
             Scenario::StaticSmall1kIdle => "static-small-1k-idle",
             Scenario::ProxyMedium => "proxy-medium",
             Scenario::ProxyLarge => "proxy-large",
+            Scenario::ProxyFile => "proxy-file",
         }
     }
 
@@ -83,6 +92,7 @@ impl Scenario {
             Scenario::ProxySmall | Scenario::ProxyFresh => "/proxy/small",
             Scenario::ProxyMedium => "/proxy/medium",
             Scenario::ProxyLarge => "/proxy/large",
+            Scenario::ProxyFile => FILE_PATH,
         }
     }
 
@@ -95,7 +105,8 @@ impl Scenario {
             | Scenario::ConditionalHit
             | Scenario::StaticSmall1kIdle
             | Scenario::ProxyMedium
-            | Scenario::ProxyLarge => Reuse::KeepAlive,
+            | Scenario::ProxyLarge
+            | Scenario::ProxyFile => Reuse::KeepAlive,
         }
     }
 
@@ -111,7 +122,8 @@ impl Scenario {
             | Scenario::ProxyFresh
             | Scenario::ConditionalHit
             | Scenario::ProxyMedium
-            | Scenario::ProxyLarge => 0,
+            | Scenario::ProxyLarge
+            | Scenario::ProxyFile => 0,
         }
     }
 
@@ -132,7 +144,8 @@ impl Scenario {
             | Scenario::ProxySmall
             | Scenario::ProxyFresh
             | Scenario::ConditionalHit
-            | Scenario::StaticSmall1kIdle => SMALL,
+            | Scenario::StaticSmall1kIdle
+            | Scenario::ProxyFile => SMALL,
         };
         Expect { status, body_len }
     }
@@ -150,7 +163,30 @@ impl Scenario {
             | Scenario::ProxyFresh
             | Scenario::StaticSmall1kIdle
             | Scenario::ProxyMedium
-            | Scenario::ProxyLarge => String::new(),
+            | Scenario::ProxyLarge
+            | Scenario::ProxyFile => String::new(),
+        }
+    }
+}
+
+/// Which routes the bench config has (`server::config`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Routes {
+    /// The static root and the `/proxy` route.
+    Plain,
+    /// Also `/file`, a proxy route with `internal_files` (FR-PROXY-32):
+    /// only when a scenario needs it, so a binary from before stage 8
+    /// (`bisect.sh`) still loads the config for every other scenario.
+    WithFiles,
+}
+
+impl Routes {
+    /// The routes `scenarios` need.
+    pub fn of(scenarios: &[Scenario]) -> Routes {
+        if scenarios.contains(&Scenario::ProxyFile) {
+            Routes::WithFiles
+        } else {
+            Routes::Plain
         }
     }
 }
@@ -204,6 +240,27 @@ mod tests {
         }
         assert!(!Scenario::DEFAULT.contains(&Scenario::ProxyMedium));
         assert!(!Scenario::DEFAULT.contains(&Scenario::ProxyLarge));
+    }
+
+    /// `proxy-file` (FR-PROXY-32): the 1 KiB file, keep-alive, run by
+    /// default (the nightly records it); only it adds the `/file` route.
+    #[test]
+    fn proxy_file_serves_the_small_file_by_default() {
+        let s = Scenario::ProxyFile;
+        assert_eq!(Scenario::from_name("proxy-file"), Some(s));
+        assert_eq!(s.path(), "/file/1k");
+        assert_eq!(s.reuse(), Reuse::KeepAlive);
+        assert_eq!(s.idle(), 0);
+        assert_eq!(
+            s.expect(None),
+            Expect {
+                status: 200,
+                body_len: SMALL
+            }
+        );
+        assert!(Scenario::DEFAULT.contains(&s));
+        assert_eq!(Routes::of(&Scenario::DEFAULT), Routes::WithFiles);
+        assert_eq!(Routes::of(&[Scenario::StaticSmall]), Routes::Plain);
     }
 
     #[test]

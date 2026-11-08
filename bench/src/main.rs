@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use backend::Backend;
 use load::Target;
 use row::Row;
-use scenario::Scenario;
+use scenario::{Routes, Scenario};
 use server::{Place, Server};
 
 /// Client threads per scenario.
@@ -110,7 +110,8 @@ fn measure(ctx: &Context, server: &mut Server, scenario: Scenario) -> Option<Row
         | Scenario::ProxyFresh
         | Scenario::StaticSmall1kIdle
         | Scenario::ProxyMedium
-        | Scenario::ProxyLarge => None,
+        | Scenario::ProxyLarge
+        | Scenario::ProxyFile => None,
     };
     let etag = etag.as_deref();
     let target = Target {
@@ -350,7 +351,13 @@ fn main() -> ExitCode {
     for run in 1..=args.runs {
         ctx.run = run;
         println!("bench: run {run} of {}", args.runs);
-        let mut server = match Server::start(&args.binary, backend.addr, &run.to_string(), place) {
+        let mut server = match Server::start(
+            &args.binary,
+            backend.addr,
+            &run.to_string(),
+            place,
+            Routes::of(&args.scenarios),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 fail("all", Reason::Startup, &e);

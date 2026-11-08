@@ -403,7 +403,7 @@ jobs:
     name: bench
     if: ${{ !inputs.bench_netem }}
     runs-on: ubuntu-24.04
-    # Full budget: 5 runs x 6 scenarios x about 27 s, plus one run of
+    # Full budget: 5 runs x 7 scenarios x about 27 s, plus one run of
     # the 1k-idle and proxy-large scenarios (about 60 s), plus the builds.
     timeout-minutes: 46
     steps:

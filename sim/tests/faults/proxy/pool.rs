@@ -127,6 +127,12 @@ pub(crate) struct Assign {
 }
 
 impl Assign {
+    /// The exchange `up` served last: its client, index and request
+    /// number.
+    pub(crate) fn last_of(&self, up: UpstreamId) -> Option<(ConnId, usize, usize)> {
+        self.last.get(&up).copied()
+    }
+
     /// A new round: the pool was emptied (`clear_pool`), ids go on.
     pub(crate) fn round(&mut self) {
         self.last.clear();
@@ -241,11 +247,23 @@ fn reuse(
         return false;
     }
     let i = next_exchange(story, sim, up);
+    let prev = stories.iter().find(|s| s.conn == prev_conn);
+    // FR-PROXY-32: after a file only by its rule, judged as the reuse
+    // begins (before a backend acts on it again).
+    let file = prev
+        .and_then(|s| file_parkable(s.exchanges.get(prev_i)?, s.runs.get(prev_i)?, Fate::Reused));
+    if let Some(Err(why)) = file {
+        panic!(
+            "conn={} reuses up={} after a file of conn={} exchange {prev_i}, but {why}\ntrace:\n{}",
+            conn.0,
+            up.0,
+            prev_conn.0,
+            sim.trace()
+        );
+    }
     // The backend may have ended the connection right after the last
     // response, before the core saw it: then this request finds it dead.
-    let ended = stories
-        .iter()
-        .find(|s| s.conn == prev_conn)
+    let ended = prev
         .and_then(|s| s.exchanges.get(prev_i))
         .and_then(closed_after);
     let story = &mut stories[s];
@@ -567,8 +585,23 @@ pub(crate) fn left_reusable(
                 ));
             }
         }
+        // FR-PROXY-32: after a file, only by its own rule (`file_model.rs`).
+        Reply::File(_) => {
+            return match file_parkable(prev, run, Fate::Parked(net)) {
+                Some(Ok(())) => after_response(prev, script, run, reuser),
+                Some(Err(why)) => Err(why),
+                None => Err("its file is no file".to_owned()),
+            };
+        }
         Reply::Relay(_) | Reply::Fail(_) => return Err("its response failed".to_owned()),
     }
+    after_response(prev, script, run, reuser)
+}
+
+/// The rest of [`left_reusable`]: the backend kept the connection and
+/// sent nothing after its response, nor ended it there unless the reuser
+/// found it dead, nor wrote to it while idle.
+fn after_response(prev: &Exchange, script: &Script, run: &Run, reuser: &Run) -> Result<(), String> {
     if !script.keeps {
         return Err("its backend said close or spoke HTTP/1.0".to_owned());
     }
@@ -765,7 +798,7 @@ pub(crate) fn reuse_alts(
                     },
                 );
                 alt.tags.push(match &ex.script.as_ref().map(|s| &s.reply) {
-                    Some(Reply::Relay(_)) => "retry: replayed, relayed",
+                    Some(Reply::Relay(_) | Reply::File(_)) => "retry: replayed, relayed",
                     Some(Reply::Fail(_)) | None => "retry: replayed, failed again",
                 });
                 alt

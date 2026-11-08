@@ -355,6 +355,20 @@ tests/
                     boundary gets exactly its bytes, a suffix range the
                     last ones, a range past the end the 416; each head
                     byte-exact by the sim's model
+  internal_files.rs backend-directed files through the binary
+                    (FR-PROXY-32, FR-STATIC-19; Landlock `required`
+                    with DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1, else
+                    `best_effort`, seccomp by the kill switch): a std
+                    stub backend names a 600 KiB pattern file by
+                    `X-Accel-Redirect` (it arrives exactly, the
+                    backend's `content-disposition` kept, its body never
+                    sent, logged `kind=backend_file ... status=200`) or
+                    `X-Sendfile` (a range across a chunk gets exactly its
+                    bytes); `/etc/passwd` is a 502 (`bad_file_path`)
+                    with none of its bytes, a symlink in the root out of
+                    it a 404; a client's forged file headers never reach
+                    the backend, Rack's hints do; after `Content-Length:
+                    0` two requests share one backend connection
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process

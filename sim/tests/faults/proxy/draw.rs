@@ -68,6 +68,9 @@ pub(crate) fn random_exchange(
             need_body: false,
             large: rng.u8(0..3) == 0,
             files: net.routes[fwd.route].files,
+            tree: net.routes[fwd.route].tree.clone(),
+            policy: net.routes[fwd.route].policy,
+            wish: req.wish.clone(),
             // An eager backend may answer while the request head is still
             // being written: a reset then fails that write at once.
             resets: match timing {
@@ -152,6 +155,9 @@ fn timed_exchange(
         large: false,
         resets: Resets::Late,
         files: net.routes[fwd.route].files,
+        tree: None,
+        policy: net.routes[fwd.route].policy,
+        wish: None,
     };
     let script = matches!(kind, 2 | 5 | 6 | 7).then(|| random_script(rng, &ctx));
     let (connect, timing) = match kind {
@@ -176,7 +182,7 @@ fn timed_exchange(
             let s = script.as_ref()?;
             match &s.reply {
                 Reply::Relay(r) if r.fails.is_none() && r.kind != BodyKind::None => {}
-                Reply::Relay(_) | Reply::Fail(_) => return None,
+                Reply::Relay(_) | Reply::Fail(_) | Reply::File(_) => return None,
             }
             if s.body_end <= s.head_end {
                 return None;
@@ -207,7 +213,7 @@ fn timed_exchange(
             let s = script.as_ref()?;
             match &s.reply {
                 Reply::Relay(r) if r.fails.is_none() => {}
-                Reply::Relay(_) | Reply::Fail(_) => return None,
+                Reply::Relay(_) | Reply::Fail(_) | Reply::File(_) => return None,
             }
             (ConnectBehaviour::Accept, Timing::ClientStall)
         }

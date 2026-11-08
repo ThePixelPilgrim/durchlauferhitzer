@@ -41,6 +41,9 @@ pub(crate) struct Request {
     /// `forged-file-header` when it carries a file header and is
     /// forwarded (FR-PROXY-32); counted once the backend got the head.
     pub(crate) file_tag: Option<&'static str>,
+    /// On an `internal_files` route: the file (below the root) its
+    /// conditional and range lines are for (`internal::wish_lines`).
+    pub(crate) wish: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +213,14 @@ pub(crate) fn random_proxy_request(
             _ => 4,
         }
     };
+    // An `internal_files` route gets more GETs and HEADs: conditionals
+    // count for them only, ranges for a GET (FR-STATIC-18, -19,
+    // `internal.rs`).
+    let method = match (target, rng.u8(0..6)) {
+        (0 | 1, 0 | 1) if net.routes[target].tree.is_some() => "GET",
+        (0 | 1, 2) if net.routes[target].tree.is_some() => "HEAD",
+        _ => method,
+    };
     let rest = rng.choice(RESTS).copied().unwrap_or("");
     let path = match target {
         0 | 1 => format!("{}{rest}", net.routes[target].prefix),
@@ -349,6 +360,18 @@ pub(crate) fn random_proxy_request(
     for (name, value) in forged {
         lines.push(Line { name, value });
     }
+    // FR-PROXY-32, FR-STATIC-18, -19: conditional and range lines for a
+    // file the backend may name.
+    let wish = match target {
+        0 | 1 => wish_lines(rng, net.routes[target].tree.as_deref()),
+        _ => None,
+    };
+    let wish = wish.map(|(path, extra)| {
+        for (name, value) in extra {
+            lines.push(Line { name, value });
+        }
+        path
+    });
     if defect == Some(Defect::DupXff) {
         lines.push(line("X-Forwarded-For", b"203.0.113.1"));
         lines.push(line(&random_case(rng, "x-forwarded-for"), b"203.0.113.2"));
@@ -564,6 +587,7 @@ pub(crate) fn random_proxy_request(
         chunk_ends,
         tag,
         file_tag,
+        wish,
     }
 }
 
