@@ -230,7 +230,7 @@ impl Core {
             toward,
             reuse: Reuse::Fresh,
             replay,
-            internal: internal.clone(),
+            internal,
         };
         c.state = match idle {
             // Owner decision 2026-11-07: before anything is written on
