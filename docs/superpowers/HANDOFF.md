@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-08, after stage 8 Task 5.
+Last updated 2026-11-08, after stage 8 Task 6.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -14,7 +14,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
 | 6 Restart | done (`22fd0ce..` this handoff) — record: `docs/superpowers/reviews/2026-11-06-stage-6-review.md` |
 | 7 Efficiency | done (`71d3867..` this handoff) — record: `docs/superpowers/reviews/2026-11-07-stage-7-review.md`. The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
-| 8 Backend-directed file serving | in progress (`862e951..`; plan `docs/superpowers/plans/2026-11-07-stage-8-internal-files.md`): Tasks 1 ✅ (ranges, FR-STATIC-19), 2 ✅ (`internal_files` config, FR-CFG-26; the example config already documents the finished stage 8 behaviour) , 3 ✅ (file headers stripped both ways, Rack hints, hints counted in the head buffer and memory budget) , 4 ✅ (backend file path rules; config also refuses `?`, `=`, `,` in an internal root and `,` in a prefix) , 5 ✅ (serving the backend's file: trigger, merged head, 304/206/416/404, pooling only after `Content-Length: 0`, `backend_file` log kind, `FILE_HEAD_EXTRA` 401) — **next: Task 6** (real binary, random proxy net, bench `proxy-file`) |
+| 8 Backend-directed file serving | in progress (`862e951..`; plan `docs/superpowers/plans/2026-11-07-stage-8-internal-files.md`): Tasks 1 ✅ (ranges, FR-STATIC-19), 2 ✅ (`internal_files` config, FR-CFG-26; the example config already documents the finished stage 8 behaviour) , 3 ✅ (file headers stripped both ways, Rack hints, hints counted in the head buffer and memory budget) , 4 ✅ (backend file path rules; config also refuses `?`, `=`, `,` in an internal root and `,` in a prefix) , 5 ✅ (serving the backend's file: trigger, merged head, 304/206/416/404, pooling only after `Content-Length: 0`, `backend_file` log kind, `FILE_HEAD_EXTRA` 401) , 6 ✅ (through the binary under Landlock and the kill switch, files in the random proxy net, bench `proxy-file` on its own server, no target yet) — **next: Task 7** (stage close-out: statuses, docs, whole-stage review) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -25,7 +25,7 @@ Each stage's review record lists its owner decisions, rulings, final review, fix
 ## Where things stand after stage 7 (details in the spec and the stage records)
 
 - The binary `durchlauferhitzer` (crate `driver`, `libc` its only dependency; `unsafe` only in `driver/src/sys/`, pinned by `driver/tests/unsafe_confined.rs`) serves static files and proxies over epoll, follows the contract (DRV-01…16), logs one `key=value` line per entry on a non-blocking stderr (FR-LOG-05/06), starts up in the A11 order with systemd sockets or its own binds, drops to `user` and clears every capability (FR-PROC-03), checks the descriptor budget (NFR-RES-05), and drains on SIGTERM / aborts on a second SIGTERM, SIGINT or `shutdown_timeout` (FR-PROC-05).
-- CI: x86_64 and arm64 run the same gate (fmt, clippy, tests with IPv6 required, deps check and self-test, docs with `-D warnings`); a root step runs the 10 server-starting test binaries (`SERVER_TESTS` in `ci.yml`) under `sudo` with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`; a list check keeps that step complete; the workflow token is read-only and `actions/checkout` is pinned by commit.
+- CI: x86_64 and arm64 run the same gate (fmt, clippy, tests with IPv6 required, deps check and self-test, docs with `-D warnings`); a root step runs the 12 server-starting test binaries (`SERVER_TESTS` in `ci.yml`) under `sudo` with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`; a list check keeps that step complete; the workflow token is read-only and `actions/checkout` is pinned by commit.
 - Tests: an end-to-end smoke suite on the real binary; randomized sim nets that also drain and abort (`seed % 5 == 0`) and run late timers (`seed % 4 == 0`); the unanswered-request check runs on every static seed.
 - Containment (stage 5): Landlock (read-only beneath the roots; ABI ≥ 6 also scopes signals and abstract unix sockets) and a seccomp allow-list for x86_64 and aarch64 (`driver/src/containment/filter.rs`), each `off | best_effort | required` (FR-CFG-25, FR-PROC-06). The whole driver suite also runs under `seccomp_action kill` (`DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1`) in CI on both arches and in the root step. IPv6 peers are grouped by `ipv6_prefix`, NAT64 peers by their IPv4 (FR-CONN-13).
 - Nightly (`.github/workflows/nightly.yml`, 03:17 UTC and by hand): long sim runs, four fuzz targets, the suite under kill on Debian 12; failures file `nightly` issues by fingerprint.
