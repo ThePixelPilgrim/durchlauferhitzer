@@ -225,6 +225,7 @@ fn proxy_route(backend: SocketAddr) -> RouteAction {
         max_request_body: BodyLimit::Bytes(1),
         max_response_body: BodyLimit::Bytes(1),
         pool: Pooling::On,
+        internal_files: None,
     })
 }
 

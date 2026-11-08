@@ -5,12 +5,14 @@ use super::super::model::{
     StripPrefix, VirtualHost, worst_case_per_connection,
 };
 use super::super::syntax::SyntaxErrorKind;
+use super::route::RouteKey;
 use super::*;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
 use std::time::Duration;
 
 mod containment;
+mod internal_files;
 mod limits;
 mod routes;
 
@@ -110,6 +112,7 @@ fn loads_spec_example() {
                         max_request_body: BodyLimit::Bytes(10 << 20),
                         max_response_body: BodyLimit::Unlimited,
                         pool: Pooling::On,
+                        internal_files: None,
                     }),
                 },
             ],
@@ -320,6 +323,16 @@ fn example_config_loads() {
     for (key, _) in ContainmentKey::ALL {
         let setting = format!("\n  {key} ");
         assert!(text.contains(&setting), "`{key}` is not documented");
+    }
+    // Likewise every route key, indented as in a route block (the flag
+    // `strip_prefix` is followed by `;`, the others by a space).
+    for (key, _) in RouteKey::ALL {
+        let setting = format!("\n    {key} ");
+        let flag = format!("\n    {key};");
+        assert!(
+            text.contains(&setting) || text.contains(&flag),
+            "`{key}` is not documented"
+        );
     }
     let config = config.map_err(|_| ());
     assert_eq!(

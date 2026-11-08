@@ -93,6 +93,34 @@ fn a_missing_static_root_is_exit_2_naming_it() {
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
 }
 
+/// FR-CFG-26: an `internal_files` root is opened at startup like a static
+/// root, so a missing one is exit 2 with the same wording.
+#[test]
+fn missing_internal_files_root_is_exit_2() {
+    let dir = TempDir::new();
+    let missing = dir.path().join("no-such-internal-root");
+    let conf = config(
+        &loopback(free_port()).to_string(),
+        "",
+        &format!(
+            "{PROXY_ROUTE} internal_files x-sendfile {};",
+            missing.display()
+        ),
+    );
+    let path = dir.config("internal.conf", &conf, Containment::Switch);
+    let output = run(&[path.to_str().unwrap()], Setup::non_root());
+    assert_exit(&output, 2);
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.starts_with(&format!(
+            "durchlauferhitzer: static root {}: ",
+            missing.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+}
+
 /// NFR-PORT-03 (owner decision 2026-10-29, O3): on a kernel without
 /// `openat2` (a seccomp filter makes it fail with `ENOSYS`), the probe
 /// stops startup: exit 2 with its message.

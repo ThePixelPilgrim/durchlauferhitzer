@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use crate::config::{Config, Limits, RouteAction};
+use crate::config::{Config, Limits, ProxyRoute, RouteAction};
 use crate::conn::{ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 #[cfg(doc)]
 use crate::file::RootId;
@@ -63,7 +63,8 @@ pub struct Core {
     refused_per_group: BTreeMap<IpAddr, u32>,
     /// Where every lingering connection discards its input.
     scratch: Box<[u8]>,
-    /// Distinct static roots in config order; a `RootId` indexes it.
+    /// Distinct static roots, then `internal_files` roots, in config order;
+    /// a `RootId` indexes it.
     static_roots: Vec<PathBuf>,
     files: FileTable,
     /// Distinct backends in config order; a `BackendId` indexes it.
@@ -127,6 +128,19 @@ impl Core {
                 }
             }
         }
+        // FR-CFG-26: the `internal_files` roots follow all the static ones
+        // (so a static root's id does not depend on them).
+        for route in config.hosts.iter().flat_map(|h| &h.routes) {
+            if let RouteAction::Proxy(ProxyRoute {
+                internal_files: Some(internal),
+                ..
+            }) = &route.action
+            {
+                if !static_roots.contains(&internal.root) {
+                    static_roots.push(internal.root.clone());
+                }
+            }
+        }
         let limits = &config.limits;
         let upstream_recv_capacity = recv_capacity(limits.max_head);
         let head_capacity = head_capacity(limits.max_head, limits.max_headers);
@@ -172,9 +186,10 @@ impl Core {
         &self.backends
     }
 
-    /// Every distinct static root in config order (identical paths once).
-    /// A [`RootId`] is an index into it; the driver opens each root once at
-    /// startup.
+    /// Every distinct static root in config order, then every distinct
+    /// `internal_files` root in config order (FR-CFG-26), identical paths
+    /// once. A [`RootId`] is an index into it; the driver opens each root
+    /// once at startup.
     pub fn static_roots(&self) -> &[PathBuf] {
         &self.static_roots
     }

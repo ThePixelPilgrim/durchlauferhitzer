@@ -58,13 +58,14 @@ no static root is opened.
 ## Try it
 
 The example config listens on `127.0.0.1:8080` and runs as any normal user
-(no root). Its static roots must exist. They are under `/tmp`, which every
+(no root). Its static and `internal_files` roots must exist. They are under `/tmp`, which every
 user can write to: on a shared machine another user could create
 `/tmp/durchlauferhitzer` first (or a symlink there), so use roots you own
 instead and change them in the config. On your own machine:
 
 ```sh
-mkdir -p /tmp/durchlauferhitzer/www /tmp/durchlauferhitzer/well-known
+mkdir -p /tmp/durchlauferhitzer/www /tmp/durchlauferhitzer/well-known \
+         /tmp/durchlauferhitzer/protected
 echo '<p>hello</p>' > /tmp/durchlauferhitzer/www/index.html
 target/release/durchlauferhitzer examples/durchlauferhitzer.conf
 ```
@@ -84,7 +85,7 @@ Logging never blocks: lines stderr cannot take are dropped and counted
 (`kind=dropped count=N`).
 
 Startup checks, in this order, and fails with one `durchlauferhitzer:
-<message>` line and exit 2: `openat2` support, every static root (it must be
+<message>` line and exit 2: `openat2` support, every static and `internal_files` root (it must be
 a directory), binding every `listen` address in config order, the descriptor
 budget (`RLIMIT_NOFILE`: a low soft limit is raised to what is needed when
 the hard limit allows, else the error names both numbers; raise the limit or
@@ -99,16 +100,16 @@ set `required` that the kernel cannot apply (below).
   or socket activation; a refused bind is a startup error naming the
   address.
 - Started as root (any of the real, effective or saved uid 0), `user` is
-  required: after binding and opening the static roots the server drops to
+  required: after binding and opening the static and `internal_files` roots the server drops to
   that user and group for good, and refuses to run as root otherwise
   (exit 2).
 
 ## Containment
 
 After startup the server confines itself (config block `containment`,
-see the example config): Landlock lets it only read beneath its static
-roots, and a seccomp filter allows only the system calls it needs. Each
-layer is `best_effort` (the default: used where the kernel has it,
+see the example config): Landlock lets it only read beneath its static and
+`internal_files` roots, and a seccomp filter allows only the system calls it
+needs. Each layer is `best_effort` (the default: used where the kernel has it,
 otherwise logged as missing), `required` (missing or partial is exit 2)
 or `off`; the startup log says what applies (`kind=containment ...`, one
 line per layer). A blocked call gets
@@ -120,8 +121,8 @@ journalctl -k | grep seccomp    # or, without systemd: dmesg | grep seccomp
 ```
 
 Use Linux 6.2 or later (6.10 or later restricts every right with
-Landlock alone; before 6.2 truncation is not restricted), and static
-roots the server's user cannot write. Landlock never restricts `O_PATH`
+Landlock alone; before 6.2 truncation is not restricted), and static and
+`internal_files` roots the server's user cannot write. Landlock never restricts `O_PATH`
 opens: the existence and metadata (size, owner, times) of paths outside
 the roots stay visible to the server process itself, not their contents.
 Clients cannot see them: requests resolve beneath the roots (`openat2`

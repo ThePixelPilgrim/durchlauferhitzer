@@ -82,7 +82,8 @@ src/
     syntax.rs           nested blocks and settings
     validate/           semantic rules, defaults, line:column errors
       route.rs            one `path` block: its keys and route rules
-    model.rs            the validated Config (limits, containment)
+    model.rs            the validated Config (limits, containment,
+                        `internal_files`)
     units.rs            durations and sizes
   http/               HTTP building blocks (pure functions, no state)
     request.rs          strict, resumable request-head parser

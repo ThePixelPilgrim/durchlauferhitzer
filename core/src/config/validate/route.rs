@@ -7,13 +7,13 @@ use crate::http::target::validate_path;
 
 use super::super::lexer::Pos;
 use super::super::model::{
-    BodyLimit, ConfigError, ConfigErrorKind, OnFileChange, Pooling, ProxyRoute, Route, RouteAction,
-    StripPrefix,
+    BodyLimit, ConfigError, ConfigErrorKind, FileHeader, InternalFiles, OnFileChange, Pooling,
+    ProxyRoute, Route, RouteAction, StripPrefix,
 };
-use super::super::syntax::{Block, Item};
+use super::super::syntax::{Block, Item, Setting};
 use super::{
     duplicate_key, fail, invalid_value, no_value, one_value, parse_backend, parse_body_limit,
-    path_segments, unknown_key, valid_root,
+    path_segments, unknown_key, valid_root, wrong_value_count,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -25,21 +25,71 @@ pub(super) enum RouteKey {
     MaxResponseBody,
     OnFileChange,
     Pool,
+    InternalFiles,
 }
 
 impl RouteKey {
+    /// Every route key with its name: the one list the parser and the
+    /// example config's test read.
+    pub(super) const ALL: [(&'static str, RouteKey); 8] = [
+        ("static", Self::Static),
+        ("proxy", Self::Proxy),
+        ("strip_prefix", Self::StripPrefix),
+        ("max_request_body", Self::MaxRequestBody),
+        ("max_response_body", Self::MaxResponseBody),
+        ("on_file_change", Self::OnFileChange),
+        ("pool", Self::Pool),
+        ("internal_files", Self::InternalFiles),
+    ];
+
     fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "static" => Some(Self::Static),
-            "proxy" => Some(Self::Proxy),
-            "strip_prefix" => Some(Self::StripPrefix),
-            "max_request_body" => Some(Self::MaxRequestBody),
-            "max_response_body" => Some(Self::MaxResponseBody),
-            "on_file_change" => Some(Self::OnFileChange),
-            "pool" => Some(Self::Pool),
-            _ => None,
-        }
+        Self::ALL
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, key)| *key)
     }
+}
+
+/// An `internal_files` root: FR-CFG-15, and visible ASCII only (bytes
+/// 0x21 to 0x7E), so that no `X-Sendfile` value can equal another root and
+/// the root can go into `X-Accel-Mapping` (FR-CFG-26).
+fn valid_internal_root(root: &str) -> bool {
+    valid_root(root) && root.bytes().all(|b| (0x21..=0x7E).contains(&b))
+}
+
+/// An `internal_files` prefix: starts and ends with `/` and is a valid path
+/// (FR-CFG-13). `/` alone is fine.
+fn valid_prefix(prefix: &str) -> bool {
+    prefix.starts_with('/') && prefix.ends_with('/') && validate_path(prefix).is_ok()
+}
+
+/// `x-sendfile <root>` or `x-accel-redirect <prefix> <root>`; the
+/// `on_file_change` is filled in by the caller.
+fn parse_internal_files(setting: &Setting) -> Result<InternalFiles, ConfigError> {
+    let bad = |value: &str| invalid_value(&setting.key, value, setting.pos);
+    let (header, root) = match setting.values.as_slice() {
+        [] => return wrong_value_count(setting),
+        [form, rest @ ..] => match (form.as_str(), rest) {
+            ("x-sendfile", [root]) => (FileHeader::XSendfile, root),
+            ("x-accel-redirect", [prefix, root]) => {
+                if !valid_prefix(prefix) {
+                    return Err(bad(prefix));
+                }
+                let prefix = prefix.clone();
+                (FileHeader::XAccelRedirect { prefix }, root)
+            }
+            ("x-sendfile" | "x-accel-redirect", _) => return wrong_value_count(setting),
+            _ => return Err(bad(form)),
+        },
+    };
+    if !valid_internal_root(root) {
+        return Err(bad(root));
+    }
+    Ok(InternalFiles {
+        header,
+        root: PathBuf::from(root),
+        on_file_change: OnFileChange::Abort,
+    })
 }
 
 /// A validated setting together with where it was written.
@@ -66,6 +116,7 @@ pub(super) fn parse_route(block: &Block) -> Result<Route, ConfigError> {
     let mut max_response: Option<Slot<BodyLimit>> = None;
     let mut on_change: Option<Slot<OnFileChange>> = None;
     let mut pool: Option<Slot<Pooling>> = None;
+    let mut internal: Option<Slot<InternalFiles>> = None;
     for item in &block.items {
         let setting = match item {
             Item::Setting(setting) => setting,
@@ -84,6 +135,7 @@ pub(super) fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             RouteKey::MaxResponseBody => max_response.is_some(),
             RouteKey::OnFileChange => on_change.is_some(),
             RouteKey::Pool => pool.is_some(),
+            RouteKey::InternalFiles => internal.is_some(),
         };
         if taken {
             return duplicate_key(name, pos);
@@ -146,6 +198,12 @@ pub(super) fn parse_route(block: &Block) -> Result<Route, ConfigError> {
                 };
                 pool = Some(Slot { pos, value: parsed });
             }
+            RouteKey::InternalFiles => {
+                internal = Some(Slot {
+                    pos,
+                    value: parse_internal_files(setting)?,
+                });
+            }
         }
     }
     let action = match (static_root, backend) {
@@ -159,15 +217,23 @@ pub(super) fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             if let Some(slot) = &pool {
                 return fail(ConfigErrorKind::PoolOnStatic, slot.pos);
             }
+            if let Some(slot) = &internal {
+                return fail(ConfigErrorKind::InternalFilesOnStatic, slot.pos);
+            }
             RouteAction::Static {
                 root: root.value,
                 on_file_change: on_change.map_or(OnFileChange::Abort, |slot| slot.value),
             }
         }
         (None, Some(backend)) => {
-            if let Some(slot) = &on_change {
-                return fail(ConfigErrorKind::OnFileChangeOnProxy, slot.pos);
-            }
+            let internal_files = match (internal, on_change) {
+                (Some(slot), change) => Some(InternalFiles {
+                    on_file_change: change.map_or(OnFileChange::Abort, |slot| slot.value),
+                    ..slot.value
+                }),
+                (None, Some(slot)) => return fail(ConfigErrorKind::OnFileChangeOnProxy, slot.pos),
+                (None, None) => None,
+            };
             let Some(max_request_body) = max_request else {
                 return fail(
                     ConfigErrorKind::MissingBodyLimit("max_request_body"),
@@ -186,6 +252,7 @@ pub(super) fn parse_route(block: &Block) -> Result<Route, ConfigError> {
                 max_request_body: max_request_body.value,
                 max_response_body: max_response_body.value,
                 pool: pool.map_or(Pooling::On, |slot| slot.value),
+                internal_files,
             })
         }
         (None, None) | (Some(_), Some(_)) => {

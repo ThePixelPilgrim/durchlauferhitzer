@@ -1,6 +1,6 @@
 use crate::conn::SEND_CAPACITY;
 use crate::core::test_support::{PEER, core};
-use crate::core::{ConnError, ConnId, Event};
+use crate::core::{ConnError, ConnId, Core, Event};
 use crate::file::FileStamp;
 use crate::http::conditional::Validators;
 use crate::http::request::Persistence;
@@ -9,6 +9,7 @@ use crate::http::response::{
     render_range_not_satisfiable,
 };
 use crate::time::Instant;
+use std::path::PathBuf;
 
 /// The send buffer bound: every fixed response, every file head (200 and
 /// 206, FR-STATIC-19), every 416 and every `304` (FR-STATIC-18), in every
@@ -170,4 +171,25 @@ fn closed_connection_is_forgotten() {
     actions.clear();
     core.handle(now, Event::ReadClosed { conn }, &mut actions);
     assert!(actions.is_empty());
+}
+
+/// FR-CFG-26: an `internal_files` root is a root the driver opens, listed
+/// after the static ones, each path once.
+#[test]
+fn static_roots_include_internal_roots() {
+    let text = "listen 127.0.0.1:80;\n\
+        host a.test {\n\
+          path /p { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1;\n\
+            internal_files x-sendfile /srv/files; }\n\
+          path / { static /srv/www; }\n\
+        }\n";
+    let core = Core::new(crate::config::load(text).unwrap());
+    assert_eq!(
+        core.static_roots(),
+        [PathBuf::from("/srv/www"), PathBuf::from("/srv/files")]
+    );
+    // An internal root equal to a static one is listed once.
+    let text = text.replace("/srv/files", "/srv/www");
+    let core = Core::new(crate::config::load(&text).unwrap());
+    assert_eq!(core.static_roots(), [PathBuf::from("/srv/www")]);
 }

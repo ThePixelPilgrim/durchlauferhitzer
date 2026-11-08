@@ -261,7 +261,8 @@ tests/
   startup.rs        the startup sequence of the binary, run as non-root
                     (as `nobody` when the tests run as root): it serves,
                     logging `shared_ports` with its uid first; a
-                    missing or non-directory root, a port in use and
+                    missing or non-directory root (an `internal_files`
+                    root too), a port in use and
                     overlapping listen addresses are exit 2 naming them;
                     every thread blocks SIGTERM/SIGINT/SIGPIPE/SIGHUP;
                     `disk_threads` workers; fds 0-2 closed at exec are

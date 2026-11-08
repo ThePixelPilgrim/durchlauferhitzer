@@ -200,6 +200,37 @@ pub struct ProxyRoute {
     /// Whether backend connections are pooled (FR-PROXY-02): on by
     /// default, `pool off;` for backends that keep per-connection state.
     pub pool: Pooling,
+    /// Files this route's backend may direct the server to send
+    /// (FR-CFG-26); `None`: the backend's file headers are never honoured.
+    pub internal_files: Option<InternalFiles>,
+}
+
+/// The `internal_files` setting of a proxy route (FR-CFG-26): a backend's
+/// `200` response can name a file below `root` for the server to send
+/// instead of its own body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InternalFiles {
+    /// Which response header names the file.
+    pub header: FileHeader,
+    /// The folder the files are below (FR-CFG-15 syntax, visible ASCII
+    /// only). It is opened at startup like a static root.
+    pub root: PathBuf,
+    /// What happens when a sent file changes (FR-STATIC-12 semantics);
+    /// `Abort` unless the route says `on_file_change`.
+    pub on_file_change: OnFileChange,
+}
+
+/// The response header that names an internal file (FR-CFG-26).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileHeader {
+    /// `X-Sendfile`: the value is the file's absolute path below the root.
+    XSendfile,
+    /// `X-Accel-Redirect`: the value is a path starting with `prefix`;
+    /// what follows the prefix is the file's path below the root.
+    XAccelRedirect {
+        /// Starts and ends with `/`.
+        prefix: String,
+    },
 }
 
 /// Whether a proxy route reuses idle backend connections (FR-PROXY-02).
@@ -246,6 +277,7 @@ pub enum ConfigErrorKind {
     StripPrefixOnStatic,
     BodyLimitOnStatic,
     OnFileChangeOnProxy,
+    InternalFilesOnStatic,
     PoolOnStatic,
     MissingBodyLimit(&'static str),
     /// `max_connections` times the worst case per connection exceeds
@@ -291,7 +323,14 @@ impl fmt::Display for ConfigError {
                 write!(f, "body limits are only allowed on proxy routes")
             }
             ConfigErrorKind::OnFileChangeOnProxy => {
-                write!(f, "`on_file_change` is only allowed on static routes")
+                write!(
+                    f,
+                    "`on_file_change` is only allowed on static routes and proxy routes \
+                     with `internal_files`"
+                )
+            }
+            ConfigErrorKind::InternalFilesOnStatic => {
+                write!(f, "`internal_files` is only allowed on proxy routes")
             }
             ConfigErrorKind::PoolOnStatic => {
                 write!(f, "`pool` is only allowed on proxy routes")
