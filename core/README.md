@@ -81,6 +81,7 @@ src/
     lexer.rs            tokens
     syntax.rs           nested blocks and settings
     validate/           semantic rules, defaults, line:column errors
+      route.rs            one `path` block: its keys and route rules
     model.rs            the validated Config (limits, containment)
     units.rs            durations and sizes
   http/               HTTP building blocks (pure functions, no state)
