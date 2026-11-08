@@ -46,7 +46,7 @@ every connection's head buffer, so every other scenario runs exactly the
 config it ran before stage 8, and `bisect.sh` runs them on older
 binaries too,
 default limits except three for `static-small-1k-idle` (one server
-serves every scenario of a run): `max_connections 2048` and
+serves every scenario of a run but `proxy-file`): `max_connections 2048` and
 `max_connections_per_ip 2048` (every client shares 127.0.0.1), and
 `keepalive_timeout 125m`, which outlasts the idle connections' hold at
 the longest `--duration` (two windows plus about 8 s). The other

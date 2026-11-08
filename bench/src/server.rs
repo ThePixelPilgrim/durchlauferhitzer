@@ -61,7 +61,8 @@ pub const KEEPALIVE_MINUTES: u64 = 125;
 
 /// The bench config: default limits but three, for
 /// `static-small-1k-idle`'s 1 000 idle connections (one server serves
-/// every scenario of a run, and these only matter there):
+/// every scenario of a run but `proxy-file`, and these only matter
+/// there):
 /// `max_connections 2048` and `max_connections_per_ip 2048` leave room
 /// beside them (every client shares 127.0.0.1), and `keepalive_timeout
 /// 125m` outlasts their hold at the longest `--duration` (3600 s: two

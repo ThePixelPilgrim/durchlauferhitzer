@@ -296,7 +296,8 @@ impl Trigger {
 
 /// Whether a drawn value may hold obs-text: not in a head that carries a
 /// defect of its own (which of the two the parser reports first is not
-/// what this net checks).
+/// what this net checks), nor in a clean one (`Ctx::clean`, there to get
+/// pooling going).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObsText {
     Allowed,
@@ -371,7 +372,7 @@ fn value_for(rng: &mut fastrand::Rng, files: RouteFiles, path: &str, obs: ObsTex
             RouteFiles::XAccelRedirect { prefix, .. } => prefix.to_owned(),
         },
         // obs-text (a byte outside visible ASCII the parser refuses).
-        15 | 16 if obs == ObsText::Allowed => {
+        15..=20 if obs == ObsText::Allowed => {
             let mut v = named.into_bytes();
             let at = v.len() / 2;
             v.splice(at..at, *b"\xc3\xa9");

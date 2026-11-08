@@ -419,9 +419,10 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     // a file, with lines the merged head keeps, drops or defers to.
     let trigger = match (ctx.files, parsed) {
         (Some(route), Some(200)) if files && rng.u8(0..4) != 0 => {
-            let obs = match defect {
-                None => ObsText::Allowed,
-                Some(_) => ObsText::Never,
+            // Not in a clean context: it is there to get pooling going.
+            let obs = match (defect, ctx.clean) {
+                (None, false) => ObsText::Allowed,
+                (Some(_), _) | (None, true) => ObsText::Never,
             };
             let t = random_trigger(rng, route, ctx.wish.as_deref(), obs);
             let name = any_case(rng, route.own_name());
