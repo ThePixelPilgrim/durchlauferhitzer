@@ -62,6 +62,7 @@ fn answer(path: &str, root: &Path) -> String {
         "/s/big" => (format!("X-Sendfile: {root}/big.bin\r\n"), ""),
         "/s/passwd" => ("X-Sendfile: /etc/passwd\r\n".to_owned(), DECOY),
         "/s/link" => (format!("X-Sendfile: {root}/link\r\n"), ""),
+        "/s/inner" => (format!("X-Sendfile: {root}/inner\r\n"), ""),
         _ => (String::new(), "plain"),
     };
     format!(
@@ -149,6 +150,9 @@ impl Site {
         fs::write(&big, pattern()).unwrap();
         fs::set_permissions(&big, fs::Permissions::from_mode(0o644)).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", root.join("link")).unwrap();
+        // Inside the root: only the no-symlink rule refuses it (Landlock
+        // would allow the file it names).
+        std::os::unix::fs::symlink("big.bin", root.join("inner")).unwrap();
         Site { dir, root }
     }
 
@@ -294,16 +298,21 @@ fn outside_the_root_is_502() {
     );
 }
 
-/// FR-STATIC-09: a symlink inside the root (pointing out of it) is a 404,
-/// as on a static route.
+/// FR-STATIC-09: a symlink in the root is a 404, as on a static route:
+/// one pointing out of it, and one pointing at `big.bin` beside it.
 #[test]
 fn symlink_in_the_root_is_404() {
     let site = Site::new();
     let backend = Backend::start(site.root.clone());
     let (running, addr) = site.serve(backend.addr);
-    let (head, body) = exchange(addr, "/s/link", "");
-    assert!(head.starts_with("HTTP/1.1 404 Not Found\r\n"), "{head}");
-    assert_eq!(text(&body), "404 Not Found\n");
+    for path in ["/s/link", "/s/inner"] {
+        let (head, body) = exchange(addr, path, "");
+        assert!(
+            head.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{path}: {head}"
+        );
+        assert_eq!(text(&body), "404 Not Found\n", "{path}");
+    }
     running.kill();
 }
 

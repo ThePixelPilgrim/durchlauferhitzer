@@ -1268,6 +1268,15 @@ Failures, persistence, timeouts:
       written, then close it.
     - "Given more than once" counts every line of the route's header,
       one the backend named in `Connection` included.
+  - *Implementer calls (stage 8 Task 6):*
+    - The core's `Date` in the merged head is written `Date:`, as
+      FR-HTTP-22a renders it in a core head, right after the status line.
+    - `Content-Length: 0` means the value 0, leading zeros allowed
+      (`00`, RFC 9110 §8.6), as a relay's framing reads it (FR-PROXY-02).
+    - obs-text in the file header's value is refused by the response
+      head parser before any path rule (`502`, `BadResponse`,
+      FR-PROXY-13), so of the bytes outside visible ASCII only SP and
+      HTAB reach the bad-path rule.
 
 ### FR-CONN — Connections: keep-alive, pipelining, close, timeouts, caps
 

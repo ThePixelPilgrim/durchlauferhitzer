@@ -77,6 +77,22 @@ impl Scenario {
         }
     }
 
+    /// The routes of the server the scenario runs on.
+    pub fn routes(self) -> Routes {
+        match self {
+            Scenario::ProxyFile => Routes::WithFiles,
+            Scenario::StaticSmall
+            | Scenario::StaticLarge
+            | Scenario::StaticFresh
+            | Scenario::ProxySmall
+            | Scenario::ProxyFresh
+            | Scenario::ConditionalHit
+            | Scenario::StaticSmall1kIdle
+            | Scenario::ProxyMedium
+            | Scenario::ProxyLarge => Routes::Plain,
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Scenario> {
         Scenario::ALL.into_iter().find(|s| s.name() == name)
     }
@@ -172,23 +188,13 @@ impl Scenario {
 /// Which routes the bench config has (`server::config`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Routes {
-    /// The static root and the `/proxy` route.
+    /// The static root and the `/proxy` route: every scenario but
+    /// `proxy-file`, with the config it ran before stage 8.
     Plain,
-    /// Also `/file`, a proxy route with `internal_files` (FR-PROXY-32):
-    /// only when a scenario needs it, so a binary from before stage 8
-    /// (`bisect.sh`) still loads the config for every other scenario.
+    /// Also `/file`, a proxy route with `internal_files` (FR-PROXY-32),
+    /// for `proxy-file` alone: its server is its own, since the route
+    /// grows every connection's head buffer (NFR-RES-01).
     WithFiles,
-}
-
-impl Routes {
-    /// The routes `scenarios` need.
-    pub fn of(scenarios: &[Scenario]) -> Routes {
-        if scenarios.contains(&Scenario::ProxyFile) {
-            Routes::WithFiles
-        } else {
-            Routes::Plain
-        }
-    }
 }
 
 #[cfg(test)]
@@ -259,8 +265,14 @@ mod tests {
             }
         );
         assert!(Scenario::DEFAULT.contains(&s));
-        assert_eq!(Routes::of(&Scenario::DEFAULT), Routes::WithFiles);
-        assert_eq!(Routes::of(&[Scenario::StaticSmall]), Routes::Plain);
+        for other in Scenario::ALL {
+            let routes = if other == s {
+                Routes::WithFiles
+            } else {
+                Routes::Plain
+            };
+            assert_eq!(other.routes(), routes, "{}", other.name());
+        }
     }
 
     #[test]

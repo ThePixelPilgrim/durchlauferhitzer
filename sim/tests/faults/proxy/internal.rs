@@ -285,6 +285,24 @@ pub(crate) struct Trigger {
     pub(crate) values: Vec<Vec<u8>>,
 }
 
+impl Trigger {
+    /// A value holds obs-text: the response head parser refuses the head
+    /// (FR-PROXY-13, a `502` `BadResponse(BadHeaderValue)`) before any
+    /// path rule is applied.
+    pub(crate) fn obs_text(&self) -> bool {
+        self.values.iter().flatten().any(|b| *b >= 0x80)
+    }
+}
+
+/// Whether a drawn value may hold obs-text: not in a head that carries a
+/// defect of its own (which of the two the parser reports first is not
+/// what this net checks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObsText {
+    Allowed,
+    Never,
+}
+
 /// Percent-encodes `path` for `X-Accel-Redirect`: `%` and the space
 /// always, other bytes now and then, in either hex case.
 fn encode(rng: &mut fastrand::Rng, path: &str) -> String {
@@ -304,7 +322,7 @@ fn encode(rng: &mut fastrand::Rng, path: &str) -> String {
 }
 
 /// A value naming `path` (below the root) for `files`, maybe spoilt.
-fn value_for(rng: &mut fastrand::Rng, files: RouteFiles, path: &str) -> Vec<u8> {
+fn value_for(rng: &mut fastrand::Rng, files: RouteFiles, path: &str, obs: ObsText) -> Vec<u8> {
     let named = match files {
         RouteFiles::XSendfile { root } => match rng.u8(0..20) {
             0 => root.to_owned(),
@@ -347,6 +365,18 @@ fn value_for(rng: &mut fastrand::Rng, files: RouteFiles, path: &str) -> Vec<u8> 
             RouteFiles::XSendfile { .. } => "/etc/passwd".to_owned(),
             RouteFiles::XAccelRedirect { prefix, .. } => format!("{prefix}a%00b"),
         },
+        // The root or the prefix alone (an empty rest): a directory, 404.
+        14 => match files {
+            RouteFiles::XSendfile { root } => format!("{root}/"),
+            RouteFiles::XAccelRedirect { prefix, .. } => prefix.to_owned(),
+        },
+        // obs-text (a byte outside visible ASCII the parser refuses).
+        15 | 16 if obs == ObsText::Allowed => {
+            let mut v = named.into_bytes();
+            let at = v.len() / 2;
+            v.splice(at..at, *b"\xc3\xa9");
+            return v;
+        }
         _ => return named.into_bytes(),
     };
     spoilt.into_bytes()
@@ -358,6 +388,7 @@ pub(crate) fn random_trigger(
     rng: &mut fastrand::Rng,
     files: RouteFiles,
     wish: Option<&str>,
+    obs: ObsText,
 ) -> Trigger {
     let pick = |rng: &mut fastrand::Rng| {
         let path = match wish {
@@ -365,7 +396,7 @@ pub(crate) fn random_trigger(
             Some(_) | None if rng.bool() => rng.choice(FILES).copied().unwrap_or("a.txt"),
             Some(_) | None => rng.choice(OTHER).copied().unwrap_or("d"),
         };
-        value_for(rng, files, path)
+        value_for(rng, files, path, obs)
     };
     let mut values = vec![pick(rng)];
     if rng.u8(0..12) == 0 {

@@ -144,7 +144,8 @@ tests/
                           file tree per root, the clients' conditional
                           and range lines for one of its files, the
                           header values a backend's `200` names a file
-                          with (bad paths and traversals among them)
+                          with (bad paths, obs-text, traversals and the
+                          header named in `Connection` among them)
       file_model.rs       backend-directed files, the model: bad path
                           (502), 404 or file; 200/206/304/416, the
                           merged head, the exact bytes or the abort, the

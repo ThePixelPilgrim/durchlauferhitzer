@@ -139,7 +139,9 @@ pub(crate) struct FileReply {
     pub(crate) backend_date: bool,
     pub(crate) backend_type: bool,
     pub(crate) backend_nosniff: bool,
-    /// The head says `Content-Length: 0` (FR-PROXY-02's pooling rule).
+    /// The head says `Content-Length: 0` (FR-PROXY-02's pooling rule):
+    /// the value 0, leading zeros allowed (`00`, RFC 9110 section 8.6),
+    /// as a relay's framing reads it (implementer call, stage 8 Task 6).
     pub(crate) zero: bool,
 }
 
@@ -222,7 +224,9 @@ pub(crate) fn tokens_of(lines: &[(String, Vec<u8>)]) -> Vec<String> {
 /// The merged head of a `200`, `206` or `304` (planner calls under
 /// FR-PROXY-32): the core's status line, its `Date` unless the backend
 /// sent one, the backend's kept lines, then the core's lines in the
-/// order of FR-STATIC-19.
+/// order of FR-STATIC-19. The core's `Date` is written `Date:`, as
+/// FR-HTTP-22a renders it in a core head, right after the status line
+/// (implementer call, stage 8 Task 6).
 fn merged_head(
     f: &FileReply,
     file: &ModelFile,
@@ -535,6 +539,8 @@ pub(crate) const FILE_REQUIRED: &[&str] = &[
     "file-changed-abort",
     "file-backend-content-type",
     "file-name-content-type",
+    "file-obs-text-502",
+    "file-header-named-in-connection",
 ];
 
 /// Each file name must be reached well clear of zero (a 1000-seed run).

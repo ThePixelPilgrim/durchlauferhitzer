@@ -419,10 +419,21 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     // a file, with lines the merged head keeps, drops or defers to.
     let trigger = match (ctx.files, parsed) {
         (Some(route), Some(200)) if files && rng.u8(0..4) != 0 => {
-            let t = random_trigger(rng, route, ctx.wish.as_deref());
+            let obs = match defect {
+                None => ObsText::Allowed,
+                Some(_) => ObsText::Never,
+            };
+            let t = random_trigger(rng, route, ctx.wish.as_deref(), obs);
             let name = any_case(rng, route.own_name());
             for value in &t.values {
                 push(&mut wire, rng, &name, value);
+            }
+            // Its own header named in `Connection`: still the trigger, and
+            // still counted (stage 8 Task 5 call under FR-PROXY-32).
+            if rng.u8(0..6) == 0 {
+                let named = any_case(rng, &name);
+                push(&mut wire, rng, "Connection", named.as_bytes());
+                file_tags.push("file-header-named-in-connection");
             }
             for _ in 0..rng.usize(0..3) {
                 if let Some(&(name, value)) = rng.choice(FILE_EXTRA) {
@@ -490,7 +501,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         n
     } else if trigger.is_some() && (rng.bool() || (ctx.clean && rng.bool())) {
         0
-    } else if trigger.is_some() && rng.u8(0..3) == 0 {
+    } else if trigger.is_some() && rng.bool() {
         // A tiny body, often split from its head: never a reason to park.
         rng.usize(1..=8)
     } else if ctx.need_body {
@@ -551,7 +562,8 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
     // line brings it to within 3 bytes of the limit, either side.
     let mut too_large = false;
     let mut padded = false;
-    if defect.is_none() && !ctx.clean && rng.u8(0..12) == 0 {
+    let obs = trigger.as_ref().is_some_and(Trigger::obs_text);
+    if defect.is_none() && !obs && !ctx.clean && rng.u8(0..12) == 0 {
         let target = ctx.max_head as i64 + rng.i64(-3..=3);
         let pad = target - (wire.len() - head_start) as i64 - 2 - "X-Pad: \r\n".len() as i64;
         if pad > 0 {
@@ -617,7 +629,13 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         && ctx.limit.is_some_and(|max| body.len() as u64 > max);
     let ending = if ctx.clean {
         Ending::Done { eof: false }
-    } else if ctx.valid_only || defect.is_some() || body_defect.is_some() || overflow || too_large {
+    } else if ctx.valid_only
+        || defect.is_some()
+        || body_defect.is_some()
+        || overflow
+        || too_large
+        || obs
+    {
         Ending::Done {
             eof: kind == BodyKind::UntilClose || rng.bool(),
         }
@@ -692,9 +710,17 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         )
     };
     // A `200` naming a file: the body is never read, so neither its limit
-    // nor HTTP/1.0's ban on chunking applies (FR-PROXY-32).
+    // nor HTTP/1.0's ban on chunking applies (FR-PROXY-32). `zero`: the
+    // value 0, leading zeros allowed (`00`, RFC 9110 section 8.6), as a
+    // relay's framing reads it (FR-PROXY-02; implementer call, stage 8
+    // Task 6).
     let zero = framing == BodyKind::Length && cl_value == Some(0);
     let reply = match (&trigger, reply) {
+        // obs-text in the file header: the parser refuses the head.
+        (Some(t), Reply::Relay(_) | Reply::Fail(_)) if t.obs_text() => {
+            tag = Some("file-obs-text-502");
+            Reply::Fail(BackendFailure::BadResponse(ResponseError::BadHeaderValue))
+        }
         (
             Some(t),
             Reply::Relay(_)
@@ -717,7 +743,7 @@ pub(crate) fn random_script(rng: &mut fastrand::Rng, ctx: &Ctx) -> Script {
         Reply::Relay(_) | Reply::File(_) => {}
         Reply::Fail(_) => file_tags.clear(),
     }
-    let head_first = matches!(reply, Reply::File(_)) && body_end > head_end && rng.bool();
+    let head_first = matches!(reply, Reply::File(_)) && body_end > head_end && rng.u8(0..4) != 0;
     Script {
         wire,
         head_end,

@@ -287,6 +287,25 @@ mod tests {
         assert!(!config(addr, Path::new("/w"), backend, false, None).contains("user"));
     }
 
+    /// Only `proxy-file`'s server has `internal_files`: every other
+    /// scenario runs the config of before stage 8 (`the_config`).
+    #[test]
+    fn only_proxy_file_gets_internal_files() {
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let backend: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        let plain = config(addr, Path::new("/w"), backend, false, None);
+        for s in crate::scenario::Scenario::ALL {
+            let files = match s.routes() {
+                Routes::Plain => None,
+                Routes::WithFiles => Some(Path::new("/f")),
+            };
+            let text = config(addr, Path::new("/w"), backend, false, files);
+            let proxy_file = s == crate::scenario::Scenario::ProxyFile;
+            assert_eq!(text.contains("internal_files"), proxy_file, "{}", s.name());
+            assert_eq!(text == plain, !proxy_file, "{}", s.name());
+        }
+    }
+
     /// `proxy-file`'s route (FR-PROXY-32, FR-CFG-26): the backend's
     /// `X-Accel-Redirect: /protected/1k.bin` names `1k.bin` below the
     /// files root.

@@ -348,43 +348,57 @@ fn main() -> ExitCode {
     }
     let mut rows = Vec::new();
     let mut failed = false;
-    for run in 1..=args.runs {
+    'runs: for run in 1..=args.runs {
         ctx.run = run;
         println!("bench: run {run} of {}", args.runs);
-        let mut server = match Server::start(
-            &args.binary,
-            backend.addr,
-            &run.to_string(),
-            place,
-            Routes::of(&args.scenarios),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                fail("all", Reason::Startup, &e);
-                failed = true;
-                break;
+        // `proxy-file` runs on a server of its own: its `/file` route
+        // (FR-PROXY-32) grows every connection's head buffer, so every
+        // other scenario keeps the config it ran before stage 8. One
+        // server at a time (`--netem` gives each the same address).
+        for routes in [Routes::Plain, Routes::WithFiles] {
+            let group: Vec<Scenario> = args
+                .scenarios
+                .iter()
+                .copied()
+                .filter(|s| s.routes() == routes)
+                .collect();
+            if group.is_empty() {
+                continue;
             }
-        };
-        for &scenario in &args.scenarios {
-            match measure(&ctx, &mut server, scenario) {
-                Some(row) => {
-                    failed |= row.errors > 0 || row.requests == 0 || row.syscalls_per_req.is_none();
-                    rows.push(row);
+            let tag = match routes {
+                Routes::Plain => run.to_string(),
+                Routes::WithFiles => format!("{run}-files"),
+            };
+            let mut server = match Server::start(&args.binary, backend.addr, &tag, place, routes) {
+                Ok(s) => s,
+                Err(e) => {
+                    fail("all", Reason::Startup, &e);
+                    failed = true;
+                    break 'runs;
                 }
-                None => failed = true,
-            }
-            if let Err(e) = write_csv(&args.out, &rows) {
-                eprintln!("bench: {}: {e}", args.out.display());
-                return ExitCode::FAILURE;
-            }
-            if let Some(status) = server.exited() {
-                fail(
-                    scenario.name(),
-                    Reason::ServerExited,
-                    &format!("{status}: {}", server.last_lines()),
-                );
-                failed = true;
-                break;
+            };
+            for scenario in group {
+                match measure(&ctx, &mut server, scenario) {
+                    Some(row) => {
+                        failed |=
+                            row.errors > 0 || row.requests == 0 || row.syscalls_per_req.is_none();
+                        rows.push(row);
+                    }
+                    None => failed = true,
+                }
+                if let Err(e) = write_csv(&args.out, &rows) {
+                    eprintln!("bench: {}: {e}", args.out.display());
+                    return ExitCode::FAILURE;
+                }
+                if let Some(status) = server.exited() {
+                    fail(
+                        scenario.name(),
+                        Reason::ServerExited,
+                        &format!("{status}: {}", server.last_lines()),
+                    );
+                    failed = true;
+                    break;
+                }
             }
         }
     }

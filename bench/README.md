@@ -40,9 +40,11 @@ one proxy route to the in-process stub backend (keep-alive; the body is
 `internal_files x-accel-redirect /protected/ <files>` (FR-PROXY-32): the
 backend answers `/1k` with `200`, `Content-Length: 0` and
 `X-Accel-Redirect: /protected/1k.bin`, and the server sends the 1 KiB
-`1k.bin` of `<files>` (the route only with that scenario, so
-`bisect.sh` still runs every other scenario on a binary from before
-stage 8),
+`1k.bin` of `<files>`. `proxy-file` runs on a server of its own, started
+after the run's other scenarios (one server at a time): the route grows
+every connection's head buffer, so every other scenario runs exactly the
+config it ran before stage 8, and `bisect.sh` runs them on older
+binaries too,
 default limits except three for `static-small-1k-idle` (one server
 serves every scenario of a run): `max_connections 2048` and
 `max_connections_per_ip 2048` (every client shares 127.0.0.1), and
