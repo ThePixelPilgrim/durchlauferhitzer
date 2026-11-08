@@ -364,7 +364,9 @@
 //!   rewritten request head; once that is written, the same buffer holds
 //!   the rewritten response head for the client, which `send_buffer`
 //!   hands out before the body. Its capacity, `max_head + max_headers +
-//!   128`, holds any rewrite of a head within the limits.
+//!   128` plus the longest Rack hint lines of the config's
+//!   `internal_files` routes (FR-PROXY-32, NFR-RES-01), holds any rewrite
+//!   of a head within the limits.
 //! - Descriptor budget: at most one upstream socket is open or connecting
 //!   per counted connection, and active and idle pooled upstreams together
 //!   are at most `max_connections` (a new connect at that count first

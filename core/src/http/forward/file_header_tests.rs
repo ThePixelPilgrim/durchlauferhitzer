@@ -179,7 +179,10 @@ fn len_twins_match_with_files() {
     let requests = [request(FORGED), request(PLAIN)];
     let responses = [
         response(FILE_404),
-        response(b"HTTP/1.1 200 OK\r\nX-Accel-Redirect: /protected/a\r\nX-Sendfile: /srv/files/a\r\n\r\n"),
+        response(
+            b"HTTP/1.1 200 OK\r\nX-Accel-Redirect: /protected/a\r\n\
+              X-Sendfile: /srv/files/a\r\n\r\n",
+        ),
     ];
     for files in routes() {
         let files = files.as_ref();

@@ -25,7 +25,10 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use crate::config::{Config, InternalFiles, Limits, ProxyRoute, RouteAction, RouteMix};
+use crate::config::{
+    Config, FileHeader, InternalFiles, Limits, OnFileChange, ProxyRoute, Route, RouteAction,
+    RouteMix,
+};
 use crate::conn::{ConnState, LINGER_SCRATCH, SEND_CAPACITY};
 use crate::file::{Chunk, FileFollows, FileSegment, FileTable, RootId};
 use crate::http::date::{ImfFixdate, imf_fixdate};
@@ -67,6 +70,14 @@ pub struct Core {
     /// The distinct `internal_files` settings of the proxy routes, in
     /// config order (FR-PROXY-32); an [`InternalRouteId`] indexes it.
     internal_routes: Vec<InternalRoute>,
+    /// For each config route, `[host][route]` (a
+    /// [`RouteIndex`](crate::routing::RouteIndex)), the id
+    /// of its `internal_files`, resolved once here; `None` without.
+    route_internal: Vec<Vec<Option<InternalRouteId>>>,
+    /// The `internal_files` that strips the most from a response (every
+    /// `x-accel-*` and `x-sendfile`): what an exchange whose id does not
+    /// resolve is relayed under (fail closed; unreachable in practice).
+    strictest: InternalFiles,
     files: FileTable,
     /// Distinct backends in config order; a `BackendId` indexes it.
     backends: Vec<SocketAddr>,
@@ -98,6 +109,42 @@ pub(crate) struct InternalRouteId(pub(crate) u32);
 pub(crate) struct InternalRoute {
     pub(crate) files: InternalFiles,
     pub(crate) root: RootId,
+}
+
+/// The [`InternalRouteId`] of `route`'s `internal_files`, if it has one:
+/// its root joins `static_roots` (once per path), the setting joins
+/// `internal_routes` (once per distinct setting).
+fn internal_route(
+    route: &Route,
+    static_roots: &mut Vec<PathBuf>,
+    internal_routes: &mut Vec<InternalRoute>,
+) -> Option<InternalRouteId> {
+    let RouteAction::Proxy(ProxyRoute {
+        internal_files: Some(internal),
+        ..
+    }) = &route.action
+    else {
+        return None;
+    };
+    let root = match static_roots.iter().position(|r| *r == internal.root) {
+        Some(index) => index,
+        None => {
+            static_roots.push(internal.root.clone());
+            static_roots.len() - 1
+        }
+    };
+    let index = match internal_routes.iter().position(|r| r.files == *internal) {
+        Some(index) => index,
+        None => {
+            internal_routes.push(InternalRoute {
+                files: internal.clone(),
+                // A config holds far fewer than `u32::MAX` roots.
+                root: RootId(u32::try_from(root).unwrap_or(u32::MAX)),
+            });
+            internal_routes.len() - 1
+        }
+    };
+    u32::try_from(index).ok().map(InternalRouteId)
 }
 
 /// Whether the core takes new work.
@@ -145,28 +192,17 @@ impl Core {
         // FR-CFG-26: the `internal_files` roots follow all the static ones
         // (so a static root's id does not depend on them).
         let mut internal_routes: Vec<InternalRoute> = Vec::new();
-        for route in config.hosts.iter().flat_map(|h| &h.routes) {
-            if let RouteAction::Proxy(ProxyRoute {
-                internal_files: Some(internal),
-                ..
-            }) = &route.action
-            {
-                let index = match static_roots.iter().position(|r| *r == internal.root) {
-                    Some(index) => index,
-                    None => {
-                        static_roots.push(internal.root.clone());
-                        static_roots.len() - 1
-                    }
-                };
-                // A config holds far fewer than `u32::MAX` roots.
-                let root = RootId(u32::try_from(index).unwrap_or(u32::MAX));
-                if !internal_routes.iter().any(|r| r.files == *internal) {
-                    internal_routes.push(InternalRoute {
-                        files: internal.clone(),
-                        root,
-                    });
-                }
+        let mut route_internal: Vec<Vec<Option<InternalRouteId>>> = Vec::new();
+        for host in &config.hosts {
+            let mut ids = Vec::new();
+            for route in &host.routes {
+                ids.push(internal_route(
+                    route,
+                    &mut static_roots,
+                    &mut internal_routes,
+                ));
             }
+            route_internal.push(ids);
         }
         let limits = &config.limits;
         let upstream_recv_capacity = recv_capacity(limits.max_head);
@@ -188,6 +224,14 @@ impl Core {
             scratch: vec![0; LINGER_SCRATCH].into_boxed_slice(),
             static_roots,
             internal_routes,
+            route_internal,
+            strictest: InternalFiles {
+                header: FileHeader::XAccelRedirect {
+                    prefix: String::new(),
+                },
+                root: PathBuf::new(),
+                on_file_change: OnFileChange::Abort,
+            },
             files: FileTable::new(),
             backends,
             upstreams: UpstreamTable::new(),

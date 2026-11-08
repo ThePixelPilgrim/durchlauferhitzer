@@ -38,20 +38,39 @@ impl Router {
     /// route's segments, compared percent-decoded ([`decoded_eq`]); the
     /// route with the most segments wins.
     pub fn route(&self, host: Option<&str>, path: &str) -> Result<&Route, RouteMiss> {
+        self.locate(host, path).map(|(_, route)| route)
+    }
+
+    /// As [`Router::route`], with where the route sits in the config: its
+    /// host's index and its own within that host's routes.
+    pub fn locate(
+        &self,
+        host: Option<&str>,
+        path: &str,
+    ) -> Result<(RouteIndex, &Route), RouteMiss> {
         let host = host.ok_or(RouteMiss::UnknownHost)?;
         let key = strip_port(host).to_ascii_lowercase();
-        let vhost = self
+        let (host, vhost) = self
             .by_name
             .get(&key)
-            .and_then(|index| self.hosts.get(*index))
+            .and_then(|index| Some((*index, self.hosts.get(*index)?)))
             .ok_or(RouteMiss::UnknownHost)?;
         vhost
             .routes
             .iter()
-            .filter(|route| segments_match(&route.segments, path))
-            .max_by_key(|route| route.segments.len())
+            .enumerate()
+            .filter(|(_, route)| segments_match(&route.segments, path))
+            .max_by_key(|(_, route)| route.segments.len())
+            .map(|(route, found)| (RouteIndex { host, route }, found))
             .ok_or(RouteMiss::NoMatchingPath)
     }
+}
+
+/// Where a route sits in the config: `hosts[host].routes[route]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteIndex {
+    pub host: usize,
+    pub route: usize,
 }
 
 /// Strips a trailing `:digits` port; for `[v6]:port` only after the `]`.
@@ -386,6 +405,22 @@ mod tests {
             r.route(Some("[::2]:80"), "/").unwrap_err(),
             RouteMiss::UnknownHost
         );
+    }
+
+    /// `locate` names the route's place in the config: its host's index
+    /// and its own among that host's routes.
+    #[test]
+    fn locate_gives_the_route_index() {
+        let r = Router::new(&[
+            host(&["a.test"], &["/", "/a/"]),
+            host(&["b.test"], &["/x/", "/", "/b/"]),
+        ]);
+        let at = |host: &str, path: &str| r.locate(Some(host), path).map(|(index, _)| index);
+        assert_eq!(at("a.test", "/a/x"), Ok(RouteIndex { host: 0, route: 1 }));
+        assert_eq!(at("a.test", "/z"), Ok(RouteIndex { host: 0, route: 0 }));
+        assert_eq!(at("b.test", "/b/x"), Ok(RouteIndex { host: 1, route: 2 }));
+        assert_eq!(at("b.test", "/q"), Ok(RouteIndex { host: 1, route: 1 }));
+        assert_eq!(at("c.test", "/"), Err(RouteMiss::UnknownHost));
     }
 
     #[test]

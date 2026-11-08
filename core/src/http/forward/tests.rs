@@ -750,7 +750,10 @@ proptest! {
         if let Ok(ParseStatus::Complete { head, .. }) = parse_head(&raw, &limits()) {
             let mut out = Vec::new();
             render_backend_request(&head, path, peer, Persistence::Close, None, &mut out);
-            prop_assert_eq!(backend_request_len(&head, path, peer, Persistence::Close, None), out.len());
+            prop_assert_eq!(
+                backend_request_len(&head, path, peer, Persistence::Close, None),
+                out.len()
+            );
             prop_assert_eq!(String::from_utf8(out).unwrap(), model_request(&head, path, peer));
         }
 

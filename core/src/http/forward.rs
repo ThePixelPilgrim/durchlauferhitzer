@@ -172,13 +172,14 @@ pub fn backend_request_len(
 
 /// Appends the head sent to the client (FR-PROXY-12): the status line as
 /// `HTTP/1.1 <code> <reason>`, the backend's headers in order without the
-/// hop-by-hop ones and the file headers of a route with `files`
-/// (`x-sendfile` and `x-accel-redirect` on every route, every `x-accel-*`
-/// on an `x-accel-redirect` route; FR-PROXY-32), `content-length`,
-/// `date`, `server` and all others passing through as received, then `date: <date>` if `date` is set and none of
-/// the backend's `date` headers passes through (FR-HTTP-22a; one the
-/// backend named in `Connection` is hop-by-hop and does not), and
-/// `connection: close` when `persistence` is `Close`.
+/// hop-by-hop ones and the file headers (`x-sendfile` and
+/// `x-accel-redirect` on every route, every `x-accel-*` on an
+/// `x-accel-redirect` route, `files` saying which; FR-PROXY-32), with
+/// `content-length`, `date`, `server` and all others passing through as
+/// received; then `date: <date>` if `date` is set and none of the
+/// backend's `date` headers passes through (FR-HTTP-22a; one the backend
+/// named in `Connection` is hop-by-hop and does not), and `connection:
+/// close` when `persistence` is `Close`.
 ///
 /// The backend's reason is kept, also when empty. The parser admits only
 /// printable ASCII and HTAB; a reason with any other byte is replaced by

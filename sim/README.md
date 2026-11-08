@@ -53,6 +53,7 @@ src/
                       and late timers (NFR-TEST-07)
   disk.rs             file ids, disk operations, sendfile, file invariants
   backend.rs          scripted backends, upstream pumping and invariants
+  backend/hints.rs    the head buffer's room for Rack's hints
   pool.rs             the core's idle pool as the sim sees it: idle
                       hygiene and drain checks, idle closes by cause
   fs.rs               the in-memory file system
@@ -161,13 +162,14 @@ and hostile heads; bytes after the body; resets and ends of stream anywhere,
 a reset also queued right behind the bytes before it, `backend_reset_after`;
 random windows), on two proxy routes beside a static one, with random body
 limits and timeouts, and now and then `internal_files` (FR-PROXY-32: forged
-file headers from clients, file headers from backends, Rack's hints). Each exchange is predicted by a model written from the
-spec, not from the core: the backend must receive exactly the rewritten
-request and the client's body, and the client exactly the rewritten head and
-the backend's body bytes, a cut connection with its log, or the predicted
-4xx/5xx. A response cut by a reset behind its bytes delivers every body
-byte before it, then the cut is logged `BackendFailed { Reset }`
-(FR-PROXY-26, DRV-10, NFR-RES-04). Backend connections are pooled
+file headers from clients, file headers from backends, Rack's hints). Each
+exchange is predicted by a model written from the spec, not from the core:
+the backend must receive exactly the rewritten request and the client's
+body, and the client exactly the rewritten head and the backend's body
+bytes, a cut connection with its log, or the predicted 4xx/5xx. A response
+cut by a reset behind its bytes delivers every body byte before it, then
+the cut is logged `BackendFailed { Reset }` (FR-PROXY-26, DRV-10,
+NFR-RES-04). Backend connections are pooled
 (FR-PROXY-02) on the routes the seed draws pooled (`pool off;` on the
 others): the net follows which exchange each upstream serves by the
 core's report of who holds it and by the client each forwarded byte was

@@ -361,7 +361,7 @@ impl Core {
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };
-        let route = self.router.route(head.host.as_deref(), &head.target.path);
+        let route = self.router.locate(head.host.as_deref(), &head.target.path);
         let unread_body = match head.body {
             BodyFraming::None => UnreadBody::None,
             BodyFraming::Length(_) | BodyFraming::Chunked => UnreadBody::Pending,
@@ -369,7 +369,7 @@ impl Core {
         let body = BodyMode::of(&head.method);
         let (status, persistence) = match route {
             Err(_) => (Status::NotFound, head.persistence),
-            Ok(route) => match &route.action {
+            Ok((index, route)) => match &route.action {
                 RouteAction::Static {
                     root,
                     on_file_change,
@@ -382,7 +382,21 @@ impl Core {
                     Plan::Respond(status, persistence) => (status, persistence),
                 },
                 RouteAction::Proxy(target) => {
-                    match proxy::plan(route, target, &head, &self.backends, &self.internal_routes) {
+                    let internal = self
+                        .route_internal
+                        .get(index.host)
+                        .and_then(|routes| routes.get(index.route))
+                        .copied()
+                        .flatten();
+                    let proxied = proxy::plan(
+                        route,
+                        target,
+                        &head,
+                        &self.backends,
+                        internal,
+                        &self.internal_routes,
+                    );
+                    match proxied {
                         ProxyPlan::Forward(forward) => {
                             self.forward(now, conn, head, forward, after, actions);
                             return;

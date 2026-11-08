@@ -42,7 +42,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use std::net::SocketAddr;
 
-use durchlauferhitzer_core::config::{Config, FileHeader, RouteAction};
+use durchlauferhitzer_core::config::Config;
 use durchlauferhitzer_core::http::chunked::{ChunkedValidator, Done, MAX_UNCONSUMED};
 use durchlauferhitzer_core::http::request::{BodyFraming, HeadLimits, ParseStatus, parse_head};
 use durchlauferhitzer_core::{
@@ -50,6 +50,8 @@ use durchlauferhitzer_core::{
 };
 
 use crate::{Eof, Pending, Sim, SimConnState, Window};
+
+mod hints;
 
 /// How a backend answers a connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,8 +244,7 @@ pub(crate) struct Backends {
     /// The upstream receive buffer's capacity for this config, by the
     /// documented formula `max(32 KiB, max_head)` (NFR-RES-01).
     pub(crate) recv_bound: usize,
-    /// The head buffer's capacity, `max_head + max_headers + 128` plus the
-    /// longest Rack hints of the config's `internal_files` routes.
+    /// The head buffer's capacity, `max_head + max_headers + 128 + hint_room`.
     pub(crate) head_bound: usize,
     /// Limits to judge a forwarded request head by: the head buffer's
     /// capacity, and room for the proxy's own header lines.
@@ -253,28 +254,7 @@ pub(crate) struct Backends {
 impl Backends {
     pub(crate) fn new(config: &Config) -> Backends {
         let limits = &config.limits;
-        // NFR-RES-01: room for the longest Rack hints of an
-        // `internal_files` route (FR-PROXY-32), by their documented sizes:
-        // `x-sendfile-type: X-Sendfile\r\n` (29), or
-        // `x-sendfile-type: X-Accel-Redirect\r\n` (35) and
-        // `x-accel-mapping: <root>/=<prefix>\r\n` (21 + root + prefix).
-        let hints = config
-            .hosts
-            .iter()
-            .flat_map(|h| &h.routes)
-            .filter_map(|r| match &r.action {
-                RouteAction::Proxy(p) => p.internal_files.as_ref(),
-                RouteAction::Static { .. } => None,
-            })
-            .map(|f| match &f.header {
-                FileHeader::XSendfile => 29,
-                FileHeader::XAccelRedirect { prefix } => {
-                    35 + 21 + f.root.as_os_str().len() + prefix.len()
-                }
-            })
-            .max()
-            .unwrap_or(0);
-        let head = limits.max_head + limits.max_headers + 128 + hints;
+        let head = limits.max_head + limits.max_headers + 128 + hints::hint_room(config);
         Backends {
             connect: BTreeMap::new(),
             default_window: Window::Unlimited,
@@ -287,8 +267,7 @@ impl Backends {
             forwarded_limits: HeadLimits {
                 max_request_line: head,
                 max_head: head,
-                // The proxy's own lines: `x-forwarded-for`,
-                // `x-forwarded-proto`, `connection` and two hints.
+                // Its own lines: forwarded-for and -proto, connection, 2 hints.
                 max_headers: limits.max_headers + 5,
             },
         }
