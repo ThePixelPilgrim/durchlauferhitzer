@@ -9,7 +9,10 @@
 //! bytes, a path outside the root is a 502 that sends none of that file,
 //! a symlink in the root a 404, a client's forged file headers never
 //! reach the backend (Rack's hints do), and after `Content-Length: 0`
-//! the backend connection is pooled.
+//! the backend connection is pooled. Each head is compared byte for byte
+//! with one built from the sim's spec-written model
+//! (`sim/tests/support/model_http.rs`, with the file's stamp and the
+//! `Date` the response carried), as `file_ranges.rs` does.
 
 #![allow(
     clippy::unwrap_used,
@@ -22,6 +25,10 @@
 #[path = "support/child.rs"]
 mod child;
 
+#[allow(dead_code, reason = "shared with the sim's test binaries; we use part")]
+#[path = "../../sim/tests/support/model_http.rs"]
+mod model_http;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -30,13 +37,22 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::UNIX_EPOCH;
 
 use child::{
     Containment, PATIENCE, Running, Setup, TempDir, free_port, read_some, seccomp_kill, text,
 };
+use durchlauferhitzer_core::FileStamp;
+use durchlauferhitzer_core::http::request::Persistence;
+use durchlauferhitzer_core::http::response::BodyMode;
+use durchlauferhitzer_core::http::status::Status;
+use model_http::{model_file_head, model_fixed, model_partial_head};
 
 /// The size of `big.bin`: more than two 256 KiB chunks (FR-STATIC-17).
 const SIZE: usize = 600 * 1024;
+
+/// `big.bin`'s type (FR-STATIC-12): the backend sends no `Content-Type`.
+const TYPE: &str = "application/octet-stream";
 
 /// Bytes that tell their positions apart (251 is prime).
 fn pattern() -> Vec<u8> {
@@ -143,6 +159,17 @@ struct Site {
 }
 
 impl Site {
+    /// The stamp the server reports for `big.bin`: its size and mtime in
+    /// nanoseconds (FR-STATIC-18).
+    fn stamp(&self) -> FileStamp {
+        let meta = fs::metadata(self.root.join("big.bin")).unwrap();
+        let mtime = meta.modified().unwrap().duration_since(UNIX_EPOCH).unwrap();
+        FileStamp {
+            size: meta.len(),
+            modified_ns: u64::try_from(mtime.as_nanos()).unwrap(),
+        }
+    }
+
     fn new() -> Site {
         let dir = TempDir::new();
         let root = dir.dir("files");
@@ -218,6 +245,22 @@ fn exchange(addr: SocketAddr, path: &str, head_lines: &str) -> (String, Vec<u8>)
     (text(&response[..end]), response[end..].to_vec())
 }
 
+/// The `Date` value `head` carries (FR-HTTP-22a).
+fn date_of(head: &str) -> String {
+    head.split("\r\nDate: ")
+        .nth(1)
+        .and_then(|rest| rest.get(..29))
+        .unwrap_or_else(|| panic!("no Date: {head}"))
+        .to_owned()
+}
+
+/// A merged head (FR-PROXY-32): the model's file head `model` with the
+/// backend's kept lines `kept` right after its `Date`.
+fn merged(model: &[u8], date: &str, kept: &str) -> String {
+    let date_line = format!("Date: {date}\r\n");
+    text(model).replacen(&date_line, &format!("{date_line}{kept}"), 1)
+}
+
 /// Whether the server logged a line of `kind` with the field `field`
 /// (`key=value`).
 fn logged(log: &str, kind: &str, field: &str) -> bool {
@@ -235,16 +278,10 @@ fn x_accel_redirect_serves_the_file_under_containment() {
     let backend = Backend::start(site.root.clone());
     let (running, addr) = site.serve(backend.addr);
     let (head, body) = exchange(addr, "/a/big", "");
-    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
-    assert!(
-        head.contains("\r\ncontent-disposition: attachment; filename=\"big.bin\"\r\n"),
-        "{head}"
-    );
-    assert!(
-        head.contains(&format!("\r\nContent-Length: {SIZE}\r\n")),
-        "{head}"
-    );
-    assert!(!head.to_ascii_lowercase().contains("x-accel"), "{head}");
+    let date = date_of(&head);
+    let model = model_file_head(TYPE, site.stamp(), Persistence::Close, Some(&date));
+    let kept = "content-disposition: attachment; filename=\"big.bin\"\r\n";
+    assert_eq!(head, merged(&model, &date, kept));
     assert!(body == pattern(), "{} body bytes", body.len());
     let log = running.kill();
     assert!(logged(&log, "backend_file", "status=200"), "{log}");
@@ -259,16 +296,15 @@ fn x_sendfile_range_crosses_a_chunk() {
     let backend = Backend::start(site.root.clone());
     let (running, addr) = site.serve(backend.addr);
     let (head, body) = exchange(addr, "/s/big", "Range: bytes=200000-500000\r\n");
-    assert!(
-        head.starts_with("HTTP/1.1 206 Partial Content\r\n"),
-        "{head}"
+    let date = date_of(&head);
+    let model = model_partial_head(
+        TYPE,
+        site.stamp(),
+        (200_000, 500_000),
+        Persistence::Close,
+        Some(&date),
     );
-    assert!(
-        head.contains(&format!(
-            "\r\nContent-Length: 300001\r\nContent-Range: bytes 200000-500000/{SIZE}\r\n"
-        )),
-        "{head}"
-    );
+    assert_eq!(head, text(&model));
     assert!(
         body == pattern()[200_000..=500_000],
         "{} body bytes",
@@ -286,8 +322,13 @@ fn outside_the_root_is_502() {
     let backend = Backend::start(site.root.clone());
     let (running, addr) = site.serve(backend.addr);
     let (head, body) = exchange(addr, "/s/passwd", "");
-    assert!(head.starts_with("HTTP/1.1 502 Bad Gateway\r\n"), "{head}");
-    assert_eq!(text(&body), "502 Bad Gateway\n");
+    let model = model_fixed(
+        Status::BadGateway,
+        Persistence::Close,
+        BodyMode::Full,
+        Some(&date_of(&head)),
+    );
+    assert_eq!(format!("{head}{}", text(&body)), text(&model));
     let passwd = fs::read_to_string("/etc/passwd").unwrap();
     let first = passwd.lines().next().unwrap();
     assert!(!head.contains(first) && !text(&body).contains(DECOY));
@@ -307,11 +348,13 @@ fn symlink_in_the_root_is_404() {
     let (running, addr) = site.serve(backend.addr);
     for path in ["/s/link", "/s/inner"] {
         let (head, body) = exchange(addr, path, "");
-        assert!(
-            head.starts_with("HTTP/1.1 404 Not Found\r\n"),
-            "{path}: {head}"
+        let model = model_fixed(
+            Status::NotFound,
+            Persistence::Close,
+            BodyMode::Full,
+            Some(&date_of(&head)),
         );
-        assert_eq!(text(&body), "404 Not Found\n", "{path}");
+        assert_eq!(format!("{head}{}", text(&body)), text(&model), "{path}");
     }
     running.kill();
 }
@@ -326,7 +369,19 @@ fn client_cannot_forge_file_headers() {
     let forged = "X-Sendfile: /etc/passwd\r\nX-Accel-Redirect: /protected/../x\r\n\
                   X-Sendfile-Type: X-Sendfile\r\nX-Accel-Mapping: /=/protected/\r\n";
     let (head, body) = exchange(addr, "/a/plain", forged);
-    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+    // Relayed (FR-PROXY-12): the backend's lines, then the core's
+    // `Date` (the backend sent none), lowercase like every relayed line.
+    let date = head
+        .split("\r\ndate: ")
+        .nth(1)
+        .and_then(|rest| rest.get(..29))
+        .unwrap_or_else(|| panic!("no date: {head}"));
+    assert_eq!(
+        head,
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: 5\r\ndate: {date}\r\nconnection: close\r\n\r\n"
+        )
+    );
     assert_eq!(text(&body), "plain");
     let heads = backend.heads();
     assert_eq!(heads.len(), 1, "{heads:?}");
@@ -356,7 +411,13 @@ fn pooled_after_content_length_0() {
     let (running, addr) = site.serve(backend.addr);
     for _ in 0..2 {
         let (head, body) = exchange(addr, "/s/big", "");
-        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        let model = model_file_head(
+            TYPE,
+            site.stamp(),
+            Persistence::Close,
+            Some(&date_of(&head)),
+        );
+        assert_eq!(head, text(&model));
         assert!(body == pattern(), "{} body bytes", body.len());
     }
     assert_eq!(backend.accepted(), 1);
