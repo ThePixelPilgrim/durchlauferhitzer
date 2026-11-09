@@ -161,7 +161,7 @@ fn is_file_response_header(name: &str, files: Option<&InternalFiles>) -> bool {
 /// `x-forwarded-host`, `x-forwarded-port`) and the file headers
 /// (`x-sendfile`, `x-accel-redirect`, `x-sendfile-type`,
 /// `x-accel-mapping`, FR-PROXY-32), each also when spelled with `_` for
-/// `-`, as is `x-forwarded-for` (owner decision 2026-11-09);
+/// `-`, as is `x-forwarded-for` (FR-PROXY-06);
 /// `content-length` is
 /// re-rendered without leading zeros, everything else (`host`,
 /// `transfer-encoding`, …) as received. Then come `x-forwarded-for` (the
