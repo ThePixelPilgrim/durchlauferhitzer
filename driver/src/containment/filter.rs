@@ -14,7 +14,10 @@
 //! Landlock's gap before ABI 5), `truncate` and `ftruncate` (they narrow,
 //! but cannot close, the gap before ABI 3: `openat2` with `O_TRUNC` is out
 //! of the filter's reach, FR-PROC-06), `execve`, and stats by path
-//! (`newfstatat`, `statx`).
+//! (`newfstatat`, `statx`). Nor `openat`: glibc's malloc would open
+//! `/sys/devices/system/cpu/online` with it from a worker when contention
+//! forces a new arena, so startup limits glibc to one arena instead
+//! (`sys::malloc::limit_arenas`, FR-PROC-04 step 6b).
 
 use durchlauferhitzer_core::config::SeccompAction;
 

@@ -13,6 +13,7 @@ pub mod eventfd;
 pub mod fd;
 pub mod file;
 pub mod landlock;
+pub mod malloc;
 pub mod rlimit;
 pub mod seccomp;
 pub mod signal;

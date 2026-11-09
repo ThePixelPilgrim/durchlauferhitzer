@@ -24,6 +24,7 @@ use crate::event_loop::{Driver, Exit};
 use crate::log::{DriverLog, LogEntry, LogSink};
 use crate::pool::SpawnFailed;
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
+use crate::sys::malloc;
 use crate::sys::signal::{Signal, SignalFd};
 use crate::sys::socket::{Probe, steer_reuseport, tcp_listen};
 use crate::sys::user::euid;
@@ -240,7 +241,9 @@ struct Ready {
 /// `--ready-fd` start steers each, right after its `listen`, to the
 /// running server, FR-PROC-07; bound as a non-root euid, a
 /// `shared_ports` note), the descriptor budget (NFR-RES-05), the memory
-/// backstop (NFR-RES-09, a `memory_backstop` note), the privilege drop
+/// backstop (NFR-RES-09, a `memory_backstop` note), glibc's malloc
+/// limited to one arena (FR-PROC-04 step 6b; exit 2 if refused), the
+/// privilege drop
 /// (A8), then Landlock (FR-PROC-06), while the process has one thread
 /// and before anything else opens a path.
 fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
@@ -273,6 +276,13 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
         backends: core.backends().len(),
     }))?;
     notes.push(backstop::apply(backstop)?);
+    // Before any thread exists: glibc's malloc then never reads
+    // `/sys/devices/system/cpu/online` from a worker (FR-PROC-04 step 6b).
+    if !malloc::limit_arenas() {
+        return Err(Failure(
+            "cannot limit glibc's malloc arenas (M_ARENA_MAX)".to_owned(),
+        ));
+    }
     notes.extend(privileges::drop_privileges(user.as_deref())?);
     notes.extend(shared);
     let landlock = containment::restrict_files(&containment, &roots)?;

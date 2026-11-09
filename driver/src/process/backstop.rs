@@ -150,7 +150,10 @@ pub use crate::pool::DISK_THREAD_STACK;
 pub const BASE_ALLOWANCE: u64 = 4 * 1024 * 1024;
 
 /// What each disk worker maps besides its [`DISK_THREAD_STACK`]: its
-/// `sigaltstack` and, on glibc, an arena (measured, module docs).
+/// `sigaltstack` and, on glibc, an arena (measured, module docs). Since
+/// startup limits glibc to one arena (`sys::malloc`, FR-PROC-04 step 6b)
+/// no worker gets an arena of its own, so the arena part is slack now;
+/// the constant is kept.
 pub const DISK_THREAD_OVERHEAD: u64 = 256 * 1024;
 
 /// What each counted connection holds outside `memory_limit` whatever its

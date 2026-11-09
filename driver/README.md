@@ -259,6 +259,9 @@ src/
                       `clear_ambient` (PR_CAP_AMBIENT_CLEAR_ALL),
                       `clear_capabilities` (capset to empty),
                       `capabilities` (capget → `Capabilities`)
+    malloc.rs         `limit_arenas` (glibc: `mallopt(M_ARENA_MAX, 1)` at
+                      startup, so no worker reads
+                      /sys/devices/system/cpu/online; nothing on musl)
     rlimit.rs         `nofile`, `raise_nofile`, `set_soft_nofile`
                       (RLIMIT_NOFILE); `data`, `cap_data` (RLIMIT_DATA)
     seccomp.rs        `supported` (`Support`: ERRNO and KILL_PROCESS

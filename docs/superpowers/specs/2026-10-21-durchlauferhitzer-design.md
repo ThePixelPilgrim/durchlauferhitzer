@@ -1757,6 +1757,10 @@ Failures, persistence, timeouts:
      available number);
   6a. *(stage 9 Task 2)* the memory backstop (NFR-RES-09: `RLIMIT_DATA`;
       exit 2 naming the needed and the available number);
+  6b. *(stage 9 final fix wave, controller ruling 2026-11-09)* on glibc,
+      malloc's arena limit set to 1 (`mallopt(M_ARENA_MAX, 1)`, while the
+      process has one thread), so no worker thread ever reads
+      `/sys/devices/system/cpu/online` (FR-PROC-06); nothing on musl;
   7. the privilege drop (FR-PROC-03; exit 2);
   7a. *(stage 5 Task 5)* Landlock (FR-PROC-06), while the process has
       one thread and before anything else opens a path (exit 2 for a
@@ -1986,7 +1990,15 @@ Failures, persistence, timeouts:
     checks it (defence in depth: a 64-bit exec clears the flag on both
     x86_64 and aarch64, as the CI runners show with `setarch -X`):
     if set, seccomp counts as "partly supported" (logged under
-    `best_effort`, exit 2 under `required`). An unexpected call gets
+    `best_effort`, exit 2 under `required`). `openat` stays out of the
+    allow-list: a path-based open would widen the sandbox beyond
+    `openat2` beneath the roots. glibc's malloc would make one from any
+    thread the first time contention forces a new arena (its arena limit
+    comes from `__get_nprocs()`, which reads
+    `/sys/devices/system/cpu/online`, seen under CPU pressure with 64
+    disk threads); startup presets that limit to 1 before any thread
+    exists (FR-PROC-04 step 6b), so the read never happens *(stage 9
+    final fix wave, controller ruling 2026-11-09)*. An unexpected call gets
     `seccomp_action`: `kill` (the default since the owner decision
     2026-11-09; `fail` before) ends the process; `fail` returns `EPERM`
     and the server keeps running. Every blocked call is logged by
