@@ -341,3 +341,22 @@ fn example_config_loads() {
     );
     assert_eq!(config.map(|c| c.containment), Ok(Containment::default()));
 }
+
+/// NFR-RES-01: the example's memory budget comment states what the loaded
+/// example needs per connection and in total, so its figures cannot drift
+/// from `worst_case_per_connection` (its `internal_files` route included).
+#[test]
+fn example_config_states_its_memory_budget() {
+    let text = include_str!("../../../../../examples/durchlauferhitzer.conf");
+    let Ok(config) = load(text) else {
+        panic!("examples/durchlauferhitzer.conf does not load");
+    };
+    let per = worst_case_per_connection(&config.limits, config.route_mix());
+    let n = u64::from(config.limits.max_connections);
+    let stated = format!(
+        "= {per} bytes.\n# {n} x {per} = {} bytes (about {}MiB)",
+        n * per,
+        (n * per + (1 << 19)) >> 20
+    );
+    assert!(text.contains(&stated), "the example should say {stated:?}");
+}
