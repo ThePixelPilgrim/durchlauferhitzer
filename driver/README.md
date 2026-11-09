@@ -408,8 +408,10 @@ tests/
                     connections start (root with CAP_SYS_RESOURCE, or a
                     high enough hard RLIMIT_NOFILE, which CI's container
                     jobs get from `--ulimit nofile`; skipped otherwise),
-                    8 static GETs of 1 MiB and 8 proxied POSTs of 64 KiB
-                    are served, the server alive afterwards
+                    6 static GETs of 1 MiB and 6 proxied POSTs of 64 KiB
+                    on 16 slots are served (slack for lingering slots),
+                    the server alive afterwards; the worst static and
+                    proxied request on every slot is survived
   budget.rs         NFR-RES-05 in the binary with RLIMIT_NOFILE lowered
                     in the child: one short is exit 2 with both numbers,
                     exactly the budget starts and serves, a low soft limit

@@ -4,9 +4,10 @@
 //! inherited above it; an inherited hard limit one byte short is exit 2
 //! naming both numbers; and the measured allowances are large enough:
 //! 64 disk threads start and serve, 65536 connections start, and the
-//! smoke load (8 static GETs of 1 MiB and 8 proxied POSTs of 64 KiB, all
+//! smoke load (6 static GETs of 1 MiB and 6 proxied POSTs of 64 KiB on
 //! 16 slots) is served, each under its own backstop, the server alive
-//! afterwards (an allocation the kernel refuses would abort it).
+//! afterwards (an allocation the kernel refuses would abort it); and the
+//! worst request on every slot, static and proxied, is survived.
 //!
 //! Every server runs as non-root (as `nobody` when the tests run as
 //! root), except the 65536-connection one, which needs about 262 000
@@ -341,13 +342,18 @@ fn starts_with_65536_connections_under_the_backstop() {
     assert_alive(&mut server);
 }
 
+/// 6 static GETs of 1 MiB and 6 proxied POSTs of 64 KiB at once, on the
+/// 16 slots of the smallest budget. The 4 spare slots are slack: a slot
+/// can still be held by the readiness probe's connection or by a client
+/// that finished early while its close lingers (FR-CONN-05, up to 2 s),
+/// and a late client meeting 16 held slots would get a 503.
 #[test]
 fn serves_the_smoke_load_under_the_smallest_budget() {
     let site = Site::new();
     let (path, _) = site.config(&site.text(&small(4), ""));
     let mut server = Running::start(&[&path], Setup::non_root(), site.addr);
     let addr = site.addr;
-    let clients: Vec<_> = (0..8)
+    let clients: Vec<_> = (0..6)
         .flat_map(|_| {
             [
                 thread::spawn(move || get_big(addr)),
