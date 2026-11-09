@@ -78,35 +78,78 @@ fn backend_sees_the_hints() {
 
 /// FR-PROXY-32 Trigger: on any status but `200` the route's header is
 /// removed and the response passes unchanged, body and all (Stripping:
-/// on an `x-accel-redirect` route every `X-Accel-*` goes too).
+/// on an `x-accel-redirect` route every `X-Accel-*` goes too): a `201`,
+/// `204`, `206`, `304` and `404`, on either route, each logged as a
+/// proxied response with no file opened.
 #[test]
 fn non_200_with_the_route_header_is_relayed_without_it() {
-    let mut sim = Sim::new(FILES);
-    let c = request(
-        &mut sim,
-        b"GET /accel/a HTTP/1.1\r\nHost: example.test\r\n\r\n",
-    );
-    let up = only_upstream(&sim);
-    sim.backend_send(
-        up,
-        b"HTTP/1.1 404 Not Found\r\nX-Accel-Redirect: /protected/a\r\nX-Accel-Expires: 10\r\n\
-          Content-Type: text/plain\r\nContent-Length: 4\r\n\r\nnope",
-    );
-    sim.run_until_idle();
-    assert_eq!(
-        String::from_utf8_lossy(&sim.take_received(c)),
-        "HTTP/1.1 404 Not Found\r\ncontent-type: text/plain\r\ncontent-length: 4\r\n\r\nnope",
-        "{}",
-        sim.trace()
-    );
-    assert_eq!(
-        sim.logs(),
-        &[proxied(c, 404, "/accel/a")],
-        "{}",
-        sim.trace()
-    );
-    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
-    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    // (path, status, the backend's response, what the client gets)
+    let cases: [(&str, u16, &str, &str); 5] = [
+        (
+            "/send/a",
+            201,
+            "HTTP/1.1 201 Created\r\nLocation: /a/1\r\nX-Sendfile: /srv/files/a\r\n\
+             Content-Length: 2\r\n\r\nok",
+            "HTTP/1.1 201 Created\r\nlocation: /a/1\r\ncontent-length: 2\r\n\r\nok",
+        ),
+        (
+            "/accel/a",
+            204,
+            "HTTP/1.1 204 No Content\r\nX-Accel-Redirect: /protected/a\r\n\
+             X-Accel-Buffering: no\r\n\r\n",
+            "HTTP/1.1 204 No Content\r\n\r\n",
+        ),
+        (
+            "/send/a",
+            206,
+            "HTTP/1.1 206 Partial Content\r\nX-Sendfile: /srv/files/a\r\n\
+             Content-Range: bytes 0-3/10\r\nContent-Length: 4\r\n\r\nabcd",
+            "HTTP/1.1 206 Partial Content\r\ncontent-range: bytes 0-3/10\r\n\
+             content-length: 4\r\n\r\nabcd",
+        ),
+        (
+            "/accel/a",
+            304,
+            "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\n\
+             X-Accel-Redirect: /protected/a\r\n\r\n",
+            "HTTP/1.1 304 Not Modified\r\netag: \"v1\"\r\n\r\n",
+        ),
+        (
+            "/accel/a",
+            404,
+            "HTTP/1.1 404 Not Found\r\nX-Accel-Redirect: /protected/a\r\nX-Accel-Expires: 10\r\n\
+             Content-Type: text/plain\r\nContent-Length: 4\r\n\r\nnope",
+            "HTTP/1.1 404 Not Found\r\ncontent-type: text/plain\r\ncontent-length: 4\r\n\r\nnope",
+        ),
+    ];
+    for (path, status, backend, relayed) in cases {
+        let mut sim = Sim::new(FILES);
+        let wire = format!("GET {path} HTTP/1.1\r\nHost: example.test\r\n\r\n");
+        let c = request(&mut sim, wire.as_bytes());
+        let up = only_upstream(&sim);
+        sim.backend_send(up, backend.as_bytes());
+        sim.run_until_idle();
+        assert_eq!(
+            String::from_utf8_lossy(&sim.take_received(c)),
+            relayed,
+            "{status}: {}",
+            sim.trace()
+        );
+        assert_eq!(
+            sim.logs(),
+            &[proxied(c, status, path)],
+            "{status}: {}",
+            sim.trace()
+        );
+        assert_eq!(sim.open_upstreams(), 0, "{status}: {}", sim.trace());
+        assert_eq!(
+            sim.state(c),
+            SimConnState::Open,
+            "{status}: {}",
+            sim.trace()
+        );
+        assert_eq!(sim.open_files(), 0, "{status}: {}", sim.trace());
+    }
 }
 
 /// FR-PROXY-32 Trigger: the header the route does not trust is removed and
