@@ -13,10 +13,15 @@ binary.
   `<pidfile>.lock/pid` (pid and start time), created with the shell's
   noclobber; a lock whose holder no longer runs is taken over. A new
   process it does not hand over gets `SIGHUP`; one that never reached
-  its event loop is killed after 10 s.
+  its event loop is killed after 10 s. Its fork runs `setsid` and the
+  binary only once it is listed in `<pidfile>.draining` (a "go" line
+  on a private FIFO): killed before that, the helper leaves nothing
+  running.
 - `openrc/durchlauferhitzer` — the OpenRC script (`start`, `stop`,
   `checkconfig`, `reload`), modelled on Alpine's haproxy script; `stop`
-  also ends the processes a reload left draining (`<pidfile>.draining`). Install
+  also ends the processes a reload left (`<pidfile>.draining`: draining,
+  or not handed over by a killed helper; each by pid and start time).
+  Install
   it as `/etc/init.d/durchlauferhitzer`, the helper as
   `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`.
 - `openrc/durchlauferhitzer.confd` — its settings, as
