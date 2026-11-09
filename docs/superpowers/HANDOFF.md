@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-08, after stage 8 closed its tasks.
+Last updated 2026-11-08, after the stage 8 review.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -14,7 +14,8 @@ A new session should start from the latest `main`, read this file first, then `C
 | 5 Containment | done (`bc2f7d3..` this handoff) — record: `docs/superpowers/reviews/2026-11-02-stage-5-review.md` |
 | 6 Restart | done (`22fd0ce..` this handoff) — record: `docs/superpowers/reviews/2026-11-06-stage-6-review.md` |
 | 7 Efficiency | done (`71d3867..` this handoff) — record: `docs/superpowers/reviews/2026-11-07-stage-7-review.md`. The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
-| 8 Backend-directed file serving | done (`862e951..` this handoff; plan `docs/superpowers/plans/2026-11-07-stage-8-internal-files.md`, Tasks 1–7 ✅) — **next: the stage 8 whole-branch review** over `862e951..main`, then its record `docs/superpowers/reviews/<date>-stage-8-review.md` |
+| 8 Backend-directed file serving | done (`862e951..` this handoff) — record: `docs/superpowers/reviews/2026-11-09-stage-8-review.md` |
+| next | **the owner chooses**: spec Timeline item 9 ("Later, maybe": hung-disk handling) or 10 (caching), or an item from the deferred lists (TLS, Landlock network rules, multipart ranges) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
