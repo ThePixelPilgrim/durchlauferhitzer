@@ -603,6 +603,13 @@ fn pipelined_request_is_answered_after_the_file() {
             backend_file(c, Status::Ok, Method::Get, "/dl/y"),
         ]
     );
+    // FR-PROXY-02: the reused upstream is pooled again after its file.
+    assert_eq!(
+        sim.upstream_holder(up),
+        Some(UpstreamHolder::Pool),
+        "{}",
+        sim.trace()
+    );
 }
 
 /// A client taking `window` bytes per write asks for `big.bin`; the

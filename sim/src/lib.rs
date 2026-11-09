@@ -169,8 +169,10 @@ pub struct Sim {
     timer_order: TimerOrder,
     /// Idle pooled upstreams the core closed, by cause (`pool.rs`).
     idle_closes: BTreeMap<IdleClose, usize>,
-    /// Every upstream seen idle in the pool after a core call (`pool.rs`).
-    ever_pooled: BTreeSet<UpstreamId>,
+    /// How many times each upstream was seen entering the pool after a
+    /// core call, and the ones idle after the last (`pool.rs`).
+    parks: BTreeMap<UpstreamId, usize>,
+    idle_now: BTreeSet<UpstreamId>,
 }
 
 impl Sim {
@@ -200,7 +202,8 @@ impl Sim {
             backends,
             timer_order: TimerOrder::OnTime,
             idle_closes: BTreeMap::new(),
-            ever_pooled: BTreeSet::new(),
+            parks: BTreeMap::new(),
+            idle_now: BTreeSet::new(),
         }
     }
 

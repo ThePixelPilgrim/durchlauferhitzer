@@ -56,7 +56,7 @@ src/
   backend/hints.rs    the head buffer's room for Rack's hints
   pool.rs             the core's idle pool as the sim sees it: idle
                       hygiene and drain checks, idle closes by cause,
-                      every upstream ever idle
+                      how often each upstream entered the pool
   fs.rs               the in-memory file system
   tests.rs            unit tests of the sim's own invariant checks
 tests/
@@ -153,8 +153,8 @@ tests/
                           logs; parked only after `Content-Length: 0`
                           (checked whenever an upstream idles or is
                           reused), and then always unless the backend
-                          ended or a drain began (checked on the answer,
-                          by `Sim::ever_pooled`); the file coverage gate
+                          ended or a drain began (checked on the answer:
+                          a park after it, `Sim::parks`); the file coverage gate
       response.rs         random backend responses (hostile ones among
                           them) and the model of what the client receives
       outcome.rs          exchanges, timings and the outcomes they allow
