@@ -311,7 +311,7 @@ impl Story {
 }
 
 /// How many script bytes are sent before its ending.
-fn script_target(script: &Script) -> usize {
+pub(crate) fn script_target(script: &Script) -> usize {
     match script.ending {
         Ending::Done { .. } => script.wire.len(),
         Ending::Reset(k) | Ending::ResetAfter(k) | Ending::Eof(k) => k,
