@@ -340,7 +340,9 @@ pub enum ConfigErrorKind {
     RouteNeedsOneAction,
     StripPrefixOnStatic,
     BodyLimitOnStatic,
-    OnFileChangeOnProxy,
+    /// `on_file_change` on a proxy route without `internal_files`: it serves
+    /// no file the setting could apply to.
+    OnFileChangeWithoutFiles,
     InternalFilesOnStatic,
     /// An `internal_files` root equal to or below a static root, compared
     /// component by component (FR-CFG-26): its files would be public.
@@ -392,7 +394,7 @@ impl fmt::Display for ConfigError {
             ConfigErrorKind::BodyLimitOnStatic => {
                 write!(f, "body limits are only allowed on proxy routes")
             }
-            ConfigErrorKind::OnFileChangeOnProxy => {
+            ConfigErrorKind::OnFileChangeWithoutFiles => {
                 write!(
                     f,
                     "`on_file_change` is only allowed on static routes and proxy routes \
