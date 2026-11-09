@@ -2,6 +2,8 @@
 //! of `restart.rs` (one test binary, one `serial` lock): its refusals,
 //! the grace, its lock, `stop_post`, and `listen` changes.
 
+use std::process::Child;
+
 use super::*;
 
 /// The helper's refusals: exit 1, a one-line reason, the old process
@@ -214,9 +216,10 @@ fn a_concurrent_reload_is_refused() {
 }
 
 /// The helper lists each old process in `<pidfile>.draining`; the OpenRC
-/// script's `stop_post` ends those still running the binary (SIGTERM,
-/// then SIGKILL per `retry`) and removes the list; another program's pid
-/// in it is left alone.
+/// script's `stop_post` ends those still running with their start time
+/// (SIGTERM, then SIGKILL per `retry`) and removes the list; a listed pid
+/// reused by another process (another start time), whatever it runs, is
+/// left alone.
 #[test]
 fn stop_post_ends_the_draining_processes() {
     let _serial = serial();
@@ -238,10 +241,11 @@ fn stop_post_ends_the_draining_processes() {
     assert_eq!(site.draining(), vec![old.pid()]);
     let mut sleeper = Command::new("sleep").arg("30").spawn().unwrap();
     let mut list = fs::read_to_string(site.draining_file()).unwrap();
-    // Another program; the server's binary but another start time (a
-    // reused pid); a line without a start time.
-    let sleeper_start = start_time(sleeper.id()).unwrap();
-    list.push_str(&format!("{} {sleeper_start}\n", sleeper.id()));
+    // A listed pid reused by another program, and one reused by the
+    // server's binary (each another start time); a line without a start
+    // time.
+    let sleeper_start: u64 = start_time(sleeper.id()).unwrap().parse().unwrap();
+    list.push_str(&format!("{} {}\n", sleeper.id(), sleeper_start + 1));
     list.push_str(&format!("{new} 1\n{new}\n"));
     fs::write(site.draining_file(), list).unwrap();
     assert!(
@@ -459,6 +463,197 @@ fn a_new_process_of_a_killed_helper_is_ended_by_stop_post() {
     assert!(!alive(new), "stop_post left the new process");
     assert!(alive(old.pid()), "stop_post ended the old process");
     assert!(!site.draining_file().exists());
+    assert_eq!(site.pid(), old.pid());
+}
+
+/// A stub for the helper's `name` (`setsid`, `mv`) on a `PATH` of its
+/// own: it creates the file `<gate>.entered`, then blocks opening the
+/// FIFO `gate` for reading (until something opens it for writing; the
+/// tests never do), then would run the real `name`. Returns that `PATH`
+/// and the stub's path, or `None` (with a note) when `sh` runs a
+/// built-in `name` instead (a busybox built to prefer its applets, as
+/// Ubuntu's; dash and Alpine's busybox take the `PATH`).
+fn gated_stub(site: &Site, name: &str, gate: &Path) -> Option<(String, String)> {
+    let made = Command::new("mkfifo").arg(gate).status().unwrap();
+    assert!(made.success());
+    let bin_dir = site.dir.dir("gated-bin");
+    let stub = bin_dir.join(name);
+    let script = format!(
+        "#!/bin/sh\n: >'{gate}.entered'\n: <'{gate}'\nPATH=${{PATH#*:}}\nexec {name} \"$@\"\n",
+        gate = gate.display()
+    );
+    fs::write(&stub, script).unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let stub = stub.display().to_string();
+    let found = Command::new("sh")
+        .arg("-c")
+        .arg(r#"command -v "$1""#)
+        .arg("sh")
+        .arg(name)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    if text(&found.stdout).trim_end() != stub {
+        eprintln!("skipped: sh does not run {name} from PATH");
+        return None;
+    }
+    Some((path, stub))
+}
+
+/// Starts the helper as [`Site::spawn_reload`] does, with `path` as its
+/// `PATH`.
+fn spawn_reload_with_path(site: &Site, conf: &Path, path: &str) -> Child {
+    Command::new("sh")
+        .arg(HELPER)
+        .args([&site.bin, conf, &site.pidfile, &site.log])
+        .arg("30")
+        .env("TMPDIR", site.tmp())
+        .env("PATH", path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// The command line of `pid`, its arguments joined by spaces (empty if
+/// it is gone).
+fn cmdline(pid: u32) -> String {
+    fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|raw| String::from_utf8_lossy(&raw).replace('\0', " "))
+        .unwrap_or_default()
+}
+
+/// The running children of `pid`.
+fn children(pid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir("/proc").unwrap() {
+        let Ok(entry) = entry else { continue };
+        let Ok(child) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let parent = stat
+            .rsplit_once(") ")
+            .and_then(|(_, rest)| rest.split(' ').nth(1))
+            .and_then(|ppid| ppid.parse::<u32>().ok());
+        if parent == Some(pid) && alive(child) {
+            found.push(child);
+        }
+    }
+    found
+}
+
+/// Whether a [`gated_stub`] reached its `gate`.
+fn gate_entered(gate: &Path) -> bool {
+    gate.with_extension("entered").exists()
+}
+
+/// Stage 8 review (M2): the new pid is listed while it is still the
+/// helper's fork on its way to the binary (here held in a gated `setsid`
+/// stub, a shell script). A helper killed then leaves that process to
+/// `stop_post`, which must end it by its pid and start time, though it
+/// does not run the binary (yet): it never gets to.
+#[test]
+fn a_killed_helpers_fork_is_ended_by_stop_post_before_it_runs_the_binary() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let old = site.start(&old_conf);
+    let gate = site.dir.path().join("gate");
+    let Some((path, stub)) = gated_stub(&site, "setsid", &gate) else {
+        return;
+    };
+    let mut helper = spawn_reload_with_path(&site, &new_conf, &path);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let new = loop {
+        if let Some(&new) = site.draining().first()
+            && cmdline(new).contains(&stub)
+            && gate_entered(&gate)
+        {
+            break new;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stub never ran as the listed pid"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    signal_pid(helper.id(), "KILL");
+    let _ = helper.wait();
+    let output = site.stop_post("TERM/2/KILL/2");
+    let left = alive(new);
+    if left {
+        signal_pid(new, "KILL");
+    }
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!left, "stop_post left the new process");
+    assert_eq!(site.processes(), vec![old.pid()], "the binary ran");
+    assert!(!site.draining_file().exists());
+    assert_eq!(site.pid(), old.pid());
+}
+
+/// Stage 8 review (M2 hardening): a helper killed between starting the
+/// new process and listing it (here held in a gated `mv` stub, the
+/// list's rename) leaves no shell behind: its fork, still waiting for
+/// the helper's go, ends, and never runs the binary.
+#[test]
+fn a_helper_killed_before_its_fork_is_listed_leaves_nothing_behind() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let old = site.start(&old_conf);
+    let gate = site.dir.path().join("gate");
+    let Some((path, stub)) = gated_stub(&site, "mv", &gate) else {
+        return;
+    };
+    let mut helper = spawn_reload_with_path(&site, &new_conf, &path);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mv, forks) = loop {
+        let kids = children(helper.id());
+        let (stubs, others): (Vec<u32>, Vec<u32>) = kids
+            .into_iter()
+            .partition(|&kid| cmdline(kid).contains(&stub));
+        if let [mv] = stubs[..]
+            && gate_entered(&gate)
+        {
+            break (mv, others);
+        }
+        assert!(Instant::now() < deadline, "the mv stub never ran");
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(forks.len(), 1, "the helper's children: {forks:?}");
+    let fork = forks[0];
+    signal_pid(helper.id(), "KILL");
+    let _ = helper.wait();
+    signal_pid(mv, "KILL");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(fork) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let left = alive(fork);
+    if left {
+        signal_pid(fork, "KILL");
+    }
+    assert!(!left, "the helper's fork was left behind");
+    assert_eq!(site.processes(), vec![old.pid()], "the binary ran");
     assert_eq!(site.pid(), old.pid());
 }
 

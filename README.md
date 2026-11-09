@@ -185,7 +185,10 @@ losing a connection; the OpenRC script's `reload` calls it
    refused);
 4. starts `<binary> --ready-fd 3 <config>` beside it, in its own session,
    output appended to `<logfile>`, and lists its pid in
-   `<pidfile>.draining` at once (so `stop` ends it if the helper dies);
+   `<pidfile>.draining` at once (so `stop` ends it if the helper dies,
+   also while it is still on its way to `<binary>`); it runs `<binary>`
+   only once listed, so a helper killed before that leaves nothing
+   running;
 5. waits for `ready` (default 30 s); if it does not come, it sends the
    new process `SIGHUP` (one already serving drains, its queue moving to
    the old process; one stuck before its event loop is killed after
@@ -198,8 +201,8 @@ losing a connection; the OpenRC script's `reload` calls it
    exits 1) and sends the old one `SIGHUP` (it drains, then exits 0); if
    the new process is gone right after, the helper exits 1: start the
    server again. The OpenRC script's `stop` also
-   stops the processes still draining (each checked by binary and start
-   time, so a reused pid is left alone);
+   stops the processes still listed (each checked by its start time, so
+   a reused pid is left alone);
 7. waits (at most 10 s, then a warning) until the old process has closed
    its listeners, then releases the lock.
 
