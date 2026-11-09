@@ -508,7 +508,6 @@ fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
     }
 }
 
-/// Prints `durchlauferhitzer: <message>` to stderr.
 /// The startup message of a `Driver::new` failure: a disk worker the
 /// kernel refused ([`SpawnFailed`], `EAGAIN` when its stack cannot be
 /// mapped) names the memory backstop (`backstop` bytes) it started under,
@@ -525,6 +524,7 @@ fn driver_failure(err: &io::Error, backstop: u64) -> String {
     }
 }
 
+/// Prints `durchlauferhitzer: <message>` to stderr.
 fn report(message: impl Display) {
     say_err(format_args!("durchlauferhitzer: {message}"));
 }

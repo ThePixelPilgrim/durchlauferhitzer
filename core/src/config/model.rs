@@ -102,7 +102,10 @@ pub struct Limits {
     /// [`worst_case_per_connection`] must fit in it (FR-CFG-21). It budgets
     /// each connection's own buffers only. Outside it, and not counted: the
     /// send buffers of refused connections, the 4 KiB lingering scratch
-    /// buffer, and driver-side buffers (disk readahead, the log buffer).
+    /// buffer, driver-side buffers (disk readahead, the log buffer), and the
+    /// state of a request in flight (its decoded path, its request
+    /// summary), which the memory backstop's per-connection term covers
+    /// (NFR-RES-09).
     pub memory_limit: u64,
     /// Prefix length in bits that groups IPv6 peers for the per-IP limit
     /// (FR-CONN-13), 32 to 128.

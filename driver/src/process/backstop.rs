@@ -89,7 +89,11 @@
 //! path and query, all copied out of its head, so together at most
 //! `max_head`) and, while a static open is pending, the decoded path,
 //! one buffer of at most the request line (at most `max_head`), moved
-//! from the core's `OpenFile` into the disk job, never copied. Every
+//! from the core's `OpenFile` into the disk job, never copied. A file a
+//! backend names (FR-PROXY-32) has a decoded path bounded by the
+//! upstream's receive buffer, `max(32 KiB, max_head)`, not by `max_head`;
+//! it is covered all the same, since `ExchangeBuffers::into_head` frees
+//! that budgeted, larger buffer before the open is pending. Every
 //! slot can hold it at once: the opens queue behind the disk workers
 //! (a slow disk), or the exchanges wait on a stalled backend.
 //!
@@ -158,8 +162,10 @@ pub const PER_CONNECTION_FIXED: u64 = 8 * 1024;
 /// request in flight, in multiples of `max_head`: the strings a request
 /// keeps for its log (method, host, raw path and query, all copied out of
 /// its head, together at most `max_head`) and a static open's decoded
-/// path (at most the request line, so at most `max_head`), with
-/// allocator rounding (measured with every slot holding the worst case,
+/// path (at most the request line, so at most `max_head`; a path a backend
+/// names is bounded by the upstream receive buffer, `max(32 KiB,
+/// max_head)`, which is freed, budget and all, before its open is
+/// pending), with allocator rounding (measured with every slot holding the worst case,
 /// module docs).
 pub const REQUEST_STATE_FACTOR: u64 = 3;
 

@@ -328,7 +328,9 @@ Structure and values:
   - `memory_limit` budgets each connection's own buffers only (owner
     decision 2026-10-27). Outside it, and not counted: the send buffers of
     refused (503) connections, the shared 4 KiB lingering scratch buffer,
-    and driver-side buffers (disk readahead, the log buffer).
+    driver-side buffers (disk readahead, the log buffer), and the state of
+    a request in flight (its decoded path, its request summary; NFR-RES-01),
+    which the memory backstop's per-connection term covers (NFR-RES-09).
   - Arithmetic saturates; nothing wraps.
 - **FR-CFG-25** [done] (owner decision 2026-10-29, stage 5 brainstorm) The optional top-level
   `containment` block sets how strictly the containment layers of
@@ -2400,7 +2402,10 @@ Failures, persistence, timeouts:
   line, moved to the driver's open, the core keeping no copy; stage 9
   final fix wave, review C1). That is at most twice `max_head` per
   connection, outside `memory_limit` and carried by NFR-RES-09's
-  allowance. Config load enforces the first term against `memory_limit` with
+  allowance. A file a backend names (FR-PROXY-32) has a decoded path
+  bounded by the upstream receive buffer, `max(32 KiB, max_head)`, not by
+  `max_head`; it is covered because that budgeted, larger buffer is freed
+  (`into_head()`) before the open is pending. Config load enforces the first term against `memory_limit` with
   `worst_case_per_connection` (FR-CFG-21, owner decision 2026-10-27).
 
   `memory_limit` budgets each connection's own buffers only (owner decision
@@ -2556,9 +2561,11 @@ Failures, persistence, timeouts:
   disk thread <n> of <threads>: <error>; RLIMIT_DATA is the memory
   backstop (<bytes> bytes, NFR-RES-09)``, review M2); a per-connection
   term that is too small would abort a loaded server, which is why it
-  carries the measured worst case, pinned by tests that put the worst
-  static and proxied request on every slot at the smallest
-  `memory_limit` FR-CFG-21 accepts.
+  carries the measured worst case. The tests that put the worst static
+  and proxied request on every slot at the smallest `memory_limit`
+  FR-CFG-21 accepts pin a factor of at least 1 (their opens complete too
+  fast to all be pending at once); the value 3 rests on the unit test
+  and the measurement documented in `backstop.rs`.
   The 65536-connection test runs in CI's root step and in the container
   jobs (Alpine; nightly older glibc), which start with a raised `nofile`
   ulimit because Docker's root has no `CAP_SYS_RESOURCE`.
