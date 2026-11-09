@@ -15,6 +15,11 @@ const FILE: FileId = FileId(1);
 /// `a.txt`'s validators at 1000 bytes (mtime 7 ns: the epoch).
 const VALIDATORS: &str = "ETag: \"3e8-7\"\r\nLast-Modified: Thu, 01 Jan 1970 00:00:00 GMT\r\n";
 
+/// The keep-alive head of the whole 1000-byte `a.txt`.
+const WHOLE_HEAD: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
+    Content-Length: 1000\r\nETag: \"3e8-7\"\r\nLast-Modified: Thu, 01 Jan 1970 00:00:00 GMT\r\n\
+    Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n";
+
 fn stamp(size: u64) -> FileStamp {
     FileStamp {
         size,
@@ -322,10 +327,7 @@ fn changed_file_ignores_if_range() {
             write_interest(),
         ]
     );
-    let sent = String::from_utf8_lossy(core.send_buffer(CONN)).into_owned();
-    assert!(sent.starts_with("HTTP/1.1 200 OK\r\n"), "{sent}");
-    assert!(sent.contains("\r\nETag: \"3e8-7\"\r\n"), "{sent}");
-    assert!(!sent.contains("Content-Range"), "{sent}");
+    assert_eq!(String::from_utf8_lossy(core.send_buffer(CONN)), WHOLE_HEAD);
 }
 
 /// `Range` counts only for `GET`: a `HEAD` gets the whole file's head.
@@ -345,11 +347,7 @@ fn range_on_head_is_a_whole_head() {
             write_interest(),
         ]
     );
-    let sent = String::from_utf8_lossy(core.send_buffer(CONN)).into_owned();
-    assert!(
-        sent.starts_with("HTTP/1.1 200 OK\r\n") && sent.contains("\r\nContent-Length: 1000\r\n"),
-        "{sent}"
-    );
+    assert_eq!(String::from_utf8_lossy(core.send_buffer(CONN)), WHOLE_HEAD);
 }
 
 /// A failure while a range is sent cuts it like a whole file

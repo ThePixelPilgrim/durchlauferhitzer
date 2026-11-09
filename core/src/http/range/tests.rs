@@ -42,8 +42,12 @@ fn the_fixture_is_the_file_it_names() {
 #[test]
 fn judges_ranges() {
     let part = |first, last| Ranged::Part { first, last };
-    let rows: [(&str, Ranged); 15] = [
+    let rows: [(&str, Ranged); 18] = [
         ("bytes=0-99", part(0, 99)),
+        // The last byte alone: the first byte may be the last.
+        ("bytes=999-", part(999, 999)),
+        ("bytes=-1", part(999, 999)),
+        ("bytes=999-999", part(999, 999)),
         ("bytes=990-", part(990, 999)),
         ("bytes=-10", part(990, 999)),
         ("bytes=-2000", part(0, 999)),
@@ -85,6 +89,12 @@ fn judges_ranges() {
     let post = Method::Other("POST".to_owned());
     assert_eq!(judge(&post, &range, STAMP), Ranged::Whole);
     assert_eq!(get(&[]), Ranged::Whole, "no Range");
+    let one_byte = FileStamp { size: 1, ..STAMP };
+    assert_eq!(
+        judge(&Method::Get, &[("range", "bytes=0-")], one_byte),
+        part(0, 0),
+        "a 1-byte file"
+    );
     assert_eq!(
         RangeRequest::NONE.judge(&Method::Get, &Validators::of(STAMP), 1000),
         Ranged::Whole

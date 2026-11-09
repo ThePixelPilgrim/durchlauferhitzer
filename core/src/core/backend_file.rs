@@ -242,3 +242,5 @@ impl Core {
 mod flow_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trigger_tests;
