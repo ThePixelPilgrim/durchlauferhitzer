@@ -3,18 +3,24 @@
 
 use std::io::Write as _;
 
-use durchlauferhitzer_core::config::SeccompAction;
+use durchlauferhitzer_core::config::{Layer, SeccompAction};
 
 use super::{Applied, Gap, LayerName, Outcome, State};
 
 impl Outcome {
-    /// `kind=containment layer state [abi | action log] [gaps covered_by]
-    /// [uncovered]`, without the newline: a list of gaps is joined by `+`.
+    /// `kind=containment layer mode state [abi | action log] [gaps
+    /// covered_by] [uncovered]`, without the newline: a list of gaps is
+    /// joined by `+`.
     pub(crate) fn write_line(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(b"kind=containment layer=");
         out.extend_from_slice(match self.layer {
             LayerName::Landlock => b"landlock",
             LayerName::Seccomp => b"seccomp",
+        });
+        out.extend_from_slice(match self.mode {
+            Layer::Off => b" mode=off",
+            Layer::BestEffort => b" mode=best_effort",
+            Layer::Required => b" mode=required",
         });
         let (state, applied): (&[u8], _) = match self.state {
             State::Active(applied) => (b"active", Some(applied)),

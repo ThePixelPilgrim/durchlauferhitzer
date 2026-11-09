@@ -58,6 +58,26 @@ prints `ok` (exit 0), or the first error as `<path>:<line>:<column>:
 `durchlauferhitzer: <path>: <reason>` (exit 1). It only reads the file:
 no socket is bound and no static or `internal_files` root is opened.
 
+For a valid config it also writes on stderr, still with exit 0, one
+warning per containment setting softer than the
+[guaranteed install](#guaranteed-install) (`landlock` or `seccomp`
+`best_effort` or `off`, `seccomp_action fail`), in config order, then
+the memory backstop the server would set at startup (it is not set by
+`--check`). The example config keeps the strict defaults, so it gets
+the backstop line alone:
+
+```
+examples/durchlauferhitzer.conf: memory backstop: 1092616192 bytes
+```
+
+With `seccomp_action fail;` in its `containment` block a warning comes
+first:
+
+```
+examples/durchlauferhitzer.conf: warning: containment seccomp_action fail: an unexpected system call is answered, not fatal
+examples/durchlauferhitzer.conf: memory backstop: 1092616192 bytes
+```
+
 ## Try it
 
 The example config listens on `127.0.0.1:8080` and runs as any normal user
@@ -120,7 +140,8 @@ see the example config): Landlock lets it only read beneath its static and
 needs. Each layer is `required` (the default: missing or partial is exit 2),
 `best_effort` (used where the kernel has it, otherwise logged as missing and
 the server serves) or `off`; the startup log says what applies
-(`kind=containment ...`, one line per layer). A blocked call ends the
+(`kind=containment layer=<name> mode=<configured> state=<applied> ...`,
+one line per layer). A blocked call ends the
 process (`seccomp_action kill`, the default) or, with `seccomp_action fail`,
 gets `EPERM`; either way the kernel logs it:
 
@@ -139,6 +160,32 @@ their contents. Clients cannot see them: requests resolve beneath the roots
 Under containment a panic's backtrace (`RUST_BACKTRACE`) is not
 symbolized; with `seccomp_action kill` the attempt ends the process by
 SIGSYS.
+
+## Guaranteed install
+
+The security requirements are claimed for this install, and `--check`
+warns when a config leaves part of it to the kernel
+([Check a config](#check-a-config)):
+
+- the default `containment` block: `landlock required`, `seccomp
+  required`, `seccomp_action kill` (writing no block gives the same);
+  the startup log's `containment` lines show it as `mode=required`;
+- `user` set, when the server is started as root (or the service's own
+  `User=` under systemd socket activation);
+- Linux 6.2 or later (Landlock ABI 3; 6.10 or later restricts every
+  right with Landlock alone);
+- `memory_limit` sized for the host, with the memory backstop the server
+  sets from it at startup (`kind=memory_backstop bytes=<n>` in the
+  startup log, the same number `--check` prints): an allocation beyond
+  it aborts the process;
+- a supervisor that restarts the process when it ends abnormally (a
+  blocked system call under `kill`, an aborted allocation): systemd with
+  `Restart=on-abnormal` in the service unit. The OpenRC script in
+  [`contrib/openrc`](contrib/openrc) starts and reloads the server but
+  does not restart it.
+
+Outside it, least privilege (NFR-SEC-12) and the kernel-enforced memory
+backstop (NFR-RES-09) hold only as far as the kernel allows.
 
 ## systemd socket activation
 

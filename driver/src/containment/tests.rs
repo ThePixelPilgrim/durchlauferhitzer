@@ -182,11 +182,12 @@ fn read_implies_exec_makes_seccomp_partial() {
     );
 }
 
-/// What `restrict_files` returns for an applied ABI.
-fn landlock(abi: u32) -> Files {
+/// What `restrict_files` returns for an applied ABI under `mode`.
+fn landlock(mode: Layer, abi: u32) -> Files {
     Files {
         outcome: Outcome::applied(
             LayerName::Landlock,
+            mode,
             State::Active(Applied::Abi(abi)),
             abi_gaps(abi),
         ),
@@ -205,9 +206,10 @@ const FILTER: Applied = Applied::Filter(SeccompAction::Fail);
 const FILTERED: [State; 2] = [State::Active(FILTER), State::Partial(FILTER)];
 const UNFILTERED: [State; 2] = [State::Off, State::Missing];
 
-fn outcome(state: State, covered: &[Gap], uncovered: &[Gap]) -> Outcome {
+fn outcome(mode: Layer, state: State, covered: &[Gap], uncovered: &[Gap]) -> Outcome {
     Outcome {
         layer: LayerName::Landlock,
+        mode,
         state,
         covered: covered.to_vec(),
         uncovered: uncovered.to_vec(),
@@ -219,7 +221,7 @@ fn a_landlock_that_is_not_applied_has_nothing_to_cover() {
     for layer in MODES {
         for state in [State::Off, State::Missing] {
             for seccomp in FILTERED.into_iter().chain(UNFILTERED) {
-                let skipped = Outcome::skipped(LayerName::Landlock, state);
+                let skipped = Outcome::skipped(LayerName::Landlock, layer, state);
                 let files = Files {
                     outcome: skipped.clone(),
                     abi: None,
@@ -236,8 +238,8 @@ fn abi_5_and_later_need_no_cover() {
         for seccomp in FILTERED.into_iter().chain(UNFILTERED) {
             for abi in [5, 6, 7] {
                 assert_eq!(
-                    cover(layer, landlock(abi), seccomp).unwrap(),
-                    landlock(abi).outcome
+                    cover(layer, landlock(layer, abi), seccomp).unwrap(),
+                    landlock(layer, abi).outcome
                 );
             }
         }
@@ -251,16 +253,16 @@ fn the_filter_covers_device_ioctl() {
         for seccomp in FILTERED {
             for abi in [3, 4] {
                 assert_eq!(
-                    cover(layer, landlock(abi), seccomp).unwrap(),
-                    outcome(active(abi), &[Gap::DeviceIoctl], &[])
+                    cover(layer, landlock(layer, abi), seccomp).unwrap(),
+                    outcome(layer, active(abi), &[Gap::DeviceIoctl], &[])
                 );
             }
             // Truncation stays uncovered and is no failure, also under
             // `required` (owner decision 2026-11-01).
             for abi in [1, 2] {
                 assert_eq!(
-                    cover(layer, landlock(abi), seccomp).unwrap(),
-                    outcome(active(abi), &[Gap::DeviceIoctl], &[Gap::Truncate])
+                    cover(layer, landlock(layer, abi), seccomp).unwrap(),
+                    outcome(layer, active(abi), &[Gap::DeviceIoctl], &[Gap::Truncate])
                 );
             }
         }
@@ -273,14 +275,19 @@ fn without_the_filter_device_ioctl_makes_landlock_partial() {
     for seccomp in UNFILTERED {
         for abi in [3, 4] {
             assert_eq!(
-                cover(Layer::BestEffort, landlock(abi), seccomp).unwrap(),
-                outcome(partial(abi), &[], &[Gap::DeviceIoctl])
+                cover(Layer::BestEffort, landlock(Layer::BestEffort, abi), seccomp).unwrap(),
+                outcome(Layer::BestEffort, partial(abi), &[], &[Gap::DeviceIoctl])
             );
         }
         for abi in [1, 2] {
             assert_eq!(
-                cover(Layer::BestEffort, landlock(abi), seccomp).unwrap(),
-                outcome(partial(abi), &[], &[Gap::Truncate, Gap::DeviceIoctl])
+                cover(Layer::BestEffort, landlock(Layer::BestEffort, abi), seccomp).unwrap(),
+                outcome(
+                    Layer::BestEffort,
+                    partial(abi),
+                    &[],
+                    &[Gap::Truncate, Gap::DeviceIoctl]
+                )
             );
         }
     }
@@ -291,7 +298,11 @@ fn without_the_filter_device_ioctl_fails_a_required_landlock() {
     for (seccomp, word) in [(State::Off, "off"), (State::Missing, "missing")] {
         for abi in [1, 2, 3, 4] {
             assert_eq!(
-                message(cover(Layer::Required, landlock(abi), seccomp)),
+                message(cover(
+                    Layer::Required,
+                    landlock(Layer::Required, abi),
+                    seccomp
+                )),
                 format!(
                     "landlock is required but the kernel's Landlock (ABI {abi}) cannot \
                      restrict device_ioctl, and seccomp, which covers it, is {word}"

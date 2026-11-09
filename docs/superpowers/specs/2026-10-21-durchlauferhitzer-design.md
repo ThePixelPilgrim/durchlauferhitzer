@@ -1492,7 +1492,7 @@ Failures, persistence, timeouts:
       listeners, which share their ports, as the non-root effective uid
       `uid`), `kind=memory_backstop bytes` (NFR-RES-09: the
       `RLIMIT_DATA` set at startup, soft and hard, in bytes),
-      `kind=containment layer state [abi |
+      `kind=containment layer mode state [abi |
       action log] [gaps covered_by] [uncovered]` (FR-PROC-06, below).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
     `192.0.2.7`); `status` the three-digit code; `backend` the backend's
@@ -1516,7 +1516,9 @@ Failures, persistence, timeouts:
     `changed`, `other`. Each enum variant's name is its snake_case
     spelling (`HttpError::BadHeaderValue` → `bad_header_value`).
   - *(Stage 5 Task 5, controller ruling R2:)* `containment` values:
-    `layer` is `landlock` or `seccomp`; `state` is `active`, `partial`,
+    `layer` is `landlock` or `seccomp`; `mode` is the layer's configured
+    value, `off`, `best_effort` or `required` (FR-CFG-25; stage 9,
+    FR-PROC-08); `state` is `active`, `partial`,
     `missing` or `off` (FR-PROC-06); an applied Landlock (active or
     partial) adds `abi` (the kernel's Landlock ABI, decimal), an applied
     filter adds `action` (`fail` or `kill`) and `log=kernel` (the kernel
@@ -1525,10 +1527,11 @@ Failures, persistence, timeouts:
     nothing covers. A list is the gap names joined by `+`: `truncate`
     (Landlock before ABI 3), `device_ioctl` (before ABI 5),
     `read_implies_exec` (seccomp: the personality). Examples:
-    `kind=containment layer=landlock state=active abi=4 gaps=device_ioctl
-    covered_by=seccomp`, `kind=containment layer=landlock state=partial
-    abi=2 uncovered=truncate+device_ioctl`, `kind=containment
-    layer=seccomp state=active action=fail log=kernel`.
+    `kind=containment layer=landlock mode=required state=active abi=4
+    gaps=device_ioctl covered_by=seccomp`, `kind=containment
+    layer=landlock mode=best_effort state=partial abi=2
+    uncovered=truncate+device_ioctl`, `kind=containment layer=seccomp
+    mode=best_effort state=active action=fail log=kernel`.
   - Example: `kind=rejected conn=3 peer=192.0.2.7
     reason=http.bad_header_value method=GET path="/a\x20b"` (one line).
 - **FR-LOG-06** [done] Logging never blocks: if stderr is backed up,
@@ -2166,7 +2169,7 @@ Failures, persistence, timeouts:
 
 ---
 
-- **FR-PROC-08** [stage 9] `--check` warnings and the guaranteed install
+- **FR-PROC-08** [done] `--check` warnings and the guaranteed install
   (owner decision 2026-11-09, qmail review). *qmail's security guarantee
   covered Bernstein's documented install only; Debian's differed, and
   that is where the hole was reachable. The documented install is the
@@ -2191,6 +2194,24 @@ Failures, persistence, timeouts:
   that outside it NFR-SEC-12 and NFR-RES-09 hold only as far as the
   kernel allows. The example config shows the guaranteed values, with
   the softer ones in comments, not the other way round.
+  *Planner calls (stage 9 plan, Task 3):* the warnings come from the
+  core (`Containment::softenings`, one `Softening` per softer setting),
+  in config order (`landlock`, `seccomp`, `seccomp_action`), then the
+  backstop line (`backstop::limit` of the config's limits; it is not
+  set), then `ok` on stdout. The five messages, exactly:
+  - `containment landlock best_effort: serves on a kernel without
+    Landlock`
+  - `containment landlock off: Landlock is not used`
+  - `containment seccomp best_effort: serves on a kernel without
+    seccomp`
+  - `containment seccomp off: the system-call filter is not used`
+  - `containment seccomp_action fail: an unexpected system call is
+    answered, not fatal`
+
+  The `mode=` token is the configured value (`off`, `best_effort`,
+  `required`), right after `layer=` and before `state=`, the applied
+  outcome: `kind=containment layer=landlock mode=required state=active
+  abi=4 ...` (FR-LOG-05).
 
 ## Non-functional requirements
 

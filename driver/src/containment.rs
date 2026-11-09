@@ -94,6 +94,8 @@ impl From<landlock::Gap> for Gap {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub layer: LayerName,
+    /// How strictly the config asks for the layer (FR-PROC-08).
+    pub mode: Layer,
     pub state: State,
     /// The gaps the seccomp filter covers.
     pub covered: Vec<Gap>,
@@ -103,9 +105,10 @@ pub struct Outcome {
 
 impl Outcome {
     /// A layer that is not applied (`Off` or `Missing`): no gap to name.
-    fn skipped(layer: LayerName, state: State) -> Self {
+    fn skipped(layer: LayerName, mode: Layer, state: State) -> Self {
         Self {
             layer,
+            mode,
             state,
             covered: Vec::new(),
             uncovered: Vec::new(),
@@ -113,9 +116,10 @@ impl Outcome {
     }
 
     /// An applied layer whose gaps are not covered (yet).
-    fn applied(layer: LayerName, state: State, uncovered: Vec<Gap>) -> Self {
+    fn applied(layer: LayerName, mode: Layer, state: State, uncovered: Vec<Gap>) -> Self {
         Self {
             layer,
+            mode,
             state,
             covered: Vec::new(),
             uncovered,
@@ -164,7 +168,7 @@ enum Fit {
 pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<Files, Error> {
     match files_plan(config.landlock, landlock::abi())? {
         FilesPlan::Skip(state) => Ok(Files {
-            outcome: Outcome::skipped(LayerName::Landlock, state),
+            outcome: Outcome::skipped(LayerName::Landlock, config.landlock, state),
             abi: None,
         }),
         FilesPlan::Apply(abi) => {
@@ -175,6 +179,7 @@ pub(crate) fn restrict_files(config: &Containment, roots: &[OwnedFd]) -> Result<
             Ok(Files {
                 outcome: Outcome::applied(
                     LayerName::Landlock,
+                    config.landlock,
                     State::Active(Applied::Abi(abi)),
                     gaps,
                 ),
@@ -196,16 +201,20 @@ pub(crate) fn restrict_calls(config: &Containment, landlock: Files) -> Result<[O
         persona,
     )?;
     let calls = match plan {
-        CallsPlan::Skip(state) => Outcome::skipped(LayerName::Seccomp, state),
+        CallsPlan::Skip(state) => Outcome::skipped(LayerName::Seccomp, config.seccomp, state),
         CallsPlan::Apply(arch, fit) => {
             let action = config.seccomp_action;
             seccomp::install(&program(arch, action, std::process::id()))
                 .map_err(|err| Error(format!("seccomp: {err}")))?;
             let applied = Applied::Filter(action);
+            let mode = config.seccomp;
             match fit {
-                Fit::Whole => Outcome::applied(LayerName::Seccomp, State::Active(applied), vec![]),
+                Fit::Whole => {
+                    Outcome::applied(LayerName::Seccomp, mode, State::Active(applied), vec![])
+                }
                 Fit::Partial => Outcome::applied(
                     LayerName::Seccomp,
+                    mode,
                     State::Partial(applied),
                     vec![Gap::ReadImpliesExec],
                 ),

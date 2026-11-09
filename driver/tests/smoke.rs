@@ -838,7 +838,8 @@ host proxy.test {{
     // Under the seccomp kill switch the whole run was under `kill`.
     if seccomp_kill() {
         assert_eq!(
-            layers[1], "kind=containment layer=seccomp state=active action=kill log=kernel",
+            layers[1],
+            "kind=containment layer=seccomp mode=required state=active action=kill log=kernel",
             "{layers:?}"
         );
     }

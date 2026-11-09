@@ -133,10 +133,20 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Option<Command> {
 }
 
 /// `--check`: loads the config and prints `ok` or the error; touches
-/// neither the network nor the roots.
+/// neither the network nor the roots. A valid config's softer
+/// containment choices are warned about on stderr, followed by the
+/// memory backstop startup would set (FR-PROC-08); it is not set here.
 fn check(path: &Path) -> ExitStatus {
     match load_config(path) {
-        Ok(_) => {
+        Ok(config) => {
+            for softening in config.containment.softenings() {
+                say_err(format_args!("{}: warning: {softening}", path.display()));
+            }
+            say_err(format_args!(
+                "{}: memory backstop: {} bytes",
+                path.display(),
+                backstop::limit(&config.limits)
+            ));
             let _ = writeln!(io::stdout().lock(), "ok");
             ExitStatus::Ok
         }

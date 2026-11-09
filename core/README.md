@@ -91,6 +91,8 @@ src/
     syntax.rs           nested blocks and settings
     validate/           semantic rules, defaults, line:column errors
       route.rs            one `path` block: its keys and route rules
+    softening.rs        the containment settings softer than the
+                        defaults, as `--check` warns about them
     model.rs            the validated Config (limits, containment,
                         `internal_files`)
     units.rs            durations and sizes

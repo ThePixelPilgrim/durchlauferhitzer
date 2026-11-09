@@ -426,13 +426,17 @@ pub fn fd_target(pid: u32, fd: RawFd) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// The startup log's `memory_backstop` line (NFR-RES-09, without the
-/// `\n`) for the config file at `path`: `backstop::limit` of its own
-/// limits.
-pub fn memory_backstop_line(path: &str) -> String {
+/// The memory backstop (NFR-RES-09) for the config file at `path`:
+/// `backstop::limit` of its own limits.
+pub fn memory_backstop_bytes(path: &str) -> u64 {
     let config = durchlauferhitzer_core::config::load(&fs::read_to_string(path).unwrap()).unwrap();
-    let bytes = durchlauferhitzer::process::backstop::limit(&config.limits);
-    format!("kind=memory_backstop bytes={bytes}")
+    durchlauferhitzer::process::backstop::limit(&config.limits)
+}
+
+/// The startup log's `memory_backstop` line (NFR-RES-09, without the
+/// `\n`) for the config file at `path`.
+pub fn memory_backstop_line(path: &str) -> String {
+    format!("kind=memory_backstop bytes={}", memory_backstop_bytes(path))
 }
 
 /// The status of a finished child as a code, for messages.

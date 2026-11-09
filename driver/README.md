@@ -268,7 +268,9 @@ tests/
   cli.rs            the binary in a subprocess: the usage for bad
                     arguments (`--ready-fd` without a plain number
                     included), `--check` (ok, each kind of error with its
-                    line:column, a missing file; no root or port touched),
+                    line:column, a missing file; no root or port touched;
+                    a warning per softer containment setting, then the
+                    memory backstop line),
                     an unusable `--ready-fd` (0-2, closed, listening,
                     systemd's) exit 2 before the config is read
   startup.rs        the startup sequence of the binary, run as non-root
@@ -431,7 +433,8 @@ tests/
                     `CAP_NET_BIND_SERVICE`, and as root started with it
                     inheritable
   containment.rs    containment in the binary, run as non-root: the
-                    `containment` line per layer (exact, for the
+                    `containment` line per layer (exact, with its
+                    configured `mode`, for the
                     kernel's ABI), `Seccomp: 2` and `NoNewPrivs: 1` in
                     every thread; `off` per layer; `required` with
                     seccomp or Landlock hidden (`Filter`) is exit 2
@@ -533,7 +536,8 @@ tests/
                     capabilities (`Caps`); the test crate's only
                     `unsafe`), a bounded wait for the exit, the startup
                     log's `memory_backstop` line for a config
-                    (`memory_backstop_line`); re-exports `conf.rs` and
+                    (`memory_backstop_line`) and its number
+                    (`memory_backstop_bytes`); re-exports `conf.rs` and
                     `running.rs`
   support/clock_syscall.rs  a test-only `LD_PRELOAD` cdylib whose
                     `clock_gettime` always makes the system call; built

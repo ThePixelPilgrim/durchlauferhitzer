@@ -1,6 +1,7 @@
 //! Containment at startup (FR-PROC-06) in the built binary, each test a
 //! server run as non-root (as `nobody` when the tests run as root): the
-//! startup log's `containment` line per layer, the seccomp filter and
+//! startup log's `containment` line per layer (with its configured
+//! `mode`, FR-PROC-08), the seccomp filter and
 //! `no_new_privs` in every thread, `required` against a layer hidden by a
 //! test seccomp filter (exit 2) and `best_effort` against the same
 //! (logged missing, serving), and reads under Landlock.
@@ -39,12 +40,16 @@ fn after_notes(path: &str, error: &str) -> String {
     )
 }
 
-/// The seccomp line under the default `seccomp_action kill` (FR-CFG-25).
-const SECCOMP_ACTIVE: &str = "kind=containment layer=seccomp state=active action=kill log=kernel";
-const SECCOMP_OFF: &str = "kind=containment layer=seccomp state=off";
-const SECCOMP_MISSING: &str = "kind=containment layer=seccomp state=missing";
-const LANDLOCK_OFF: &str = "kind=containment layer=landlock state=off";
-const LANDLOCK_MISSING: &str = "kind=containment layer=landlock state=missing";
+/// The `containment` lines (FR-LOG-05), each with its configured `mode`
+/// (FR-PROC-08): `required` by default or as written, `best_effort` or
+/// `off` only as written. The active seccomp line is under the default
+/// `seccomp_action kill` (FR-CFG-25).
+const SECCOMP_ACTIVE: &str =
+    "kind=containment layer=seccomp mode=required state=active action=kill log=kernel";
+const SECCOMP_OFF: &str = "kind=containment layer=seccomp mode=off state=off";
+const SECCOMP_MISSING: &str = "kind=containment layer=seccomp mode=best_effort state=missing";
+const LANDLOCK_OFF: &str = "kind=containment layer=landlock mode=off state=off";
+const LANDLOCK_MISSING: &str = "kind=containment layer=landlock mode=best_effort state=missing";
 
 /// Whether the seccomp filter is installed when Landlock's line is
 /// written (it covers device `ioctl` before ABI 5).
@@ -59,7 +64,7 @@ fn landlock_line(seccomp: Seccomp) -> String {
     let Abi::Version(abi) = abi() else {
         return LANDLOCK_MISSING.to_owned();
     };
-    let head = "kind=containment layer=landlock";
+    let head = "kind=containment layer=landlock mode=required";
     match (abi, seccomp) {
         (5.., _) => format!("{head} state=active abi={abi}"),
         (3 | 4, Seccomp::Filtered) => {
@@ -525,7 +530,7 @@ fn the_clock_system_call_passes_the_filter_under_kill() {
         ..Setup::non_root()
     };
     let (mut server, mut lines) = site.start("seccomp required; seccomp_action kill;", setup);
-    lines.wait_for("kind=containment layer=seccomp state=active action=kill log=kernel");
+    lines.wait_for(SECCOMP_ACTIVE);
     let maps = fs::read_to_string(format!("/proc/{}/maps", server.pid())).unwrap();
     assert!(maps.contains(&library), "the shim is not loaded:\n{maps}");
     let response = get(site.addr, "/inside.txt");
