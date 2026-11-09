@@ -407,20 +407,15 @@ impl Core {
                     Plan::Respond(status, persistence) => (status, persistence),
                 },
                 RouteAction::Proxy(target) => {
+                    // `route_internal` and the router's index both come
+                    // from `config.hosts`, so the entry is there exactly
+                    // when the route has `internal_files`.
                     let internal = self
                         .route_internal
                         .get(index.host)
                         .and_then(|routes| routes.get(index.route))
-                        .copied()
-                        .flatten();
-                    let proxied = proxy::plan(
-                        route,
-                        target,
-                        &head,
-                        &self.backends,
-                        internal,
-                        &self.internal_routes,
-                    );
+                        .and_then(Option::as_ref);
+                    let proxied = proxy::plan(route, target, &head, &self.backends, internal);
                     match proxied {
                         ProxyPlan::Forward(forward) => {
                             self.forward(now, conn, head, forward, after, actions);
