@@ -2,14 +2,15 @@
 //! FR-STATIC-19): a std stub backend names files by `X-Accel-Redirect`
 //! or `X-Sendfile` below an `internal_files` root on the real disk, and
 //! the server sends them with `sendfile`. Landlock is `required` when
-//! `DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1` (CI), else `best_effort`; the
-//! seccomp kill switch adds `seccomp required; seccomp_action kill;`
-//! (FR-PROC-06). The 600 KiB file arrives exactly with the backend's
-//! other headers kept, a range across a chunk boundary gives exactly its
-//! bytes, a path outside the root is a 502 that sends none of that file,
-//! a symlink in the root a 404, a client's forged file headers never
-//! reach the backend (Rack's hints do), and after `Content-Length: 0`
-//! the backend connection is pooled.
+//! `DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1` (CI), else `best_effort`;
+//! seccomp is the default, `required` with `kill`, switch or not (the
+//! kill switch writes the same explicitly; FR-PROC-06, FR-CFG-25). The
+//! 600 KiB file arrives exactly with the backend's other headers kept, a
+//! range across a chunk boundary gives exactly its bytes, a path outside
+//! the root is a 502 that sends none of that file, a symlink in the root a
+//! 404, a client's forged file headers never reach the backend (Rack's
+//! hints do), and after `Content-Length: 0` the backend connection is
+//! pooled.
 
 #![allow(
     clippy::unwrap_used,
@@ -182,7 +183,8 @@ impl Site {
 }
 
 /// Landlock `required` where it must be there (CI), else `best_effort`;
-/// seccomp by the kill switch (`support/conf.rs`).
+/// seccomp is the default (`required`, `kill`), which the kill switch
+/// (`support/conf.rs`) writes explicitly.
 fn containment() -> String {
     let landlock =
         if std::env::var_os("DURCHLAUFERHITZER_REQUIRE_LANDLOCK").is_some_and(|v| v == "1") {

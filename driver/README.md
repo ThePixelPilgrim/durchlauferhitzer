@@ -340,8 +340,8 @@ tests/
                     of its exchange (DRV-13), one log line per entry
                     (exact but for `conn=`), the fd count back to its
                     baseline, then SIGTERM: `draining`, `done
-                    detached=0`, exit 0 (the seccomp line `action=kill`
-                    under the kill switch)
+                    detached=0`, exit 0 (the seccomp line `action=kill`,
+                    the default)
   pool.rs           backend connection pooling through the binary
                     (FR-PROXY-02, -26): a keep-alive stub backend counts
                     one connection for 10 sequential requests (10 with
@@ -350,7 +350,7 @@ tests/
                     is retried and logged (`kind=backend_retried`), a
                     backend's late body to a HEAD reaches no client
   file_ranges.rs    range requests through the binary (FR-STATIC-19,
-                    under the kill switch when it is on): a 600 KiB
+                    under seccomp `kill`, the default): a 600 KiB
                     pattern file, a range across the 256 KiB chunk
                     boundary gets exactly its bytes, a suffix range the
                     last ones, a range past the end the 416; each head
@@ -358,7 +358,8 @@ tests/
   internal_files.rs backend-directed files through the binary
                     (FR-PROXY-32, FR-STATIC-19; Landlock `required`
                     with DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1, else
-                    `best_effort`, seccomp by the kill switch): a std
+                    `best_effort`, seccomp the default `required`,
+                    `kill`): a std
                     stub backend names a 600 KiB pattern file by
                     `X-Accel-Redirect` (it arrives exactly, the
                     backend's `content-disposition` kept, its body never
@@ -403,7 +404,8 @@ tests/
                     `containment` line per layer (exact, for the
                     kernel's ABI), `Seccomp: 2` and `NoNewPrivs: 1` in
                     every thread; `off` per layer; `required` with
-                    seccomp or Landlock hidden (`Filter`) is exit 2,
+                    seccomp or Landlock hidden (`Filter`) is exit 2
+                    (`required` is the default, so also with no block),
                     `best_effort` logs it missing and serves; a layer
                     the kernel offers but refuses to apply is exit 2
                     under `best_effort`; seccomp
@@ -507,7 +509,9 @@ tests/
                     cargo target (so outside the test crate and the
                     product's tree; its own `unsafe`)
   support/conf.rs   temp dirs and config files (`TempDir::config`, with
-                    `Containment`: the seccomp kill switch's block, the
+                    `Containment`: the seccomp kill switch's block, which
+                    equals the default `required`/`kill` so every server
+                    test runs under kill with or without the switch, the
                     text's own, or none for an invalid config)
   support/load.rs   `restart.rs`'s HTTP clients: a response read by its
                     `Content-Length`, a fresh request, keep-alive and
