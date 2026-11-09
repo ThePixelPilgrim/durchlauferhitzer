@@ -1,8 +1,9 @@
 //! The command line (FR-PROC-01, FR-PROC-05a): usage for bad arguments,
 //! `--check` (it loads the config and touches neither the network nor the
 //! roots; it warns about softer containment and prints the memory
-//! backstop, FR-PROC-08), a `--ready-fd` that cannot be used (exit 2 before the config is
-//! read, FR-PROC-07). Each test runs the built binary in a subprocess.
+//! backstop, FR-PROC-08), a `--ready-fd` that cannot be used (exit 2
+//! before the config is read, FR-PROC-07). Each test runs the built
+//! binary in a subprocess.
 
 #![allow(
     clippy::unwrap_used,
@@ -81,6 +82,26 @@ fn check_on_a_valid_config_prints_ok() {
     );
 }
 
+/// FR-PROC-08: the shipped example config is the guaranteed install, so
+/// `--check` warns about nothing; its one stderr line is the backstop
+/// (the figure the README shows for it).
+#[test]
+fn check_on_the_example_config_warns_nothing() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/durchlauferhitzer.conf");
+    let path = path.to_str().unwrap();
+    let output = run(&["--check", path], Setup::default());
+    assert_exit(&output, 0);
+    assert_eq!(text(&output.stdout), "ok\n");
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "{path}: memory backstop: {} bytes\n",
+            memory_backstop_bytes(path)
+        )
+    );
+}
+
 /// FR-PROC-08: one warning per softer containment choice, in config
 /// order, above the backstop line; still `ok` and exit 0.
 #[test]
@@ -111,11 +132,10 @@ fn check_warns_about_each_softening() {
 }
 
 /// FR-PROC-08: the backstop `--check` prints is the one the config's
-/// own limits give, and it is only printed, not set: `--check` runs
-/// nothing of the startup, so a port held here does not fail it (it
-/// binds nothing) and stderr holds that line alone.
+/// own (non-default) limits give, stderr holds that line alone, and the
+/// config's port, held here, does not fail it: `--check` binds nothing.
 #[test]
-fn check_prints_the_backstop_and_sets_no_limit() {
+fn check_prints_the_backstop_and_binds_nothing() {
     let taken = TcpListener::bind("127.0.0.1:0").unwrap();
     let listen = taken.local_addr().unwrap().to_string();
     let dir = TempDir::new();

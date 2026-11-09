@@ -179,8 +179,9 @@ warns when a config leaves part of it to the kernel
   startup log, the same number `--check` prints): an allocation beyond
   it aborts the process;
 - a supervisor that restarts the process when it ends abnormally (a
-  blocked system call under `kill`, an aborted allocation): systemd with
-  `Restart=on-abnormal` in the service unit. The OpenRC script in
+  blocked system call under `kill`, an aborted allocation), such as the
+  [systemd service](#systemd-socket-activation) below (its
+  `Restart=on-abnormal`). The OpenRC script in
   [`contrib/openrc`](contrib/openrc) starts and reloads the server but
   does not restart it.
 
@@ -209,6 +210,7 @@ WantedBy=sockets.target
 [Service]
 ExecStart=/usr/local/bin/durchlauferhitzer /etc/durchlauferhitzer.conf
 User=www-data
+Restart=on-abnormal
 ```
 
 Leave `user` out of the config here: the service already runs as `User=`.

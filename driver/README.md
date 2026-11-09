@@ -270,7 +270,7 @@ tests/
                     included), `--check` (ok, each kind of error with its
                     line:column, a missing file; no root or port touched;
                     a warning per softer containment setting, then the
-                    memory backstop line),
+                    memory backstop line; none for the example config),
                     an unusable `--ready-fd` (0-2, closed, listening,
                     systemd's) exit 2 before the config is read
   startup.rs        the startup sequence of the binary, run as non-root
