@@ -191,6 +191,17 @@ fn content_length_over_limit_is_413_before_connect() {
     answer_ok(&mut sim, c, up);
 }
 
+/// The one `Response` entry of a 400 to `method /api/x` (FR-LOG-03).
+fn logged_one_400(sim: &Sim, c: ConnId, method: Method) {
+    let entry = Log::Response {
+        conn: c,
+        peer: peer(),
+        status: Status::BadRequest,
+        request: Some(summary(method, "/api/x")),
+    };
+    assert_eq!(sim.logs(), &[entry], "{}", sim.trace());
+}
+
 /// FR-PROXY-01: a `GET` whose head frames a body is answered 400 with
 /// `Connection: close` before any connect (NFR-SEC-14, TE.0); one
 /// `Response` entry is logged (FR-LOG-03) and the unread body lingers
@@ -209,17 +220,7 @@ fn get_with_a_body_is_400_without_connect() {
         "{}",
         sim.trace()
     );
-    assert_eq!(
-        sim.logs(),
-        &[Log::Response {
-            conn: c,
-            peer: peer(),
-            status: Status::BadRequest,
-            request: Some(summary(Method::Get, "/api/x")),
-        }],
-        "{}",
-        sim.trace()
-    );
+    logged_one_400(&sim, c, Method::Get);
     assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
     sim.send_eof(c);
     sim.run_until_idle();
@@ -243,6 +244,7 @@ fn head_with_a_chunked_body_is_400_without_connect() {
         "{}",
         sim.trace()
     );
+    logged_one_400(&sim, c, Method::Head);
     assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
 }
 
@@ -287,6 +289,7 @@ fn head_with_a_chunked_body_and_expect_gets_400_not_100() {
         "{}",
         sim.trace()
     );
+    logged_one_400(&sim, c, Method::Head);
 }
 
 /// FR-PROXY-23: a chunked body that passes the limit cuts both

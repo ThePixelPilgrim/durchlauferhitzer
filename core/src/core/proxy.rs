@@ -201,6 +201,9 @@ impl Core {
             BodyFraming::None => Expect::None,
         };
         // FR-PROXY-26: only a GET or HEAD without a body may be replayed.
+        // A GET or HEAD with a body no longer reaches here on a proxy route
+        // (FR-PROXY-01, amended 2026-11-09: `plan` answers it 400); its
+        // `Never` is kept as a defensive arm.
         let replay = match (&head.method, head.body) {
             (Method::Get | Method::Head, BodyFraming::None) => Replay::Allowed,
             (Method::Get | Method::Head | Method::Other(_), _) => Replay::Never,

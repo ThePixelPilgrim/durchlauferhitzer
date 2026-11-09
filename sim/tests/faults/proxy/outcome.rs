@@ -135,14 +135,28 @@ fn mode(req: &Request) -> BodyMode {
 
 /// Whether `req` is a `GET` or `HEAD` that carries a body (FR-PROXY-01):
 /// bytes follow its head on the wire (a `Content-Length: 0` sends none,
-/// a chunked body at least its last chunk). One that also repeats
-/// `X-Forwarded-For` gets the same 400 and close, and is counted here.
+/// a chunked body at least its last chunk).
 fn body_on_get_or_head(req: &Request) -> bool {
     let bodiless = match req.summary.method {
         Method::Get | Method::Head => true,
         Method::Other(_) => false,
     };
     bodiless && req.wire.len() > req.head_len
+}
+
+/// Whether `req`'s head carries more than one `X-Forwarded-For` line
+/// (FR-PROXY-08), counted by name as the core's `check_forwardable` does.
+fn duplicate_forwarded_for(req: &Request) -> bool {
+    let head = &req.wire[..req.head_len];
+    let lines = head
+        .split(|&b| b == b'\n')
+        .filter(|line| {
+            line.split(|&b| b == b':')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case(b"x-forwarded-for"))
+        })
+        .count();
+    lines > 1
 }
 
 fn dedup(mut ps: Vec<Persistence>) -> Vec<Persistence> {
@@ -185,7 +199,10 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
         Verdict::Answer(status, p) => {
             let mut tags = tags;
             match status {
-                Status::BadRequest if body_on_get_or_head(req) => {
+                // In the core's order: `check_forwardable` (a duplicate
+                // `X-Forwarded-For`) first, then the FR-PROXY-01 arm of
+                // `plan`; a request with both counts as the duplicate.
+                Status::BadRequest if body_on_get_or_head(req) && !duplicate_forwarded_for(req) => {
                     tags.push("400 body on GET or HEAD");
                 }
                 Status::BadRequest => tags.push("400 duplicate X-Forwarded-For"),
