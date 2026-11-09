@@ -327,13 +327,14 @@ esac
 # the OpenRC script's stop allows for (it matches pid and start time).
 # The fork waits on a second FIFO, "go", written once it is listed, so
 # the binary never runs unlisted: a list that cannot be written stops
-# the helper (exit 1) before "go". Every FIFO end is opened here before the fork (an end opened
-# read-write first lets the others open at once), so no process ever
-# blocks in an open: the fork gets the write end of "ready" (fd 4, its
-# fd 3) and the read end of "go" (fd 6); this shell keeps the read end
-# of "ready" (fd 5, for the reader) and the only write end of "go" (fd
-# 7). A helper that stops or is killed before "go" leaves the fork the
-# end of file: it exits, the binary never started.
+# the helper (exit 1) before "go". Every FIFO end is opened here before
+# the fork (an end opened read-write first lets the others open at
+# once), so no process ever blocks in an open: the fork gets the write
+# end of "ready" (fd 4, its fd 3) and the read end of "go" (fd 6); this
+# shell keeps the read end of "ready" (fd 5, for the reader) and the
+# only write end of "go" (fd 7). A helper that stops or is killed before
+# "go" leaves the fork the end of file: it exits, the binary never
+# started.
 { printf '' >>"$logfile"; } 2>/dev/null || fail "cannot append to $logfile"
 dir=$(mktemp -d) || fail "mktemp -d failed"
 fifo=$dir/ready go=$dir/go

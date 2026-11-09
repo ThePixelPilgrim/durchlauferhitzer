@@ -100,6 +100,13 @@ impl Reaper {
 
 impl Drop for Reaper {
     fn drop(&mut self) {
+        // The helper's children too (a fork or stub already blocked),
+        // read while it still runs, so its pid names it.
+        if matches!(self.helper.try_wait(), Ok(None)) {
+            for child in children(self.helper.id()) {
+                self.adds(child);
+            }
+        }
         let _ = self.helper.kill();
         let _ = self.helper.wait();
         for (pid, start) in &self.others {
