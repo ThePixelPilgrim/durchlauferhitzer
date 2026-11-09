@@ -206,6 +206,10 @@ pub(super) fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// The plain 502 of FR-PROXY-26, keep-alive.
+pub(super) const BAD_GATEWAY: &str = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\n\
+    Content-Length: 16\r\nX-Content-Type-Options: nosniff\r\n\r\n502 Bad Gateway\n";
+
 /// The plain 404 of FR-STATIC-09, keep-alive.
 pub(super) const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\n\
     Content-Length: 14\r\nX-Content-Type-Options: nosniff\r\n\r\n404 Not Found\n";
@@ -552,9 +556,11 @@ fn post_gets_the_file_and_range_is_ignored() {
         b"POST /dl/x HTTP/1.1\r\nHost: a.test\r\nContent-Length: 3\r\nRange: bytes=0-1\r\n\r\nabc",
         NAMES_A,
     );
-    assert!(
-        text(core.send_buffer(CONN)).starts_with(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 1000\r\n"
+    assert_eq!(
+        text(core.send_buffer(CONN)),
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 1000\r\n\
+             {VALIDATORS}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n"
         ),
         "{actions:?}"
     );
@@ -566,7 +572,6 @@ fn post_gets_the_file_and_range_is_ignored() {
             "/dl/x"
         )]
     );
-    assert!(!text(core.send_buffer(CONN)).contains("Connection: close"));
     take_head(&mut core);
     let (sent, actions) = send_file(&mut core, stamp(1000));
     assert_eq!(sent, 1000);
@@ -732,7 +737,7 @@ fn bad_paths_are_502() {
             .unwrap();
         assert!(log_at < close_at, "{lines}: {actions:?}");
         assert!(!opens(&actions), "{lines}: {actions:?}");
-        assert!(text(core.send_buffer(CONN)).starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+        assert_eq!(text(core.send_buffer(CONN)), BAD_GATEWAY, "{lines}");
     }
 }
 

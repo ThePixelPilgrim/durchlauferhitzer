@@ -15,8 +15,8 @@ use crate::upstream::UpstreamHolder;
 
 use super::fits_backend_file;
 use super::tests::{
-    CONN, FILE, GET, NAMES_A, UP, answer, backend_file, core, forwarded, handle, logs, opened,
-    regular, send_file, served, stamp, take_head, text,
+    CONN, FILE, GET, NAMES_A, UP, VALIDATORS, answer, backend_file, core, forwarded, handle, logs,
+    opened, regular, send_file, served, stamp, take_head, text,
 };
 
 // ---- logging and file changes --------------------------------------------
@@ -169,12 +169,11 @@ fn file_head_extra_bounds_the_core_lines() {
         crate::http::request::Persistence::KeepAlive,
         Some(&date),
     );
-    assert!(
-        text(&head).starts_with(
-            "HTTP/1.1 304 Not Modified\r\nDate: Fri, 31 Dec 9999 23:59:59 GMT\r\nx-a: 1\r\nETag: "
-        ),
-        "{}",
-        text(&head)
+    assert_eq!(
+        text(&head),
+        "HTTP/1.1 304 Not Modified\r\nDate: Fri, 31 Dec 9999 23:59:59 GMT\r\nx-a: 1\r\n\
+         ETag: \"ffffffffffffffff-ffffffffffffffff\"\r\n\
+         Last-Modified: Sun, 21 Jul 2554 23:34:33 GMT\r\n\r\n"
     );
 }
 
@@ -217,13 +216,15 @@ fn continue_goes_before_the_merged_head() {
             len: 25,
         },
     );
-    assert!(
-        text(core.send_buffer(CONN)).starts_with("HTTP/1.1 200 OK\r\n"),
-        "{}",
-        text(core.send_buffer(CONN))
-    );
     // The body was not read: the connection closes after the file.
-    assert!(text(core.send_buffer(CONN)).contains("Connection: close\r\n"));
+    assert_eq!(
+        text(core.send_buffer(CONN)),
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 1000\r\n\
+             {VALIDATORS}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\
+             Connection: close\r\n\r\n"
+        )
+    );
     take_head(&mut core);
     let (sent, actions) = send_file(&mut core, stamp(1000));
     assert_eq!(sent, 1000);
