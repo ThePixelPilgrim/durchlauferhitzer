@@ -396,6 +396,13 @@ pub(crate) fn check_story(
             for tag in &alt.tags {
                 coverage.add(tag);
             }
+            // FR-PROXY-32, FR-PROXY-02: parked after a file whenever the
+            // model lets it (`file_model::check_released`).
+            match check_released(sim, ex, run, &alt.tags, phases.get(first).copied(), net) {
+                Ok(true) => coverage.add("file-must-park"),
+                Ok(false) => {}
+                Err(e) => fail(format!("exchange {i}: {e}")),
+            }
             if alt.closes {
                 ended = true;
             }

@@ -36,7 +36,7 @@ mod disk;
 mod fs;
 mod pool;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -169,6 +169,8 @@ pub struct Sim {
     timer_order: TimerOrder,
     /// Idle pooled upstreams the core closed, by cause (`pool.rs`).
     idle_closes: BTreeMap<IdleClose, usize>,
+    /// Every upstream seen idle in the pool after a core call (`pool.rs`).
+    ever_pooled: BTreeSet<UpstreamId>,
 }
 
 impl Sim {
@@ -198,6 +200,7 @@ impl Sim {
             backends,
             timer_order: TimerOrder::OnTime,
             idle_closes: BTreeMap::new(),
+            ever_pooled: BTreeSet::new(),
         }
     }
 
@@ -590,6 +593,7 @@ impl Sim {
         self.actions = actions;
         self.context = None;
         self.note_holders();
+        self.note_pooled();
         self.check_buffers();
         self.check_files();
         self.check_upstreams();
