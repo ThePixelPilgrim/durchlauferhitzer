@@ -256,8 +256,9 @@ pub(crate) fn wish_lines(
     let mut text = random_conditional(rng, Some(file.stamp));
     let size = file.size();
     match rng.u8(0..6) {
-        // Past the end: a 416 (unless a 304 comes first).
-        0 => text.push_str(&format!("Range: bytes={}-\r\n", size + rng.u64(0..3))),
+        // Past the end: a 416 (unless a 304 comes first); three arms, so
+        // the 416 stays well clear of its quota (`MIN_FILE_HITS`).
+        0 | 2 | 3 => text.push_str(&format!("Range: bytes={}-\r\n", size + rng.u64(0..3))),
         // Inside the file: a 206.
         1 if size > 0 => {
             let first = rng.u64(0..size);

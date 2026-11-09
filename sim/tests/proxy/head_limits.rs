@@ -15,8 +15,9 @@ use durchlauferhitzer_sim::Sim;
 
 use super::{fixed, only_upstream, peer, summary};
 
-/// `max_head 4096` (and a request line limit within it); the body idle timeout (4 s) runs out long before a
-/// head's own cap (10 s), so only the head limit can answer early.
+/// `max_head 4096` (and a request line limit within it); the body idle
+/// timeout (4 s) runs out long before a head's own cap (10 s), so only
+/// the head limit can answer early.
 const SMALL_HEAD: &str = "listen 127.0.0.1:8080;
 limits { max_request_line 2048; max_head 4096; backend_connect_timeout 2s; backend_response_timeout 10s; body_idle_timeout 4s; }
 host example.test {

@@ -159,7 +159,22 @@ fn timed_exchange(
         policy: net.routes[fwd.route].policy,
         wish: None,
     };
-    let script = matches!(kind, 2 | 5 | 6 | 7).then(|| random_script(rng, &ctx));
+    let mut script = matches!(kind, 2 | 5 | 6 | 7).then(|| random_script(rng, &ctx));
+    // Half the partial heads look for a head just over `max_head`
+    // (FR-PROXY-14), so the 502 before its end is reached often. The
+    // search draws from its own generator, seeded without advancing
+    // `rng`, so the rest of the net's draws stay as they were.
+    let mut own = fastrand::Rng::with_seed(rng.get_seed() ^ 0x9e37_79b9_7f4a_7c15);
+    if matches!(kind, 2 | 7) && own.bool() {
+        for _ in 0..40 {
+            match &script {
+                Some(s) if too_large_from(s, net).is_none() => {
+                    script = Some(random_script(&mut own, &ctx));
+                }
+                Some(_) | None => break,
+            }
+        }
+    }
     let (connect, timing) = match kind {
         0 => (ConnectBehaviour::Hang, Timing::ConnectHang),
         1 => (ConnectBehaviour::Accept, Timing::Silent),

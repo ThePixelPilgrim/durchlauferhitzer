@@ -881,8 +881,11 @@ Backend response parsing:
   behaviour.)* As for request heads (FR-HTTP-06), each verdict is given
   as soon as it is certain: once more than `max_head` bytes of one head
   (interim or final, each counted on its own, FR-PROXY-18) are in without
-  its blank line, or the upstream's receive buffer is full, it is the 502
-  at once, without waiting for the head's end or its LF. A deadline due
+  its blank line, it is the 502 at once, without waiting for the head's
+  end or its LF. (The upstream's receive buffer, `max(32 KiB,
+  max_head)`, is larger than `max_head` below 32 KiB; from 32 KiB on it
+  holds exactly `max_head` bytes, and a full buffer without the head's
+  end is the same 502 one byte earlier.) A deadline due
   later does not come first: while the client's upload stalls, that 502
   precedes the body idle timeout's 408 (FR-PROXY-29), and the unread body
   closes the client (FR-PROXY-26). A head with at most `max_head` bytes
@@ -906,6 +909,10 @@ Backend response parsing:
   No framing header means the body ends when the backend closes.
 - **FR-PROXY-17** [done] A head is judged line by line as its LF arrives;
   the parser is resumable and split-independent (NFR-ROB-02).
+  *Controller ruling 2026-11-09 (nightly fix, seed 99897):* limit
+  verdicts (FR-PROXY-14) are the exception to waiting for an LF: they are
+  given as soon as they are certain, as in FR-HTTP-06, without the head's
+  LF.
 - **FR-PROXY-18** [done] Interim responses: a 1xx other than 101 is
   dropped and the next head is parsed afresh, with the limits applied anew;
   `101 Switching Protocols` → 502; more than 8 consecutive interim heads →
