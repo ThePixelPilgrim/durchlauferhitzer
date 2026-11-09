@@ -526,16 +526,21 @@ pub(crate) fn check_parked(sim: &Sim, stories: &mut [Story], assign: &Assign, ne
 /// response the client got whole) was logged while serving (`phase`), and
 /// that [`file_parkable`] lets park with a backend that kept the
 /// connection and sent nothing more, must have left its upstream idle in
-/// the pool, if only until a later call closed it
-/// ([`Sim::ever_pooled`]). `Ok(true)` when judged so.
+/// the pool after this answer, if only until a later call closed it: the
+/// upstream entered the pool ([`Sim::parks`]) once more than the
+/// requests it carried before this one (`run.seq - 1`, each taken from
+/// the pool), or a later request of any client went out on it (taken
+/// from the pool at once). `Ok(Some(reused))` when judged so, `reused`
+/// if the upstream came from the pool for this exchange.
 pub(crate) fn check_released(
     sim: &Sim,
+    stories: &[Story],
     ex: &Exchange,
     run: &Run,
     tags: &[&'static str],
     phase: Option<Phase>,
     net: &NetConfig,
-) -> Result<bool, String> {
+) -> Result<Option<bool>, String> {
     let answer = tags.iter().any(|t| {
         matches!(
             *t,
@@ -549,19 +554,24 @@ pub(crate) fn check_released(
         )
     });
     let (Some(script), Some(up)) = (&ex.script, run.up) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !answer || phase != Some(Phase::Serving) || script.ending != (Ending::Done { eof: false }) {
-        return Ok(false);
+        return Ok(None);
     }
+    let parked_after = sim.parks(up) >= run.seq
+        || stories
+            .iter()
+            .flat_map(|s| &s.runs)
+            .any(|r| r.up == Some(up) && r.seq > run.seq);
     match file_parkable(ex, run, Fate::Parked(net)) {
-        Some(Ok(())) if sim.ever_pooled(up) => Ok(true),
+        Some(Ok(())) if parked_after => Ok(Some(run.seq > 1)),
         Some(Ok(())) => Err(format!(
-            "up={} was never parked after its file ({tags:?}), though nothing kept it \
-             from the pool",
-            up.0
+            "up={} (request {} on it) was not parked after its file ({tags:?}), though \
+             nothing kept it from the pool",
+            up.0, run.seq
         )),
-        Some(Err(_)) | None => Ok(false),
+        Some(Err(_)) | None => Ok(None),
     }
 }
 

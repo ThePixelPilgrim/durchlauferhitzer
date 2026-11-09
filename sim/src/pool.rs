@@ -4,7 +4,7 @@
 //! 1 and 5), and the count of idle closes by cause, for the nets'
 //! coverage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use durchlauferhitzer_core::{UpstreamHolder, UpstreamId};
 
@@ -102,16 +102,22 @@ impl Sim {
         &self.idle_closes
     }
 
-    /// Whether `up` was ever idle in the core's pool after a core call:
-    /// a park is seen even if a later call in the same step closed it.
-    pub fn ever_pooled(&self, up: UpstreamId) -> bool {
-        self.ever_pooled.contains(&up)
+    /// How many times `up` was seen entering the core's pool, each core
+    /// call looked at after it returned: a park counts even if a later
+    /// call in the same step closed it. A park the same call took out
+    /// again (a reuse at once) is not seen.
+    pub fn parks(&self, up: UpstreamId) -> usize {
+        self.parks.get(&up).copied().unwrap_or(0)
     }
 
-    /// Note the upstreams idle in the pool now (after every core call).
+    /// Count the upstreams that entered the pool since the last call
+    /// (after every core call).
     pub(crate) fn note_pooled(&mut self) {
-        let pooled = self.pooled_upstreams();
-        self.ever_pooled.extend(pooled);
+        let pooled: BTreeSet<UpstreamId> = self.pooled_upstreams().into_iter().collect();
+        for up in pooled.difference(&self.idle_now) {
+            *self.parks.entry(*up).or_default() += 1;
+        }
+        self.idle_now = pooled;
     }
 
     /// Review Focus 5: a drain closes the idle pool at once.
