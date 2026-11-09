@@ -40,25 +40,29 @@ start_pre() {
 	checkconfig
 }
 
-# The processes a reload left draining (the helper lists them in
-# $pidfile.draining as "<pid> <start time>"): those still running
-# $command, with that start time (field 22 of their stat), get the
-# signals of $retry, like the server itself, then the list goes.
+# The processes a reload left (the helper lists them in
+# $pidfile.draining as "<pid> <start time>"): those still running with
+# that start time (field 22 of their stat) get the signals of $retry,
+# like the server itself, then the list goes. Only the root-run helper
+# writes the list, and a pid with its start time names one process (a
+# reused pid has another start time): $command, draining or not handed
+# over, or the helper's own fork on its way to it (setsid, then
+# $command), which a killed helper may leave; so the executable is not
+# checked.
 stop_post() {
 	dl_list="$pidfile.draining"
 	[ -f "$dl_list" ] || return 0
-	dl_real=$(readlink -f "$command")
 	dl_pids=
 	while read -r dl_pid dl_start; do
 		case $dl_pid in
 		'' | *[!0-9]*) continue ;;
 		esac
-		dl_now=$(sed -n 's/^.*) //p' "/proc/$dl_pid/stat" 2>/dev/null | cut -d ' ' -f 20)
-		if [ -z "$dl_start" ] || [ "$dl_now" != "$dl_start" ]; then
-			continue
-		fi
-		dl_exe=$(readlink "/proc/$dl_pid/exe" 2>/dev/null) || continue
-		[ "${dl_exe% (deleted)}" = "$dl_real" ] && dl_pids="$dl_pids $dl_pid"
+		dl_stat=$(sed -n 's/^.*) //p' "/proc/$dl_pid/stat" 2>/dev/null)
+		dl_now=$(printf '%s\n' "$dl_stat" | cut -d ' ' -f 20)
+		case $dl_stat in
+		'' | Z*) continue ;;
+		esac
+		[ -n "$dl_start" ] && [ "$dl_now" = "$dl_start" ] && dl_pids="$dl_pids $dl_pid"
 	done <"$dl_list"
 	if [ -z "$dl_pids" ]; then
 		rm -f "$dl_list"

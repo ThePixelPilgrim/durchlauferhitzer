@@ -13,7 +13,10 @@
 //!   A new process that dies during the grace gets the pid file pointed
 //!   back at the old one (exit 1, no SIGHUP); one not ready in time is
 //!   stopped and reaped; one whose helper is killed is listed in
-//!   `<pidfile>.draining`, which OpenRC's `stop_post` ends.
+//!   `<pidfile>.draining`, which OpenRC's `stop_post` ends, also while it
+//!   is still the helper's fork on its way to the binary (a gated
+//!   `setsid` stub); a helper killed before listing it (a gated `mv`
+//!   stub) leaves nothing running.
 //! - A `listen` address the new config drops is closed (documented); one
 //!   it adds is served, with a new `user`, and nothing is lost.
 //! - The lock: a second helper is refused while the holder runs; a stale

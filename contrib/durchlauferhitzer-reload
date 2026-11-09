@@ -20,7 +20,10 @@
 #     appended to <logfile>, fd 3 a FIFO in a fresh private directory,
 #     fds 4-9 closed. Its pid and start time go to <pidfile>.draining at
 #     once, so the OpenRC script's stop ends it should this helper be
-#     killed before the handover.
+#     killed before the handover, also while that pid is still this
+#     helper's fork on its way to <binary>. The fork runs <binary> only
+#     once it is listed; a helper killed before that leaves nothing
+#     running (the fork exits).
 #  5. Wait for "ready" (at least the timeout, default 30 s, measured on
 #     the clock). Otherwise stop the new process (below) and leave the old
 #     one untouched. Once ready, the new process steers every new
@@ -165,9 +168,12 @@ lock=$pidfile.lock locked='' guarded='' dir='' new='' reader='' handed_over=''
 draining=$pidfile.draining
 
 # Rewrites the draining list ("<pid> <start time>" lines): the entries
-# that still run <binary> with their start time, but $1 (a pid, or
-# empty), then $2 (a pid, or empty) with its own start time. Temp file,
-# then rename; a failure leaves the list as it was.
+# that still run with their start time, but $1 (a pid, or empty), then
+# $2 (a pid, or empty) with its own start time. Temp file, then rename;
+# a failure leaves the list as it was. A pid and its start time name one
+# process (a reused pid has another start time); a listed one runs
+# <binary>, or is still a helper's fork on its way to it (step 4), which
+# the OpenRC script's stop must end as well.
 list_draining() {
 	ld_tmp=$(mktemp "$draining.XXXXXX") || return 1
 	if {
@@ -176,8 +182,8 @@ list_draining() {
 				case $pid in
 				'' | *[!0-9]* | "$1" | "$2") continue ;;
 				esac
-				[ -n "$start" ] && [ "$(start_time "$pid")" = "$start" ] &&
-					[ "$(exe_of "$pid")" = "$real" ] && printf '%s %s\n' "$pid" "$start"
+				[ -n "$start" ] && runs_as "$pid" "$start" &&
+					printf '%s %s\n' "$pid" "$start"
 			done <"$draining"
 		fi
 		if [ -n "$2" ]; then
@@ -314,23 +320,51 @@ case $old in
 esac
 [ "$(exe_of "$old")" = "$real" ] || fail "pid $old (from $pidfile) is not running $real"
 
-# 4. The new process, with fd 3 the write end of the FIFO and none of
-# this shell's other descriptors below 10 (POSIX can name no higher ones).
+# 4. The new process, with fd 3 the write end of the FIFO "ready" and
+# none of this shell's other descriptors below 10 (POSIX can name no
+# higher ones). Its pid is this shell's fork, which runs setsid, which
+# runs the binary: listed at once, it is on its way to the binary, which
+# the OpenRC script's stop allows for (it matches pid and start time).
+# The fork waits on a second FIFO, "go", written once it is listed (or
+# its listing failed, with a warning), so the binary never runs
+# unlisted. Every FIFO end is opened here before the fork (an end opened
+# read-write first lets the others open at once), so no process ever
+# blocks in an open: the fork gets the write end of "ready" (fd 4, its
+# fd 3) and the read end of "go" (fd 6); this shell keeps the read end
+# of "ready" (fd 5, for the reader) and the only write end of "go" (fd
+# 7). A helper killed before "go" leaves the fork the end of file: it
+# exits, the binary never started.
 { printf '' >>"$logfile"; } 2>/dev/null || fail "cannot append to $logfile"
 dir=$(mktemp -d) || fail "mktemp -d failed"
-fifo=$dir/ready
-mkfifo -m 600 "$fifo" || fail "mkfifo failed"
-setsid "$binary" --ready-fd 3 "$config" </dev/null >>"$logfile" 2>&1 3>"$fifo" \
-	4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+fifo=$dir/ready go=$dir/go
+mkfifo -m 600 "$fifo" "$go" || fail "mkfifo failed"
+exec 8<>"$fifo"
+# shellcheck disable=SC2094 # the two ends of one FIFO
+exec 5<"$fifo" 4>"$fifo" 8>&-
+exec 7<>"$go"
+exec 6<"$go"
+(
+	trap - EXIT
+	exec 5<&- 7>&-
+	IFS= read -r go_line <&6 && [ "$go_line" = go ] || exit 1
+	exec setsid "$binary" --ready-fd 3 "$config" </dev/null >>"$logfile" 2>&1 3>&4 \
+		4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
+) &
 new=$!
+exec 4>&- 6<&-
 list_draining '' "$new" ||
 	warn "cannot list the new process (pid $new) in $draining"
+printf 'go\n' >&7
+exec 7>&-
 
-# 5. Readiness: a reader (0 ready, 1 EOF, 2 another line, which it keeps),
-# polled until the timeout has passed on the clock (in tenths of a second
-# where `sleep` takes them), then killed.
+# 5. Readiness: a reader of fd 5 (0 ready, 1 EOF, 2 another line, which
+# it keeps), polled until the timeout has passed on the clock (in tenths
+# of a second where `sleep` takes them), then killed. The new process's
+# end of file comes once it has closed fd 3 (it is the only writer). A
+# helper killed before the reader runs leaves "ready" without a reader:
+# the new process's report fails, and it logs that and serves on, listed.
 (
-	if IFS= read -r line <"$fifo" && [ "$line" = ready ]; then
+	if IFS= read -r line <&5 && [ "$line" = ready ]; then
 		exit 0
 	fi
 	[ -n "$line" ] || exit 1
@@ -338,6 +372,7 @@ list_draining '' "$new" ||
 	exit 2
 ) &
 reader=$!
+exec 5<&-
 tick=0.1
 sleep "$tick" 2>/dev/null || tick=1
 t0=$(now)
