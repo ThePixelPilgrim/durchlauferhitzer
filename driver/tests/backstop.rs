@@ -384,6 +384,29 @@ fn every_slot_limits(text_of: impl Fn(&str) -> String, extra: &str) -> String {
     format!("{counts} memory_limit {smallest}; disk_threads 4;")
 }
 
+/// Waits until the readiness probe's slot is free. `Running::start`'s
+/// probe connection sends nothing and is closed once the server reads
+/// its end, which arrived before this request's connection. This request
+/// (a 404 for an unknown host, no backend) is followed by the client's
+/// end, so the server answers and closes the connection itself without
+/// lingering; reading to the end of stream waits for that close, by which
+/// time the probe's end has been read too. Then every slot is free.
+fn after_the_probe(addr: SocketAddr) {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: unknown.invalid\r\n\r\n")
+        .unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    assert!(
+        response.starts_with(b"HTTP/1.1 404 Not Found\r\n"),
+        "{}",
+        text(&response)
+    );
+}
+
 /// Opens one connection per request, writes each but its last byte, then
 /// (after a pause, so the heads complete in as few loop iterations as
 /// possible) every last byte, and returns the streams.
@@ -457,6 +480,7 @@ fn static_requests_on_every_slot(line: &str) {
     let target = many_segments("GET", limits.max_request_line);
     let request = format!("GET {target} HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
     let requests = vec![request.into_bytes(); SLOTS];
+    after_the_probe(addr);
     for (i, mut stream) in send_together(addr, &requests).into_iter().enumerate() {
         let response = read_all(&mut stream);
         assert!(
@@ -553,6 +577,7 @@ fn survives_worst_case_proxy_requests_on_every_slot() {
         "POST {target} HTTP/1.1\r\nHost: {host}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
     );
     let requests = vec![request.into_bytes(); SLOTS];
+    after_the_probe(addr);
     let mut streams = send_together(addr, &requests);
     // Every exchange waits on the backend at once.
     let deadline = std::time::Instant::now() + PATIENCE;
