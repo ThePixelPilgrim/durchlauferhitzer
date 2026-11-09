@@ -109,10 +109,12 @@ src/
                       shutdown drain)
     tests.rs          unit tests of the loop's decisions on a driver that
                       is built but not run (the silence check's peek on a
-                      socket pair among them); one run on loopback counts
-                      a 1 KiB file's segments (MSG_MORE, NFR-PERF-06),
-                      another times heads with no file behind them (a
-                      HEAD, a 304, a proxied response: never corked)
+                      socket pair among them)
+    loopback_tests.rs the loop on loopback: `TCP_NODELAY` on every
+                      socket, at most 64 accepts per readiness, a 1 KiB
+                      file's segments (MSG_MORE, NFR-PERF-06), heads with
+                      no file behind them timed (a HEAD, a 304, a proxied
+                      response: never corked)
     eager_tests.rs    eager I/O at its edges: the budget, EOF, an error
     relay_tests.rs    the loop on loopback relaying a proxied 1 MiB body:
                       its `epoll_ctl` calls (NFR-PERF-05)
@@ -329,6 +331,9 @@ tests/
                     failed with DURCHLAUFERHITZER_REQUIRE_ROOT=1; also
                     `tcp_migrate_req` with
                     DURCHLAUFERHITZER_REQUIRE_MIGRATE=1); one at a time
+  restart/helper.rs `restart.rs`'s second half (a module of that test
+                    binary): the helper's refusals, the grace, the lock,
+                    `stop_post` and `listen` changes
   smoke.rs          the end-to-end smoke run (NFR-TEST-07): one binary
                     serving a static and a proxy host to a test backend,
                     200 requests over 32 parallel keep-alive connections
