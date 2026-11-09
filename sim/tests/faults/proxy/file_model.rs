@@ -3,7 +3,8 @@
 //! header value is a bad path (`502`), a `404` or a file; the status
 //! (`200`, `206`, `304`, `416`) and the merged head; the exact file bytes
 //! or the abort; the logs; and the upstream's fate, parked only after
-//! `Content-Length: 0` ([`check_parked`]). What is drawn is
+//! `Content-Length: 0` ([`check_parked`]), and then whenever nothing kept
+//! it from the pool ([`check_released`]). What is drawn is
 //! `internal.rs`.
 
 use super::*;
@@ -520,6 +521,50 @@ pub(crate) fn check_parked(sim: &Sim, stories: &mut [Story], assign: &Assign, ne
     }
 }
 
+/// The converse of [`check_parked`], which only fails a forbidden park:
+/// an exchange whose answer to a served name (`tags`, those of the
+/// response the client got whole) was logged while serving (`phase`), and
+/// that [`file_parkable`] lets park with a backend that kept the
+/// connection and sent nothing more, must have left its upstream idle in
+/// the pool, if only until a later call closed it
+/// ([`Sim::ever_pooled`]). `Ok(true)` when judged so.
+pub(crate) fn check_released(
+    sim: &Sim,
+    ex: &Exchange,
+    run: &Run,
+    tags: &[&'static str],
+    phase: Option<Phase>,
+    net: &NetConfig,
+) -> Result<bool, String> {
+    let answer = tags.iter().any(|t| {
+        matches!(
+            *t,
+            "file-200"
+                | "file-206"
+                | "file-304"
+                | "file-416"
+                | "file-404-missing"
+                | "file-404-dir"
+                | "file-404-dotfile"
+        )
+    });
+    let (Some(script), Some(up)) = (&ex.script, run.up) else {
+        return Ok(false);
+    };
+    if !answer || phase != Some(Phase::Serving) || script.ending != (Ending::Done { eof: false }) {
+        return Ok(false);
+    }
+    match file_parkable(ex, run, Fate::Parked(net)) {
+        Some(Ok(())) if sim.ever_pooled(up) => Ok(true),
+        Some(Ok(())) => Err(format!(
+            "up={} was never parked after its file ({tags:?}), though nothing kept it \
+             from the pool",
+            up.0
+        )),
+        Some(Err(_)) | None => Ok(false),
+    }
+}
+
 /// The file coverage names, each required at least [`MIN_FILE_HITS`]
 /// times over the seeds.
 pub(crate) const FILE_REQUIRED: &[&str] = &[
@@ -535,6 +580,7 @@ pub(crate) const FILE_REQUIRED: &[&str] = &[
     "file-head",
     "file-post",
     "file-parked",
+    "file-must-park",
     "file-closed-body",
     "file-changed-abort",
     "file-backend-content-type",

@@ -102,6 +102,18 @@ impl Sim {
         &self.idle_closes
     }
 
+    /// Whether `up` was ever idle in the core's pool after a core call:
+    /// a park is seen even if a later call in the same step closed it.
+    pub fn ever_pooled(&self, up: UpstreamId) -> bool {
+        self.ever_pooled.contains(&up)
+    }
+
+    /// Note the upstreams idle in the pool now (after every core call).
+    pub(crate) fn note_pooled(&mut self) {
+        let pooled = self.pooled_upstreams();
+        self.ever_pooled.extend(pooled);
+    }
+
     /// Review Focus 5: a drain closes the idle pool at once.
     pub(crate) fn drained_pool(&mut self, pooled: &[UpstreamId]) {
         self.backends.drained = true;
