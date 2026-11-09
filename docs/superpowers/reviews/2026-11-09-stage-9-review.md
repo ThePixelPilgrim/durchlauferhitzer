@@ -16,7 +16,7 @@ Gate at the end of the fix wave: fmt, clippy `-D warnings`, the workspace tests 
 | CI fix | the containers' `nofile` ulimit; both epoll waits and both clone flag sets on every libc | `06e77dc..3bee322` |
 | 5 | close-out | `3bee322..e2a031a` |
 | nightly | issues #3 and #4 pinned (model bugs; the core was right both times) | `e2a031a..86970a7` |
-| final | the fix wave for the whole-stage review | `86970a7..7443a2c` (`aca6a90` the wave, `7443a2c` its doc minors), then this record |
+| final | the fix wave for the whole-stage review | `86970a7..dd8f1c6` (`aca6a90` the wave, `7443a2c` its doc minors, `81beb1a`/`2b133cc`/`72f519e`/`dd8f1c6` test robustness under load, `0d67457` glibc's arena limit), then this record |
 
 ## Owner decisions taken during stage 9 (all in the spec)
 
@@ -51,6 +51,7 @@ Gate at the end of the fix wave: fmt, clippy `-D warnings`, the workspace tests 
 
 ## Root causes found on the way
 
+- **glibc's arena limit read under contention (final gate under CPU pressure):** the first time contention forces a new malloc arena, a disk worker thread reads `/sys/devices/system/cpu/online` through plain `openat`, which the allow-list rightly lacks, so the server was killed by SIGSYS; quiet runs never create enough arenas to reach it. Fixed by presetting glibc's arena limit (`mallopt(M_ARENA_MAX, 1)`, `driver/src/sys/malloc.rs`) before the first thread, not by allowing a path-based open. Contention-only libc paths need a run under CPU pressure, which the gate did not have.
 - **Idle measurement of a per-connection bound (Task 2 → C1):** an allowance measured without load cannot cover load. Resource bounds are measured under the worst request the limits admit, and a resource-bound change gets an exploit attempt on a built binary before it is declared done.
 - **Container root without `CAP_SYS_RESOURCE` (CI fix):** a test that raises a hard limit as root passes on the plain runner and fails in every container; the local gate never sees it because the `REQUIRE_ROOT` flag is CI's. The CI run of `main` is part of a task's done criterion.
 - **Libc versions under `kill` (CI fix):** Rust's bundled musl 1.2.5 issues `epoll_wait` and glibc's exact clone flags where Alpine's 1.2.6 issues `epoll_pwait` and adds `CLONE_DETACHED`; a per-libc-version allow-list kills the server on a libc update.
@@ -58,6 +59,8 @@ Gate at the end of the fix wave: fmt, clippy `-D warnings`, the workspace tests 
 
 ## Accepted gaps
 
+- The arena-limit fix has no deterministic test: the path needs contention; the evidence is strace under pressure and eight pressure runs of the backstop binary (recorded in the fix report).
+- The survive and smoke-load backstop tests tolerate slow machines with a 60 s read timeout and slot slack rather than exact timing.
 - Zeroing one allowance constant alone fails no test (generous constants cannot be pinned one at a time); the survive tests catch a factor of 0, not 1 or 2; the factor rests on the documented measurement.
 - The thread-spawn error names `RLIMIT_DATA` whatever limit refused the thread.
 - The reload helper shows `--check`'s stderr only when it holds a warning.
@@ -66,6 +69,7 @@ Gate at the end of the fix wave: fmt, clippy `-D warnings`, the workspace tests 
 
 ## Process notes
 
+- The fix-wave implementer and the controller shared one worktree: the implementer's commit swept the controller's uncommitted record into `81beb1a`, and a later `reset --hard` by the controller discarded uncommitted doc edits, redone from their scripts. One worktree per writer.
 - Three task reviews read diffs and approved an allowance that a live attack broke in minutes; the whole-stage review's instinct to build and attack the binary is what caught C1.
 - CI went red from Task 2 to Task 4 unnoticed by the local gate; the controller reported tasks done before the CI run of `main`.
 - While the controller's session sat inside a worktree, every subagent's shell was confined to it; parallel implementers need the session in the main checkout.
@@ -73,5 +77,6 @@ Gate at the end of the fix wave: fmt, clippy `-D warnings`, the workspace tests 
 
 ## Deferred
 
+- Nightly: a job running the driver suite under CPU pressure (busy loops on every core), since contention-only libc paths never show in quiet runs.
 - Owner: the OpenRC script has no respawn (add supervision or leave it documented); close nightly issue #5 when the next nightly is green; the `proxy-file` NFR-PERF target (from stage 8).
 - Later: the qmail review's carry-forwards (a nightly on the newest kernel and glibc; numeric `uid:gid` for `user`; an opener process when TLS arrives; product line count beside the benchmarks; the supported TLS deployment named); a `fail`-mode suite run if wanted; `sim/tests/proxy/bodies.rs` split at the next addition.
