@@ -96,6 +96,10 @@ pub enum DriverLog {
     /// 2026-11-06, FR-PROC-07). Logged once at startup, after
     /// `privileges`.
     SharedPorts { uid: u32 },
+    /// The memory backstop set at startup: soft and hard `RLIMIT_DATA`
+    /// both `bytes` (NFR-RES-09). Logged once, with the startup notes,
+    /// before `privileges`.
+    MemoryBackstop { bytes: u64 },
 }
 
 /// The steps of a shutdown the log reports (FR-PROC-05, FR-PROC-07, A9).

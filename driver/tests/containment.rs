@@ -22,16 +22,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use child::{
-    Containment, Filter, Lines, Running, Setup, TempDir, assert_exit, free_port, get, non_root_uid,
-    run, run_program, text, threads,
+    Containment, Filter, Lines, Running, Setup, TempDir, assert_exit, free_port, get,
+    memory_backstop_line, non_root_uid, run, run_program, text, threads,
 };
 use durchlauferhitzer::sys::landlock::{Abi, abi};
 
-/// The stderr of a non-root server that fails at the seccomp filter: the
-/// startup notes are written by then (its `shared_ports` line, owner
+/// The stderr of a non-root server with the config at `path` that fails
+/// at the seccomp filter: the startup notes are written by then (its
+/// `memory_backstop` line, NFR-RES-09, and its `shared_ports` line, owner
 /// decision 2026-11-06), then the error.
-fn after_notes(error: &str) -> String {
-    format!("kind=shared_ports uid={}\n{error}", non_root_uid())
+fn after_notes(path: &str, error: &str) -> String {
+    format!(
+        "{}\nkind=shared_ports uid={}\n{error}",
+        memory_backstop_line(path),
+        non_root_uid()
+    )
 }
 
 /// The seccomp line under the default `seccomp_action kill` (FR-CFG-25).
@@ -247,11 +252,15 @@ fn seccomp_hidden() -> Setup {
 #[test]
 fn a_required_seccomp_the_kernel_lacks_is_exit_2() {
     let site = Site::new();
-    let output = run(&[&site.config("seccomp required;")], seccomp_hidden());
+    let path = site.config("seccomp required;");
+    let output = run(&[&path], seccomp_hidden());
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
-        after_notes("durchlauferhitzer: seccomp is required but the kernel has none\n")
+        after_notes(
+            &path,
+            "durchlauferhitzer: seccomp is required but the kernel has none\n"
+        )
     );
 }
 
@@ -345,11 +354,15 @@ fn a_seccomp_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
         filter: Filter::SeccompInstallEinval,
         ..Setup::non_root()
     };
-    let output = run(&[&site.config("seccomp best_effort;")], setup);
+    let path = site.config("seccomp best_effort;");
+    let output = run(&[&path], setup);
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
-        after_notes("durchlauferhitzer: seccomp: Invalid argument (os error 22)\n")
+        after_notes(
+            &path,
+            "durchlauferhitzer: seccomp: Invalid argument (os error 22)\n"
+        )
     );
 }
 
@@ -436,15 +449,17 @@ fn read_implies_exec_fails_a_required_seccomp() {
         return;
     }
     let site = Site::new();
+    let path = site.config("seccomp required;");
     let output = run_program(
         SETARCH,
-        &[arch, "-X", child::exe(), &site.config("seccomp required;")],
+        &[arch, "-X", child::exe(), &path],
         Setup::non_root(),
     );
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
         after_notes(
+            &path,
             "durchlauferhitzer: seccomp is required but the personality has \
              READ_IMPLIES_EXEC, which defeats its PROT_EXEC check\n"
         )

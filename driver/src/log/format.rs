@@ -154,6 +154,12 @@ pub fn format_driver(entry: &DriverLog, out: &mut Vec<u8>) {
         DriverLog::ReadyFailed { errno } => ("ready_failed", "errno", i64::from(*errno)),
         DriverLog::SteerFailed { errno } => ("steer_failed", "errno", i64::from(*errno)),
         DriverLog::SharedPorts { uid } => ("shared_ports", "uid", i64::from(*uid)),
+        DriverLog::MemoryBackstop { bytes } => {
+            out.extend_from_slice(b"kind=memory_backstop");
+            number(out, "bytes", *bytes);
+            out.push(b'\n');
+            return;
+        }
         DriverLog::Dropped { count } => {
             out.extend_from_slice(b"kind=dropped");
             number(out, "count", *count);

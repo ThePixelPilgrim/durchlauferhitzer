@@ -28,6 +28,7 @@ use crate::sys::socket::{Probe, steer_reuseport, tcp_listen};
 use crate::sys::user::euid;
 use crate::systemd::{Activation, take_sockets};
 
+pub mod backstop;
 mod budget;
 mod privileges;
 mod ready;
@@ -224,9 +225,10 @@ struct Ready {
 /// listeners (systemd's, A7, or bound here with `probe`, A6; a
 /// `--ready-fd` start steers each, right after its `listen`, to the
 /// running server, FR-PROC-07; bound as a non-root euid, a
-/// `shared_ports` note), the descriptor budget (NFR-RES-05), the
-/// privilege drop (A8), then Landlock (FR-PROC-06), while the process
-/// has one thread and before anything else opens a path.
+/// `shared_ports` note), the descriptor budget (NFR-RES-05), the memory
+/// backstop (NFR-RES-09, a `memory_backstop` note), the privilege drop
+/// (A8), then Landlock (FR-PROC-06), while the process has one thread
+/// and before anything else opens a path.
 fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let containment = config.containment;
     let listen = config.listen.clone();
@@ -235,6 +237,7 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let disk_threads = config.limits.disk_threads;
     let shutdown_timeout = config.limits.shutdown_timeout;
     let restart_timeout = config.limits.restart_timeout;
+    let limits = config.limits.clone();
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
     let (listeners, steering, mut notes, shared) = match take_sockets(&listen).map_err(Failure)? {
@@ -255,6 +258,7 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
         roots: roots.len(),
         backends: core.backends().len(),
     }))?;
+    notes.push(backstop::apply(&limits)?);
     notes.extend(privileges::drop_privileges(user.as_deref())?);
     notes.extend(shared);
     let landlock = containment::restrict_files(&containment, &roots)?;

@@ -317,6 +317,14 @@ fn driver_kinds() {
             DriverLog::SharedPorts { uid: 65534 },
             "kind=shared_ports uid=65534\n",
         ),
+        (
+            DriverLog::MemoryBackstop { bytes: 15_810_560 },
+            "kind=memory_backstop bytes=15810560\n",
+        ),
+        (
+            DriverLog::MemoryBackstop { bytes: u64::MAX },
+            "kind=memory_backstop bytes=18446744073709551615\n",
+        ),
         (DriverLog::Dropped { count: 17 }, "kind=dropped count=17\n"),
         (
             DriverLog::PrivilegesKept {

@@ -63,6 +63,13 @@ src/
                     `listen`; to itself before the seccomp filter; back to
                     index 0 if the filter fails, FR-PROC-07), the
                     `shared_ports` note of a non-root bind
+    backstop.rs       NFR-RES-09: `limit` (`memory_limit` + the measured
+                      `BASE_ALLOWANCE` + `disk_threads` x
+                      (`DISK_THREAD_STACK` + `DISK_THREAD_OVERHEAD`) +
+                      `max_connections` x `PER_CONNECTION_ALLOWANCE`; the
+                      measurement in its docs), `apply` (soft and hard
+                      RLIMIT_DATA set to it, the `memory_backstop` note,
+                      or fail naming both numbers)
     budget.rs         NFR-RES-05: `open_now` (`/proc/self/fd`, O5),
                       `needed` (the formula in its docs and the spec),
                       `ensure` (raise the soft limit, or fail naming both
@@ -186,7 +193,9 @@ src/
                     `start`, `submit` (`Job::Open` / `Job::Readahead`),
                     `cancel_readahead` (`Cancel`: a queued readahead
                     of a closed file, OA1), `results` (`JobResult`), `shutdown` (joins within
-                    1 s, detaches the rest, returns how many)
+                    1 s, detaches the rest, returns how many);
+                    `DISK_THREAD_STACK` (2 MiB, each worker's stack,
+                    NFR-RES-09)
   sys/              the only `unsafe` code: thin, checked syscall wrappers
     mod.rs            module rules
     fd.rs             `Io` (Done / WouldBlock / Closed / Err), the -1/errno
@@ -245,7 +254,7 @@ src/
                       `clear_capabilities` (capset to empty),
                       `capabilities` (capget → `Capabilities`)
     rlimit.rs         `nofile`, `raise_nofile`, `set_soft_nofile`
-                      (RLIMIT_NOFILE)
+                      (RLIMIT_NOFILE); `data`, `cap_data` (RLIMIT_DATA)
     seccomp.rs        `supported` (`Support`: ERRNO and KILL_PROCESS
                       available, SECCOMP_GET_ACTION_AVAIL), `install`
                       (PR_SET_NO_NEW_PRIVS, then the filter with TSYNC |
@@ -373,6 +382,15 @@ tests/
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process
+  backstop.rs       NFR-RES-09 in the binary: RLIMIT_DATA soft and hard
+                    are `backstop::limit` after startup and logged
+                    (`memory_backstop`), inherited unlimited or above it;
+                    a hard limit one byte short is exit 2 with both
+                    numbers; 64 disk threads start and serve, 65536
+                    connections start (root with CAP_SYS_RESOURCE, or a
+                    high enough hard RLIMIT_NOFILE; skipped otherwise),
+                    8 static GETs of 1 MiB and 8 proxied POSTs of 64 KiB
+                    are served, the server alive afterwards
   budget.rs         NFR-RES-05 in the binary with RLIMIT_NOFILE lowered
                     in the child: one short is exit 2 with both numbers,
                     exactly the budget starts and serves, a low soft limit
@@ -496,13 +514,15 @@ tests/
                     binary checked to be reachable
                     for `nobody` before it is started as nobody, the
                     child's setup before exec (`pre_exec`: closed fds,
-                    fd 3, RLIMIT_NOFILE, a seccomp filter (`Filter`:
+                    fd 3, RLIMIT_NOFILE, RLIMIT_DATA, a seccomp filter (`Filter`:
                     `openat2`, `seccomp` or `landlock_create_ruleset`
                     answered ENOSYS, `landlock_restrict_self` EPERM,
                     `seccomp(SECCOMP_SET_MODE_FILTER)` EINVAL),
                     capabilities (`Caps`); the test crate's only
-                    `unsafe`), a bounded wait for the exit; re-exports
-                    `conf.rs` and `running.rs`
+                    `unsafe`), a bounded wait for the exit, the startup
+                    log's `memory_backstop` line for a config
+                    (`memory_backstop_line`); re-exports `conf.rs` and
+                    `running.rs`
   support/clock_syscall.rs  a test-only `LD_PRELOAD` cdylib whose
                     `clock_gettime` always makes the system call; built
                     by `containment.rs` with the toolchain's `rustc`, no
@@ -558,7 +578,8 @@ listeners (systemd's, `systemd.rs`, untouched; or, overlapping
 addresses refused first (`overlap`, FR-CFG-10), bound in config order
 with `SO_REUSEPORT`, after a plain probe bind (listening, then closed)
 unless `--ready-fd` is given, the first failure named), the
-descriptor budget (`process/budget.rs`), the privilege drop
+descriptor budget (`process/budget.rs`), the memory backstop
+(`process/backstop.rs`, RLIMIT_DATA), the privilege drop
 and the clearing of every capability (`process/privileges.rs`, while
 the process has one thread), Landlock (`containment::restrict_files`,
 still with one thread, before anything else opens a path), the signal

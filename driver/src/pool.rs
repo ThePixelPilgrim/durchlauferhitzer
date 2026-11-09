@@ -49,6 +49,11 @@ use durchlauferhitzer_core::FileId;
 use crate::sys::eventfd::EventFd;
 use crate::sys::file::{Stat, fstat, openat2_beneath, readahead};
 
+/// The stack size of each disk worker, set with
+/// [`thread::Builder::stack_size`] whatever `RUST_MIN_STACK` says: the
+/// memory backstop counts it once per worker (NFR-RES-09).
+pub const DISK_THREAD_STACK: usize = 2 * 1024 * 1024;
+
 /// Work for a disk worker.
 #[derive(Debug)]
 pub enum Job {
@@ -199,6 +204,7 @@ impl Pool {
             let wake = Arc::clone(&wake);
             let spawned = thread::Builder::new()
                 .name(format!("disk-{i}"))
+                .stack_size(DISK_THREAD_STACK)
                 .spawn(move || work(&shared, &sender, &wake));
             match spawned {
                 Ok(handle) => pool.threads.push(handle),

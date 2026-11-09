@@ -1,7 +1,8 @@
 //! Running the built binary (`CARGO_BIN_EXE_durchlauferhitzer`) for the
 //! CLI and startup tests: a config in a temp file, a free loopback port,
 //! the child's setup before `exec` (closed descriptors, a listener as fd 3,
-//! a lowered `RLIMIT_NOFILE`, a non-root user when the tests run as root)
+//! a lowered `RLIMIT_NOFILE` or `RLIMIT_DATA`, a non-root user when the
+//! tests run as root)
 //! and a bounded wait for its exit; the running server ([`Running`],
 //! [`Lines`], [`signal_pid`], [`get`]) is in `running.rs`, re-exported.
 //! [`run_program`] runs another program with the same setup, as a control.
@@ -99,6 +100,8 @@ pub struct Setup {
     pub listen_pid: Option<String>,
     /// `RLIMIT_NOFILE` (soft, hard) in the child.
     pub nofile: Option<(u64, u64)>,
+    /// `RLIMIT_DATA` (soft, hard) in the child.
+    pub data: Option<(u64, u64)>,
     /// Run the child as uid/gid [`NOBODY`] (only possible as root).
     pub as_nobody: bool,
     /// Only the effective uid set to this before `exec` (the real uid
@@ -237,6 +240,9 @@ fn prepare(mut cmd: Command, program: &Path, setup: Setup) -> (Command, Vec<Owne
     }
     if let Some((soft, hard)) = setup.nofile {
         pre_exec::limit_nofile(&mut cmd, soft, hard);
+    }
+    if let Some((soft, hard)) = setup.data {
+        pre_exec::limit_data(&mut cmd, soft, hard);
     }
     match setup.caps {
         Caps::Inherited => {}
@@ -420,6 +426,15 @@ pub fn fd_target(pid: u32, fd: RawFd) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// The startup log's `memory_backstop` line (NFR-RES-09, without the
+/// `\n`) for the config file at `path`: `backstop::limit` of its own
+/// limits.
+pub fn memory_backstop_line(path: &str) -> String {
+    let config = durchlauferhitzer_core::config::load(&fs::read_to_string(path).unwrap()).unwrap();
+    let bytes = durchlauferhitzer::process::backstop::limit(&config.limits);
+    format!("kind=memory_backstop bytes={bytes}")
+}
+
 /// The status of a finished child as a code, for messages.
 pub fn code(status: ExitStatus) -> Option<i32> {
     status.code()
@@ -594,6 +609,25 @@ mod pre_exec {
             // SAFETY: `setrlimit` is async-signal-safe; `limit` is a valid
             // `rlimit` the kernel only reads.
             if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        };
+        // SAFETY: the hook calls only `setrlimit` (async-signal-safe) and
+        // reads errno; it neither allocates nor locks.
+        unsafe { cmd.pre_exec(hook) };
+    }
+
+    /// Sets the child's `RLIMIT_DATA` to `soft`/`hard`.
+    pub fn limit_data(cmd: &mut Command, soft: u64, hard: u64) {
+        let hook = move || {
+            let limit = libc::rlimit {
+                rlim_cur: soft,
+                rlim_max: hard,
+            };
+            // SAFETY: `setrlimit` is async-signal-safe; `limit` is a valid
+            // `rlimit` the kernel only reads.
+            if unsafe { libc::setrlimit(libc::RLIMIT_DATA, &limit) } == -1 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())

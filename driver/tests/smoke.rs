@@ -61,8 +61,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use child::{
-    Containment, PATIENCE, Running, Setup, TempDir, free_port, non_root_uid, read_some,
-    refused_port, seccomp_kill, text,
+    Containment, PATIENCE, Running, Setup, TempDir, free_port, memory_backstop_line, non_root_uid,
+    read_some, refused_port, seccomp_kill, text,
 };
 use durchlauferhitzer_core::FileStamp;
 use durchlauferhitzer_core::http::request::Persistence;
@@ -398,8 +398,8 @@ fn log_lines(kind: Kind, backend: SocketAddr, down: SocketAddr) -> Vec<String> {
 
 /// A line without its ` conn=<digits>` field, which must be there for a
 /// core entry (`response`, `proxied_response`, `backend_failed`, ...)
-/// and absent for a driver one (`privileges`, `shared_ports`, `shutdown`,
-/// `containment`).
+/// and absent for a driver one (`memory_backstop`, `privileges`,
+/// `shared_ports`, `shutdown`, `containment`).
 fn without_conn(line: &str) -> String {
     let fields: Vec<&str> = line.split(' ').collect();
     let conn = fields
@@ -410,6 +410,7 @@ fn without_conn(line: &str) -> String {
         })
         .count();
     let driver = [
+        "kind=memory_backstop ",
         "kind=privileges ",
         "kind=shared_ports ",
         "kind=shutdown ",
@@ -816,8 +817,9 @@ host proxy.test {{
     assert!(results.try_recv().is_err(), "a backend connection too many");
 
     let mut got: Vec<String> = lines.all().iter().map(|l| without_conn(l)).collect();
-    // Bound as non-root: the `shared_ports` line comes first (owner
-    // decision 2026-11-06).
+    // The memory backstop first (NFR-RES-09); bound as non-root, the
+    // `shared_ports` line next (owner decision 2026-11-06).
+    assert_eq!(got.remove(0), memory_backstop_line(path.to_str().unwrap()));
     assert_eq!(
         got.remove(0),
         format!("kind=shared_ports uid={}", non_root_uid())

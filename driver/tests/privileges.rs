@@ -31,7 +31,8 @@ use std::net::SocketAddr;
 
 use child::{
     CAP_NET_BIND_SERVICE, Caps, Containment, NOBODY, PROXY_ROUTE, Running, Setup, TempDir,
-    assert_exit, config, free_port, get, is_root, non_root_uid, run, run_program, text,
+    assert_exit, config, free_port, get, is_root, memory_backstop_line, non_root_uid, run,
+    run_program, text,
 };
 
 fn loopback(port: u16) -> SocketAddr {
@@ -87,10 +88,12 @@ fn as_non_root_with_a_user_nothing_is_dropped_and_that_is_logged() {
     let response = get(addr, "/index.html");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let stderr = server.kill();
-    // Owner decision 2026-11-06: it bound its own listeners as non-root.
+    // The memory backstop first (NFR-RES-09); owner decision 2026-11-06:
+    // it bound its own listeners as non-root.
     assert!(
         stderr.starts_with(&format!(
-            "kind=privileges action=kept reason=not_root\nkind=shared_ports uid={uid}\n"
+            "{}\nkind=privileges action=kept reason=not_root\nkind=shared_ports uid={uid}\n",
+            memory_backstop_line(&path)
         )),
         "{stderr}"
     );
@@ -284,7 +287,10 @@ fn as_non_root_every_capability_is_cleared() {
     assert!(caps.iter().all(|sets| *sets == [0; 4]), "{caps:x?}");
     let stderr = server.kill();
     assert!(
-        stderr.starts_with("kind=privileges action=kept reason=not_root\n"),
+        stderr.starts_with(&format!(
+            "{}\nkind=privileges action=kept reason=not_root\n",
+            memory_backstop_line(&path)
+        )),
         "{stderr}"
     );
 }
@@ -337,7 +343,10 @@ fn a_systemd_socket_below_1024_needs_no_root() {
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let stderr = server.kill();
     assert!(
-        stderr.starts_with("kind=privileges action=kept reason=not_root\n"),
+        stderr.starts_with(&format!(
+            "{}\nkind=privileges action=kept reason=not_root\n",
+            memory_backstop_line(&path)
+        )),
         "{stderr}"
     );
     // systemd bound it, not the server.

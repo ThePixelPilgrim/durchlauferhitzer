@@ -1406,6 +1406,8 @@ Failures, persistence, timeouts:
   that broke a rule (`Body(Chunked(..) | TooLarge)`), a stalled request
   body (`Timeout(RequestBody)`) and (owner decision 2026-10-27) a client
   that ended its stream mid-body (`Body(ClosedEarly)`, FR-PROXY-26).
+  The driver's own kinds are listed in FR-LOG-05 and FR-LOG-07; *(stage
+  9 Task 2)* among them `memory_backstop` (NFR-RES-09).
 - **FR-LOG-03** [done] One entry per request: a routed request or route
   miss logs `Response`; a parse error logs `Rejected` only. A later failure
   of the same exchange (timeout, abort) adds its own entry.
@@ -1476,7 +1478,9 @@ Failures, persistence, timeouts:
       failed in a `--ready-fd` start; startup goes on),
       `kind=shared_ports uid` (FR-PROC-07: the server bound its own
       listeners, which share their ports, as the non-root effective uid
-      `uid`), `kind=containment layer state [abi |
+      `uid`), `kind=memory_backstop bytes` (NFR-RES-09: the
+      `RLIMIT_DATA` set at startup, soft and hard, in bytes),
+      `kind=containment layer state [abi |
       action log] [gaps covered_by] [uncovered]` (FR-PROC-06, below).
   - Values: `conn` the connection id; `peer` the IP address (`::1`,
     `192.0.2.7`); `status` the three-digit code; `backend` the backend's
@@ -1595,7 +1599,10 @@ Failures, persistence, timeouts:
   (FR-PROC-07 builder calls). A root bind logs nothing (only root can
   join). Like `privileges`, it is written with the startup notes, so a
   startup that fails later (the seccomp filter) prints it before its
-  error line.
+  error line. *(Stage 9 Task 2:)* `memory_backstop bytes` is logged
+  once at startup, with the startup notes, after any `steer_failed`
+  lines of the bind and before `privileges`: the `RLIMIT_DATA` the
+  memory backstop set (NFR-RES-09).
 
 ### FR-PROC — Process: CLI, privileges, systemd, signals, restart
 
@@ -1697,6 +1704,8 @@ Failures, persistence, timeouts:
      (FR-CFG-10; exit 2 naming the address);
   6. the descriptor budget (NFR-RES-05; exit 2 naming the needed and the
      available number);
+  6a. *(stage 9 Task 2)* the memory backstop (NFR-RES-09: `RLIMIT_DATA`;
+      exit 2 naming the needed and the available number);
   7. the privilege drop (FR-PROC-03; exit 2);
   7a. *(stage 5 Task 5)* Landlock (FR-PROC-06), while the process has
       one thread and before anything else opens a path (exit 2 for a
@@ -2369,7 +2378,7 @@ Failures, persistence, timeouts:
   total deadline (FR-CONN-06).
 - **NFR-RES-08** [done] No busy waiting: the core only reacts to events
   and exposes its next deadline.
-- **NFR-RES-09** [stage 9] Kernel-enforced memory backstop (owner
+- **NFR-RES-09** [done] Kernel-enforced memory backstop (owner
   decision 2026-11-09, qmail review). *qmail's one memory hole,
   CVE-2005-1513, was reachable only without `softlimit`, an optional
   step of its documented install that Debian's packaging dropped; Qualys
@@ -2378,12 +2387,13 @@ Failures, persistence, timeouts:
   accounting mistake becomes an abort, not growth.* At startup, once the
   config is loaded and before the first accept, the driver sets a
   process memory limit, soft and hard alike so the process cannot raise
-  it again, to `memory_limit` plus a fixed allowance for what
-  NFR-RES-01 leaves outside the budget: the refused-connection send
-  buffers, the lingering scratch, the readahead and log buffers, the
-  worker threads' stacks and the allocator's own overhead. The allowance
-  is a constant of the driver, measured and documented in the plan with
-  its margin; the startup log names the limit set. An allocation the
+  it again, to `memory_limit` plus an allowance of measured constants
+  for what NFR-RES-01 leaves outside the budget: the refused-connection
+  send buffers, the lingering scratch, the readahead and log buffers, the
+  worker threads' stacks and the allocator's own overhead. The
+  constants are the driver's, measured and documented with their margin
+  (in `driver/src/process/backstop.rs`); the startup log names the limit
+  set. An allocation the
   kernel refuses aborts the process (Rust's allocation-failure abort),
   which the supervisor restarts: serving on with less memory than the
   config promises is not an option. An inherited hard limit already
@@ -2393,7 +2403,34 @@ Failures, persistence, timeouts:
   arena reservations) is the expected choice over `RLIMIT_AS`, which
   glibc's per-thread arenas inflate; the plan justifies the choice with
   a measurement on glibc and musl. `--check` prints the backstop it
-  would set (FR-PROC-08).
+  would set (FR-PROC-08). *Planner calls (stage 9 plan; Task 2, with
+  the controller's rulings on its measurement):* `RLIMIT_DATA`, soft and
+  hard. The limit is `memory_limit + BASE_ALLOWANCE + disk_threads ×
+  (DISK_THREAD_STACK + DISK_THREAD_OVERHEAD) + max_connections ×
+  PER_CONNECTION_ALLOWANCE`, saturating: three allowance terms, with the
+  disk workers' stack pinned to `DISK_THREAD_STACK` = 2 MiB by
+  `Builder::stack_size` (whatever `RUST_MIN_STACK` says).
+  `BASE_ALLOWANCE` = 4 MiB, `DISK_THREAD_OVERHEAD` = 256 KiB (a thread's
+  12 KiB `sigaltstack` and one 132 KiB glibc arena, with margin),
+  `PER_CONNECTION_ALLOWANCE` = 5 KiB. Measured 2026-11-09 (`VmData`,
+  x86_64, glibc and Rust's bundled musl):
+  - startup preallocates nothing per connection, so the per-connection
+    constant was measured with 4080 connections open: 1 055 (glibc) and
+    3 757 (musl) bytes each beyond the budgeted buffers, rounded up to
+    4 KiB, plus the 1 KiB send buffer of a refused connection;
+  - a disk thread costs its stack plus 75.6 KB (glibc) or 16.7 KB
+    (musl);
+  - the base is twice the brief's derivation (the loaded reading less
+    the other terms, 0.45 MiB on glibc, rounded up to a MiB and
+    doubled).
+  The log kind is `memory_backstop bytes` (FR-LOG-05, -07), written with
+  the startup notes. A hard limit below the backstop is exit 2:
+  `memory backstop: the server needs <needed> bytes of RLIMIT_DATA,
+  <hard> are available`. The backstop is set between the descriptor
+  budget and the privilege drop (FR-PROC-04 step 6a), so root's
+  `CAP_SYS_RESOURCE` is gone before anything could raise it. The disk
+  workers are spawned after it, so an allowance that is too small fails
+  startup (the thread spawn is refused, exit 2), not a loaded server.
 
 ### NFR-ROB — Robustness
 
