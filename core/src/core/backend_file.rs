@@ -16,6 +16,7 @@ use crate::conn::{
 };
 use crate::http::backend_path::{Located, accel_path, sendfile_path};
 use crate::http::forward::{kept_lines_len, render_kept_lines};
+use crate::http::mime::content_type;
 use crate::http::response::{BodyMode, FILE_HEAD_EXTRA, render_fixed};
 use crate::http::response_head::{RequestKind, ResponseBody, ResponseError, ResponseHead};
 use crate::http::status::Status;
@@ -189,7 +190,7 @@ impl Core {
                     deadline,
                 }
             }
-            Located::Open { segments, slash } => {
+            Located::Open { path, slash } => {
                 buffers.clear_head();
                 let kept = render_kept_lines(&head, files, &mut buffers.head);
                 release(
@@ -203,10 +204,13 @@ impl Core {
                     actions,
                 );
                 let file = self.files.allocate(conn);
+                let content_type = content_type(path.last());
+                // The decoded path moves to the driver: the core keeps no
+                // copy (NFR-RES-09).
                 actions.push(Action::OpenFile {
                     file,
                     root: *root,
-                    path: segments.clone(),
+                    path,
                 });
                 ConnState::OpeningFile {
                     file,
@@ -221,7 +225,7 @@ impl Core {
                         query: None,
                         root: *root,
                         on_change: files.on_file_change,
-                        path: segments,
+                        content_type,
                         conditional: request.conditional,
                         range: request.range,
                         source: FileSource::Backend(BackendFile {

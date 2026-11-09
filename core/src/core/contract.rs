@@ -96,12 +96,16 @@
 //! - `OpenFile { root, path }` names a path as relative segments (decoded
 //!   bytes, never `.`, `..`, empty, or containing `/` or NUL; a decoded
 //!   backend path may hold other control bytes or `\`, still one name
-//!   beneath the root). The driver
+//!   beneath the root), joined by `/` in one buffer ([`RelPath`]): its
+//!   bytes are the relative path to open as they stand. The action owns
+//!   the only copy (the core keeps none), so the driver takes it by move
+//!   and drops it once the open is done; an open still queued holds it
+//!   (NFR-RES-09 counts it). The driver
 //!   resolves it beneath the root, without following symlinks anywhere in
 //!   the path and without ever leaving the root (`openat2` with
 //!   `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), and reports the metadata
-//!   (`fstat`) of the open descriptor. An empty segment list means the root
-//!   itself: the driver opens `"."` beneath the root descriptor
+//!   (`fstat`) of the open descriptor. An empty path (no segment) means
+//!   the root itself: the driver opens `"."` beneath the root descriptor
 //!   (`openat2(root, "")` fails with `ENOENT`, which would make `GET /` a
 //!   404).
 //! - Open flags: `O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`, never
@@ -595,6 +599,7 @@ use crate::file::{FileError, FileId, FileMeta, FileStamp, RootId};
 #[cfg(doc)]
 use crate::log::BackendFailure;
 use crate::log::Log;
+use crate::rel_path::RelPath;
 #[cfg(doc)]
 use crate::upstream::UPSTREAM_RECV_MIN;
 use crate::upstream::{BackendId, UpstreamId};
@@ -701,12 +706,13 @@ pub enum Action {
     ShutdownWrite { conn: ConnId },
     /// Close `conn`. The last action the core emits for it.
     Close { conn: ConnId },
-    /// Open `path` (relative segments) beneath static root `root`, without
-    /// following symlinks and without leaving the root, as `file`.
+    /// Open `path` (relative segments joined by `/`) beneath static root
+    /// `root`, without following symlinks and without leaving the root, as
+    /// `file`.
     OpenFile {
         file: FileId,
         root: RootId,
-        path: Vec<Vec<u8>>,
+        path: RelPath,
     },
     /// Read `len` bytes of `file` from `offset` into the page cache, then
     /// report `ChunkReady`. Never beyond the size reported at open.

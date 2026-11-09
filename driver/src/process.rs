@@ -22,6 +22,7 @@ use durchlauferhitzer_core::config::{Config, Containment, load};
 use crate::containment::{self, Files};
 use crate::event_loop::{Driver, Exit};
 use crate::log::{DriverLog, LogEntry, LogSink};
+use crate::pool::SpawnFailed;
 use crate::sys::file::{Openat2, open_dir_path, openat2_supported};
 use crate::sys::signal::{Signal, SignalFd};
 use crate::sys::socket::{Probe, steer_reuseport, tcp_listen};
@@ -229,6 +230,9 @@ struct Ready {
     landlock: Files,
     /// Whether the listeners are steered to this process before readiness.
     steering: Steering,
+    /// The memory backstop set (NFR-RES-09), for the message of a disk
+    /// worker that cannot start under it.
+    backstop: u64,
 }
 
 /// A11 steps 3 to 7a: the `openat2` probe, the static roots, the
@@ -283,6 +287,7 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
         containment,
         landlock,
         steering,
+        backstop,
     })
 }
 
@@ -422,6 +427,7 @@ fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
         containment,
         landlock,
         steering,
+        backstop,
     } = ready;
     // SIGTERM, SIGINT, SIGPIPE and SIGHUP: blocked in every thread, read
     // by the loop (SIGPIPE ignored there).
@@ -449,7 +455,7 @@ fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
     let mut driver = match Driver::new(core, listeners, roots, disk_threads, log) {
         Ok(driver) => driver,
         Err(err) => {
-            report(format_args!("driver: {err}"));
+            report(driver_failure(&err, backstop));
             return ExitStatus::Startup;
         }
     };
@@ -503,6 +509,22 @@ fn run_loop(ready: Ready, readiness: Option<Readiness>) -> ExitStatus {
 }
 
 /// Prints `durchlauferhitzer: <message>` to stderr.
+/// The startup message of a `Driver::new` failure: a disk worker the
+/// kernel refused ([`SpawnFailed`], `EAGAIN` when its stack cannot be
+/// mapped) names the memory backstop (`backstop` bytes) it started under,
+/// since that `EAGAIN` reads like a thread or pid limit otherwise.
+fn driver_failure(err: &io::Error, backstop: u64) -> String {
+    match err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<SpawnFailed>())
+    {
+        Some(_) => format!(
+            "driver: {err}; RLIMIT_DATA is the memory backstop ({backstop} bytes, NFR-RES-09)"
+        ),
+        None => format!("driver: {err}"),
+    }
+}
+
 fn report(message: impl Display) {
     say_err(format_args!("durchlauferhitzer: {message}"));
 }
@@ -521,9 +543,35 @@ mod tests {
     use std::net::SocketAddr;
     use std::os::fd::AsFd;
 
-    use super::{Command, Probe, ReadyFd, Steering, bind, overlap, parse_args};
+    use super::{Command, Probe, ReadyFd, Steering, bind, driver_failure, overlap, parse_args};
+    use crate::pool::SpawnFailed;
     use crate::sys::socket::tests::spread;
     use crate::sys::socket::{local_addr, tcp_listen};
+
+    /// Review M2: a disk worker refused at startup names the memory
+    /// backstop; any other driver error stands alone.
+    #[test]
+    fn a_refused_disk_thread_names_the_memory_backstop() {
+        let refused = std::io::Error::from_raw_os_error(libc::EAGAIN);
+        let err = std::io::Error::new(
+            refused.kind(),
+            SpawnFailed {
+                thread: 37,
+                threads: 64,
+                error: refused,
+            },
+        );
+        assert_eq!(
+            driver_failure(&err, 1_234),
+            "driver: cannot start disk thread 37 of 64: Resource temporarily unavailable \
+             (os error 11); RLIMIT_DATA is the memory backstop (1234 bytes, NFR-RES-09)"
+        );
+        let other = std::io::Error::from_raw_os_error(libc::EMFILE);
+        assert_eq!(
+            driver_failure(&other, 1_234),
+            "driver: Too many open files (os error 24)"
+        );
+    }
 
     fn parse(args: &[&str]) -> Option<Command> {
         parse_args(args.iter().map(OsString::from))

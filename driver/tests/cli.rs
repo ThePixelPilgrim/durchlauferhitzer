@@ -83,23 +83,37 @@ fn check_on_a_valid_config_prints_ok() {
 }
 
 /// FR-PROC-08: the shipped example config is the guaranteed install, so
-/// `--check` warns about nothing; its one stderr line is the backstop
-/// (the figure the README shows for it).
+/// `--check` warns about nothing; its one stderr line is the backstop,
+/// the figure the README shows for it (every README line naming the
+/// example's backstop shows that number).
 #[test]
 fn check_on_the_example_config_warns_nothing() {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/durchlauferhitzer.conf");
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = manifest.join("../examples/durchlauferhitzer.conf");
     let path = path.to_str().unwrap();
     let output = run(&["--check", path], Setup::default());
     assert_exit(&output, 0);
     assert_eq!(text(&output.stdout), "ok\n");
+    let bytes = memory_backstop_bytes(path);
     assert_eq!(
         text(&output.stderr),
-        format!(
-            "{path}: memory backstop: {} bytes\n",
-            memory_backstop_bytes(path)
-        )
+        format!("{path}: memory backstop: {bytes} bytes\n")
     );
+    let readme = std::fs::read_to_string(manifest.join("../README.md")).unwrap();
+    let shown: Vec<&str> = readme
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("examples/durchlauferhitzer.conf: memory backstop: ")?
+                .strip_suffix(" bytes")
+        })
+        .collect();
+    assert!(
+        !shown.is_empty(),
+        "README.md shows no backstop for the example"
+    );
+    for figure in shown {
+        assert_eq!(figure, bytes.to_string(), "README.md's backstop figure");
+    }
 }
 
 /// FR-PROC-08: one warning per softer containment choice, in config

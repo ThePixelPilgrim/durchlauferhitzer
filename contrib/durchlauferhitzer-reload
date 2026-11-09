@@ -11,7 +11,8 @@
 #     time is stale: it is taken over, with a note on stderr, under a
 #     guard (<pidfile>.lock/takeover), so that of helpers finding it at
 #     once one at most proceeds.
-#  1. <binary> --check <config>; on an error, print it and stop.
+#  1. <binary> --check <config>; on an error, print it and stop; its
+#     warnings (FR-PROC-08), if any, are printed too.
 #  2. net.ipv4.tcp_migrate_req must be 1 (written if 0, never restored):
 #     the old process's queued connections then move to the new one.
 #  3. The pid in <pidfile> must run <binary> (" (deleted)" allowed: the
@@ -298,11 +299,16 @@ if ! take_lock; then
 fi
 locked=yes
 
-# 1. The config.
-if ! out=$("$binary" --check "$config" 2>&1); then
+# 1. The config. Its stderr is shown when it fails, and when it passes
+# with warnings (FR-PROC-08: a containment softer than the guaranteed
+# install), the backstop line with them: the operator just edited it.
+if ! out=$("$binary" --check "$config" 2>&1 >/dev/null); then
 	[ -n "$out" ] && printf '%s\n' "$out" >&2
 	fail "the config check failed: $config"
 fi
+case $out in
+*": warning: "*) printf '%s\n' "$out" >&2 ;;
+esac
 
 # 2. Queued connections must move to the new process.
 [ -e "$migrate" ] || fail "$migrate is missing (Linux 5.14 or later is needed)"

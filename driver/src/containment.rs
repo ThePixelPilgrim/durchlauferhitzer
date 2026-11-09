@@ -225,14 +225,21 @@ pub(crate) fn restrict_calls(config: &Containment, landlock: Files) -> Result<[O
     Ok([files, calls])
 }
 
+/// The way out a missing `layer` names in its exit-2 message (review M4):
+/// the setting that serves without it.
+fn way_out(layer: &str) -> String {
+    format!("; write `containment {{ {layer} best_effort; }}` to serve without it")
+}
+
 /// Landlock's decision: `layer` against the kernel's `abi`.
 fn files_plan(layer: Layer, abi: Abi) -> Result<FilesPlan, Error> {
     match (layer, abi) {
         (Layer::Off, _) => Ok(FilesPlan::Skip(State::Off)),
         (Layer::BestEffort, Abi::Missing) => Ok(FilesPlan::Skip(State::Missing)),
-        (Layer::Required, Abi::Missing) => Err(Error(
-            "landlock is required but the kernel has none".to_owned(),
-        )),
+        (Layer::Required, Abi::Missing) => Err(Error(format!(
+            "landlock is required but the kernel has none{}",
+            way_out("landlock")
+        ))),
         (Layer::BestEffort | Layer::Required, Abi::Version(abi)) => Ok(FilesPlan::Apply(abi)),
     }
 }
@@ -247,7 +254,10 @@ fn calls_plan(
     persona: impl FnOnce() -> Result<Personality, Error>,
 ) -> Result<CallsPlan, Error> {
     let lacking = |why: &str| match layer {
-        Layer::Required => Err(Error(format!("seccomp is required but {why}"))),
+        Layer::Required => Err(Error(format!(
+            "seccomp is required but {why}{}",
+            way_out("seccomp")
+        ))),
         Layer::Off | Layer::BestEffort => Ok(CallsPlan::Skip(State::Missing)),
     };
     match layer {

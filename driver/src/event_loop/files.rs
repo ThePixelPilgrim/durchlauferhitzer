@@ -10,7 +10,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 
 use durchlauferhitzer_core::{
-    ConnError, ConnId, Event, FileError, FileId, FileMeta, FileStamp, RootId,
+    ConnError, ConnId, Event, FileError, FileId, FileMeta, FileStamp, RelPath, RootId,
 };
 
 use super::{Direction, Driver, FileFailure, Freed};
@@ -254,7 +254,7 @@ impl Driver {
     /// has not opened, or a driver without a pool (both refused by
     /// `Driver::new`), is answered `FileFailed { Other }` after the
     /// actions of the current call.
-    pub(super) fn open_file(&mut self, file: FileId, root: RootId, path: Vec<Vec<u8>>) {
+    pub(super) fn open_file(&mut self, file: FileId, root: RootId, path: RelPath) {
         let root_fd = usize::try_from(root.0).ok().and_then(|i| self.roots.get(i));
         match (root_fd, &self.pool) {
             (Some(root_fd), Some(pool)) => {
@@ -262,7 +262,7 @@ impl Driver {
                 pool.submit(Job::Open {
                     file,
                     root_fd: Arc::clone(root_fd),
-                    segments: path,
+                    path,
                 });
             }
             (None, _) | (_, None) => self.file_failures.push_back(FileFailure::Open(file)),

@@ -440,8 +440,9 @@ pub(crate) struct StaticRequest {
     pub(crate) root: RootId,
     /// The route's policy for a file that changes while it is sent.
     pub(crate) on_change: OnFileChange,
-    /// The relative segments of the path being opened.
-    pub(crate) path: Vec<Vec<u8>>,
+    /// The `Content-Type` of the file being opened, from its name: the
+    /// path itself went to the driver with the `OpenFile` (NFR-RES-09).
+    pub(crate) content_type: &'static str,
     /// The request's conditional headers, judged once the file is open
     /// (FR-STATIC-18).
     pub(crate) conditional: Conditional,
@@ -455,8 +456,11 @@ pub(crate) struct StaticRequest {
 /// Who asked for a file response's file.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FileSource {
-    /// The request's static route.
-    Route,
+    /// The request's static route, whose first `route_segments` path
+    /// segments are skipped: a directory's `index.html` is opened at the
+    /// summary's path decoded again (FR-STATIC-05), since the decoded path
+    /// went to the driver.
+    Route { route_segments: usize },
     /// A backend's answer on an `internal_files` route (FR-PROXY-32).
     Backend(BackendFile),
 }

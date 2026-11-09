@@ -347,7 +347,7 @@ fn file_tree() -> (TempDir, OwnedFd) {
 }
 
 fn open(root: &OwnedFd, segments: &[&[u8]]) -> std::io::Result<OwnedFd> {
-    openat2_beneath(root.as_fd(), segments)
+    openat2_beneath(root.as_fd(), segments.join(&b'/'))
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn sendfile_delivers_the_exact_bytes_then_reports_end_of_file() {
     let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
     fs::write(tmp.path().join("data"), &data).unwrap();
     let root = open_dir_path(tmp.path()).unwrap();
-    let file = openat2_beneath(root.as_fd(), &[b"data"]).unwrap();
+    let file = openat2_beneath(root.as_fd(), b"data".to_vec()).unwrap();
     readahead(file.as_fd(), 0, data.len() as u64).unwrap();
 
     let (client, mut server) = loopback_pair();
@@ -490,7 +490,7 @@ fn readahead_and_sendfile_work_past_4_gib() {
     data.write_at(b"WRONG!", at % (1 << 32)).unwrap();
     drop(data);
     let root = open_dir_path(tmp.path()).unwrap();
-    let file = openat2_beneath(root.as_fd(), &[b"sparse"]).unwrap();
+    let file = openat2_beneath(root.as_fd(), b"sparse".to_vec()).unwrap();
     readahead(file.as_fd(), at, 6).unwrap();
     let (client, mut server) = loopback_pair();
     match sendfile(client.as_fd(), file.as_fd(), at, 6) {

@@ -67,7 +67,7 @@ the memory backstop the server would set at startup (it is not set by
 the backstop line alone:
 
 ```
-examples/durchlauferhitzer.conf: memory backstop: 1092616192 bytes
+examples/durchlauferhitzer.conf: memory backstop: 1146093568 bytes
 ```
 
 With `seccomp_action fail;` in its `containment` block a warning comes
@@ -75,7 +75,7 @@ first:
 
 ```
 examples/durchlauferhitzer.conf: warning: containment seccomp_action fail: an unexpected system call is answered, not fatal
-examples/durchlauferhitzer.conf: memory backstop: 1092616192 bytes
+examples/durchlauferhitzer.conf: memory backstop: 1146093568 bytes
 ```
 
 ## Try it
@@ -159,7 +159,9 @@ their contents. Clients cannot see them: requests resolve beneath the roots
 
 Under containment a panic's backtrace (`RUST_BACKTRACE`) is not
 symbolized; with `seccomp_action kill` the attempt ends the process by
-SIGSYS.
+SIGSYS. The same holds for an allocation the memory backstop refuses:
+with `RUST_BACKTRACE` set, that abort ends by SIGSYS too (the kernel log
+then shows a seccomp kill, not a filter gap); without it, by SIGABRT.
 
 ## Guaranteed install
 
@@ -177,7 +179,10 @@ warns when a config leaves part of it to the kernel
 - `memory_limit` sized for the host, with the memory backstop the server
   sets from it at startup (`kind=memory_backstop bytes=<n>` in the
   startup log, the same number `--check` prints): an allocation beyond
-  it aborts the process;
+  it aborts the process. The backstop bounds the process's own memory
+  only: kernel memory (socket buffers, epoll state, the page cache) is
+  outside `RLIMIT_DATA`; bound it with the service's cgroup
+  (`MemoryMax=`) or the TCP memory sysctls;
 - a supervisor that restarts the process when it ends abnormally (a
   blocked system call under `kill`, an aborted allocation), such as the
   [systemd service](#systemd-socket-activation) below (its
@@ -228,7 +233,8 @@ losing a connection; the OpenRC script's `reload` calls it
 
 1. takes the lock `<pidfile>.lock` (a second reload meanwhile is refused;
    one whose helper no longer runs is taken over, with a note), checks
-   the config (`--check`) and stops on an error;
+   the config (`--check`) and stops on an error, and shows its warnings
+   (with the backstop line) when it passes with some;
 2. sets `net.ipv4.tcp_migrate_req` to 1 (Linux 5.14 or later; left set),
    so connections queued on the old process move to the new one when it
    closes its listeners;

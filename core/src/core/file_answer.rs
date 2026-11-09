@@ -10,7 +10,6 @@ use crate::conn::{BackendFile, Conn, ConnState, FileHead, FileSource, StaticRequ
 use crate::file::{Chunk, FILE_CHUNK, FileId, FileStamp, FileTable};
 use crate::http::conditional::{Freshness, Validators};
 use crate::http::date::ImfFixdate;
-use crate::http::mime::content_type;
 use crate::http::range::Ranged;
 use crate::http::request::{Method, Persistence};
 use crate::http::response::{
@@ -113,19 +112,18 @@ pub(super) fn queue_head(
         persistence,
         date,
     } = *with;
-    let name = request.path.last().map(Vec::as_slice).unwrap_or_default();
+    let content_type = request.content_type;
     let status = answer.status();
     let (log, head) = match (request.source, answer) {
-        (FileSource::Route | FileSource::Backend(_), FileAnswer::Unsatisfiable) => {
+        (FileSource::Route { .. } | FileSource::Backend(_), FileAnswer::Unsatisfiable) => {
             render_range_not_satisfiable(size, persistence, body, date, &mut c.send);
             (None, FileHead::SendBuffer)
         }
-        (FileSource::Route, FileAnswer::NotModified) => {
+        (FileSource::Route { .. }, FileAnswer::NotModified) => {
             render_not_modified(validators, persistence, date, &mut c.send);
             (None, FileHead::SendBuffer)
         }
-        (FileSource::Route, FileAnswer::File(part)) => {
-            let content_type = content_type(name);
+        (FileSource::Route { .. }, FileAnswer::File(part)) => {
             render_file_head(
                 content_type,
                 part,
@@ -137,10 +135,10 @@ pub(super) fn queue_head(
             (None, FileHead::SendBuffer)
         }
         (FileSource::Backend(file), FileAnswer::NotModified) => {
-            merged(file, FileStatus::NotModified, content_type(name), with)
+            merged(file, FileStatus::NotModified, content_type, with)
         }
         (FileSource::Backend(file), FileAnswer::File(part)) => {
-            merged(file, FileStatus::File(part), content_type(name), with)
+            merged(file, FileStatus::File(part), content_type, with)
         }
     };
     actions.push(Action::Log(match log {

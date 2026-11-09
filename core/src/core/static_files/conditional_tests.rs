@@ -1,7 +1,7 @@
 //! Conditional requests on static files (FR-STATIC-18). The expected heads
 //! are written out here, not taken from the core's renderers.
 
-use crate::core::test_support::{PEER, files_core, request, secs};
+use crate::core::test_support::{PEER, files_core, rel, request, secs};
 use crate::core::{Action, ConnId, Core, Event, Interest};
 use crate::file::{FileId, FileKind, FileMeta, FileStamp, RootId};
 use crate::http::request::Method;
@@ -85,7 +85,7 @@ fn answer(request_bytes: &[u8], stamp: FileStamp, clock: Option<u64>) -> (Vec<Ac
         actions.contains(&Action::OpenFile {
             file: FileId(1),
             root: RootId(1),
-            path: vec![b"f.txt".to_vec()],
+            path: rel(&[b"f.txt"]),
         }),
         "{actions:?}"
     );

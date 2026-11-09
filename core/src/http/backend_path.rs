@@ -1,5 +1,5 @@
 //! Backend file paths (FR-PROXY-32 Path, Bad path): turns an `X-Sendfile`
-//! or `X-Accel-Redirect` value into the segments to open below the route's
+//! or `X-Accel-Redirect` value into the path to open below the route's
 //! root, a `404`, or a bad path (the backend misbehaving, a `502`).
 //!
 //! Safe on arbitrary bytes. The checks run in this order, each over the
@@ -21,16 +21,17 @@
 //! (404) at step 7, while a raw `..` is a bad path (502).
 
 pub use super::static_path::TrailingSlash;
-use super::static_path::{StaticPathError, decode_segment};
+use super::static_path::{StaticPathError, decode_into};
+use crate::rel_path::RelPath;
 
 /// Where a value that is not a bad path points.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Located {
-    /// Open these segments below the root. No segment is empty, `.` or
-    /// `..`, starts with `.`, or holds `/` or NUL. No segments at all
-    /// means the root itself (a directory, so a 404 later).
+    /// Open this path below the root. No segment is empty, `.` or `..`,
+    /// starts with `.`, or holds `/` or NUL. No segments at all means the
+    /// root itself (a directory, so a 404 later).
     Open {
-        segments: Vec<Vec<u8>>,
+        path: RelPath,
         /// Whether the value ended in `/` after the root or prefix.
         slash: TrailingSlash,
     },
@@ -76,11 +77,14 @@ pub fn sendfile_path(root: &[u8], value: &[u8]) -> Result<Located, BadPath> {
         };
         (rest, slash)
     };
-    let segments = raw_segments(rest)?
-        .into_iter()
-        .map(<[u8]>::to_vec)
-        .collect();
-    Ok(locate(segments, slash))
+    let mut path = RelPath::with_capacity(rest.len() + 1);
+    let mut hidden = Hidden::No;
+    for segment in raw_segments(rest)? {
+        let start = path.start_segment();
+        path.buffer().extend_from_slice(segment);
+        hidden = hidden.or(path.as_bytes().get(start..).unwrap_or_default());
+    }
+    Ok(locate(path, hidden, slash))
 }
 
 /// An `X-Accel-Redirect` value: `prefix` (raw bytes, case-sensitive; it
@@ -93,11 +97,14 @@ pub fn accel_path(prefix: &[u8], value: &[u8]) -> Result<Located, BadPath> {
         Some(b'/') => TrailingSlash::Present,
         None | Some(_) => TrailingSlash::Absent,
     };
-    let segments = raw_segments(rest)?
-        .into_iter()
-        .map(decode)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(locate(segments, slash))
+    let mut path = RelPath::with_capacity(rest.len() + 1);
+    let mut hidden = Hidden::No;
+    for segment in raw_segments(rest)? {
+        let start = path.start_segment();
+        decode(segment, path.buffer())?;
+        hidden = hidden.or(path.as_bytes().get(start..).unwrap_or_default());
+    }
+    Ok(locate(path, hidden, slash))
 }
 
 /// Steps 1 to 3: empty, a byte outside visible ASCII, a `?`.
@@ -114,43 +121,59 @@ fn check_bytes(value: &[u8]) -> Result<(), BadPath> {
     Ok(())
 }
 
-/// Step 5: splits `rest` (what follows the root's `/` or the prefix) into
-/// raw segments, dropping the empty trailing one. An empty `rest` has none.
-fn raw_segments(rest: &[u8]) -> Result<Vec<&[u8]>, BadPath> {
-    if rest.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
+/// Step 5: checks `rest` (what follows the root's `/` or the prefix)
+/// whole, then returns its raw segments, without the empty trailing one.
+/// An empty `rest` has none.
+fn raw_segments(rest: &[u8]) -> Result<impl Iterator<Item = &[u8]>, BadPath> {
     let mut segments = rest.split(|&b| b == b'/').peekable();
     while let Some(segment) = segments.next() {
         match segment {
             b"" if segments.peek().is_none() => {}
             b"" | b"." | b".." => return Err(BadPath::BadSegment),
-            _ => out.push(segment),
+            _ => {}
         }
     }
-    Ok(out)
+    Ok(rest
+        .split(|&b| b == b'/')
+        .filter(|segment| !segment.is_empty()))
 }
 
-/// Step 6: one percent-decoding pass over a raw segment.
-fn decode(segment: &[u8]) -> Result<Vec<u8>, BadPath> {
-    decode_segment(segment).map_err(|err| match err {
+/// Step 6: one percent-decoding pass over a raw segment, onto `out`.
+fn decode(segment: &[u8], out: &mut Vec<u8>) -> Result<(), BadPath> {
+    decode_into(segment, out).map_err(|err| match err {
         StaticPathError::BadEscape => BadPath::BadEscape,
-        // `decode_segment` reports nothing else; were it to, the value is
+        // `decode_into` reports nothing else; were it to, the value is
         // still not a path to open.
         StaticPathError::DotSegment | StaticPathError::BadSegment => BadPath::BadEscape,
     })
 }
 
+/// Whether some segment is one a static route hides (step 7): noted per
+/// segment while the path is built, since a decoded `/` no longer shows
+/// once the segments are joined, and judged after step 6 is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hidden {
+    No,
+    Yes,
+}
+
+impl Hidden {
+    /// `self`, or `Yes` if `segment` starts with `.` or holds a `/` or NUL.
+    fn or(self, segment: &[u8]) -> Hidden {
+        match self {
+            Hidden::Yes => Hidden::Yes,
+            Hidden::No if segment.first() == Some(&b'.') => Hidden::Yes,
+            Hidden::No if segment.iter().any(|&b| b == b'/' || b == 0) => Hidden::Yes,
+            Hidden::No => Hidden::No,
+        }
+    }
+}
+
 /// Step 7: the static rules (FR-STATIC-09).
-fn locate(segments: Vec<Vec<u8>>, slash: TrailingSlash) -> Located {
-    let hidden = |segment: &Vec<u8>| {
-        segment.first() == Some(&b'.') || segment.iter().any(|&b| b == b'/' || b == 0)
-    };
-    if segments.iter().any(hidden) {
-        Located::NotFound
-    } else {
-        Located::Open { segments, slash }
+fn locate(path: RelPath, hidden: Hidden, slash: TrailingSlash) -> Located {
+    match hidden {
+        Hidden::Yes => Located::NotFound,
+        Hidden::No => Located::Open { path, slash },
     }
 }
 

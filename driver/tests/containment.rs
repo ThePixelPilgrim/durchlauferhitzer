@@ -264,7 +264,7 @@ fn a_required_seccomp_the_kernel_lacks_is_exit_2() {
         text(&output.stderr),
         after_notes(
             &path,
-            "durchlauferhitzer: seccomp is required but the kernel has none\n"
+            "durchlauferhitzer: seccomp is required but the kernel has none; write `containment { seccomp best_effort; }` to serve without it\n"
         )
     );
 }
@@ -296,7 +296,7 @@ fn a_required_landlock_the_kernel_lacks_is_exit_2() {
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
-        "durchlauferhitzer: landlock is required but the kernel has none\n"
+        "durchlauferhitzer: landlock is required but the kernel has none; write `containment { landlock best_effort; }` to serve without it\n"
     );
 }
 
@@ -311,7 +311,7 @@ fn an_absent_block_requires_landlock() {
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
-        "durchlauferhitzer: landlock is required but the kernel has none\n"
+        "durchlauferhitzer: landlock is required but the kernel has none; write `containment { landlock best_effort; }` to serve without it\n"
     );
 }
 

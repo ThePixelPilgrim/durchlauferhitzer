@@ -5,12 +5,13 @@
 //! expected heads are written out here, not taken from the core's
 //! renderers. End to end in `sim/tests/proxy/backend_files.rs`.
 
-use crate::core::test_support::{PEER, request, secs};
+use crate::core::test_support::{PEER, rel, request, secs};
 use crate::core::{Action, ConnId, Core, Event};
 use crate::file::{FileError, FileId, FileKind, FileMeta, FileStamp, RootId};
 use crate::http::request::Method;
 use crate::http::status::Status;
 use crate::log::{BackendFailure, Log, RequestSummary};
+use crate::rel_path::RelPath;
 use crate::upstream::{BackendId, UpstreamHolder, UpstreamId};
 
 /// `/dl` and `/grow` serve `x-accel-redirect /protected/` below
@@ -230,7 +231,7 @@ fn route_header_on_200_opens_the_file() {
         actions.contains(&Action::OpenFile {
             file: FILE,
             root: ROOT,
-            path: vec![b"a.pdf".to_vec()],
+            path: rel(&[b"a.pdf"]),
         }),
         "{actions:?}"
     );
@@ -637,10 +638,10 @@ fn directory_and_trailing_slash_are_404() {
         kind: FileKind::Directory,
         stamp: stamp(4096),
     };
-    let cases: [(&str, Vec<Vec<u8>>, FileMeta); 3] = [
-        ("/protected/a", vec![b"a".to_vec()], directory),
-        ("/protected/a/", vec![b"a".to_vec()], regular(1000)),
-        ("/protected/", vec![], directory),
+    let cases: [(&str, RelPath, FileMeta); 3] = [
+        ("/protected/a", rel(&[b"a"]), directory),
+        ("/protected/a/", rel(&[b"a"]), regular(1000)),
+        ("/protected/", rel(&[]), directory),
     ];
     for (value, path, meta) in cases {
         let mut core = core();

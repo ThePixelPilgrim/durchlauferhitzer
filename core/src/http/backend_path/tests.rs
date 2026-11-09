@@ -3,7 +3,7 @@ use proptest::prelude::*;
 
 fn open(segments: &[&[u8]], slash: TrailingSlash) -> Result<Located, BadPath> {
     Ok(Located::Open {
-        segments: segments.iter().map(|s| s.to_vec()).collect(),
+        path: RelPath::from_segments(segments).unwrap(),
         slash,
     })
 }
@@ -236,8 +236,13 @@ fn value() -> impl Strategy<Value = Vec<u8>> {
 /// What every `Open` must satisfy, whatever the input.
 fn check_segments(located: &Located) -> Result<(), TestCaseError> {
     match located {
-        Located::Open { segments, .. } => {
-            for segment in segments {
+        Located::Open { path, .. } => {
+            // The joined bytes: no empty segment, no NUL.
+            let bytes = path.as_bytes();
+            prop_assert!(bytes.first() != Some(&b'/') && bytes.last() != Some(&b'/'));
+            prop_assert!(!bytes.windows(2).any(|w| w == b"//"), "{:?}", bytes);
+            prop_assert!(!bytes.contains(&0), "{:?}", bytes);
+            for segment in path.segments() {
                 prop_assert!(!segment.is_empty());
                 prop_assert!(!segment.contains(&b'/'), "{:?}", segment);
                 prop_assert!(!segment.contains(&0), "{:?}", segment);
@@ -258,7 +263,8 @@ fn check_accel(value: &[u8]) -> Result<(), TestCaseError> {
     };
     check_segments(&located)?;
     match located {
-        Located::Open { segments, slash } => {
+        Located::Open { path, slash } => {
+            let segments: Vec<&[u8]> = path.segments().collect();
             prop_assert!(value.starts_with(PREFIX));
             prop_assert!(visible(value));
             let rest = &value[PREFIX.len()..];
@@ -321,7 +327,8 @@ proptest! {
         if let Ok(located) = sendfile_path(ROOT, &value) {
             check_segments(&located)?;
             match located {
-                Located::Open { segments, slash } => {
+                Located::Open { path, slash } => {
+                    let segments: Vec<&[u8]> = path.segments().collect();
                     prop_assert!(
                         value == ROOT || value.starts_with(b"/srv/files/"),
                         "{}",

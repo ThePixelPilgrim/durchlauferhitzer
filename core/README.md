@@ -72,6 +72,9 @@ src/
   conn.rs             per-connection state (ConnState) and buffers
   file.rs             file ids, file metadata/stamps, change policy,
                       `FileFollows` (file data after the send buffer)
+  rel_path.rs         `RelPath`: an `OpenFile` path, its segments joined
+                      by `/` in one buffer (one allocation, moved to the
+                      driver, NFR-RES-09)
   upstream.rs         upstream and backend ids, open upstreams and who
                       holds them, the fixed-size buffers of a proxied
                       exchange
@@ -114,9 +117,9 @@ src/
                         file headers stripped and Rack's hints, a backend
                         file's kept lines (FR-PROXY-32)
     target.rs           request-target validation (traversal, encodings)
-    static_path.rs      decoding paths to file-system segments
-    backend_path.rs     `X-Sendfile` / `X-Accel-Redirect` values to
-                        segments, 404 or bad path (FR-PROXY-32)
+    static_path.rs      decoding paths to a `RelPath`, decoded in place
+    backend_path.rs     `X-Sendfile` / `X-Accel-Redirect` values to a
+                        `RelPath`, 404 or bad path (FR-PROXY-32)
     response.rs         rendering fixed responses, file heads (200 and
                         206), 416s, 304s, redirects, a backend file's
                         merged head and its bound `FILE_HEAD_EXTRA`

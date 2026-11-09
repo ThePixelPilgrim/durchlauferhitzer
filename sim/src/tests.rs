@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::disk::Phase;
-use durchlauferhitzer_core::{BackendId, FileStamp, RootId};
+use durchlauferhitzer_core::{BackendId, FileStamp, RelPath, RootId};
 use std::net::Ipv4Addr;
 
 const CONFIG: &str = "listen 127.0.0.1:8080; host a.test { path / { static /srv; } }";
@@ -134,7 +134,7 @@ fn open_file_outside_a_connection_event_is_a_violation() {
     sim.apply(Action::OpenFile {
         file: FileId(1),
         root: RootId(0),
-        path: Vec::new(),
+        path: RelPath::default(),
     });
 }
 

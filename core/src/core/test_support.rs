@@ -4,11 +4,17 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use crate::core::{Action, ConnId, Core, Event};
 use crate::file::{FileKind, FileMeta, FileStamp};
+use crate::rel_path::RelPath;
 use crate::time::Instant;
 
 pub(super) const CONFIG: &str = "listen 127.0.0.1:8080; \
     limits { max_request_line 8; max_head 8; } \
     host a.test { path / { static /srv; } }";
+
+/// The `OpenFile` path of `segments`.
+pub(super) fn rel(segments: &[&[u8]]) -> RelPath {
+    RelPath::from_segments(segments).unwrap()
+}
 
 pub(super) fn core() -> Core {
     Core::new(crate::config::load(CONFIG).unwrap())

@@ -48,6 +48,45 @@ fn a_bad_config_reload_changes_nothing() {
     assert!(text(&output.stderr).contains("bad.conf:2:1"), "{output:?}");
 }
 
+/// FR-PROC-08 (review M3): a new config that passes `--check` with
+/// warnings is reloaded, and the helper shows the check's stderr (the
+/// warning, then the backstop line) for the operator who just edited
+/// it. Without a warning it stays quiet (the other reload tests).
+#[test]
+fn a_reload_shows_the_checks_warnings() {
+    let _serial = serial();
+    if !can_restart() {
+        return;
+    }
+    let site = Site::new();
+    let addr = site.addr;
+    let old_conf = site.config("old", &[addr], "old");
+    let new_conf = site.config("new", &[addr], "new");
+    let text_new = fs::read_to_string(&new_conf).unwrap();
+    let soft = site.dir.config(
+        "soft.conf",
+        &format!(
+            "{}containment {{ seccomp_action fail; }}\n",
+            text_new.trim_end_matches(child::KILL_BLOCK)
+        ),
+        Containment::AsWritten,
+    );
+    let _old = site.start(&old_conf);
+    let output = site.reload(&soft);
+    site.assert_reload_ok(&output);
+    let soft = soft.to_str().unwrap();
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "{soft}: warning: containment seccomp_action fail: an unexpected system call is \
+             answered, not fatal\n{}: memory backstop: {} bytes\n",
+            soft,
+            child::memory_backstop_bytes(soft)
+        )
+    );
+    assert_eq!(fresh_request(addr, &["new"]), Ok("new".to_owned()));
+}
+
 /// A new config that passes `--check` but fails at startup (a missing
 /// root, before binding; an unknown `user`, after binding).
 #[test]

@@ -66,7 +66,8 @@ src/
     backstop.rs       NFR-RES-09: `limit` (`memory_limit` + the measured
                       `BASE_ALLOWANCE` + `disk_threads` x
                       (`DISK_THREAD_STACK` + `DISK_THREAD_OVERHEAD`) +
-                      `max_connections` x `PER_CONNECTION_ALLOWANCE`; the
+                      `max_connections` x (`PER_CONNECTION_FIXED` +
+                      `REQUEST_STATE_FACTOR` x `max_head`); the
                       measurement in its docs), `apply` (soft and hard
                       RLIMIT_DATA set to it, the `memory_backstop` note,
                       or fail naming both numbers)
@@ -234,7 +235,8 @@ src/
                       program choosing the port group's member by index,
                       `SO_ATTACH_REUSEPORT_CBPF`)
                       (`BufferSizes`: SO_SNDBUF / SO_RCVBUF, read only)
-    file.rs           `openat2_beneath` (RESOLVE_BENEATH |
+    file.rs           `openat2_beneath` (a relative path, taken by move;
+                      RESOLVE_BENEATH |
                       RESOLVE_NO_SYMLINKS, `OPEN_FLAGS`), `openat2_supported`,
                       `open_dir_path` (O_PATH roots), `fstat` → `Stat`
                       (the system call itself, never `newfstatat`),

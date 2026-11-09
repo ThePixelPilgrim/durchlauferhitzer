@@ -1,5 +1,7 @@
 //! Decoding of validated request paths into relative file-name segments.
 
+use crate::rel_path::RelPath;
+
 /// Why a path could not be turned into relative segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaticPathError {
@@ -37,9 +39,13 @@ pub fn trailing_slash(path: &str) -> TrailingSlash {
 /// trailing empty segment, and decoded segments must not start with `.` or
 /// contain `/` or NUL. The only precondition is that `path` is a path
 /// without a query (`?` is treated as an ordinary byte).
-pub fn relative_segments(path: &str, skip: usize) -> Result<Vec<Vec<u8>>, StaticPathError> {
+///
+/// The result is one buffer, allocated once: a decoded path is never
+/// longer than `path` less its leading `/`, and the one byte to spare
+/// takes the driver's NUL in place (NFR-RES-09).
+pub fn relative_segments(path: &str, skip: usize) -> Result<RelPath, StaticPathError> {
     let rest = path.strip_prefix('/').ok_or(StaticPathError::BadSegment)?;
-    let mut out = Vec::new();
+    let mut out = RelPath::with_capacity(rest.len() + 1);
     let mut segments = rest.split('/').enumerate().peekable();
     while let Some((index, segment)) = segments.next() {
         if segment.is_empty() {
@@ -51,14 +57,15 @@ pub fn relative_segments(path: &str, skip: usize) -> Result<Vec<Vec<u8>>, Static
         if index < skip {
             continue;
         }
-        let decoded = decode_segment(segment.as_bytes())?;
+        let start = out.start_segment();
+        decode_into(segment.as_bytes(), out.buffer())?;
+        let decoded = out.buffer().get(start..).unwrap_or_default();
         if decoded.first() == Some(&b'.') {
             return Err(StaticPathError::DotSegment);
         }
         if decoded.iter().any(|&b| b == b'/' || b == 0) {
             return Err(StaticPathError::BadSegment);
         }
-        out.push(decoded);
     }
     Ok(out)
 }
@@ -72,10 +79,9 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-/// Percent-decodes one segment exactly once (FR-STATIC-02); a `%` not
-/// followed by two hex digits is `BadEscape`.
-pub(crate) fn decode_segment(segment: &[u8]) -> Result<Vec<u8>, StaticPathError> {
-    let mut out = Vec::with_capacity(segment.len());
+/// Percent-decodes one segment exactly once (FR-STATIC-02) onto the end
+/// of `out`; a `%` not followed by two hex digits is `BadEscape`.
+pub(crate) fn decode_into(segment: &[u8], out: &mut Vec<u8>) -> Result<(), StaticPathError> {
     let mut iter = segment.iter().copied();
     while let Some(b) = iter.next() {
         if b == b'%' {
@@ -89,34 +95,52 @@ pub(crate) fn decode_segment(segment: &[u8]) -> Result<Vec<u8>, StaticPathError>
             out.push(b);
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The path of `segments`, for comparing.
+    fn segs(segments: &[&[u8]]) -> Result<RelPath, StaticPathError> {
+        RelPath::from_segments(segments).ok_or(StaticPathError::BadSegment)
+    }
+
     #[test]
     fn decodes_and_skips() {
         assert_eq!(
             relative_segments("/assets/a%20b/c.css", 1),
-            Ok(vec![b"a b".to_vec(), b"c.css".to_vec()])
+            segs(&[b"a b", b"c.css"])
         );
-        assert_eq!(relative_segments("/", 0), Ok(vec![]));
-        assert_eq!(relative_segments("/a/", 0), Ok(vec![b"a".to_vec()]));
-        assert_eq!(relative_segments("/%C3%A4", 0), Ok(vec![vec![0xC3, 0xA4]]));
+        assert_eq!(relative_segments("/", 0), segs(&[]));
+        assert_eq!(relative_segments("/a/", 0), segs(&[b"a"]));
+        assert_eq!(relative_segments("/%C3%A4", 0), segs(&[&[0xC3, 0xA4]]));
+    }
+
+    /// The whole path is one buffer, sized once from the request path:
+    /// thousands of segments cost one allocation, with room for the
+    /// driver's NUL.
+    #[test]
+    fn many_segments_are_one_buffer() {
+        let path = "/a".repeat(4000);
+        let decoded = relative_segments(&path, 0).unwrap_or_default();
+        assert_eq!(decoded.segments().count(), 4000);
+        let bytes = decoded.into_bytes();
+        assert_eq!(bytes.len(), 7999);
+        assert_eq!(bytes.capacity(), 8000);
     }
 
     #[test]
     fn decodes_exactly_once() {
-        assert_eq!(relative_segments("/%252e", 0), Ok(vec![b"%2e".to_vec()]));
+        assert_eq!(relative_segments("/%252e", 0), segs(&[b"%2e"]));
     }
 
     #[test]
     fn skip_beyond_segments_is_empty() {
-        assert_eq!(relative_segments("/a/b", 5), Ok(vec![]));
-        assert_eq!(relative_segments("/a/", 1), Ok(vec![]));
-        assert_eq!(relative_segments("/", 3), Ok(vec![]));
+        assert_eq!(relative_segments("/a/b", 5), segs(&[]));
+        assert_eq!(relative_segments("/a/", 1), segs(&[]));
+        assert_eq!(relative_segments("/", 3), segs(&[]));
     }
 
     #[test]
@@ -133,7 +157,7 @@ mod tests {
             relative_segments("/x/.y", 1),
             Err(StaticPathError::DotSegment)
         );
-        assert_eq!(relative_segments("/.x/y", 1), Ok(vec![b"y".to_vec()]));
+        assert_eq!(relative_segments("/.x/y", 1), segs(&[b"y"]));
     }
 
     #[test]

@@ -17,11 +17,13 @@ use crate::file::{
 };
 use crate::http::conditional::Validators;
 use crate::http::date::ImfFixdate;
+use crate::http::mime::content_type;
 use crate::http::request::{BodyFraming, Method, Persistence, RequestHead};
 use crate::http::response::{BodyMode, redirect_len, render_fixed, render_redirect};
 use crate::http::static_path::{TrailingSlash, relative_segments, trailing_slash};
 use crate::http::status::Status;
 use crate::log::{Log, RequestSummary};
+use crate::rel_path::RelPath;
 use crate::time::Instant;
 
 impl Core {
@@ -67,7 +69,13 @@ impl Core {
             (FileKind::Directory, OpenStep::Requested, TrailingSlash::Absent) => {
                 Opened::NotServed(NotServed::Redirect)
             }
-            (FileKind::Directory, OpenStep::Requested, TrailingSlash::Present) => Opened::OpenIndex,
+            (FileKind::Directory, OpenStep::Requested, TrailingSlash::Present) => {
+                match index_path(&request) {
+                    Some(path) => Opened::OpenIndex(path),
+                    // Never: the same path was decoded for the open.
+                    None => Opened::NotServed(NotServed::NotFound),
+                }
+            }
             // FR-PROXY-32: a backend's file is served as a static route
             // serves its decoded path, but a directory is a 404.
             (FileKind::Regular, OpenStep::Backend, TrailingSlash::Absent) => Opened::Serve,
@@ -113,16 +121,16 @@ impl Core {
                 };
                 after_head(&mut self.files, queued, actions)
             }
-            Opened::OpenIndex => {
+            Opened::OpenIndex(path) => {
                 // One file per connection: the directory goes first.
                 self.files.release(file);
                 actions.push(Action::CloseFile { file });
-                request.path.push(INDEX.to_vec());
+                request.content_type = content_type(INDEX);
                 let next = self.files.allocate(conn);
                 actions.push(Action::OpenFile {
                     file: next,
                     root: request.root,
-                    path: request.path.clone(),
+                    path,
                 });
                 ConnState::OpeningFile {
                     file: next,
@@ -398,13 +406,29 @@ impl Core {
 /// The name served for a directory requested with a trailing `/`.
 const INDEX: &[u8] = b"index.html";
 
+/// The path of a directory's `index.html` (FR-STATIC-05) for a static
+/// route's `request`: its path decoded again, `index.html` appended.
+/// `None` for a backend's file (never a directory to serve) or a path
+/// that no longer decodes (never: it was decoded for the first open).
+fn index_path(request: &StaticRequest) -> Option<RelPath> {
+    match request.source {
+        FileSource::Route { route_segments } => {
+            let mut path = relative_segments(&request.summary.path, route_segments).ok()?;
+            path.push(INDEX);
+            Some(path)
+        }
+        FileSource::Backend(_) => None,
+    }
+}
+
 /// What became of an opened static path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Opened {
     /// A regular file to send (or, for HEAD, describe).
     Serve,
-    /// A directory requested with `/`: open its `index.html` next.
-    OpenIndex,
+    /// A directory requested with `/`: open its `index.html`, at this
+    /// path, next.
+    OpenIndex(RelPath),
     NotServed(NotServed),
 }
 
@@ -552,12 +576,14 @@ pub(super) enum Plan {
     Respond(Status, Persistence),
 }
 
-/// Open `path` (relative segments) beneath static root `root`; the route's
-/// change policy applies while it is sent.
+/// Open `path` beneath static root `root`; the route's change policy
+/// applies while it is sent. The route has `route_segments` segments,
+/// skipped in the request's path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StaticOpen {
     root: RootId,
-    path: Vec<Vec<u8>>,
+    path: RelPath,
+    route_segments: usize,
     on_change: OnFileChange,
 }
 
@@ -594,6 +620,7 @@ pub(super) fn plan(
         Ok(path) => Plan::Open(StaticOpen {
             root,
             path,
+            route_segments: route.segments.len(),
             on_change,
         }),
         Err(_) => Plan::Respond(Status::NotFound, head.persistence),
@@ -622,15 +649,15 @@ impl Core {
         let StaticOpen {
             root,
             path,
+            route_segments,
             on_change,
         } = open;
         let slash = trailing_slash(&head.target.path);
+        let content_type = content_type(path.last());
         let file = self.files.allocate(conn);
-        actions.push(Action::OpenFile {
-            file,
-            root,
-            path: path.clone(),
-        });
+        // The decoded path moves to the driver: the core keeps no copy
+        // (NFR-RES-09).
+        actions.push(Action::OpenFile { file, root, path });
         c.state = ConnState::OpeningFile {
             file,
             slash,
@@ -648,10 +675,10 @@ impl Core {
                 query: head.target.query,
                 root,
                 on_change,
-                path,
+                content_type,
                 conditional: head.conditional,
                 range: head.range,
-                source: FileSource::Route,
+                source: FileSource::Route { route_segments },
             },
         };
     }

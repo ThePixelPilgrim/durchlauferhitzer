@@ -1947,8 +1947,12 @@ Failures, persistence, timeouts:
     whatever the mode: it is no missing layer, and the process may be
     half restricted. *(Stage 5 Task 5, builder calls:)* the startup log
     line of each layer is FR-LOG-05's `containment` kind. The exit-2 messages
-    are `<layer> is required but the kernel has none`, `seccomp is
-    required but it has no allow-list for this architecture`, `seccomp is
+    are ``<layer> is required but the kernel has none; write `containment
+    { <layer> best_effort; }` to serve without it``, ``seccomp is required
+    but it has no allow-list for this architecture; write `containment {
+    seccomp best_effort; }` to serve without it`` (the way out added in
+    the stage 9 final fix wave, review M4: a stock kernel may ship a
+    layer without enabling it), `seccomp is
     required but the personality has READ_IMPLIES_EXEC, which defeats its
     PROT_EXEC check` and `landlock is required but the kernel's Landlock
     (ABI N) cannot restrict device_ioctl, and seccomp, which covers it, is
@@ -1981,8 +1985,9 @@ Failures, persistence, timeouts:
     x86_64 and aarch64, as the CI runners show with `setarch -X`):
     if set, seccomp counts as "partly supported" (logged under
     `best_effort`, exit 2 under `required`). An unexpected call gets
-    `seccomp_action`: `fail` (the default) returns `EPERM` and the server
-    keeps running; `kill` ends the process. Every blocked call is logged by
+    `seccomp_action`: `kill` (the default since the owner decision
+    2026-11-09; `fail` before) ends the process; `fail` returns `EPERM`
+    and the server keeps running. Every blocked call is logged by
     the kernel (`SECCOMP_FILTER_FLAG_LOG`: the audit or kernel log, with the
     call number); the startup log says so, so an operator knows where to
     look. *Builder call:* the allow-list is proven by running the end-to-end
@@ -2030,7 +2035,10 @@ Failures, persistence, timeouts:
   - *Without systemd* (the HAProxy model, `-sf`), driven from outside the
     server by the init script:
     1. the script checks the new config (`--check`); on an error it stops
-       and the old process keeps serving;
+       and the old process keeps serving; *(stage 9 final fix wave,
+       review M3)* a check that passes with warnings (FR-PROC-08) has
+       its stderr shown (the warnings and the backstop line), and the
+       reload goes on;
     2. it starts a new process, which starts up as usual and binds the
        same `listen` addresses: every listener the server binds itself
        sets `SO_REUSEPORT` (and `SO_REUSEADDR`), so old and new share
@@ -2385,7 +2393,14 @@ Failures, persistence, timeouts:
 
   So total buffer memory ≤ `max_connections` × (receive + send + upstream
   buffers) + `max_connections` × send + 4 KiB, plus small fixed per-entry
-  state. Config load enforces the first term against `memory_limit` with
+  state, plus the state of each connection's request in flight: the
+  strings kept for its log (method, host, raw path and query, all copied
+  out of its head, so together at most `max_head`) and, while a static
+  open is pending, its decoded path (one buffer of at most the request
+  line, moved to the driver's open, the core keeping no copy; stage 9
+  final fix wave, review C1). That is at most twice `max_head` per
+  connection, outside `memory_limit` and carried by NFR-RES-09's
+  allowance. Config load enforces the first term against `memory_limit` with
   `worst_case_per_connection` (FR-CFG-21, owner decision 2026-10-27).
 
   `memory_limit` budgets each connection's own buffers only (owner decision
@@ -2478,9 +2493,15 @@ Failures, persistence, timeouts:
   constants are the driver's, measured and documented with their margin
   (in `driver/src/process/backstop.rs`); the startup log names the limit
   set. An allocation the
-  kernel refuses aborts the process (Rust's allocation-failure abort),
-  which the supervisor restarts: serving on with less memory than the
-  config promises is not an option. An inherited hard limit already
+  kernel refuses aborts the process (Rust's allocation-failure abort,
+  SIGABRT; with `RUST_BACKTRACE` set under `seccomp_action kill` the
+  backtrace's `getcwd` ends it by SIGSYS instead, a seccomp kill in the
+  kernel log that is no allow-list gap), which the supervisor restarts:
+  serving on with less memory than the config promises is not an
+  option. The backstop bounds the process's own memory only: kernel
+  memory (socket buffers, epoll state, the page cache) is outside
+  `RLIMIT_DATA` (bound it with the service's cgroup, `MemoryMax=`, or the
+  TCP memory sysctls; stage 9 final fix wave, review M5). An inherited hard limit already
   below the backstop fails startup (exit 2) naming both numbers, like
   NFR-RES-05. *Builder notes:* `RLIMIT_DATA` (Linux ≥ 4.7 counts private
   writable mappings: the heap and thread stacks, not glibc's `PROT_NONE`
@@ -2491,17 +2512,33 @@ Failures, persistence, timeouts:
   the controller's rulings on its measurement):* `RLIMIT_DATA`, soft and
   hard. The limit is `memory_limit + BASE_ALLOWANCE + disk_threads ×
   (DISK_THREAD_STACK + DISK_THREAD_OVERHEAD) + max_connections ×
-  PER_CONNECTION_ALLOWANCE`, saturating: three allowance terms, with the
+  (PER_CONNECTION_FIXED + REQUEST_STATE_FACTOR × max_head)`, saturating
+  (the per-connection term a formula since the stage 9 final fix wave,
+  controller ruling 2026-11-09 on review C1: a constant measured on idle
+  connections let a remote client abort the server): three allowance
+  terms, with the
   disk workers' stack pinned to `DISK_THREAD_STACK` = 2 MiB by
   `Builder::stack_size` (whatever `RUST_MIN_STACK` says).
   `BASE_ALLOWANCE` = 4 MiB, `DISK_THREAD_OVERHEAD` = 256 KiB (a thread's
   12 KiB `sigaltstack` and one 132 KiB glibc arena, with margin),
-  `PER_CONNECTION_ALLOWANCE` = 5 KiB. Measured 2026-11-09 (`VmData`,
-  x86_64, glibc and Rust's bundled musl):
-  - startup preallocates nothing per connection, so the per-connection
-    constant was measured with 4080 connections open: 1 056 (glibc) and
-    3 756 (musl) bytes each beyond the budgeted buffers, rounded up to
-    4 KiB, plus the 1 KiB send buffer of a refused connection;
+  `PER_CONNECTION_FIXED` = 8 KiB, `REQUEST_STATE_FACTOR` = 3. Measured
+  2026-11-09 (`VmData`, x86_64, glibc and Rust's bundled musl linked
+  statically):
+  - startup preallocates nothing per connection; with 4080 idle
+    connections open each costs 1 056 (glibc) and 3 756 (musl) bytes
+    beyond the budgeted buffers (Task 2's measurement, then the whole
+    allowance: 5 KiB with a refused connection's send buffer);
+  - every slot holding the worst request at once (a static `GET` of `/a`
+    repeated to the line's end with its open held pending, or a proxied
+    `POST` of that path to a backend that never answers; heads from
+    128 bytes to 256 KiB): beyond the budget, at least 6 717 bytes a
+    connection (musl, proxy, a 128-byte head: musl's size classes for
+    the exchange's buffers), so `PER_CONNECTION_FIXED` is that rounded up
+    to a KiB plus a refused connection's send buffer, 8 KiB; above it at
+    most 2.28 × `max_head` (musl, static: the summary's path and the
+    decoded path, about a line each), rounded up to the factor 3. The
+    term carries every per-request structure the core keeps outside
+    `memory_limit`; a new one needs its worst case in it;
   - a disk thread costs its stack plus 73.8 KiB (glibc) or 16.7 KiB
     (musl);
   - the base is twice the brief's derivation (the loaded reading less
@@ -2514,8 +2551,14 @@ Failures, persistence, timeouts:
   <hard> are available`. The backstop is set between the descriptor
   budget and the privilege drop (FR-PROC-04 step 6a), so root's
   `CAP_SYS_RESOURCE` is gone before anything could raise it. The disk
-  workers are spawned after it, so an allowance that is too small fails
-  startup (the thread spawn is refused, exit 2), not a loaded server.
+  workers are spawned after it, so a thread term that is too small fails
+  startup (the thread spawn is refused, exit 2: ``driver: cannot start
+  disk thread <n> of <threads>: <error>; RLIMIT_DATA is the memory
+  backstop (<bytes> bytes, NFR-RES-09)``, review M2); a per-connection
+  term that is too small would abort a loaded server, which is why it
+  carries the measured worst case, pinned by tests that put the worst
+  static and proxied request on every slot at the smallest
+  `memory_limit` FR-CFG-21 accepts.
   The 65536-connection test runs in CI's root step and in the container
   jobs (Alpine; nightly older glibc), which start with a raised `nofile`
   ulimit because Docker's root has no `CAP_SYS_RESOURCE`.

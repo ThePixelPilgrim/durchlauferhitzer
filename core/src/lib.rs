@@ -8,6 +8,7 @@ mod core;
 mod file;
 pub mod http;
 mod log;
+mod rel_path;
 mod relay_body;
 mod request_body;
 pub mod routing;
@@ -22,5 +23,6 @@ pub use crate::log::{
     BackendFailure, LimitKind, Log, RejectReason, RequestBodyError, RequestLine, RequestSummary,
     TimeoutKind,
 };
+pub use crate::rel_path::RelPath;
 pub use crate::time::Instant;
 pub use crate::upstream::{BackendId, UpstreamHolder, UpstreamId};

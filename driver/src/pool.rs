@@ -37,6 +37,7 @@
 //!   wanted them has ended.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -44,7 +45,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use durchlauferhitzer_core::FileId;
+use durchlauferhitzer_core::{FileId, RelPath};
 
 use crate::sys::eventfd::EventFd;
 use crate::sys::file::{Stat, fstat, openat2_beneath, readahead};
@@ -57,12 +58,13 @@ pub const DISK_THREAD_STACK: usize = 2 * 1024 * 1024;
 /// Work for a disk worker.
 #[derive(Debug)]
 pub enum Job {
-    /// Open `segments` beneath the static root `root_fd` (DRV-07/08; an
-    /// empty list is the root itself), then `fstat` the descriptor.
+    /// Open `path` beneath the static root `root_fd` (DRV-07/08; an empty
+    /// path is the root itself), then `fstat` the descriptor. The job
+    /// owns the action's path, moved, until the open is done.
     Open {
         file: FileId,
         root_fd: Arc<OwnedFd>,
-        segments: Vec<Vec<u8>>,
+        path: RelPath,
     },
     /// Read `len` bytes at `offset` of the open `fd` into the page cache,
     /// then `fstat` it for the stamp at the time of the read.
@@ -164,6 +166,32 @@ impl Shared {
     }
 }
 
+/// A disk worker the kernel refused to start: the `thread`-th (from 1) of
+/// `threads`, and why (`EAGAIN` when its stack cannot be mapped, as
+/// under too small a memory backstop, NFR-RES-09).
+#[derive(Debug)]
+pub struct SpawnFailed {
+    pub thread: u32,
+    pub threads: u32,
+    pub error: io::Error,
+}
+
+impl fmt::Display for SpawnFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "cannot start disk thread {} of {}: {}",
+            self.thread, self.threads, self.error
+        )
+    }
+}
+
+impl std::error::Error for SpawnFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// The disk worker pool.
 #[derive(Debug)]
 pub struct Pool {
@@ -176,7 +204,7 @@ impl Pool {
     /// Starts `threads` workers (`disk_threads`, 1–64 by the config) that
     /// `notify` `wake` after every result. Zero threads is `InvalidInput`;
     /// a thread that cannot be spawned stops the ones already started and
-    /// returns the error.
+    /// returns the error, of its kind, carrying a [`SpawnFailed`].
     pub fn start(threads: u32, wake: EventFd) -> io::Result<Pool> {
         if threads == 0 {
             return Err(io::Error::new(
@@ -208,9 +236,16 @@ impl Pool {
                 .spawn(move || work(&shared, &sender, &wake));
             match spawned {
                 Ok(handle) => pool.threads.push(handle),
-                Err(err) => {
+                Err(error) => {
                     pool.stop();
-                    return Err(err);
+                    return Err(io::Error::new(
+                        error.kind(),
+                        SpawnFailed {
+                            thread: i + 1,
+                            threads,
+                            error,
+                        },
+                    ));
                 }
             }
         }
@@ -345,8 +380,8 @@ fn run(job: Job) -> JobResult {
         Job::Open {
             file,
             root_fd,
-            segments,
-        } => match openat2_beneath(root_fd.as_fd(), &segments) {
+            path,
+        } => match openat2_beneath(root_fd.as_fd(), path.into_bytes()) {
             Ok(fd) => match fstat(fd.as_fd()) {
                 Ok(stat) => JobResult::Opened { file, fd, stat },
                 // `fd` closes here, on the worker: net zero descriptors, so
@@ -377,7 +412,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use durchlauferhitzer_core::{FileId, FileKind};
+    use durchlauferhitzer_core::{FileId, FileKind, RelPath};
 
     use super::{Cancel, GRACE, Job, JobResult, Pool, Stopped};
     use crate::sys::eventfd::EventFd;
@@ -407,7 +442,7 @@ mod tests {
         Job::Open {
             file: FileId(file),
             root_fd: Arc::clone(root),
-            segments: path.iter().map(|s| s.to_vec()).collect(),
+            path: RelPath::from_segments(path).unwrap(),
         }
     }
 
@@ -514,8 +549,10 @@ mod tests {
             jobs += 1;
             pool.submit(open(jobs, &root_fd, &[]));
             jobs += 1;
-            // A NUL byte: refused before any system call, still answered.
-            pool.submit(open(jobs, &root_fd, &[b"a\0b"]));
+            // A path below a file: `ENOTDIR`, still answered. (A NUL
+            // byte, refused before any system call, cannot reach a job:
+            // no `RelPath` holds one.)
+            pool.submit(open(jobs, &root_fd, &[b"a.txt", b"x"]));
         }
         let results = collect(&pool, &wake, usize::try_from(jobs).unwrap());
         let mut seen = BTreeMap::new();
@@ -535,11 +572,11 @@ mod tests {
                 }
                 JobResult::OpenFailed { file, error } => {
                     let errno = if file.0 % 4 == 2 {
-                        Some(libc::ENOENT)
+                        libc::ENOENT
                     } else {
-                        None
+                        libc::ENOTDIR
                     };
-                    assert_eq!(error.raw_os_error(), errno, "{file:?}");
+                    assert_eq!(error.raw_os_error(), Some(errno), "{file:?}");
                     assert!(file.0 % 4 == 2 || file.0 % 4 == 0, "{file:?}");
                 }
                 JobResult::ChunkRead { .. } | JobResult::ReadFailed { .. } => {

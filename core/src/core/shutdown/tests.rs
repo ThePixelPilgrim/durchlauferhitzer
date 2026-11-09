@@ -1,7 +1,7 @@
 //! The two drain targets (FR-PROC-05, FR-PROC-07): each restart case
 //! next to its shutdown twin, which keeps the behaviour of stage 4.
 
-use crate::core::test_support::{GET_F, PEER, accept, files_core, regular, secs, stamp};
+use crate::core::test_support::{GET_F, PEER, accept, files_core, regular, rel, secs, stamp};
 use crate::core::{Action, ConnId, Core, DrainTarget, Event};
 use crate::file::{FileId, RootId};
 use crate::http::conditional::Validators;
@@ -42,7 +42,7 @@ fn opens(actions: &[Action], file: FileId) -> bool {
     actions.contains(&Action::OpenFile {
         file,
         root: RootId(1),
-        path: vec![b"f.txt".to_vec()],
+        path: rel(&[b"f.txt"]),
     })
 }
 

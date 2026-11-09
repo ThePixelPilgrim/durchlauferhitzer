@@ -112,7 +112,7 @@ fn checks<'a>(
         (
             "a_file_beneath_the_root_opens",
             Box::new(move || {
-                let fd = ok("open", openat2_beneath(root.as_fd(), &["file.txt"]))?;
+                let fd = ok("open", openat2_beneath(root.as_fd(), b"file.txt".to_vec()))?;
                 match ok("read", read_fd(fd))?.as_str() {
                     "inside" => Ok(()),
                     other => Err(format!("read {other:?}")),
@@ -122,11 +122,11 @@ fn checks<'a>(
         (
             "a_directory_beneath_the_root_opens",
             Box::new(move || {
-                ok("open .", openat2_beneath::<&str>(root.as_fd(), &[]))?;
-                ok("open sub", openat2_beneath(root.as_fd(), &["sub"]))?;
+                ok("open .", openat2_beneath(root.as_fd(), Vec::new()))?;
+                ok("open sub", openat2_beneath(root.as_fd(), b"sub".to_vec()))?;
                 ok(
                     "open sub/index.html",
-                    openat2_beneath(root.as_fd(), &["sub", "index.html"]),
+                    openat2_beneath(root.as_fd(), b"sub/index.html".to_vec()),
                 )?;
                 let names: Vec<_> = ok("read_dir", fs::read_dir(moved.join("sub")))?
                     .map(|entry| entry.unwrap().file_name())

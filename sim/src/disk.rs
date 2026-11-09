@@ -275,7 +275,7 @@ impl Sim {
                     FileTrack {
                         conn,
                         root,
-                        key: path,
+                        key: path.segments().map(<[u8]>::to_vec).collect(),
                         phase: Phase::Opening,
                     },
                 );

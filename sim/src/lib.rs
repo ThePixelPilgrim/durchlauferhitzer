@@ -821,7 +821,7 @@ fn action_text(action: &Action) -> String {
         Action::Log(log) => format!("conn={} -> Log {log:?}", log.conn().0),
         Action::OpenFile { file, root, path } => {
             let path: Vec<String> = path
-                .iter()
+                .segments()
                 .map(|s| String::from_utf8_lossy(s).into_owned())
                 .collect();
             format!("file={} -> OpenFile root={} path={path:?}", file.0, root.0)

@@ -45,7 +45,7 @@ pub const NOBODY: u32 = 65534;
 mod conf;
 
 #[allow(unused_imports, reason = "each test binary uses part")]
-pub use conf::{Containment, PROXY_ROUTE, TempDir, config, seccomp_kill};
+pub use conf::{Containment, KILL_BLOCK, PROXY_ROUTE, TempDir, config, seccomp_kill};
 
 #[path = "port.rs"]
 mod port;

@@ -39,20 +39,15 @@ pub struct Stat {
     pub mtime_ns: u64,
 }
 
-/// Opens `segments`, joined with `/`, beneath `dir` with `openat2` and
-/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`; an empty list opens `"."` (the
-/// directory itself). The segments are not checked here: the kernel refuses
-/// `..`, absolute paths and symlinks (`EXDEV`, `ELOOP`). A NUL byte in a
-/// segment is `InvalidInput`. The open flags are always [`OPEN_FLAGS`], so
-/// the descriptor is never inheritable.
-pub fn openat2_beneath<S: AsRef<[u8]>>(dir: BorrowedFd<'_>, segments: &[S]) -> io::Result<OwnedFd> {
-    let mut path = Vec::new();
-    for (i, segment) in segments.iter().enumerate() {
-        if i > 0 {
-            path.push(b'/');
-        }
-        path.extend_from_slice(segment.as_ref());
-    }
+/// Opens `path` (a relative path: the contract's segments joined with
+/// `/`, taken by move so its buffer becomes the C string, NUL added in
+/// place when it has room) beneath `dir` with `openat2` and
+/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`; an empty path opens `"."` (the
+/// directory itself). The path is not checked here: the kernel refuses
+/// `..`, absolute paths and symlinks in any component (`EXDEV`, `ELOOP`).
+/// A NUL byte is `InvalidInput`. The open flags are always
+/// [`OPEN_FLAGS`], so the descriptor is never inheritable.
+pub fn openat2_beneath(dir: BorrowedFd<'_>, mut path: Vec<u8>) -> io::Result<OwnedFd> {
     if path.is_empty() {
         path.push(b'.');
     }

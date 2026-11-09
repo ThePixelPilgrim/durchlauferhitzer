@@ -1,4 +1,4 @@
-use crate::core::test_support::{GET_F, PEER, files_core, regular, request, secs, stamp};
+use crate::core::test_support::{GET_F, PEER, files_core, regular, rel, request, secs, stamp};
 use crate::core::{Action, ConnError, ConnId, Event, Interest};
 use crate::file::{FileError, FileFollows, FileId, FileKind, FileMeta, FileSegment, RootId};
 use crate::http::conditional::Validators;
@@ -33,7 +33,7 @@ fn file_is_opened_read_sent_and_closed() {
             Action::OpenFile {
                 file,
                 root: RootId(1),
-                path: vec![b"f.txt".to_vec()],
+                path: rel(&[b"f.txt"]),
             },
             Action::SetInterest {
                 conn,
@@ -130,7 +130,7 @@ fn file_is_opened_read_sent_and_closed() {
         actions.contains(&Action::OpenFile {
             file: FileId(2),
             root: RootId(1),
-            path: vec![b"f.txt".to_vec()],
+            path: rel(&[b"f.txt"]),
         }),
         "{actions:?}"
     );
@@ -212,6 +212,44 @@ fn directory_without_slash_is_closed_and_redirected() {
     assert_eq!(core.files.len(), 0);
 }
 
+/// The core keeps no copy of the decoded path (it moved to the driver
+/// with the `OpenFile`): a directory's `index.html` is opened at the
+/// request's path decoded again, the route's own segments skipped.
+#[test]
+fn the_index_path_is_decoded_again_below_the_route() {
+    let mut core = files_core();
+    let now = secs(0);
+    let actions = request(
+        &mut core,
+        now,
+        1,
+        b"GET /x/a%20b/c/ HTTP/1.1\r\nHost: a.test\r\n\r\n",
+    );
+    assert!(
+        actions.contains(&Action::OpenFile {
+            file: FileId(1),
+            root: RootId(1),
+            path: rel(&[b"a b", b"c"]),
+        }),
+        "{actions:?}"
+    );
+    let mut actions = Vec::new();
+    let meta = FileMeta {
+        kind: FileKind::Directory,
+        stamp: stamp(0),
+    };
+    let file = FileId(1);
+    core.handle(now, Event::FileOpened { file, meta }, &mut actions);
+    assert!(
+        actions.contains(&Action::OpenFile {
+            file: FileId(2),
+            root: RootId(1),
+            path: rel(&[b"a b", b"c", b"index.html"]),
+        }),
+        "{actions:?}"
+    );
+}
+
 #[test]
 fn directory_with_slash_opens_its_index_after_closing_it() {
     let mut core = files_core();
@@ -238,7 +276,7 @@ fn directory_with_slash_opens_its_index_after_closing_it() {
             Action::OpenFile {
                 file: FileId(2),
                 root: RootId(1),
-                path: vec![b"d".to_vec(), b"index.html".to_vec()],
+                path: rel(&[b"d", b"index.html"]),
             },
         ]
     );
@@ -697,7 +735,7 @@ fn file_follows_the_head_of_a_200_until_the_body_is_sent() {
     assert!(actions.contains(&Action::OpenFile {
         file: FileId(2),
         root: RootId(1),
-        path: vec![b"f.txt".to_vec()],
+        path: rel(&[b"f.txt"]),
     }));
     assert_eq!(core.file_follows(conn), FileFollows::No, "next request");
 
@@ -718,7 +756,7 @@ fn file_follows_the_head_of_a_200_until_the_body_is_sent() {
         actions.contains(&Action::OpenFile {
             file: FileId(2),
             root: RootId(1),
-            path: vec![b"f.txt".to_vec()],
+            path: rel(&[b"f.txt"]),
         }),
         "{actions:?}"
     );

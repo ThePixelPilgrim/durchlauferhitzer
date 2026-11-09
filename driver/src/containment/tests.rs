@@ -38,7 +38,7 @@ fn landlock_missing_is_logged_under_best_effort_and_fatal_under_required() {
     );
     assert_eq!(
         message(files_plan(Layer::Required, Abi::Missing)),
-        "landlock is required but the kernel has none"
+        "landlock is required but the kernel has none; write `containment { landlock best_effort; }` to serve without it"
     );
 }
 
@@ -140,7 +140,7 @@ fn seccomp_missing_in_the_kernel() {
             Support::Missing,
             Personality::Plain
         )),
-        "seccomp is required but the kernel has none"
+        "seccomp is required but the kernel has none; write `containment { seccomp best_effort; }` to serve without it"
     );
 }
 
@@ -153,7 +153,7 @@ fn seccomp_missing_for_the_architecture() {
         );
         assert_eq!(
             message(calls(Layer::Required, None, support, Personality::Plain)),
-            "seccomp is required but it has no allow-list for this architecture"
+            "seccomp is required but it has no allow-list for this architecture; write `containment { seccomp best_effort; }` to serve without it"
         );
     }
 }
