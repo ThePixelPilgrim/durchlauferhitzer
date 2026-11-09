@@ -63,7 +63,7 @@ pub fn render_fixed(
     date: Option<&ImfFixdate>,
     out: &mut Vec<u8>,
 ) {
-    render_plain(status, "", persistence, body, date, out);
+    render_plain(status, Unsatisfiable::No, persistence, body, date, out);
 }
 
 /// Appends the `416 Range Not Satisfiable` of a `GET` whose one range
@@ -78,10 +78,9 @@ pub fn render_range_not_satisfiable(
     date: Option<&ImfFixdate>,
     out: &mut Vec<u8>,
 ) {
-    let extra = format!("Content-Range: bytes */{size}\r\n{ACCEPT_RANGES}");
     render_plain(
         Status::RangeNotSatisfiable,
-        &extra,
+        Unsatisfiable::Size(size),
         persistence,
         body,
         date,
@@ -89,25 +88,43 @@ pub fn render_range_not_satisfiable(
     );
 }
 
-/// A fixed response for `status`, with the `extra` header lines right
-/// after `Content-Length`.
+/// Whether a plain response is a `416` naming the file's size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unsatisfiable {
+    No,
+    Size(u64),
+}
+
+/// A fixed response for `status`, written straight into `out` (nothing
+/// else is allocated); a `416` carries `Content-Range` and
+/// `Accept-Ranges` right after `Content-Length`.
 fn render_plain(
     status: Status,
-    extra: &str,
+    unsatisfiable: Unsatisfiable,
     persistence: Persistence,
     body: BodyMode,
     date: Option<&ImfFixdate>,
     out: &mut Vec<u8>,
 ) {
-    let text = format!("{} {}\n", status.code(), status.reason());
-    out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", status.code(), status.reason()).as_bytes());
+    let (code, reason) = (status.code(), status.reason());
+    // Writing into a `Vec` never fails.
+    let _infallible = write!(out, "HTTP/1.1 {code} {reason}\r\n");
     put_date(date, out);
-    let mut head = format!(
-        "Content-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n{extra}X-Content-Type-Options: nosniff\r\n",
-        text.len()
+    // The body is `<code> <reason>\n`; every code has three digits.
+    let text_len = reason.len().saturating_add(5);
+    let _infallible = write!(
+        out,
+        "Content-Type: text/plain; charset=utf-8\r\nContent-Length: {text_len}\r\n"
     );
+    match unsatisfiable {
+        Unsatisfiable::No => {}
+        Unsatisfiable::Size(size) => {
+            let _infallible = write!(out, "Content-Range: bytes */{size}\r\n{ACCEPT_RANGES}");
+        }
+    }
+    out.extend_from_slice(b"X-Content-Type-Options: nosniff\r\n");
     match status {
-        Status::MethodNotAllowed => head.push_str("Allow: GET, HEAD\r\n"),
+        Status::MethodNotAllowed => out.extend_from_slice(b"Allow: GET, HEAD\r\n"),
         Status::Ok
         | Status::PartialContent
         | Status::MovedPermanently
@@ -126,13 +143,14 @@ fn render_plain(
         | Status::HttpVersionNotSupported => {}
     }
     match persistence {
-        Persistence::Close => head.push_str("Connection: close\r\n"),
+        Persistence::Close => out.extend_from_slice(CONNECTION_CLOSE.as_bytes()),
         Persistence::KeepAlive => {}
     }
-    head.push_str("\r\n");
-    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(b"\r\n");
     match body {
-        BodyMode::Full => out.extend_from_slice(text.as_bytes()),
+        BodyMode::Full => {
+            let _infallible = writeln!(out, "{code} {reason}");
+        }
         BodyMode::HeadOnly => {}
     }
 }
@@ -623,6 +641,36 @@ mod tests {
         );
     }
 
+    /// A 416 and a fixed response are appended after the bytes `out`
+    /// holds, the 416 naming any size, the 405 its `Allow` line after
+    /// `X-Content-Type-Options`.
+    #[test]
+    fn plain_responses_append_their_exact_bytes() {
+        let mut out = b"x".to_vec();
+        render_range_not_satisfiable(u64::MAX, Persistence::Close, BodyMode::Full, None, &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "xHTTP/1.1 416 Range Not Satisfiable\r\nContent-Type: text/plain; charset=utf-8\r\n\
+             Content-Length: 26\r\nContent-Range: bytes */18446744073709551615\r\n\
+             Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\
+             Connection: close\r\n\r\n416 Range Not Satisfiable\n"
+        );
+        let mut out = b"y".to_vec();
+        render_fixed(
+            Status::MethodNotAllowed,
+            Persistence::KeepAlive,
+            BodyMode::Full,
+            None,
+            &mut out,
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "yHTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain; charset=utf-8\r\n\
+             Content-Length: 23\r\nX-Content-Type-Options: nosniff\r\nAllow: GET, HEAD\r\n\
+             \r\n405 Method Not Allowed\n"
+        );
+    }
+
     #[test]
     fn renders_file_head_close() {
         let mut out = b"x".to_vec();
@@ -679,6 +727,44 @@ mod tests {
             out,
             b"HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 23\r\nX-Content-Type-Options: nosniff\r\nAllow: GET, HEAD\r\n\r\n405 Method Not Allowed\n"
         );
+    }
+
+    /// Every fixed response's `Content-Length` is its body's length.
+    #[test]
+    fn content_length_is_the_body_length_for_every_status() {
+        for status in [
+            Status::Ok,
+            Status::PartialContent,
+            Status::BadRequest,
+            Status::MovedPermanently,
+            Status::NotModified,
+            Status::NotFound,
+            Status::MethodNotAllowed,
+            Status::RequestTimeout,
+            Status::ContentTooLarge,
+            Status::UriTooLong,
+            Status::RangeNotSatisfiable,
+            Status::ExpectationFailed,
+            Status::RequestHeaderFieldsTooLarge,
+            Status::BadGateway,
+            Status::ServiceUnavailable,
+            Status::GatewayTimeout,
+            Status::HttpVersionNotSupported,
+        ] {
+            let mut out = Vec::new();
+            render_fixed(status, Persistence::Close, BodyMode::Full, None, &mut out);
+            let text = String::from_utf8(out).unwrap();
+            let (head, body) = text.split_once("\r\n\r\n").unwrap();
+            assert_eq!(
+                body,
+                format!("{} {}\n", status.code(), status.reason()),
+                "{status:?}"
+            );
+            assert!(
+                head.contains(&format!("\r\nContent-Length: {}\r\n", body.len())),
+                "{text}"
+            );
+        }
     }
 
     #[test]
