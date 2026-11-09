@@ -12,7 +12,7 @@ use super::pool::make_room;
 use super::relay::{ClientSide, client_side};
 use super::request::HeadEnd;
 use super::upload::body_idle_deadline;
-use super::{Action, ConnId, Core, InternalRoute, InternalRouteId, Mode};
+use super::{Action, ConnId, Core, InternalRoute, Mode};
 use crate::config::{BodyLimit, Limits, Pooling, ProxyRoute, Route, StripPrefix};
 use crate::conn::{Conn, ConnState, ProxyRequest, Replay, Reuse, UnreadBody};
 use crate::http::conditional::Conditional;
@@ -57,14 +57,15 @@ pub(super) struct Forward {
 /// forwardable (FR-PROXY-08: at most one `X-Forwarded-For`, else 400 and
 /// close), and a `Content-Length` must not exceed the route's
 /// `max_request_body` (FR-PROXY-23: else 413 and close, its body unread).
-/// Any method is forwarded (FR-PROXY-01).
+/// Any method is forwarded (FR-PROXY-01). `internal` is the route's
+/// `internal_files` as [`Core::new`] resolved it, which the request then
+/// carries.
 pub(super) fn plan(
     route: &Route,
     target: &ProxyRoute,
     head: &RequestHead,
     backends: &[SocketAddr],
-    internal: Option<InternalRouteId>,
-    internal_routes: &[Arc<InternalRoute>],
+    internal: Option<&Arc<InternalRoute>>,
 ) -> ProxyPlan {
     if let Err(error) = check_forwardable(head) {
         return ProxyPlan::Respond(error.status(), Persistence::Close);
@@ -89,26 +90,13 @@ pub(super) fn plan(
         StripPrefix::Strip => strip_segments(&head.target.path, route.segments.len()),
         StripPrefix::Keep => head.target.path.clone(),
     };
-    // `internal` was resolved for this route in `Core::new`; this is the
-    // one lookup of its setting, which the request then carries. A route
-    // with `internal_files` whose id does not resolve (unreachable in
-    // practice) fails closed: nothing is forwarded without its
-    // file-header rules, like an unlisted backend.
-    let internal = match (&target.internal_files, internal) {
-        (None, _) => None,
-        (Some(_), Some(id)) => match internal_routes.get(id.0 as usize) {
-            Some(route) => Some(Arc::clone(route)),
-            None => return ProxyPlan::Respond(Status::BadGateway, head.persistence),
-        },
-        (Some(_), None) => return ProxyPlan::Respond(Status::BadGateway, head.persistence),
-    };
     ProxyPlan::Forward(Forward {
         backend,
         path,
         limit,
         response_limit: target.max_response_body,
         pool: target.pool,
-        internal,
+        internal: internal.map(Arc::clone),
     })
 }
 

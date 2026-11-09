@@ -67,15 +67,12 @@ pub struct Core {
     /// Distinct static roots, then `internal_files` roots, in config order;
     /// a `RootId` indexes it.
     static_roots: Vec<PathBuf>,
-    /// The distinct `internal_files` settings of the proxy routes, in
-    /// config order (FR-PROXY-32); an [`InternalRouteId`] indexes it. A
-    /// forwarded request shares its route's entry (an `Arc`: nothing is
-    /// allocated per request, and nothing is looked up again).
-    internal_routes: Vec<Arc<InternalRoute>>,
     /// For each config route, `[host][route]` (a
-    /// [`RouteIndex`](crate::routing::RouteIndex)), the id
-    /// of its `internal_files`, resolved once here; `None` without.
-    route_internal: Vec<Vec<Option<InternalRouteId>>>,
+    /// [`RouteIndex`](crate::routing::RouteIndex)), its `internal_files`
+    /// (FR-PROXY-32), resolved once in [`Core::new`]; `None` without.
+    /// Identical settings share one `Arc`, and a forwarded request shares
+    /// its route's: nothing is allocated per request.
+    route_internal: Vec<Vec<Option<Arc<InternalRoute>>>>,
     files: FileTable,
     /// Distinct backends in config order; a `BackendId` indexes it.
     backends: Vec<SocketAddr>,
@@ -96,11 +93,6 @@ pub struct Core {
     mode: Mode,
 }
 
-/// An index into [`Core`]'s `internal_routes`: a proxy route's
-/// `internal_files`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InternalRouteId(pub(crate) u32);
-
 /// A proxy route's `internal_files` (FR-CFG-26, FR-PROXY-32), built once in
 /// [`Core::new`]: the setting, and its root's [`RootId`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,14 +101,14 @@ pub(crate) struct InternalRoute {
     pub(crate) root: RootId,
 }
 
-/// The [`InternalRouteId`] of `route`'s `internal_files`, if it has one:
-/// its root joins `static_roots` (once per path), the setting joins
-/// `internal_routes` (once per distinct setting).
+/// `route`'s `internal_files`, if it has one: its root joins
+/// `static_roots` (once per path), the setting joins `internal_routes`
+/// (once per distinct setting), and the route shares that entry.
 fn internal_route(
     route: &Route,
     static_roots: &mut Vec<PathBuf>,
     internal_routes: &mut Vec<Arc<InternalRoute>>,
-) -> Option<InternalRouteId> {
+) -> Option<Arc<InternalRoute>> {
     let RouteAction::Proxy(ProxyRoute {
         internal_files: Some(internal),
         ..
@@ -131,18 +123,16 @@ fn internal_route(
             static_roots.len() - 1
         }
     };
-    let index = match internal_routes.iter().position(|r| r.files == *internal) {
-        Some(index) => index,
-        None => {
-            internal_routes.push(Arc::new(InternalRoute {
-                files: internal.clone(),
-                // A config holds far fewer than `u32::MAX` roots.
-                root: RootId(u32::try_from(root).unwrap_or(u32::MAX)),
-            }));
-            internal_routes.len() - 1
-        }
-    };
-    u32::try_from(index).ok().map(InternalRouteId)
+    if let Some(shared) = internal_routes.iter().find(|r| r.files == *internal) {
+        return Some(Arc::clone(shared));
+    }
+    let entry = Arc::new(InternalRoute {
+        files: internal.clone(),
+        // A config holds far fewer than `u32::MAX` roots.
+        root: RootId(u32::try_from(root).unwrap_or(u32::MAX)),
+    });
+    internal_routes.push(Arc::clone(&entry));
+    Some(entry)
 }
 
 /// Whether the core takes new work.
@@ -190,7 +180,7 @@ impl Core {
         // FR-CFG-26: the `internal_files` roots follow all the static ones
         // (so a static root's id does not depend on them).
         let mut internal_routes: Vec<Arc<InternalRoute>> = Vec::new();
-        let mut route_internal: Vec<Vec<Option<InternalRouteId>>> = Vec::new();
+        let mut route_internal: Vec<Vec<Option<Arc<InternalRoute>>>> = Vec::new();
         for host in &config.hosts {
             let mut ids = Vec::new();
             for route in &host.routes {
@@ -225,7 +215,6 @@ impl Core {
             refused_per_group: BTreeMap::new(),
             scratch: vec![0; LINGER_SCRATCH].into_boxed_slice(),
             static_roots,
-            internal_routes,
             route_internal,
             files: FileTable::new(),
             backends,

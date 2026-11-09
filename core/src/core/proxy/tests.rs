@@ -383,18 +383,15 @@ fn worst_case_per_connection_equals_the_buffers_the_core_allocates() {
     }
 }
 
-/// FR-PROXY-32: `plan` hands a route's `internal_files` to the request
-/// from the one lookup made for it; a route with `internal_files` whose id
-/// does not resolve fails closed (502, nothing forwarded), like a backend
-/// that is not listed.
+/// FR-PROXY-32: `plan` hands the route's `internal_files`, resolved once
+/// in `Core::new`, to the request: the same `Arc`, nothing allocated.
 #[test]
-fn plan_takes_the_routes_internal_files_or_fails_closed() {
+fn plan_hands_the_routes_internal_files_to_the_request() {
     use super::{ProxyPlan, plan};
     use crate::config::{RouteAction, load};
-    use crate::core::{InternalRoute, InternalRouteId};
+    use crate::core::InternalRoute;
     use crate::file::RootId;
-    use crate::http::request::{HeadLimits, ParseStatus, Persistence, parse_head};
-    use crate::http::status::Status;
+    use crate::http::request::{HeadLimits, ParseStatus, parse_head};
     use std::sync::Arc;
     let config = load(
         "listen 127.0.0.1:80; host a.test { path /p { proxy 127.0.0.1:3000; \
@@ -415,15 +412,7 @@ fn plan_takes_the_routes_internal_files_or_fails_closed() {
         files: target.internal_files.clone().unwrap(),
         root: RootId(0),
     });
-    let routes = [Arc::clone(&entry)];
-    match plan(
-        route,
-        target,
-        &head,
-        &backends,
-        Some(InternalRouteId(0)),
-        &routes,
-    ) {
+    match plan(route, target, &head, &backends, Some(&entry)) {
         ProxyPlan::Forward(forward) => assert!(
             forward
                 .internal
@@ -433,10 +422,5 @@ fn plan_takes_the_routes_internal_files_or_fails_closed() {
         ),
         other => panic!("expected a forward, got {other:?}"),
     }
-    for (id, routes) in [(None, &routes[..]), (Some(InternalRouteId(0)), &[][..])] {
-        assert_eq!(
-            plan(route, target, &head, &backends, id, routes),
-            ProxyPlan::Respond(Status::BadGateway, Persistence::KeepAlive)
-        );
-    }
+    assert_eq!(Arc::strong_count(&entry), 1, "the plan was dropped");
 }

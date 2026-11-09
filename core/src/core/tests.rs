@@ -1,6 +1,6 @@
 use crate::conn::SEND_CAPACITY;
 use crate::core::test_support::{PEER, core};
-use crate::core::{ConnError, ConnId, Core, Event, InternalRouteId};
+use crate::core::{ConnError, ConnId, Core, Event};
 use crate::file::{FileStamp, RootId};
 use crate::http::conditional::Validators;
 use crate::http::request::Persistence;
@@ -10,6 +10,7 @@ use crate::http::response::{
 };
 use crate::time::Instant;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The send buffer bound: every fixed response, every file head (200 and
 /// 206, FR-STATIC-19), every 416 and every `304` (FR-STATIC-18), in every
@@ -215,33 +216,41 @@ const INTERNAL: &str = "listen 127.0.0.1:80;\n\
       path /p { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1; }\n\
     }\n";
 
-/// FR-PROXY-32: each route's `internal_files` id is resolved once, by
-/// its place in the config; identical settings share one.
+/// FR-PROXY-32: each route's `internal_files` is resolved once, by its
+/// place in the config, with its root's id in `static_roots`; routes
+/// without one have none.
 #[test]
 fn each_route_maps_to_its_internal_files() {
     let core = Core::new(crate::config::load(INTERNAL).unwrap());
-    let id = |n| Some(InternalRouteId(n));
+    let roots: Vec<Vec<Option<(PathBuf, RootId)>>> = core
+        .route_internal
+        .iter()
+        .map(|routes| {
+            routes
+                .iter()
+                .map(|r| r.as_ref().map(|r| (r.files.root.clone(), r.root)))
+                .collect()
+        })
+        .collect();
+    let files = Some((PathBuf::from("/srv/files"), RootId(1)));
+    let shared = Some((PathBuf::from("/srv/shared"), RootId(2)));
     assert_eq!(
-        core.route_internal,
-        [vec![id(0), id(1), id(1), None], vec![None]]
+        roots,
+        [vec![files, shared.clone(), shared, None], vec![None]]
     );
 }
 
-/// FR-PROXY-32: each distinct `internal_files` setting is listed once, in
-/// config order, with its root's id in `static_roots`.
+/// FR-PROXY-32: identical `internal_files` settings share one entry (an
+/// `Arc`, built once); distinct ones do not.
 #[test]
-fn internal_routes_point_at_their_roots() {
+fn identical_internal_files_share_one_entry() {
     let core = Core::new(crate::config::load(INTERNAL).unwrap());
-    let listed: Vec<(PathBuf, RootId)> = core
-        .internal_routes
-        .iter()
-        .map(|r| (r.files.root.clone(), r.root))
-        .collect();
-    assert_eq!(
-        listed,
-        [
-            (PathBuf::from("/srv/files"), RootId(1)),
-            (PathBuf::from("/srv/shared"), RootId(2)),
-        ]
-    );
+    let [p, q, r, _] = core.route_internal[0].as_slice() else {
+        panic!("four routes on a.test");
+    };
+    let (Some(p), Some(q), Some(r)) = (p, q, r) else {
+        panic!("three internal_files routes");
+    };
+    assert!(Arc::ptr_eq(q, r));
+    assert!(!Arc::ptr_eq(p, q));
 }
