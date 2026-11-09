@@ -412,6 +412,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "restart: served with close",
     // File headers (FR-PROXY-32, `files.rs`).
     "forged-file-header",
+    "underscore-spelled-header",
     "file-header-on-non-200",
     "other-file-header-on-200",
     "x-accel-star-stripped",

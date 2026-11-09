@@ -97,8 +97,26 @@ const FORGED: &[(&str, &[u8])] = &[
     ("X-Accel-Mapping", b"/srv/files/=/"),
 ];
 
+/// Headers no client may send a backend under any spelling with `_` for
+/// `-` (FR-PROXY-06, -32, owner decision 2026-11-09): the file headers,
+/// the client identity headers, and `X-Forwarded-For`, whose hyphenated
+/// line alone the proxy merges.
+const UNDERSCORABLE: &[(&str, &[u8])] = &[
+    ("X-Sendfile", b"/etc/passwd"),
+    ("X-Accel-Redirect", b"/protected/../x"),
+    ("X-Sendfile-Type", b"X-Sendfile"),
+    ("X-Accel-Mapping", b"/=/protected/"),
+    ("X-Forwarded-For", b"203.0.113.9"),
+    ("X-Forwarded-Proto", b"https"),
+    ("X-Real-IP", b"203.0.113.9"),
+    ("X-Forwarded-Host", b"evil.test"),
+    ("X-Forwarded-Port", b"443"),
+];
+
 /// Forged file header lines for a client request, one time in four: one
-/// to three of them in any case, now and then also named in `Connection`.
+/// to three of them in any case, now and then also named in `Connection`;
+/// one time in three also a header of `UNDERSCORABLE` spelled with `_`
+/// for some `-` (at least one), in any case.
 pub(crate) fn forged_lines(rng: &mut fastrand::Rng) -> Vec<(String, Vec<u8>)> {
     let mut lines = Vec::new();
     if rng.u8(0..4) != 0 {
@@ -113,7 +131,34 @@ pub(crate) fn forged_lines(rng: &mut fastrand::Rng) -> Vec<(String, Vec<u8>)> {
         let named = rng.choice(FORGED).map_or("X-Sendfile", |(n, _)| n);
         lines.push(("Connection".to_owned(), any_case(rng, named).into_bytes()));
     }
+    if rng.u8(0..3) == 0 {
+        if let Some(&(name, value)) = rng.choice(UNDERSCORABLE) {
+            let spelled = underscored(rng, name);
+            lines.push((any_case(rng, &spelled), value.to_vec()));
+        }
+    }
     lines
+}
+
+/// `name` with some of its `-` (at least one, all half the time) as `_`.
+fn underscored(rng: &mut fastrand::Rng, name: &str) -> String {
+    let dashes = name.bytes().filter(|b| *b == b'-').count();
+    let forced = rng.usize(0..dashes.max(1));
+    let all = rng.bool();
+    let mut n = 0;
+    name.chars()
+        .map(|c| {
+            if c != '-' {
+                return c;
+            }
+            n += 1;
+            if all || n - 1 == forced || rng.bool() {
+                '_'
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn any_case(rng: &mut fastrand::Rng, name: &str) -> String {
