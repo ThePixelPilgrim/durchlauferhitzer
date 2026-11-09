@@ -97,6 +97,12 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// `head` with `Connection: close` before its blank line.
+fn closing(head: &str) -> String {
+    let open = head.strip_suffix("\r\n").unwrap_or(head);
+    format!("{open}Connection: close\r\n\r\n")
+}
+
 /// The merged `200` of `a.pdf` with no backend headers, keep-alive.
 fn plain_200(sim: &Sim) -> String {
     format!(
@@ -169,26 +175,39 @@ fn the_named_file_is_served() {
 /// all written. The file is served all the same.
 #[test]
 fn the_upstream_closes_unless_the_exchange_is_reusable() {
-    let cases: [(&[u8], &[u8]); 3] = [
+    // The client keeps its persistence (HTTP/1.0 always closes,
+    // FR-HTTP-09), or closes when its request body was not all read
+    // (FR-PROXY-27, -28).
+    let cases: [(&[u8], &[u8], Persistence); 3] = [
         (
             b"GET /dl/x HTTP/1.0\r\nHost: example.test\r\nConnection: keep-alive\r\n\r\n",
             NAMES_A,
+            Persistence::Close,
         ),
         (
             GET,
             b"HTTP/1.0 200 OK\r\nX-Accel-Redirect: /protected/a.pdf\r\nContent-Length: 0\r\n\r\n",
+            Persistence::KeepAlive,
         ),
         (
             b"POST /dl/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nab",
             NAMES_A,
+            Persistence::Close,
         ),
     ];
-    for (wire, backend) in cases {
+    for (wire, backend, persistence) in cases {
         let mut sim = sim();
         let c = served(&mut sim, wire, backend);
         assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
-        assert!(
-            sim.take_received(c).ends_with(&pattern(1000)),
+        let head = match persistence {
+            Persistence::KeepAlive => plain_200(&sim),
+            Persistence::Close => closing(&plain_200(&sim)),
+        };
+        let mut expected = head.into_bytes();
+        expected.extend(pattern(1000));
+        assert_eq!(
+            text(&sim.take_received(c)),
+            text(&expected),
             "{}",
             sim.trace()
         );
@@ -477,6 +496,7 @@ fn file_changes_follow_the_routes_setting() {
     );
 
     let mut sim = self::sim();
+    let at_open = validators(&sim, "big.bin");
     let new = grown(&sim);
     sim.change_during_send(ROOT, "big.bin", 1, new);
     let c = served(
@@ -484,13 +504,20 @@ fn file_changes_follow_the_routes_setting() {
         b"GET /grow/x HTTP/1.1\r\nHost: example.test\r\n\r\n",
         names_big,
     );
+    // The size and validators at open (FR-STATIC-15 `allow_growth`).
+    let mut expected = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {big}\r\n\
+         {}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n",
+        at_open
+    )
+    .into_bytes();
+    expected.extend(pattern(big));
     let received = sim.take_received(c);
     assert!(
-        received.ends_with(&pattern(big)),
+        received == expected,
         "{}",
-        text(&received[..200])
+        text(&received[..received.len().min(400)])
     );
-    assert!(text(&received).contains(&format!("Content-Length: {big}\r\n")));
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
 }
 
