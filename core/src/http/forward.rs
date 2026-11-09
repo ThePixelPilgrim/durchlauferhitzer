@@ -106,6 +106,31 @@ const FILE_REQUEST: [&str; 4] = [
     "x-accel-mapping",
 ];
 
+/// Whether a client's request header never reaches the backend for its
+/// name (beyond the hop-by-hop ones): a client identity header or a file
+/// header, also when spelled with `_` for `-` (owner decision 2026-11-09:
+/// CGI servers such as Rack map `X_Accel_Mapping` and `X-Accel-Mapping`
+/// to the same key), and any `_` spelling of `x-forwarded-for`, whose
+/// hyphenated line alone the proxy merges (FR-PROXY-06, -08, -32). Names
+/// are the parser's lowercased ones; nothing is allocated.
+fn is_withheld(name: &str) -> bool {
+    CLIENT_IDENTITY
+        .iter()
+        .chain(&FILE_REQUEST)
+        .any(|entry| same_but_underscores(name, entry))
+        || (name.contains('_') && same_but_underscores(name, "x-forwarded-for"))
+}
+
+/// Whether `name` equals `entry` byte for byte, with every `_` in `name`
+/// read as `-`.
+fn same_but_underscores(name: &str, entry: &str) -> bool {
+    name.len() == entry.len()
+        && name
+            .bytes()
+            .zip(entry.bytes())
+            .all(|(n, e)| n == e || (n == b'_' && e == b'-'))
+}
+
 /// Whether a backend's response header is a file header that never
 /// reaches a client (FR-PROXY-32): `x-sendfile` and `x-accel-redirect` on
 /// every route, every `x-accel-*` on an `x-accel-redirect` route. Names
@@ -131,7 +156,8 @@ fn is_file_response_header(name: &str, files: Option<&InternalFiles>) -> bool {
 /// identity headers (`x-forwarded-proto`, `forwarded`, `x-real-ip`,
 /// `x-forwarded-host`, `x-forwarded-port`) and the file headers
 /// (`x-sendfile`, `x-accel-redirect`, `x-sendfile-type`,
-/// `x-accel-mapping`, FR-PROXY-32);
+/// `x-accel-mapping`, FR-PROXY-32), each also when spelled with `_` for
+/// `-`, as is `x-forwarded-for` (owner decision 2026-11-09);
 /// `content-length` is
 /// re-rendered without leading zeros, everything else (`host`,
 /// `transfer-encoding`, …) as received. Then come `x-forwarded-for` (the
@@ -280,11 +306,10 @@ fn backend_request(
     });
 
     let listed = listed_tokens(&head.headers);
-    let forwardable = head.headers.iter().filter(|h| {
-        !is_hop_by_hop_bytes(h.name.as_bytes(), &listed)
-            && !CLIENT_IDENTITY.contains(&h.name.as_str())
-            && !FILE_REQUEST.contains(&h.name.as_str())
-    });
+    let forwardable = head
+        .headers
+        .iter()
+        .filter(|h| !is_hop_by_hop_bytes(h.name.as_bytes(), &listed) && !is_withheld(&h.name));
     for header in forwardable.clone() {
         match header.name.as_str() {
             "x-forwarded-for" => {}

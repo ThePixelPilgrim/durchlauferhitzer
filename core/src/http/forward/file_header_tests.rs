@@ -269,3 +269,59 @@ fn kept_lines_drop_framing_validators_and_file_headers() {
         }
     );
 }
+
+/// The hints a route adds after `x-forwarded-proto`, by route kind.
+fn routes_with_hints() -> [(Option<InternalFiles>, &'static str); 3] {
+    [
+        (None, ""),
+        (Some(x_sendfile()), "x-sendfile-type: X-Sendfile\r\n"),
+        (
+            Some(x_accel_redirect()),
+            "x-sendfile-type: X-Accel-Redirect\r\nx-accel-mapping: /srv/files/=/protected/\r\n",
+        ),
+    ]
+}
+
+/// Owner decision 2026-11-09 (FR-PROXY-32 Stripping): a client header
+/// whose name, with `_` read as `-`, is a file header never reaches the
+/// backend (CGI servers such as Rack map `X_Accel_Mapping` and
+/// `X-Accel-Mapping` to the same key), on every kind of route. Names that
+/// differ by more than the spelling pass.
+#[test]
+fn underscore_spelled_file_headers_never_reach_the_backend() {
+    let head = request(
+        b"GET /p HTTP/1.1\r\nHost: a\r\nX_Sendfile: /etc/passwd\r\n\
+          X_Accel_Redirect: /x\r\nX_Sendfile_Type: X-Accel-Redirect\r\n\
+          X_Accel_Mapping: /evil=/x/\r\nx-accel_mapping: /evil=/x/\r\n\
+          X_Sendfile_Types: kept\r\nX__Sendfile: kept\r\nX_Sendfile_: kept\r\n\r\n",
+    );
+    let kept = "GET /p HTTP/1.1\r\nhost: a\r\nx_sendfile_types: kept\r\nx__sendfile: kept\r\n\
+                x_sendfile_: kept\r\nx-forwarded-for: 192.0.2.1\r\nx-forwarded-proto: http\r\n";
+    for (files, hints) in routes_with_hints() {
+        assert_eq!(
+            backend_head(&head, files.as_ref()),
+            format!("{kept}{hints}connection: close\r\n\r\n")
+        );
+    }
+}
+
+/// Owner decision 2026-11-09 (FR-PROXY-06): the same holds for the client
+/// identity headers and for `X-Forwarded-For`, whose only spelling the
+/// proxy merges is the hyphenated one, on every kind of route.
+#[test]
+fn underscore_spelled_identity_headers_never_reach_the_backend() {
+    let head = request(
+        b"GET /p HTTP/1.1\r\nHost: a\r\nX_Forwarded_For: 6.6.6.6\r\nX_Real_IP: 6.6.6.6\r\n\
+          X_Forwarded_Proto: https\r\nX_Forwarded_Host: evil\r\nX_Forwarded_Port: 1\r\n\
+          x-forwarded_host: evil\r\nForwarded: for=6.6.6.6\r\nX-Forwarded-For: 1.2.3.4\r\n\
+          X_Real_IPs: kept\r\n\r\n",
+    );
+    let kept = "GET /p HTTP/1.1\r\nhost: a\r\nx_real_ips: kept\r\n\
+                x-forwarded-for: 1.2.3.4, 192.0.2.1\r\nx-forwarded-proto: http\r\n";
+    for (files, hints) in routes_with_hints() {
+        assert_eq!(
+            backend_head(&head, files.as_ref()),
+            format!("{kept}{hints}connection: close\r\n\r\n")
+        );
+    }
+}
