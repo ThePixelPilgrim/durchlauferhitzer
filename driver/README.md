@@ -366,9 +366,12 @@ tests/
                     `X-Sendfile` (a range across a chunk gets exactly its
                     bytes); `/etc/passwd` is a 502 (`bad_file_path`)
                     with none of its bytes, a symlink in the root out of
-                    it a 404; a client's forged file headers never reach
-                    the backend, Rack's hints do; after `Content-Length:
-                    0` two requests share one backend connection
+                    it and one inside it a 404; a client's forged file
+                    headers never reach the backend, Rack's hints do;
+                    after `Content-Length: 0` two requests share one
+                    backend connection; every head is compared byte for
+                    byte with one built from the sim's model
+                    (`model_http.rs`, with the file's stamp and `Date`)
   env_remove.rs     `remove_vars` removes the variables: no libtest
                     harness (`harness = false`), since it needs a
                     single-threaded process
