@@ -135,6 +135,8 @@ jobs:
         run: scripts/check-product-deps.sh
       - name: Product dependency check self-test
         run: scripts/test-check-product-deps.sh
+      - name: Branch cleanup script self-test
+        run: scripts/test-cleanup-merged-branches.sh
       - name: Nightly report and bench chart script tests
         # The fingerprint and issue decision of nightly.yml's `report`
         # job (NFR-TEST-08) and the benchmark page (NFR-PERF-08); once

@@ -343,7 +343,7 @@ CPU time and system calls per request, measured nightly: [BENCHMARKS.md](https:/
 - [`examples/`](examples) — documented example configuration.
 - [`contrib/`](contrib) — the reload helper and the OpenRC script.
 - [`docs/superpowers/`](docs/superpowers) — design spec, implementation plans per stage, and review records.
-- [`scripts/`](scripts) — CI helpers (product dependency check, nightly failure issues, the benchmark page).
+- [`scripts/`](scripts) — CI helpers (product dependency check, nightly failure issues, the benchmark page) and `cleanup-merged-branches.sh`, which deletes branches already merged into `main` (dry run by default, `--delete` to act).
 
 ## License
 
