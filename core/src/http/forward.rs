@@ -100,8 +100,8 @@ const CLIENT_IDENTITY: [&str; 5] = [
 /// Request only, on every proxy route. Names are the parser's lowercased
 /// ones.
 const FILE_REQUEST: [&str; 4] = [
-    "x-sendfile",
-    "x-accel-redirect",
+    FileHeader::X_SENDFILE,
+    FileHeader::X_ACCEL_REDIRECT,
     "x-sendfile-type",
     "x-accel-mapping",
 ];
@@ -138,8 +138,12 @@ fn same_but_underscores(name: &str, entry: &str) -> bool {
 fn is_file_response_header(name: &str, files: Option<&InternalFiles>) -> bool {
     const ACCEL: &str = "x-accel-";
     match files.map(|f| &f.header) {
-        Some(FileHeader::XAccelRedirect { .. }) => name.starts_with(ACCEL) || name == "x-sendfile",
-        Some(FileHeader::XSendfile) | None => matches!(name, "x-sendfile" | "x-accel-redirect"),
+        Some(FileHeader::XAccelRedirect { .. }) => {
+            name.starts_with(ACCEL) || name == FileHeader::X_SENDFILE
+        }
+        Some(FileHeader::XSendfile) | None => {
+            name == FileHeader::X_SENDFILE || name == FileHeader::X_ACCEL_REDIRECT
+        }
     }
 }
 
@@ -343,11 +347,14 @@ fn backend_request(
 /// Rack's hints for an `internal_files` route (FR-PROXY-32), from the
 /// config: nothing is allocated per request.
 fn put_hints(sink: &mut impl Sink, files: &InternalFiles) {
+    sink.put(b"x-sendfile-type: ");
+    sink.put(files.header.hint_value().as_bytes());
+    sink.put(b"\r\n");
     match &files.header {
-        FileHeader::XSendfile => sink.put(b"x-sendfile-type: X-Sendfile\r\n"),
+        FileHeader::XSendfile => {}
         FileHeader::XAccelRedirect { prefix } => {
             // The root is visible ASCII and never `/` (FR-CFG-26).
-            sink.put(b"x-sendfile-type: X-Accel-Redirect\r\nx-accel-mapping: ");
+            sink.put(b"x-accel-mapping: ");
             sink.put(files.root.as_os_str().as_encoded_bytes());
             sink.put(b"/=");
             sink.put(prefix.as_bytes());
