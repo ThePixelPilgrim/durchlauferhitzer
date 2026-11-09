@@ -813,6 +813,13 @@ Request head toward the backend:
   FR-PROXY-09). *Owner decision 2026-10-27 (stage 3 final review M8).*
   *(Owner decision 2026-11-09, stage 8 review:)* a client header whose
   name, with `_` read as `-`, is one of these is removed too.
+  *Implementer call (stage 8 review):* so is any `_` spelling of
+  `X-Forwarded-For` (such as `X_Forwarded_For`): only the hyphenated
+  line is the client's value of FR-PROXY-08, and a CGI server would
+  read the other as the same key. Tests
+  `underscore_spelled_identity_headers_never_reach_the_backend`,
+  `underscore_spelled_file_headers_never_reach_the_backend` (all three
+  route kinds).
   They are not hop-by-hop: a backend's response keeps headers of these
   names (FR-PROXY-12). Tests `client_identity_headers_are_removed`,
   `identity_headers_in_a_response_pass_through`; the proxy net sends
