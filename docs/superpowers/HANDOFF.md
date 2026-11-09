@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-09, after the qmail review wrote stage 9's requirements into the spec.
+Last updated 2026-11-09, after stage 9 Task 1 (containment defaults) landed.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -15,7 +15,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 6 Restart | done (`22fd0ce..` this handoff) — record: `docs/superpowers/reviews/2026-11-06-stage-6-review.md` |
 | 7 Efficiency | done (`71d3867..` this handoff) — record: `docs/superpowers/reviews/2026-11-07-stage-7-review.md`. The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
 | 8 Backend-directed file serving | done (`862e951..` this handoff; plan `docs/superpowers/plans/2026-11-07-stage-8-internal-files.md`, Tasks 1–7 ✅) — **next: the stage 8 whole-branch review** over `862e951..main`, then its record `docs/superpowers/reviews/<date>-stage-8-review.md` |
-| 9 Guarantee hardening | spec'd 2026-11-09 (record: `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): NFR-RES-09 kernel memory backstop, FR-PROC-08 `--check` warnings and the guaranteed install, NFR-SEC-14 framing-variant ledger (in force, review due 2027-11); open decisions 3 (body on `GET`/`HEAD`, TE.0) and 4 (`required` defaults) await the owner. **After the stage 8 review:** brainstorm is done (the lessons record), next is the stage 9 plan (`writing-plans`), then subagent-driven execution |
+| 9 Guarantee hardening | in progress — plan `docs/superpowers/plans/2026-11-09-stage-9-guarantee-hardening.md` (record: `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`; both open decisions taken 2026-11-09). Task 1 ✅ (`required`/`required`/`kill` defaults, FR-CFG-25; every driver server test now runs under seccomp kill, switch or not). **Next: Task 2** (NFR-RES-09 kernel memory backstop), then Task 3 (FR-PROC-08 `--check` warnings, guaranteed install), Task 4 (FR-PROXY-01 body on `GET`/`HEAD` → 400), Task 5 close-out. NFR-SEC-14 ledger in force, review due 2027-11. Workspace: the worktree `.claude/worktrees/stage9-plan`, SDD ledger `.superpowers/sdd/2026-11-09-stage-9-guarantee-hardening/progress.md` (ignored scratch; a fresh session recreates it from the commit history) |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
