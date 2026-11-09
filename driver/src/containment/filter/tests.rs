@@ -18,12 +18,12 @@ const PID: u32 = 4242;
 /// `CLONE_DETACHED`, which musl 1.2.6's `pthread_create` adds.
 const CLONE_DETACHED: u64 = 0x0040_0000;
 
-/// The thread flags of `pthread_create`: glibc's (also musl 1.2.5's);
-/// the filter also accepts them plus `CLONE_DETACHED`, for every libc.
-const THREAD: u64 = GLIBC_THREAD;
+/// The two thread flag sets the filter accepts for every libc: glibc's
+/// (also musl 1.2.5's), and the same plus `CLONE_DETACHED` (musl 1.2.6's).
+const THREAD_DETACHED: u64 = THREAD_GLIBC | CLONE_DETACHED;
 
 /// glibc's.
-const GLIBC_THREAD: u64 = (libc::CLONE_VM
+const THREAD_GLIBC: u64 = (libc::CLONE_VM
     | libc::CLONE_FS
     | libc::CLONE_FILES
     | libc::CLONE_SIGHAND
@@ -285,8 +285,8 @@ fn clone_only_as_a_thread_and_clone3_is_enosys() {
     each(|arch, action, prog| {
         let clone = nr(arch, "clone");
         let run_clone = |flags: u64| run(prog, &call(arch, clone, [flags, 1, 2, 3, 4, 0]));
-        assert_eq!(run_clone(THREAD), ALLOW);
-        assert_eq!(run_clone(THREAD | CLONE_DETACHED), ALLOW);
+        assert_eq!(run_clone(THREAD_GLIBC), ALLOW);
+        assert_eq!(run_clone(THREAD_DETACHED), ALLOW);
         // A fork, a vfork, a thread in new namespaces, a thread that also
         // asks for a signal on exit.
         let sigchld = libc::SIGCHLD as u64;
@@ -294,9 +294,10 @@ fn clone_only_as_a_thread_and_clone3_is_enosys() {
         for flags in [
             sigchld,
             vfork,
-            THREAD | libc::CLONE_NEWUSER as u64,
-            THREAD | sigchld,
-            THREAD | CLONE_DETACHED | sigchld,
+            THREAD_GLIBC | libc::CLONE_NEWUSER as u64,
+            THREAD_DETACHED | libc::CLONE_NEWUSER as u64,
+            THREAD_GLIBC | sigchld,
+            THREAD_DETACHED | sigchld,
             0,
         ] {
             assert_eq!(run_clone(flags), expected(action), "{flags:#x}");

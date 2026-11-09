@@ -1962,10 +1962,13 @@ Failures, persistence, timeouts:
     tests under `kill` in CI on the x86_64 and aarch64 runners (Ubuntu
     24.04's glibc) and in a Debian 12 container (glibc 2.36) on x86_64,
     and on musl in Alpine containers on both (NFR-PORT-02). *(Stage 6
-    Task 6, builder calls for musl, `cfg(target_env = "musl")`:)* x86_64
-    lists `epoll_pwait` instead of `epoll_wait` (musl's `epoll_wait`);
-    `clone`'s thread flags include `CLONE_DETACHED` (musl's
-    `pthread_create`; the kernel ignores it). *(Owner decisions
+    Task 6, builder calls for musl:)* *(owner ruling 2026-11-09, stage 9
+    CI fix: a libc update under `seccomp_action kill` must not end the
+    server)* x86_64 allows both `epoll_wait` and `epoll_pwait` for every
+    libc (glibc and musl 1.2.5 issue the first, Alpine's musl 1.2.6 the
+    second); `clone` accepts glibc's thread flag set or the same plus
+    `CLONE_DETACHED` (musl 1.2.6's `pthread_create`; the kernel ignores
+    it), for every libc, each as an exact match. *(Owner decisions
     2026-11-05, stage 6 Task 6 review:)* `futex` also allows the plain
     shared `FUTEX_WAIT` and `FUTEX_WAKE` of musl's thread list lock
     (`pthread_create`, `pthread_exit`, `pthread_join`), still no

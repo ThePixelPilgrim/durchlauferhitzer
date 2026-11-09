@@ -14,9 +14,9 @@
 //! `RLIMIT_NOFILE`: as root it starts as root with `user nobody` and,
 //! when the inherited hard `RLIMIT_NOFILE` is lower, a raised one;
 //! otherwise it skips unless the inherited hard
-//! limit is high enough (CI's root step and its container jobs, which get a raised
-//! `nofile` ulimit, run it, and fail on a skip
-//! with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`). The configs carry their own
+//! limit is high enough (CI's root step and its container jobs, which get
+//! a raised `nofile` ulimit, run it, and fail on a skip with
+//! `DURCHLAUFERHITZER_REQUIRE_ROOT=1`). The configs carry their own
 //! `containment` block (`best_effort` for both layers), so the tests run
 //! on any kernel.
 

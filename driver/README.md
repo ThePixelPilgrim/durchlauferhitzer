@@ -165,7 +165,8 @@ src/
                       action, pid)`: the arch check, then each call with its
                       argument checks (`socket` AF_INET/AF_INET6 streams,
                       protocol 0, `mmap`/`mprotect` without PROT_EXEC,
-                      `clone` with the libc's thread flags, `prctl`
+                      `clone` with glibc's thread flags or the same plus
+                      `CLONE_DETACHED`, `prctl`
                       PR_SET_NAME, `fcntl` F_GETFD/F_GETFL/F_SETFL,
                       `setsockopt` TCP_NODELAY, `getsockopt` SO_ERROR,
                       `recvfrom` MSG_PEEK|MSG_DONTWAIT (the silence
@@ -173,9 +174,7 @@ src/
                       `futex` private wait/wake and `pthread_join`'s wait,
                       `tgkill` SIGABRT to `pid`; `clone3` ENOSYS;
                       both `epoll_wait` and `epoll_pwait` on x86_64 for
-                      every libc (musl 1.2.5 and 1.2.6 differ), `clone`
-                      with glibc's thread flags or the same plus
-                      `CLONE_DETACHED` (musl 1.2.6) for every libc;
+                      every libc (musl 1.2.5 and 1.2.6 differ);
                       musl's own entries under `cfg(target_env = "musl")`:
                       the thread list lock's shared
                       `futex` wait/wake, `tkill` SIGABRT to the main
