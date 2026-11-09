@@ -47,22 +47,27 @@
 //! - Per connection: startup preallocates nothing per connection (ready
 //!   is the same at 16 and at 4096), so [`PER_CONNECTION_ALLOWANCE`]
 //!   was measured with connections open: (84 557 824 - 9 228 288) /
-//!   4080 = 18 463 bytes on glibc, (95 010 816 - 8 663 040) / 4080 =
-//!   21 165 on musl; less the budgeted client buffers (16 384 receive +
-//!   1 024 send = 17 408), 1 055 and 3 757 bytes of per-entry state and
-//!   allocator rounding (musl's size classes). 3 757 rounded up to a KiB
+//!   4080 = 18 463.1 bytes on glibc, (95 010 816 - 8 663 040) / 4080 =
+//!   21 163.7 on musl, rounded up 18 464 and 21 164; less the budgeted
+//!   client buffers (16 384 receive + 1 024 send = 17 408), 1 056 and
+//!   3 756 bytes of per-entry state and allocator rounding (musl's size
+//!   classes). 3 756 rounded up to a KiB
 //!   is 4 KiB, plus the 1 KiB send buffer of a refused connection
 //!   (`SEND_CAPACITY`, allocated on demand, outside the budget): 5 KiB.
 //! - Per disk thread: (139 591 680 - 9 228 288) / 60 = 2 172 723 bytes
-//!   on glibc, the 2 MiB stack plus 75.6 KB; on musl 2 114 219, the stack
-//!   plus 16.7 KB. `/proc/<pid>/maps` shows each thread's 12 KiB
+//!   on glibc, the 2 MiB stack plus 75 571 (73.8 KiB); on musl
+//!   (135 516 160 - 8 663 040) / 60 = 2 114 219, the stack plus 17 067
+//!   (16.7 KiB). `/proc/<pid>/maps` shows each thread's 12 KiB
 //!   `sigaltstack` and glibc's 132 KiB arenas (31 for 64 threads here;
 //!   glibc makes up to 8 x CPUs, so one per thread on 8 or more CPUs).
 //!   [`DISK_THREAD_OVERHEAD`] is 256 KiB: one arena and the sigaltstack,
 //!   144 KiB, with margin.
-//! - Base: the loaded glibc reading less what the other terms count,
-//!   10 014 720 - 1 068 608 - 4 x 2 MiB - 16 x 5 KiB = 475 584 (musl's
-//!   is lower), rounded up to a MiB and doubled: 2 MiB. Doubled again to
+//! - Base: the loaded glibc reading less `memory_limit`, the 4 stacks
+//!   and the connections' allowance,
+//!   10 014 720 - 1 068 608 - 4 x 2 MiB - 16 x 5 KiB = 475 584 (musl's is lower), rounded up to a MiB and
+//!   doubled: 2 MiB. Less the thread term's 4 x 256 KiB too, the
+//!   remainder would be negative (that term carries a margin), so the
+//!   base stands on this non-stack figure and its margin. Doubled again to
 //!   [`BASE_ALLOWANCE`], 4 MiB: allocator bookkeeping and glibc's
 //!   main-arena top pad grow with none of the other terms, and 2 MiB of
 //!   slack costs nothing, while 2 MiB too little aborts a server.
@@ -102,11 +107,10 @@ pub fn limit(limits: &Limits) -> u64 {
         .saturating_add(u64::from(limits.max_connections).saturating_mul(PER_CONNECTION_ALLOWANCE))
 }
 
-/// Sets the soft and hard `RLIMIT_DATA` to [`limit`]; a hard limit
-/// below it fails naming both numbers. The note is the startup log's
+/// Sets the soft and hard `RLIMIT_DATA` to `needed` ([`limit`] of the
+/// config's limits); a hard limit below it fails naming both numbers. The note is the startup log's
 /// `memory_backstop` line.
-pub(super) fn apply(limits: &Limits) -> Result<DriverLog, Failure> {
-    let needed = limit(limits);
+pub(super) fn apply(needed: u64) -> Result<DriverLog, Failure> {
     let (_, hard) = data().map_err(|err| Failure(format!("cannot read RLIMIT_DATA: {err}")))?;
     if hard < needed {
         return Err(Failure(format!(

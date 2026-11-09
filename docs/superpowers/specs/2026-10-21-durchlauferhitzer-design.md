@@ -2415,14 +2415,15 @@ Failures, persistence, timeouts:
   `PER_CONNECTION_ALLOWANCE` = 5 KiB. Measured 2026-11-09 (`VmData`,
   x86_64, glibc and Rust's bundled musl):
   - startup preallocates nothing per connection, so the per-connection
-    constant was measured with 4080 connections open: 1 055 (glibc) and
-    3 757 (musl) bytes each beyond the budgeted buffers, rounded up to
+    constant was measured with 4080 connections open: 1 056 (glibc) and
+    3 756 (musl) bytes each beyond the budgeted buffers, rounded up to
     4 KiB, plus the 1 KiB send buffer of a refused connection;
-  - a disk thread costs its stack plus 75.6 KB (glibc) or 16.7 KB
+  - a disk thread costs its stack plus 73.8 KiB (glibc) or 16.7 KiB
     (musl);
   - the base is twice the brief's derivation (the loaded reading less
-    the other terms, 0.45 MiB on glibc, rounded up to a MiB and
-    doubled).
+    `memory_limit`, the stacks and the connections' allowance, 0.45 MiB
+    on glibc, rounded up to a MiB and doubled; less the thread
+    overhead term too it would be negative).
   The log kind is `memory_backstop bytes` (FR-LOG-05, -07), written with
   the startup notes. A hard limit below the backstop is exit 2:
   `memory backstop: the server needs <needed> bytes of RLIMIT_DATA,

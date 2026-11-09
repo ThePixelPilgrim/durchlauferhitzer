@@ -237,7 +237,7 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
     let disk_threads = config.limits.disk_threads;
     let shutdown_timeout = config.limits.shutdown_timeout;
     let restart_timeout = config.limits.restart_timeout;
-    let limits = config.limits.clone();
+    let backstop = backstop::limit(&config.limits);
     let core = Core::new(config);
     let roots = open_roots(core.static_roots())?;
     let (listeners, steering, mut notes, shared) = match take_sockets(&listen).map_err(Failure)? {
@@ -258,7 +258,7 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
         roots: roots.len(),
         backends: core.backends().len(),
     }))?;
-    notes.push(backstop::apply(&limits)?);
+    notes.push(backstop::apply(backstop)?);
     notes.extend(privileges::drop_privileges(user.as_deref())?);
     notes.extend(shared);
     let landlock = containment::restrict_files(&containment, &roots)?;

@@ -9,10 +9,11 @@
 //! afterwards (an allocation the kernel refuses would abort it).
 //!
 //! Every server runs as non-root (as `nobody` when the tests run as
-//! root), but the 65536-connection one, which needs about 262 000
-//! descriptors: as root it starts as root with `user nobody` and, when
-//! the inherited hard `RLIMIT_NOFILE` is lower, a raised one (which needs
-//! `CAP_SYS_RESOURCE`); otherwise it skips unless the inherited hard
+//! root), except the 65536-connection one, which needs about 262 000
+//! descriptors and so root with `CAP_SYS_RESOURCE` to raise
+//! `RLIMIT_NOFILE`: as root it starts as root with `user nobody` and,
+//! when the inherited hard `RLIMIT_NOFILE` is lower, a raised one;
+//! otherwise it skips unless the inherited hard
 //! limit is high enough (CI's root step runs it, and fails on a skip
 //! with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`). The configs carry their own
 //! `containment` block (`best_effort` for both layers), so the tests run
@@ -221,7 +222,12 @@ fn startup_sets_rlimit_data_to_the_backstop() {
             + 4 * (stack + DISK_THREAD_OVERHEAD)
             + 16 * PER_CONNECTION_ALLOWANCE
     );
-    for data in [None, Some((expected + MIB, expected + MIB))] {
+    let inherited = [
+        None,
+        Some((expected + MIB, expected + MIB)),
+        Some((expected, expected)),
+    ];
+    for data in inherited {
         let setup = Setup {
             data,
             ..Setup::non_root()
