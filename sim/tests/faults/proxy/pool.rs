@@ -344,6 +344,29 @@ pub(crate) fn sync(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) {
     loop {
         let mut again = false;
         let ups = sim.upstreams();
+        // A request that went out on a reused connection that failed in
+        // the same step (its backend's reset right behind the previous
+        // response): its bytes are assigned, and with them the reuse,
+        // before the replay is, so the replay is that request's. Only for
+        // a closed known connection and a client with a replay pending;
+        // every other chunk keeps its turn below.
+        let mut later = Vec::new();
+        for &up in ups.iter().take(assign.seen) {
+            if sim.upstream_holder(up).is_some() {
+                continue;
+            }
+            for chunk in sim.take_backend_chunks(up) {
+                let replaying = chunk.holder.is_some_and(|conn| {
+                    let s = story_of(stories, conn, sim);
+                    replay_of(sim, &stories[s]).is_some()
+                });
+                if replaying {
+                    again |= deliver_chunk(sim, stories, assign, up, chunk);
+                } else {
+                    later.push((up, chunk));
+                }
+            }
+        }
         for &up in ups.iter().skip(assign.seen) {
             let conn = sim.upstream_conn(up);
             let s = story_of(stories, conn, sim);
@@ -396,31 +419,12 @@ pub(crate) fn sync(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) {
                 again |= reuse(sim, stories, assign, up, conn, None);
             }
         }
+        for (up, chunk) in later {
+            again |= deliver_chunk(sim, stories, assign, up, chunk);
+        }
         for &up in &ups {
             for chunk in sim.take_backend_chunks(up) {
-                let Some(conn) = chunk.holder else {
-                    panic!(
-                        "up={} received bytes while idle\ntrace:\n{}",
-                        up.0,
-                        sim.trace()
-                    );
-                };
-                again |= reuse(sim, stories, assign, up, conn, Some(chunk.request));
-                let s = story_of(stories, conn, sim);
-                let Some(run) = stories[s]
-                    .runs
-                    .iter_mut()
-                    .find(|r| r.up == Some(up) && r.seq == chunk.request)
-                else {
-                    panic!(
-                        "up={} request {} has no exchange of conn={}\ntrace:\n{}",
-                        up.0,
-                        chunk.request,
-                        conn.0,
-                        sim.trace()
-                    );
-                };
-                run.got.extend(chunk.bytes);
+                again |= deliver_chunk(sim, stories, assign, up, chunk);
             }
         }
         again |= half_stale(sim, stories);
@@ -432,6 +436,42 @@ pub(crate) fn sync(sim: &mut Sim, stories: &mut [Story], assign: &mut Assign) {
     for story in stories.iter_mut() {
         story.received.extend(sim.take_received(story.conn));
     }
+}
+
+/// Hand what the backend of `up` received (`chunk`) to the exchange it
+/// belongs to, registering a reuse as a new request on it shows; whether
+/// a reuse was registered.
+fn deliver_chunk(
+    sim: &mut Sim,
+    stories: &mut [Story],
+    assign: &mut Assign,
+    up: UpstreamId,
+    chunk: durchlauferhitzer_sim::BackendChunk,
+) -> bool {
+    let Some(conn) = chunk.holder else {
+        panic!(
+            "up={} received bytes while idle\ntrace:\n{}",
+            up.0,
+            sim.trace()
+        );
+    };
+    let again = reuse(sim, stories, assign, up, conn, Some(chunk.request));
+    let s = story_of(stories, conn, sim);
+    let Some(run) = stories[s]
+        .runs
+        .iter_mut()
+        .find(|r| r.up == Some(up) && r.seq == chunk.request)
+    else {
+        panic!(
+            "up={} request {} has no exchange of conn={}\ntrace:\n{}",
+            up.0,
+            chunk.request,
+            conn.0,
+            sim.trace()
+        );
+    };
+    run.got.extend(chunk.bytes);
+    again
 }
 
 /// A backend writes a byte to its idle connection (the exchange's
@@ -605,7 +645,7 @@ fn after_response(prev: &Exchange, script: &Script, run: &Run, reuser: &Run) -> 
     if !script.keeps {
         return Err("its backend said close or spoke HTTP/1.0".to_owned());
     }
-    if script.body_end != script.wire.len() {
+    if script.body_end != script_target(script) {
         return Err("its backend sent bytes after the response".to_owned());
     }
     // An end of stream or reset right behind the response may still be
