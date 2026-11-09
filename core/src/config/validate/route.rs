@@ -109,7 +109,10 @@ struct Slot<T> {
     value: T,
 }
 
-pub(super) fn parse_route(block: &Block) -> Result<Route, ConfigError> {
+/// Parses one `path` block; also returns where its `internal_files`
+/// setting was written, if it has one, for the checks that need the whole
+/// file (FR-CFG-26).
+pub(super) fn parse_route(block: &Block) -> Result<(Route, Option<Pos>), ConfigError> {
     let segments = match block.args.as_slice() {
         [arg] if validate_path(arg).is_ok() => path_segments(arg),
         [arg] => return Err(invalid_value("path", arg, block.pos)),
@@ -217,6 +220,8 @@ pub(super) fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             }
         }
     }
+    // A static route with `internal_files` fails below.
+    let internal_pos = internal.as_ref().map(|slot| slot.pos);
     let action = match (static_root, backend) {
         (Some(root), None) => {
             if let Some(slot) = &strip {
@@ -270,5 +275,5 @@ pub(super) fn parse_route(block: &Block) -> Result<Route, ConfigError> {
             return fail(ConfigErrorKind::RouteNeedsOneAction, block.pos);
         }
     };
-    Ok(Route { segments, action })
+    Ok((Route { segments, action }, internal_pos))
 }

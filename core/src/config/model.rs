@@ -338,6 +338,12 @@ pub enum ConfigErrorKind {
     BodyLimitOnStatic,
     OnFileChangeOnProxy,
     InternalFilesOnStatic,
+    /// An `internal_files` root equal to or below a static root, compared
+    /// component by component (FR-CFG-26): its files would be public.
+    InternalFilesUnderStatic {
+        internal_root: String,
+        static_root: String,
+    },
     PoolOnStatic,
     MissingBodyLimit(&'static str),
     /// `max_connections` times the worst case per connection exceeds
@@ -392,6 +398,14 @@ impl fmt::Display for ConfigError {
             ConfigErrorKind::InternalFilesOnStatic => {
                 write!(f, "`internal_files` is only allowed on proxy routes")
             }
+            ConfigErrorKind::InternalFilesUnderStatic {
+                internal_root,
+                static_root,
+            } => write!(
+                f,
+                "`internal_files` root `{internal_root}` is equal to or below the static \
+                 root `{static_root}`, which would make its files public"
+            ),
             ConfigErrorKind::PoolOnStatic => {
                 write!(f, "`pool` is only allowed on proxy routes")
             }

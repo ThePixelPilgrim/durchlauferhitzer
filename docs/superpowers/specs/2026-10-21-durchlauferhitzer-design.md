@@ -369,7 +369,12 @@ Structure and values:
   2026-11-09, stage 8 review:)* an `internal_files` root equal to or
   below a static root (compared component by component) is a config
   error: its files would be public through the static route. A root
-  above a static root is allowed.
+  above a static root is allowed. *Implementer calls (stage 8 review):*
+  every static root of the file counts, in any host and written before
+  or after the `internal_files` route; the error stands at the
+  `internal_files` setting and names both roots (`internal_files` root
+  `<root>` is equal to or below the static root `<static>`, which would
+  make its files public). Tests in `validate/tests/internal_files.rs`.
 - **FR-CFG-22** [done] Durations are `<u64>` followed by `ms`, `s` or `m`;
   sizes are plain bytes or `<u64>` followed by `KiB`, `MiB` or `GiB`; any
   other form, or an overflowing value, is an error.

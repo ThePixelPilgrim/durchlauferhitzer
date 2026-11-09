@@ -188,10 +188,15 @@ fn static_roots_include_internal_roots() {
         core.static_roots(),
         [PathBuf::from("/srv/www"), PathBuf::from("/srv/files")]
     );
-    // An internal root equal to a static one is listed once.
-    let text = text.replace("/srv/files", "/srv/www");
+    // A root two `internal_files` routes share is listed once (one equal
+    // to a static root is a config error, FR-CFG-26).
+    let text = text.replace(
+        "path / { static /srv/www; }",
+        "path /q { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1;\n\
+           internal_files x-accel-redirect /x/ /srv/files; }",
+    );
     let core = Core::new(crate::config::load(&text).unwrap());
-    assert_eq!(core.static_roots(), [PathBuf::from("/srv/www")]);
+    assert_eq!(core.static_roots(), [PathBuf::from("/srv/files")]);
 }
 
 /// Four routes on `a.test`: `x-accel-redirect`, two identical
@@ -201,9 +206,9 @@ const INTERNAL: &str = "listen 127.0.0.1:80;\n\
       path /p { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1;\n\
         internal_files x-accel-redirect /x/ /srv/files; }\n\
       path /q { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1;\n\
-        internal_files x-sendfile /srv/www; }\n\
+        internal_files x-sendfile /srv/shared; }\n\
       path /r { proxy 127.0.0.1:3000; max_request_body 1; max_response_body 1;\n\
-        internal_files x-sendfile /srv/www; }\n\
+        internal_files x-sendfile /srv/shared; }\n\
       path / { static /srv/www; }\n\
     }\n\
     host b.test {\n\
@@ -236,7 +241,7 @@ fn internal_routes_point_at_their_roots() {
         listed,
         [
             (PathBuf::from("/srv/files"), RootId(1)),
-            (PathBuf::from("/srv/www"), RootId(0)),
+            (PathBuf::from("/srv/shared"), RootId(2)),
         ]
     );
 }

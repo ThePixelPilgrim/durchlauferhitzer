@@ -129,6 +129,94 @@ fn wrong_counts() {
     }
 }
 
+/// A valid file with a static route on `static_root` and, after it, a
+/// proxy route with `internal_files <form>` (the setting is at 10:5).
+fn beside_static(static_root: &str, form: &str) -> String {
+    in_host(&format!(
+        "  path / {{\n    static {static_root};\n  }}\n  path /app/ {{\n    \
+         proxy 127.0.0.1:3000;\n    max_request_body 1;\n    max_response_body 1;\n    \
+         internal_files {form};\n  }}"
+    ))
+}
+
+fn under_static(internal: &str, static_root: &str) -> ConfigErrorKind {
+    ConfigErrorKind::InternalFilesUnderStatic {
+        internal_root: internal.to_string(),
+        static_root: static_root.to_string(),
+    }
+}
+
+/// Owner decision 2026-11-09 (FR-CFG-26): an `internal_files` root equal
+/// to or below a static root is an error (its files would be public
+/// through the static route), compared component by component; a root
+/// above a static root, or beside one, is fine.
+#[test]
+fn internal_root_at_or_below_a_static_root_is_an_error() {
+    for (static_root, internal) in [
+        ("/srv/www", "/srv/www"),
+        ("/srv/www", "/srv/www/private"),
+        ("/srv/www", "/srv/www/a/b"),
+        ("/", "/srv/files"),
+    ] {
+        for form in [
+            format!("x-sendfile {internal}"),
+            format!("x-accel-redirect /p/ {internal}"),
+        ] {
+            assert_eq!(
+                err(&beside_static(static_root, &form)),
+                (under_static(internal, static_root), 10, 5),
+                "{static_root} {form}"
+            );
+        }
+    }
+    assert_eq!(
+        load(&beside_static("/srv/www", "x-sendfile /srv/www/private"))
+            .unwrap_err()
+            .to_string(),
+        "10:5: `internal_files` root `/srv/www/private` is equal to or below the static \
+         root `/srv/www`, which would make its files public"
+    );
+}
+
+#[test]
+fn internal_root_above_or_beside_a_static_root_is_fine() {
+    for (static_root, internal) in [
+        ("/srv/www", "/srv"),
+        ("/srv/www/public", "/srv/www"),
+        ("/srv/www", "/srv/www-x"),
+        ("/srv/www-x", "/srv/www"),
+        ("/srv/www", "/srv/files"),
+    ] {
+        let config = ok(&beside_static(
+            static_root,
+            &format!("x-sendfile {internal}"),
+        ));
+        assert_eq!(config.hosts.len(), 1, "{static_root} {internal}");
+    }
+}
+
+/// Every static root of the file counts, in any host and written before
+/// or after the `internal_files` route.
+#[test]
+fn every_static_root_of_the_file_counts() {
+    let proxy = "  path / {\n    proxy 127.0.0.1:3000;\n    max_request_body 1;\n    \
+                 max_response_body 1;\n    internal_files x-sendfile /srv/www/private;\n  }";
+    let later = cfg(&format!(
+        "host a {{\n{proxy}\n}}\nhost b {{\n  path / {{ static /srv/www; }}\n}}\n"
+    ));
+    assert_eq!(
+        err(&later),
+        (under_static("/srv/www/private", "/srv/www"), 7, 5)
+    );
+    let earlier = cfg(&format!(
+        "host b {{\n  path / {{ static /srv/www; }}\n}}\nhost a {{\n{proxy}\n}}\n"
+    ));
+    assert_eq!(
+        err(&earlier),
+        (under_static("/srv/www/private", "/srv/www"), 10, 5)
+    );
+}
+
 #[test]
 fn bad_values() {
     let cases = [
