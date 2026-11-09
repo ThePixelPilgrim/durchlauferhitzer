@@ -293,6 +293,31 @@ pub enum FileHeader {
     },
 }
 
+impl FileHeader {
+    /// `X-Sendfile`'s name as the response parser lowercases it.
+    pub const X_SENDFILE: &'static str = "x-sendfile";
+    /// `X-Accel-Redirect`'s name as the response parser lowercases it.
+    pub const X_ACCEL_REDIRECT: &'static str = "x-accel-redirect";
+
+    /// The response header the route trusts, as the response parser
+    /// lowercases it (FR-PROXY-32 Trigger).
+    pub fn response_name(&self) -> &'static str {
+        match self {
+            FileHeader::XSendfile => Self::X_SENDFILE,
+            FileHeader::XAccelRedirect { .. } => Self::X_ACCEL_REDIRECT,
+        }
+    }
+
+    /// The header's name as Rack's `X-Sendfile-Type` hint names it
+    /// (FR-PROXY-32 Hints).
+    pub fn hint_value(&self) -> &'static str {
+        match self {
+            FileHeader::XSendfile => "X-Sendfile",
+            FileHeader::XAccelRedirect { .. } => "X-Accel-Redirect",
+        }
+    }
+}
+
 /// Whether a proxy route reuses idle backend connections (FR-PROXY-02).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pooling {

@@ -42,10 +42,7 @@ pub(super) fn named_file(request: &ProxyRequest, head: &ResponseHead) -> Option<
     if head.status != 200 {
         return None;
     }
-    let name = match route.files.header {
-        FileHeader::XSendfile => "x-sendfile",
-        FileHeader::XAccelRedirect { .. } => "x-accel-redirect",
-    };
+    let name = route.files.header.response_name();
     let mut values = head.headers.iter().filter(|h| h.name == name);
     let value = values.next()?;
     if values.next().is_some() {
