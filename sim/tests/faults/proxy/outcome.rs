@@ -133,6 +133,18 @@ fn mode(req: &Request) -> BodyMode {
     }
 }
 
+/// Whether `req` is a `GET` or `HEAD` that carries a body (FR-PROXY-01):
+/// bytes follow its head on the wire (a `Content-Length: 0` sends none,
+/// a chunked body at least its last chunk). One that also repeats
+/// `X-Forwarded-For` gets the same 400 and close, and is counted here.
+fn body_on_get_or_head(req: &Request) -> bool {
+    let bodiless = match req.summary.method {
+        Method::Get | Method::Head => true,
+        Method::Other(_) => false,
+    };
+    bodiless && req.wire.len() > req.head_len
+}
+
 fn dedup(mut ps: Vec<Persistence>) -> Vec<Persistence> {
     ps.dedup();
     ps
@@ -173,6 +185,9 @@ pub(crate) fn alts(ex: &Exchange, who: &Who, net: &NetConfig) -> Vec<Alt> {
         Verdict::Answer(status, p) => {
             let mut tags = tags;
             match status {
+                Status::BadRequest if body_on_get_or_head(req) => {
+                    tags.push("400 body on GET or HEAD");
+                }
                 Status::BadRequest => tags.push("400 duplicate X-Forwarded-For"),
                 Status::ContentTooLarge if req.summary.path.starts_with("/files") => {
                     tags.push("413 static route with a body");

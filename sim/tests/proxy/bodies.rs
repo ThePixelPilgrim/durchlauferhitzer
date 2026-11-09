@@ -191,6 +191,104 @@ fn content_length_over_limit_is_413_before_connect() {
     answer_ok(&mut sim, c, up);
 }
 
+/// FR-PROXY-01: a `GET` whose head frames a body is answered 400 with
+/// `Connection: close` before any connect (NFR-SEC-14, TE.0); one
+/// `Response` entry is logged (FR-LOG-03) and the unread body lingers
+/// until the client ends its stream (FR-CONN-05).
+#[test]
+fn get_with_a_body_is_400_without_connect() {
+    let mut sim = Sim::new(BODIES);
+    let c = request(
+        &mut sim,
+        b"GET /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhello",
+    );
+    assert!(sim.upstreams().is_empty(), "{}", sim.trace());
+    assert_eq!(
+        sim.take_received(c),
+        fixed(Status::BadRequest, Persistence::Close, BodyMode::Full),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(
+        sim.logs(),
+        &[Log::Response {
+            conn: c,
+            peer: peer(),
+            status: Status::BadRequest,
+            request: Some(summary(Method::Get, "/api/x")),
+        }],
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+    sim.send_eof(c);
+    sim.run_until_idle();
+    assert_eq!(sim.state(c), SimConnState::Closed, "{}", sim.trace());
+}
+
+/// FR-PROXY-01: a chunked body on `HEAD` is 400 too, before any connect;
+/// the answer is head-only like every response to `HEAD` (FR-HTTP-21).
+#[test]
+fn head_with_a_chunked_body_is_400_without_connect() {
+    let mut sim = Sim::new(BODIES);
+    let c = request(
+        &mut sim,
+        b"HEAD /api/x HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n\
+          5\r\nhello\r\n0\r\n\r\n",
+    );
+    assert!(sim.upstreams().is_empty(), "{}", sim.trace());
+    assert_eq!(
+        sim.take_received(c),
+        fixed(Status::BadRequest, Persistence::Close, BodyMode::HeadOnly),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.state(c), SimConnState::WriteShutdown, "{}", sim.trace());
+}
+
+/// FR-HTTP-08: `Content-Length: 0` is no body, so a `GET` carrying it is
+/// forwarded, its length line re-rendered as FR-PROXY-10 renders it and
+/// no body after the head. The parser yields `BodyFraming::None` for it
+/// (core test `body_framing`), so `plan`'s FR-PROXY-01 arm never sees a
+/// framed body here and this test passes without the arm; it pins that a
+/// zero length is never mistaken for a body.
+#[test]
+fn get_with_content_length_zero_is_forwarded() {
+    let mut sim = Sim::new(BODIES);
+    let c = request(
+        &mut sim,
+        b"GET /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 0\r\n\r\n",
+    );
+    let up = only_upstream(&sim);
+    assert_eq!(
+        sim.take_backend_request(up),
+        forwarded("GET", "/x", "content-length: 0\r\n"),
+        "{}",
+        sim.trace()
+    );
+    answer_ok(&mut sim, c, up);
+}
+
+/// FR-PROXY-01 runs in `plan`, before the `100 Continue` of FR-PROXY-25:
+/// a `HEAD` with a chunked body and `Expect: 100-continue` gets the 400
+/// and never a 100.
+#[test]
+fn head_with_a_chunked_body_and_expect_gets_400_not_100() {
+    let mut sim = Sim::new(BODIES);
+    let c = request(
+        &mut sim,
+        b"HEAD /api/x HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\n\
+          Transfer-Encoding: chunked\r\n\r\n",
+    );
+    assert!(sim.upstreams().is_empty(), "{}", sim.trace());
+    assert_eq!(
+        sim.take_received(c),
+        fixed(Status::BadRequest, Persistence::Close, BodyMode::HeadOnly),
+        "{}",
+        sim.trace()
+    );
+}
+
 /// FR-PROXY-23: a chunked body that passes the limit cuts both
 /// connections; what was within the limit was forwarded, nothing after.
 #[test]
@@ -698,29 +796,6 @@ fn early_response_after_the_whole_body_was_read_keeps_the_client() {
         sim.trace()
     );
     answer_ok_after(&mut sim, c, second);
-}
-
-/// A stalled body on a HEAD request is answered with a head-only 408, like
-/// every other response to HEAD.
-#[test]
-fn stalled_head_request_body_is_a_head_only_408() {
-    let mut sim = Sim::new(BODIES);
-    let c = request(
-        &mut sim,
-        b"HEAD /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 10\r\n\r\n012",
-    );
-    sim.advance(Duration::from_secs(30));
-    assert_eq!(
-        sim.take_received(c),
-        fixed(
-            Status::RequestTimeout,
-            Persistence::Close,
-            BodyMode::HeadOnly
-        ),
-        "{}",
-        sim.trace()
-    );
-    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
 }
 
 /// FR-PROXY-23: a chunked body already over the limit in the bytes that

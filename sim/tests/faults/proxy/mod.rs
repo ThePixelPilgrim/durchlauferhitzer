@@ -298,6 +298,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "400 bad request chunk",
     "400 Connection names framing",
     "400 duplicate X-Forwarded-For",
+    "400 body on GET or HEAD",
     // NFR-SEC-02.
     "CL+TE",
     "duplicate CL",

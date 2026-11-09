@@ -645,13 +645,13 @@ fn a_retried_request_that_fails_again_is_a_502() {
 }
 
 /// Only a GET or HEAD without a body is replayed: a POST (with or
-/// without a body) and a GET with a body get the 502 of FR-PROXY-26.
+/// without a body) and a DELETE get the 502 of FR-PROXY-26. (A GET or
+/// HEAD with a body never reaches a backend: it is 400, FR-PROXY-01.)
 #[test]
 fn a_post_on_a_dead_reused_connection_gives_502() {
     for request in [
         &b"POST /p HTTP/1.1\r\nHost: b.test\r\nContent-Length: 2\r\n\r\nab"[..],
         b"POST /p HTTP/1.1\r\nHost: b.test\r\n\r\n",
-        b"GET /p HTTP/1.1\r\nHost: b.test\r\nContent-Length: 2\r\n\r\nab",
         b"DELETE /p HTTP/1.1\r\nHost: b.test\r\n\r\n",
     ] {
         let (mut core, c, up) = with_idle();

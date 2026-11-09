@@ -70,6 +70,14 @@ pub(super) fn plan(
     if let Err(error) = check_forwardable(head) {
         return ProxyPlan::Respond(error.status(), Persistence::Close);
     }
+    // FR-PROXY-01: a backend that ignores a body on `GET` or `HEAD` would
+    // read it as a second request (NFR-SEC-14, TE.0), so none is forwarded.
+    match (&head.method, head.body) {
+        (Method::Get | Method::Head, BodyFraming::Length(_) | BodyFraming::Chunked) => {
+            return ProxyPlan::Respond(Status::BadRequest, Persistence::Close);
+        }
+        (Method::Get | Method::Head, BodyFraming::None) | (Method::Other(_), _) => {}
+    }
     let limit = target.max_request_body;
     match (head.body, limit) {
         (BodyFraming::Length(length), BodyLimit::Bytes(max)) if length > max => {

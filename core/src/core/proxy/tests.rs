@@ -424,3 +424,62 @@ fn plan_hands_the_routes_internal_files_to_the_request() {
     }
     assert_eq!(Arc::strong_count(&entry), 1, "the plan was dropped");
 }
+
+/// Plan `raw` on a proxy route `/p` with a body limit of 1 KiB.
+fn plan_of(raw: &[u8]) -> super::ProxyPlan {
+    use super::plan;
+    use crate::config::{RouteAction, load};
+    use crate::http::request::{HeadLimits, ParseStatus, parse_head};
+    let config = load(
+        "listen 127.0.0.1:80; host a.test { path /p { proxy 127.0.0.1:3000; \
+         max_request_body 1024; max_response_body 1; } }",
+    )
+    .unwrap();
+    let route = &config.hosts[0].routes[0];
+    let RouteAction::Proxy(target) = &route.action else {
+        panic!("a proxy route");
+    };
+    let Ok(ParseStatus::Complete { head, .. }) = parse_head(raw, &HeadLimits::from(&config.limits))
+    else {
+        panic!("a complete head");
+    };
+    plan(route, target, &head, &[target.backend], None)
+}
+
+/// FR-PROXY-01: a `GET` or `HEAD` whose head frames a body is answered
+/// 400 and closed, never forwarded (NFR-SEC-14, TE.0).
+#[test]
+fn plan_rejects_a_body_on_get_and_head() {
+    use super::ProxyPlan;
+    use crate::http::request::Persistence;
+    use crate::http::status::Status;
+    for raw in [
+        &b"GET /p HTTP/1.1\r\nHost: a.test\r\nContent-Length: 1\r\n\r\n"[..],
+        b"GET /p HTTP/1.1\r\nHost: a.test\r\nTransfer-Encoding: chunked\r\n\r\n",
+        b"HEAD /p HTTP/1.1\r\nHost: a.test\r\nTransfer-Encoding: chunked\r\n\r\n",
+    ] {
+        assert_eq!(
+            plan_of(raw),
+            ProxyPlan::Respond(Status::BadRequest, Persistence::Close),
+            "{}",
+            String::from_utf8_lossy(raw)
+        );
+    }
+}
+
+/// FR-PROXY-01: other methods keep their bodies, and a `GET` without one
+/// is forwarded.
+#[test]
+fn plan_keeps_other_methods_with_bodies_and_get_without() {
+    use super::ProxyPlan;
+    for raw in [
+        &b"POST /p HTTP/1.1\r\nHost: a.test\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+        b"GET /p HTTP/1.1\r\nHost: a.test\r\n\r\n",
+    ] {
+        assert!(
+            matches!(plan_of(raw), ProxyPlan::Forward(_)),
+            "{}",
+            String::from_utf8_lossy(raw)
+        );
+    }
+}

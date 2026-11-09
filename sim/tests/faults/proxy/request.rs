@@ -56,7 +56,8 @@ pub(crate) enum Verdict {
     /// closed.
     Parse(HttpError),
     /// The core answers itself (route miss, 413, duplicate
-    /// `X-Forwarded-For`), logged as a `Response`.
+    /// `X-Forwarded-For`, a body on `GET` or `HEAD`), logged as a
+    /// `Response`.
     Answer(Status, Persistence),
     /// A chunked body the core must refuse: 400 before connecting, or a cut
     /// once connected. Every forwarded byte lies before `bound` (an offset
@@ -734,6 +735,11 @@ fn judge(j: &Judged) -> Verdict {
         .filter(|l| l.name.eq_ignore_ascii_case("x-forwarded-for"))
         .count();
     if xff_lines > 1 {
+        return Verdict::Answer(Status::BadRequest, Persistence::Close);
+    }
+    // FR-PROXY-01: a body on `GET` or `HEAD` is never forwarded; a backend
+    // that ignores it would read it as a second request (NFR-SEC-14, TE.0).
+    if matches!(j.method, "GET" | "HEAD") && j.has_body {
         return Verdict::Answer(Status::BadRequest, Persistence::Close);
     }
     if let (Body::Length { payload, .. }, Some(max)) = (j.body, route.max_request_body) {

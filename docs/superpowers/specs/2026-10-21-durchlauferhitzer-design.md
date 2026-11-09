@@ -708,7 +708,7 @@ Each requirement carries its status.
 Forwarding and identity:
 
 - **FR-PROXY-01** [done] Any method token is forwarded. *(Owner decision
-  2026-11-09, the TE.0 row of NFR-SEC-14)* [stage 9]: a `GET` or `HEAD`
+  2026-11-09, the TE.0 row of NFR-SEC-14)* [done]: a `GET` or `HEAD`
   whose head frames a body (`Transfer-Encoding: chunked`, or a
   `Content-Length` above 0; `Content-Length: 0` is no body, FR-HTTP-08)
   → 400 and close, the body unread (FR-CONN-05), before any backend
@@ -716,6 +716,13 @@ Forwarding and identity:
   keep their 413 (FR-STATIC-04). *RFC 9110 §9.3.1 gives such content no
   meaning; a backend that ignores it would read the body as a second
   request, with the proxy's routing and rewriting bypassed.*
+  *Planner calls (stage 9 plan, Task 4):* the check is a match arm in
+  the core's proxy `plan`, after the duplicate `X-Forwarded-For` check
+  (FR-PROXY-08), which answers the same 400 and close, and before the
+  `max_request_body` check, so a `GET` with a `Content-Length` over the
+  limit is 400, not 413. The 400 is logged as one `Response` entry, like
+  the 413 of FR-PROXY-23 (FR-LOG-03); a 400 to `HEAD` is head-only
+  (FR-HTTP-21).
 - **FR-PROXY-02** [done] A client has at most one upstream at a time.
   *(Stages 3–6, superseded by pooling for pooled routes:)* one fresh
   backend connection per request, with `Connection: close` toward the
@@ -2309,7 +2316,7 @@ Failures, persistence, timeouts:
   | Any row above, split at any byte | the same verdict | NFR-ROB-02 | `prefix_never_contradicts_full`, `incremental_parser_matches_stateless` (both parsers); `split_independent` (chunked); `every_split_point_gives_identical_responses` (`sim/tests/faults/split.rs`) |
   | Whole exchanges: every forwarded byte against a model written from this spec | — | NFR-SEC-02/03 | the randomized proxy net `sim/tests/faults/proxy/` with `sim/tests/support/model_http.rs` |
   | Shapes nobody thought of | never a panic, bounded work and memory | NFR-SEC-13, NFR-SEC-10 | fuzz targets `request_head`, `chunked`, `response_head` (nightly) |
-  | TE.0, a body on `GET`/`HEAD`: a chunked or `Content-Length` body on a bodiless method, which a backend that ignores it would read as a second request | C 400 on proxy routes (static: 413) [stage 9; owner decision 2026-11-09] | FR-PROXY-01, FR-STATIC-04 | stage 9: `get_with_a_body_is_400_without_connect`, `head_with_a_chunked_body_is_400_without_connect` (`sim/tests/proxy/bodies.rs`), the proxy net's `400 body on GET or HEAD` bucket; until then the backend's second response is dropped and the upstream closed (FR-PROXY-22) |
+  | TE.0, a body on `GET`/`HEAD`: a chunked or `Content-Length` body on a bodiless method, which a backend that ignores it would read as a second request | C 400 on proxy routes (static: 413) | FR-PROXY-01, FR-STATIC-04 | `get_with_a_body_is_400_without_connect`, `head_with_a_chunked_body_is_400_without_connect`, `get_with_content_length_zero_is_forwarded`, `head_with_a_chunked_body_and_expect_gets_400_not_100` (`sim/tests/proxy/bodies.rs`); `plan_rejects_a_body_on_get_and_head` (`core/src/core/proxy/tests.rs`); the proxy net's `400 body on GET or HEAD` bucket |
 
   Last review: 2026-11-09 (the ledger's creation).
 
