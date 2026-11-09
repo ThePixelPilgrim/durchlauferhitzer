@@ -12,8 +12,16 @@
 # Never deleted: the base, the --keep names (default: main benchmarks;
 # --keep adds to them), the checked-out branch, branches checked out in
 # any worktree. Branches with other commits are listed as unmerged work.
+# `git cherry` ignores merge commits, so a branch whose only unique
+# content is a merge commit counts as merged.
+# Fails closed: a branch that cannot be checked (commit missing locally,
+# e.g. a --single-branch clone, or a git error) is reported "unknown:
+# kept", never deleted, and makes the exit status 1. Remote branches are
+# judged by their fetched remote-tracking refs, and deleted with a lease
+# on the checked sha, so a push in between is not lost.
 # A refused deletion is reported and the run goes on; the exit status is
-# 1 if any deletion failed, 2 on a usage error.
+# 1 if any deletion failed or any branch was unknown, 2 on a usage error
+# (including a failed fetch).
 set -euo pipefail
 
 usage() {
@@ -41,7 +49,7 @@ done
 keep+=("$base")
 
 echo "fetching $remote ..."
-git fetch --prune --quiet "$remote"
+git fetch --prune --quiet "$remote" || { echo "fetch of $remote failed" >&2; exit 2; }
 basetip=$(git rev-parse --verify --quiet "refs/remotes/$remote/$base^{commit}") ||
     { echo "no $remote/$base after fetch" >&2; exit 2; }
 echo "base: $remote/$base ($(git rev-parse --short "$basetip"))"
@@ -57,7 +65,7 @@ while IFS= read -r line; do
 done < <(git worktree list --porcelain)
 current=$(git symbolic-ref --quiet --short HEAD || true)
 
-failed=0 unmerged_lines=()
+failed=0 unmerged_lines=() reason=
 
 # protected <name> — sets $why and returns 0 when the branch must stay.
 protected() {
@@ -70,13 +78,20 @@ protected() {
     return 1
 }
 
-# merged <rev> — sets $rule (merged) or $count (commits not on the base).
+# merged <rev> — 0: merged (sets $rule), 1: unmerged (sets $count),
+# 2: could not be checked (sets $reason). Never reports an error as merged.
 merged() {
-    local cherry
-    if git merge-base --is-ancestor "$1" "$basetip"; then
-        rule="merged: ancestor of $remote/$base"; return 0
-    fi
-    cherry=$(git cherry "$basetip" "$1")
+    local rc=0 cherry
+    git cat-file -e "$1^{commit}" 2>/dev/null ||
+        { reason="unknown: kept, commit not available locally"; return 2; }
+    git merge-base --is-ancestor "$1" "$basetip" || rc=$?
+    case $rc in
+        0) rule="merged: ancestor of $remote/$base"; return 0 ;;
+        1) ;;
+        *) reason="unknown: kept, merge-base failed ($rc)"; return 2 ;;
+    esac
+    cherry=$(git cherry "$basetip" "$1") ||
+        { reason="unknown: kept, git cherry failed"; return 2; }
     count=$(grep -c '^+' <<<"$cherry" || true)
     if [[ $count -eq 0 ]]; then
         rule="merged: patch-equivalent on $remote/$base"; return 0
@@ -84,14 +99,19 @@ merged() {
     return 1
 }
 
-# handle <local|remote> <name> <rev>
+# handle <local|remote> <name> <rev> [lease-sha]
 handle() {
-    local scope=$1 name=$2 rev=$3 verb=deleted out
+    local scope=$1 name=$2 rev=$3 lease=${4:-} verb=deleted out rc=0
     if protected "$name"; then
         printf '%-16s %-6s %s  (%s)\n' keep "$scope" "$name" "$why"
         return
     fi
-    if ! merged "$rev"; then
+    merged "$rev" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        printf '%-16s %-6s %s  (%s)\n' unknown "$scope" "$name" "$reason"
+        failed=1
+        return
+    elif [[ $rc -eq 1 ]]; then
         unmerged_lines+=("$(printf '  %-6s %s  %s commit%s' "$scope" "$name" "$count" "$([[ $count -eq 1 ]] || echo s)")")
         return
     fi
@@ -102,7 +122,7 @@ handle() {
     if [[ $scope == local ]]; then
         out=$(git branch -D -- "$name" 2>&1) || verb=failed
     else
-        out=$(git push --quiet "$remote" --delete "$name" 2>&1) || verb=failed
+        out=$(git push --quiet --force-with-lease="refs/heads/$name:$lease" "$remote" ":refs/heads/$name" 2>&1) || verb=failed
     fi
     if [[ $verb == failed ]]; then
         printf '%-16s %-6s %s  (%s)\n' "FAILED to delete" "$scope" "$name" "$(tr '\n' ' ' <<<"$out")"
@@ -112,13 +132,28 @@ handle() {
     fi
 }
 
+# Capture the producers first so a failing git stops the run (set -e).
+refs=$(git for-each-ref --format='%(refname)' refs/heads)
 while read -r ref; do
+    [[ -n $ref ]] || continue
     handle local "${ref#refs/heads/}" "$ref"
-done < <(git for-each-ref --format='%(refname)' refs/heads)
+done <<<"$refs"
 
+heads=$(git ls-remote --heads "$remote")
 while IFS=$'\t' read -r sha ref; do
-    handle remote "${ref#refs/heads/}" "$sha"
-done < <(git ls-remote --heads "$remote")
+    [[ -n $ref ]] || continue
+    name=${ref#refs/heads/}
+    # Judge the fetched remote-tracking ref, and only if it is the sha the
+    # remote reports now; otherwise the branch is unknown.
+    if tracked=$(git rev-parse --verify --quiet "refs/remotes/$remote/$name^{commit}") && [[ $tracked == "$sha" ]]; then
+        handle remote "$name" "refs/remotes/$remote/$name" "$sha"
+    elif protected "$name"; then
+        printf '%-16s %-6s %s  (%s)\n' keep remote "$name" "$why"
+    else
+        printf '%-16s %-6s %s  (%s)\n' unknown remote "$name" "unknown: kept, no up-to-date remote-tracking ref"
+        failed=1
+    fi
+done <<<"$heads"
 
 if [[ ${#unmerged_lines[@]} -gt 0 ]]; then
     echo

@@ -39,8 +39,9 @@ hasnt() {
 }
 
 # run <args...> — sets $out (stdout+stderr) and $status.
+wd=$tmp/work
 run() {
-    out=$(cd "$tmp/work" && "$script" "$@" 2>&1) && status=0 || status=$?
+    out=$(cd "$wd" && "$script" "$@" 2>&1) && status=0 || status=$?
 }
 
 local_heads() { git -C "$tmp/work" for-each-ref --format='%(refname:short)' refs/heads | sort | paste -sd' '; }
@@ -151,6 +152,88 @@ has "after refusal continues" '^deleted +remote +zzz-after '
 want="benchmarks main stuck unmerged wt"
 [[ $(remote_heads) == "$want" ]] || fail "remote after refusal: '$(remote_heads)' want '$want'"
 [[ $(local_heads) == "benchmarks main unmerged wt" ]] || fail "local after refusal: '$(local_heads)'"
+
+# --- more cases, on fresh repository pairs ---
+# mkpair <name> — origin.git + work clone with one commit on main, pushed;
+# leaves the shell in the work clone.
+mkpair() {
+    git init -q --bare -b main "$tmp/$1-origin.git"
+    git clone -q "$tmp/$1-origin.git" "$tmp/$1" 2>/dev/null
+    cd "$tmp/$1"
+    git checkout -q -b main 2>/dev/null || true
+    commit base.txt 0 base
+    git push -q origin main
+    wd=$tmp/$1
+}
+rheads() { git -C "$tmp/$1-origin.git" for-each-ref --format='%(refname:short)' refs/heads | sort | paste -sd' '; }
+
+# behind (strictly behind the base), a slash name, a non-main checked-out
+# branch, --keep, detached HEAD.
+mkpair x
+git branch behind main
+git checkout -q -b feat/slash main
+commit s.txt 1 slash
+git checkout -q -b cur main
+git checkout -q -b keepme main
+git checkout -q main
+git merge -q --ff-only feat/slash
+commit m.txt 1 "main moves on"
+git push -q origin main behind feat/slash cur keepme
+git checkout -q cur
+run --keep keepme
+[[ $status -eq 0 ]] || fail "x dry run exit $status: $out"
+has "behind" '^would delete +local +behind +\(merged: ancestor'
+has "slash" '^would delete +remote +feat/slash +\(merged: ancestor'
+has "current branch kept" '^keep +local +cur +\(protected: checked out'
+has "--keep" '^keep +local +keepme +\(protected: kept by name'
+has "--keep remote" '^keep +remote +keepme +\(protected: kept by name'
+git checkout -q --detach
+run
+[[ $status -eq 0 ]] || fail "detached exit $status: $out"
+has "detached: cur no longer protected" '^would delete +local +cur +'
+run --delete --keep keepme
+[[ $status -eq 0 ]] || fail "x --delete exit $status: $out"
+[[ $(git for-each-ref --format='%(refname:short)' refs/heads | sort | paste -sd' ') == "keepme main" ]] ||
+    fail "x local after delete"
+[[ $(rheads x) == "keepme main" ]] || fail "x remote after delete: $(rheads x)"
+
+# --base: judged against another branch.
+mkpair y
+git checkout -q -b develop main
+commit d.txt 1 develop
+git checkout -q -b ondev develop
+git checkout -q -b sidemain main
+commit sm.txt 1 sidemain
+git checkout -q main
+git push -q origin develop ondev sidemain
+run --base develop
+[[ $status -eq 0 ]] || fail "--base exit $status: $out"
+has "--base" '^base: origin/develop'
+has "--base ondev" '^would delete +remote +ondev +\(merged: ancestor of origin/develop'
+has "--base develop kept" '^keep +remote +develop +\(protected: base branch'
+has "--base unmerged" '^ +remote +sidemain +1 commit$'
+
+# A remote branch whose objects are not local (--single-branch clone):
+# unknown, kept, exit 1, even with --delete.
+mkpair z
+git checkout -q -b other main
+commit o.txt 1 other
+git checkout -q -b mergedb main
+git push -q origin other mergedb
+git clone -q --single-branch --branch main "$tmp/z-origin.git" "$tmp/z2" 2>/dev/null
+wd=$tmp/z2
+run --delete
+[[ $status -eq 1 ]] || fail "single-branch exit $status (want 1): $out"
+has "single-branch other" '^unknown +remote +other +\(unknown: kept'
+has "single-branch merged one" '^unknown +remote +mergedb +\(unknown: kept'
+hasnt "single-branch deleted" '^deleted '
+[[ $(rheads z) == "main mergedb other" ]] || fail "single-branch deleted something: $(rheads z)"
+
+# A failing fetch stops the run before anything is evaluated.
+wd=$tmp/work
+run --remote nonexist --delete
+[[ $status -eq 2 ]] || fail "bad remote exit $status (want 2): $out"
+hasnt "bad remote" '^(would delete|deleted|keep) '
 
 if [[ $failures -ne 0 ]]; then
     echo "$failures failure(s)" >&2
