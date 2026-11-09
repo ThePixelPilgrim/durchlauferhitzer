@@ -49,26 +49,28 @@ start_pre() {
 # over, or the helper's own fork on its way to it (setsid, then
 # $command), which a killed helper may leave; so the executable is not
 # checked.
+#
+# A process is tracked as "<pid>:<start time>" throughout: each signal
+# and each poll checks the start time again, so a pid that ends and is
+# reused while stop_post runs (between two polls) is never signalled.
 stop_post() {
 	dl_list="$pidfile.draining"
 	[ -f "$dl_list" ] || return 0
-	dl_pids=
+	dl_procs=
 	while read -r dl_pid dl_start; do
 		case $dl_pid in
 		'' | *[!0-9]*) continue ;;
 		esac
-		dl_stat=$(sed -n 's/^.*) //p' "/proc/$dl_pid/stat" 2>/dev/null)
-		dl_now=$(printf '%s\n' "$dl_stat" | cut -d ' ' -f 20)
-		case $dl_stat in
-		'' | Z*) continue ;;
+		case $dl_start in
+		'' | *[!0-9]*) continue ;;
 		esac
-		[ -n "$dl_start" ] && [ "$dl_now" = "$dl_start" ] && dl_pids="$dl_pids $dl_pid"
+		dl_runs "$dl_pid" "$dl_start" && dl_procs="$dl_procs $dl_pid:$dl_start"
 	done <"$dl_list"
-	if [ -z "$dl_pids" ]; then
+	if [ -z "$dl_procs" ]; then
 		rm -f "$dl_list"
 		return 0
 	fi
-	ebegin "Stopping draining $RC_SVCNAME processes:$dl_pids"
+	ebegin "Stopping draining $RC_SVCNAME processes:$(dl_pids_of "$dl_procs")"
 	case $retry in
 	*/*) dl_schedule=$retry ;;
 	*) dl_schedule="TERM/${retry:-5}/KILL/5" ;;
@@ -78,26 +80,43 @@ stop_post() {
 	# shellcheck disable=SC2086 # split on /
 	set -- $dl_schedule
 	IFS=$dl_ifs
-	while [ $# -ge 2 ] && [ -n "$dl_pids" ]; do
-		# shellcheck disable=SC2086 # one argument per pid
-		kill -s "${1#SIG}" $dl_pids 2>/dev/null
+	while [ $# -ge 2 ] && [ -n "$dl_procs" ]; do
+		for dl_proc in $dl_procs; do
+			dl_runs "${dl_proc%%:*}" "${dl_proc#*:}" &&
+				kill -s "${1#SIG}" "${dl_proc%%:*}" 2>/dev/null
+		done
 		dl_n=0
 		while :; do
 			dl_left=
-			for dl_pid in $dl_pids; do
-				dl_state=$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$dl_pid/stat" 2>/dev/null)
-				[ -n "$dl_state" ] && [ "$dl_state" != Z ] && dl_left="$dl_left $dl_pid"
+			for dl_proc in $dl_procs; do
+				dl_runs "${dl_proc%%:*}" "${dl_proc#*:}" && dl_left="$dl_left $dl_proc"
 			done
-			dl_pids=$dl_left
-			[ -z "$dl_pids" ] || [ "$dl_n" -ge "$2" ] && break
+			dl_procs=$dl_left
+			[ -z "$dl_procs" ] || [ "$dl_n" -ge "$2" ] && break
 			sleep 1
 			dl_n=$((dl_n + 1))
 		done
 		shift 2
 	done
-	[ -z "$dl_pids" ] && rm -f "$dl_list"
-	[ -z "$dl_pids" ]
-	eend $? "still running:$dl_pids"
+	[ -z "$dl_procs" ] && rm -f "$dl_list"
+	[ -z "$dl_procs" ]
+	eend $? "still running:$(dl_pids_of "$dl_procs")"
+}
+
+# Whether pid $1 runs (not a zombie) with start time $2.
+dl_runs() {
+	dl_stat=$(sed -n 's/^.*) //p' "/proc/$1/stat" 2>/dev/null)
+	case $dl_stat in
+	'' | Z*) return 1 ;;
+	esac
+	[ "$(printf '%s\n' "$dl_stat" | cut -d ' ' -f 20)" = "$2" ]
+}
+
+# The pids of the "<pid>:<start time>" words in $1, each after a space.
+dl_pids_of() {
+	for dl_word in $1; do
+		printf ' %s' "${dl_word%%:*}"
+	done
 }
 
 reload() {

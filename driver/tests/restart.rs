@@ -16,7 +16,8 @@
 //!   `<pidfile>.draining`, which OpenRC's `stop_post` ends, also while it
 //!   is still the helper's fork on its way to the binary (a gated
 //!   `setsid` stub); a helper killed before listing it (a gated `mv`
-//!   stub) leaves nothing running.
+//!   stub) leaves nothing running, and one that cannot be listed is
+//!   never started (exit 1).
 //! - A `listen` address the new config drops is closed (documented); one
 //!   it adds is served, with a new `user`, and nothing is lost.
 //! - The lock: a second helper is refused while the holder runs; a stale
@@ -61,6 +62,10 @@ mod site;
 /// The helper's refusals, grace, lock and `listen` changes.
 #[path = "restart/helper.rs"]
 mod helper;
+
+/// The helper killed, or failing, before its new process is listed.
+#[path = "restart/killed.rs"]
+mod killed;
 
 use std::fs;
 use std::io::{self, Write};

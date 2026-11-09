@@ -187,8 +187,8 @@ losing a connection; the OpenRC script's `reload` calls it
    output appended to `<logfile>`, and lists its pid in
    `<pidfile>.draining` at once (so `stop` ends it if the helper dies,
    also while it is still on its way to `<binary>`); it runs `<binary>`
-   only once listed, so a helper killed before that leaves nothing
-   running;
+   only once listed (a list it cannot write is exit 1), so a helper
+   killed before that leaves nothing running;
 5. waits for `ready` (default 30 s); if it does not come, it sends the
    new process `SIGHUP` (one already serving drains, its queue moving to
    the old process; one stuck before its event loop is killed after
