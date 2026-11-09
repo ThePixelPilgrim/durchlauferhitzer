@@ -247,7 +247,9 @@ pub(super) fn parse_route(block: &Block) -> Result<(Route, Option<Pos>), ConfigE
                     on_file_change: change.map_or(OnFileChange::Abort, |slot| slot.value),
                     ..slot.value
                 }),
-                (None, Some(slot)) => return fail(ConfigErrorKind::OnFileChangeOnProxy, slot.pos),
+                (None, Some(slot)) => {
+                    return fail(ConfigErrorKind::OnFileChangeWithoutFiles, slot.pos);
+                }
                 (None, None) => None,
             };
             let Some(max_request_body) = max_request else {

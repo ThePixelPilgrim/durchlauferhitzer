@@ -82,7 +82,7 @@ fn on_file_change_with_internal_files() {
     let error = load(&with_setting("on_file_change abort;")).unwrap_err();
     assert_eq!(
         (error.kind.clone(), error.pos.line, error.pos.column),
-        (ConfigErrorKind::OnFileChangeOnProxy, 7, 5)
+        (ConfigErrorKind::OnFileChangeWithoutFiles, 7, 5)
     );
     assert_eq!(
         error.to_string(),

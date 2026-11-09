@@ -601,6 +601,6 @@ fn on_file_change_on_proxy_is_rejected() {
         err(&proxy_path(
             "    max_request_body 1;\n    max_response_body 1;\n    on_file_change abort;"
         )),
-        (ConfigErrorKind::OnFileChangeOnProxy, 7, 5)
+        (ConfigErrorKind::OnFileChangeWithoutFiles, 7, 5)
     );
 }
