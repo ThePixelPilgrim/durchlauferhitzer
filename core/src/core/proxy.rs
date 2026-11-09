@@ -593,10 +593,7 @@ impl Core {
         let Some((up, mut request, _)) = take_exchange(c) else {
             return;
         };
-        let (persistence, unread_body, buffered) = match request.body.end(&mut c.recv) {
-            BodyEnd::Read { buffered } => (request.persistence, UnreadBody::None, buffered),
-            BodyEnd::Unread => (Persistence::Close, UnreadBody::Pending, 0),
-        };
+        let (persistence, unread_body, buffered) = client_after(&mut request, &mut c.recv);
         let status = match kind {
             BackendFailure::Refused
             | BackendFailure::Reset
@@ -721,6 +718,21 @@ pub(super) fn queued_send_deadline(
 
 /// What the core answers itself to `Expect: 100-continue`.
 const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+
+/// How the client goes on when its exchange ends before a response
+/// body is relayed: as the request asked if its body was fully read
+/// (`buffered` bytes of the next request then wait at the front of
+/// `recv`), else closing with the rest of the body unread (FR-PROXY-27,
+/// -28).
+pub(super) fn client_after(
+    request: &mut ProxyRequest,
+    recv: &mut [u8],
+) -> (Persistence, UnreadBody, usize) {
+    match request.body.end(recv) {
+        BodyEnd::Read { buffered } => (request.persistence, UnreadBody::None, buffered),
+        BodyEnd::Unread => (Persistence::Close, UnreadBody::Pending, 0),
+    }
+}
 
 /// Take the exchange out of `c`'s `Connecting` or `AwaitingResponse`
 /// state: the upstream id, the request and the exchange's buffers; the

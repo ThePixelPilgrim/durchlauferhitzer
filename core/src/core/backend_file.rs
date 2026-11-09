@@ -8,21 +8,19 @@
 //! static route.
 
 use super::pool::{Exchange, release};
-use super::proxy::{queued_send_deadline, take_exchange};
+use super::proxy::{client_after, queued_send_deadline, take_exchange};
 use super::{Action, ConnId, Core, InternalRoute};
 use crate::config::FileHeader;
 use crate::conn::{
-    BackendFile, ConnState, FileSource, OpenStep, ProxyRequest, Release, StaticRequest, UnreadBody,
+    BackendFile, ConnState, FileSource, OpenStep, ProxyRequest, Release, StaticRequest,
 };
 use crate::http::backend_path::{Located, accel_path, sendfile_path};
 use crate::http::forward::{kept_lines_len, render_kept_lines};
-use crate::http::request::Persistence;
 use crate::http::response::{BodyMode, FILE_HEAD_EXTRA, render_fixed};
 use crate::http::response_head::{RequestKind, ResponseBody, ResponseError, ResponseHead};
 use crate::http::status::Status;
 use crate::log::{BackendFailure, Log};
 use crate::relay_body::rest_after;
-use crate::request_body::BodyEnd;
 use crate::time::Instant;
 
 /// What a backend's response head names on an `internal_files` route.
@@ -154,10 +152,7 @@ impl Core {
         let Some((up, mut request, mut buffers)) = take_exchange(c) else {
             return;
         };
-        let (persistence, unread_body, buffered) = match request.body.end(&mut c.recv) {
-            BodyEnd::Read { buffered } => (request.persistence, UnreadBody::None, buffered),
-            BodyEnd::Unread => (Persistence::Close, UnreadBody::Pending, 0),
-        };
+        let (persistence, unread_body, buffered) = client_after(&mut request, &mut c.recv);
         let body = BodyMode::of(&request.summary.method);
         let Some(route) = request.internal.take() else {
             return;
