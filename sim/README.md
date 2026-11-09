@@ -88,6 +88,8 @@ tests/
                         slow client), suffixes, 416s, `If-Range`, the
                         whole file for unserved ranges, a cut range
   proxy/              proxy routes end to end, with scripted backends
+                      (the routes but those of `pool.rs` and
+                      `backend_files.rs` say `pool off;`)
     main.rs             heads, failures, timeouts; shared helpers
     bodies.rs           request bodies, `100 Continue`, early responses
     expect.rs           `Expect` on every route
@@ -101,8 +103,6 @@ tests/
                         clients, idle hygiene and timeout, the safe retry
     internal_files.rs   `internal_files` routes: file headers stripped
                         both ways, Rack's hints for the backend
-                        (the routes but those of `pool.rs` and
-                        `backend_files.rs` say `pool off;`)
     backend_files.rs    the file a backend's 200 names (FR-PROXY-32):
                         the exact bytes behind the merged head, 304,
                         206, 416, HEAD, POST, 404s, bad paths (502),
@@ -344,12 +344,18 @@ conditional lines in six is replaced (from a stream of its own) by a
 `GET` of a range longer than a chunk of a file of several chunks, so
 `range-across-chunk` (a 206 checked byte for byte past its first chunk)
 must reach at least 15, and `range-cut` (a 206 cut where its fault
-strikes within the range) is reached.
+strikes within the range) is reached. Of the other requests without
+conditional lines one in four is replaced (from another stream) by a
+`GET` of a file with a range past its end, an open one, a suffix or
+several ranges, and the range lines draw those kinds a quarter of the
+time, so `range-clamped`, `range-open-end`, `range-suffix` and
+`range-multi-200` must each reach at least 15 too.
 
-Every test binary takes the bytes of the responses the core writes itself
-(fixed 4xx/5xx, file heads, 206s, 416s, 304s, redirects) and the status of each parse error
-from a model written from the spec (`tests/support/model_http.rs`, included
-by `#[path]`), never from the core's renderers.
+Every test binary takes the bytes of the responses the core writes
+itself (fixed 4xx/5xx, file heads, 206s, 416s, 304s, redirects) and the
+status of each parse error from a model written from the spec
+(`tests/support/model_http.rs`, included by `#[path]`), never from the
+core's renderers.
 
 ## Commands
 

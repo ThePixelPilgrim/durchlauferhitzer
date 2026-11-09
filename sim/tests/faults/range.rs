@@ -196,8 +196,12 @@ pub(crate) fn random_range(rng: &mut fastrand::Rng, stamp: Option<FileStamp>) ->
     let inside = |rng: &mut fastrand::Rng| rng.u64(0..size.max(1));
     // A file of more than two chunks: half the time a range longer than
     // a chunk, so ranges read in several chunks are common.
+    // Else a quarter of the time one of the kinds held to
+    // `MIN_RANGE_KIND`: past the end, open, a suffix, several ranges.
     let draw = if size > 2 * CHUNK && rng.bool() {
         6
+    } else if rng.u8(0..4) == 0 {
+        rng.choice([3, 4, 5, 10]).unwrap_or_default()
     } else {
         rng.u8(0..16)
     };
@@ -272,11 +276,6 @@ pub(crate) fn long_range_request(seed: u64, tree: &Tree) -> Option<Vec<u8>> {
     if rng.u8(0..6) != 0 {
         return None;
     }
-    let plain = |key: &str| {
-        key.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"./_-".contains(&b))
-            && !key.split('/').any(|s| s.starts_with('.'))
-    };
     let files: Vec<(&str, u64)> = tree
         .nodes
         .iter()
@@ -301,6 +300,59 @@ pub(crate) fn long_range_request(seed: u64, tree: &Tree) -> Option<Vec<u8>> {
         )
         .into_bytes(),
     )
+}
+
+/// Mixed into the generator's state to seed [`kind_range_request`].
+const KIND_RANGE_STREAM: u64 = 0x4b49_4e44_5241_4e47;
+
+/// One request in `KIND_RANGE_ONE_IN`, when the tree has a non-empty file
+/// that a plain path reaches: a `GET` of it, under `/` or `/g/`, with a
+/// range of one of the kinds gated by `MIN_RANGE_KIND`, which
+/// [`random_range`]'s lines reach too rarely on their own: past the end
+/// (clamped), open, a suffix, or several ranges (the whole file). No
+/// `If-Range`; from a stream seeded by `seed`, `None` when the head would
+/// not fit `tree.max_head`.
+pub(crate) fn kind_range_request(seed: u64, tree: &Tree) -> Option<Vec<u8>> {
+    let mut rng = fastrand::Rng::with_seed(seed ^ KIND_RANGE_STREAM);
+    if rng.u8(0..KIND_RANGE_ONE_IN) != 0 {
+        return None;
+    }
+    let files: Vec<(&str, u64)> = tree
+        .nodes
+        .iter()
+        .filter_map(|(key, node)| match node {
+            Node::File(f) if f.size() > 0 && plain(key) => Some((key.as_str(), f.size())),
+            Node::File(_) | Node::Dir | Node::Unservable => None,
+        })
+        .collect();
+    let (path, size) = rng.choice(files)?;
+    let spec = match rng.u8(0..4) {
+        0 => format!("bytes={}-{}", rng.u64(0..size), size + rng.u64(0..100)),
+        1 => format!("bytes={}-", rng.u64(0..size)),
+        2 => format!("bytes=-{}", rng.u64(1..size + 2)),
+        _ => "bytes=0-1,5-6".to_owned(),
+    };
+    let prefix = if rng.bool() { "/" } else { "/g/" };
+    let close = if rng.u8(0..6) == 0 {
+        "Connection: close\r\n"
+    } else {
+        ""
+    };
+    let head = format!(
+        "GET {prefix}{path} HTTP/1.1\r\nHost: example.test\r\n{close}Range: {spec}\r\n\r\n"
+    );
+    (head.len() <= tree.max_head - 8).then(|| head.into_bytes())
+}
+
+/// How rarely [`kind_range_request`] stands in for a drawn request.
+const KIND_RANGE_ONE_IN: u8 = 4;
+
+/// Whether the tree's `key` is reached by its path as it is: no escapes,
+/// no dot segment.
+fn plain(key: &str) -> bool {
+    key.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"./_-".contains(&b))
+        && !key.split('/').any(|s| s.starts_with('.'))
 }
 
 /// What the range requests reached, summed over all seeds.
@@ -328,6 +380,17 @@ const RANGE_NAMES: [&str; 13] = [
 
 /// `range-across-chunk` must be well clear of zero (like `MIN_GROWN`).
 const MIN_ACROSS_CHUNK: usize = 15;
+
+/// The kinds [`kind_range_request`] draws must be well clear of zero too.
+const MIN_RANGE_KIND: usize = 15;
+
+/// The names held to `MIN_RANGE_KIND`.
+const RANGE_KINDS: [&str; 4] = [
+    "range-clamped",
+    "range-open-end",
+    "range-suffix",
+    "range-multi-200",
+];
 
 impl RangeCoverage {
     fn hit(&mut self, name: &'static str) {
@@ -405,6 +468,14 @@ impl RangeCoverage {
             across >= MIN_ACROSS_CHUNK,
             "only {across} 206s checked past their first chunk (want {MIN_ACROSS_CHUNK})"
         );
+        for name in RANGE_KINDS {
+            let n = self.counts.get(name).copied().unwrap_or(0);
+            assert!(
+                n >= MIN_RANGE_KIND,
+                "only {n} {name} in all seeds (want {MIN_RANGE_KIND}): {:?}",
+                self.counts
+            );
+        }
         for name in RANGE_NAMES {
             assert!(
                 self.counts.get(name).is_some_and(|n| *n > 0),
