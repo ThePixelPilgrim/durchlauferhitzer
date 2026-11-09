@@ -5,7 +5,7 @@
 //! Only a single `bytes` range is served. Several ranges (no
 //! `multipart/byteranges`), several `Range` lines, a malformed `Range` or
 //! another unit get the whole file, as RFC 9110 allows; so does every
-//! method but `GET`. `If-Range` keeps the range only for the file's own
+//! method but `GET`, and an empty file (owner decision 2026-11-09). `If-Range` keeps the range only for the file's own
 //! strong `ETag` or exactly its `Last-Modified` bytes, on one line
 //! (planner calls, stage 8 plan).
 
@@ -127,15 +127,19 @@ impl RangeRequest {
         if !kept {
             return Ranged::Whole;
         }
-        // A suffix of no bytes, and every range of an empty file, overlap
-        // nothing (the planner call: an empty file's ranges are all 416).
+        // An empty file's `Range` is ignored (owner decision 2026-11-09);
+        // a suffix of no bytes overlaps nothing.
+        let Some(end) = size.checked_sub(1) else {
+            return Ranged::Whole;
+        };
         let empty_suffix = matches!(self.range, RangeSpec::Suffix(0));
-        match size.checked_sub(1) {
-            Some(end) if first <= end && !empty_suffix => Ranged::Part {
+        if first <= end && !empty_suffix {
+            Ranged::Part {
                 first,
                 last: last.min(end),
-            },
-            Some(_) | None => Ranged::Unsatisfiable,
+            }
+        } else {
+            Ranged::Unsatisfiable
         }
     }
 }

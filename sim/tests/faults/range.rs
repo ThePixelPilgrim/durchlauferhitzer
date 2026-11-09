@@ -61,9 +61,10 @@ fn model_spec(value: &str) -> Option<ModelSpec> {
 /// FR-STATIC-19 for a request `head` of a file with `stamp`: only a `GET`
 /// with one `Range` line holding one valid range is ranged; an `If-Range`
 /// (one line) keeps it only with the file's `ETag` or exactly its
-/// `Last-Modified`. A range that overlaps no byte (every range of an
-/// empty file, a suffix of 0) is unsatisfiable; one past the end is
-/// clamped to it.
+/// `Last-Modified`. An empty file's range is ignored (owner decision
+/// 2026-11-09): the whole file. Otherwise a range that overlaps no byte
+/// (a suffix of 0, a first byte past the end) is unsatisfiable; a last
+/// byte past the end is clamped to it.
 pub(crate) fn model_ranged(head: &[u8], stamp: FileStamp) -> ModelRanged {
     if !head.starts_with(b"GET ") {
         return ModelRanged::Whole;
@@ -82,17 +83,17 @@ pub(crate) fn model_ranged(head: &[u8], stamp: FileStamp) -> ModelRanged {
         [one] => *one == model_etag(stamp) || *one == last_modified,
         _ => false,
     };
-    if !kept {
+    let size = stamp.size;
+    if !kept || size == 0 {
         return ModelRanged::Whole;
     }
-    let size = stamp.size;
     let (first, last) = match spec {
         ModelSpec::FromTo(a, b) => (a, b.min(size.saturating_sub(1))),
         ModelSpec::From(a) => (a, size.saturating_sub(1)),
         ModelSpec::Suffix(0) => return ModelRanged::Unsatisfiable,
         ModelSpec::Suffix(n) => (size.saturating_sub(n), size.saturating_sub(1)),
     };
-    if size == 0 || first >= size {
+    if first >= size {
         ModelRanged::Unsatisfiable
     } else {
         ModelRanged::Part(first, last)
@@ -432,6 +433,15 @@ fn the_model_judges_ranges_from_the_spec() {
     assert_eq!(get("Range: bytes=1000-\r\n"), ModelRanged::Unsatisfiable);
     assert_eq!(get("Range: bytes=-0\r\n"), ModelRanged::Unsatisfiable);
     assert_eq!(get("Range: bytes=0-1,5-6\r\n"), ModelRanged::Whole);
+    let empty = FileStamp { size: 0, ..stamp };
+    for range in ["bytes=0-", "bytes=-5", "bytes=-0", "bytes=0-0"] {
+        let head = format!("GET / HTTP/1.1\r\nRange: {range}\r\n\r\n");
+        assert_eq!(
+            model_ranged(head.as_bytes(), empty),
+            ModelRanged::Whole,
+            "{range}"
+        );
+    }
     assert_eq!(
         get("Range: bytes=0-9\r\nIf-Range: Sun, 06 Nov 1994 08:49:37 GMT\r\n"),
         ModelRanged::Part(0, 9)

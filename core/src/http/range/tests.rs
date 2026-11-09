@@ -91,17 +91,24 @@ fn judges_ranges() {
     );
 }
 
-/// The planner call: nothing overlaps an empty file, so every range of
-/// one is 416, a suffix range too.
+/// Owner decision 2026-11-09 (FR-STATIC-19): an empty file's `Range` is
+/// ignored, so the whole (empty) file goes out with `200`, whatever the
+/// range and with or without a matching `If-Range`.
 #[test]
-fn empty_file_ranges_are_unsatisfiable() {
+fn empty_file_ranges_are_ignored() {
     let empty = FileStamp { size: 0, ..STAMP };
-    for value in ["bytes=0-", "bytes=-5", "bytes=0-0"] {
-        assert_eq!(
-            judge(&Method::Get, &[("range", value)], empty),
-            Ranged::Unsatisfiable,
-            "{value}"
-        );
+    let tag = format!("\"0-{:x}\"", STAMP.modified_ns);
+    assert_eq!(Validators::of(empty).etag.as_bytes(), tag.as_bytes());
+    for value in ["bytes=0-", "bytes=-5", "bytes=-0", "bytes=0-0", "bytes=5-9"] {
+        for if_range in [None, Some(tag.as_str())] {
+            let mut lines = vec![("range", value)];
+            lines.extend(if_range.map(|tag| ("if-range", tag)));
+            assert_eq!(
+                judge(&Method::Get, &lines, empty),
+                Ranged::Whole,
+                "{value} {if_range:?}"
+            );
+        }
     }
 }
 

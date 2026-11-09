@@ -221,6 +221,35 @@ fn unsatisfiable_range_gets_416() {
     );
 }
 
+/// Owner decision 2026-11-09 (FR-STATIC-19): an empty file's `Range` is
+/// ignored: the whole (empty) file with `200`, exactly as without one.
+#[test]
+fn range_on_an_empty_file_is_a_whole_200() {
+    let mut plain = files_core();
+    let whole = open(&mut plain, &head("GET", "/x/a.txt", ""), stamp(0));
+    for range in ["bytes=-5", "bytes=0-", "bytes=-0"] {
+        let mut core = files_core();
+        let actions = open(
+            &mut core,
+            &head("GET", "/x/a.txt", &format!("Range: {range}\r\n")),
+            stamp(0),
+        );
+        assert!(
+            actions.contains(&logged(Method::Get, "/x/a.txt", Status::Ok)),
+            "{range} {actions:?}"
+        );
+        assert_eq!(actions, whole, "{range}");
+        assert_eq!(
+            String::from_utf8_lossy(core.send_buffer(CONN)),
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
+             Content-Length: 0\r\nETag: \"0-7\"\r\n\
+             Last-Modified: Thu, 01 Jan 1970 00:00:00 GMT\r\nAccept-Ranges: bytes\r\n\
+             X-Content-Type-Options: nosniff\r\n\r\n",
+            "{range}"
+        );
+    }
+}
+
 /// Every 200 says the server serves ranges.
 #[test]
 fn whole_200_carries_accept_ranges() {

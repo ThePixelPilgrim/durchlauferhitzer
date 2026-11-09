@@ -106,11 +106,10 @@ fn slow_disk_and_slow_client_get_exactly_the_range() {
 }
 
 /// A range past the end gets the 416 at once, nothing read, the
-/// connection kept; an empty file's every range too.
+/// connection kept.
 #[test]
 fn range_past_the_end_gets_416() {
     let (mut sim, bytes, _) = big_file();
-    sim.add_file("/srv/www", "empty.txt", b"");
     let c = sim.connect(peer());
     let size = bytes.len() as u64;
     sim.send(
@@ -127,18 +126,44 @@ fn range_past_the_end_gets_416() {
         ))
     );
     assert!(readaheads(sim.trace()).is_empty(), "{}", sim.trace());
-    sim.send(c, &get_with("/empty.txt", "Range: bytes=-5\r\n"));
-    sim.run_until_idle();
-    assert_eq!(
-        sim.take_received(c),
-        model_http::model_range_not_satisfiable(0, Persistence::KeepAlive, None)
-    );
     assert_eq!(
         sim.logs(),
-        [
-            response_log(c, Status::RangeNotSatisfiable, Method::Get, "/big.bin"),
-            response_log(c, Status::RangeNotSatisfiable, Method::Get, "/empty.txt"),
-        ]
+        [response_log(
+            c,
+            Status::RangeNotSatisfiable,
+            Method::Get,
+            "/big.bin"
+        )]
+    );
+    assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
+    assert_eq!(sim.open_files(), 0, "{}", sim.trace());
+}
+
+/// Owner decision 2026-11-09 (FR-STATIC-19): an empty file's `Range` is
+/// ignored, a suffix range too: the whole (empty) file with `200`, the
+/// connection kept.
+#[test]
+fn range_on_an_empty_file_gets_the_whole_200() {
+    let mut sim = Sim::new(CONFIG);
+    sim.add_file("/srv/www", "empty.txt", b"");
+    let stamp = sim_stamp(0, 1);
+    let c = sim.connect(peer());
+    for range in ["bytes=-5", "bytes=0-", "bytes=-0"] {
+        sim.send(c, &get_with("/empty.txt", &format!("Range: {range}\r\n")));
+        sim.run_until_idle();
+        assert_eq!(
+            String::from_utf8_lossy(&sim.take_received(c)),
+            String::from_utf8_lossy(&head(
+                "text/plain; charset=utf-8",
+                stamp,
+                Persistence::KeepAlive
+            )),
+            "{range}"
+        );
+    }
+    assert_eq!(
+        sim.logs(),
+        vec![response_log(c, Status::Ok, Method::Get, "/empty.txt"); 3]
     );
     assert_eq!(sim.state(c), SimConnState::Open, "{}", sim.trace());
     assert_eq!(sim.open_files(), 0, "{}", sim.trace());
