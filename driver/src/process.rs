@@ -559,28 +559,31 @@ mod tests {
     use crate::sys::socket::{local_addr, tcp_listen};
 
     /// Review M2: a disk worker refused at startup names the memory
-    /// backstop; any other driver error stands alone.
+    /// backstop; any other driver error stands alone. The errno texts
+    /// come from the errors themselves: glibc and musl spell them
+    /// differently (`EMFILE`: "Too many open files" against "No file
+    /// descriptors available").
     #[test]
     fn a_refused_disk_thread_names_the_memory_backstop() {
-        let refused = std::io::Error::from_raw_os_error(libc::EAGAIN);
+        let errno = |n| std::io::Error::from_raw_os_error(n);
         let err = std::io::Error::new(
-            refused.kind(),
+            errno(libc::EAGAIN).kind(),
             SpawnFailed {
                 thread: 37,
                 threads: 64,
-                error: refused,
+                error: errno(libc::EAGAIN),
             },
         );
         assert_eq!(
             driver_failure(&err, 1_234),
-            "driver: cannot start disk thread 37 of 64: Resource temporarily unavailable \
-             (os error 11); RLIMIT_DATA is the memory backstop (1234 bytes, NFR-RES-09)"
+            format!(
+                "driver: cannot start disk thread 37 of 64: {}; RLIMIT_DATA is the memory \
+                 backstop (1234 bytes, NFR-RES-09)",
+                errno(libc::EAGAIN)
+            )
         );
-        let other = std::io::Error::from_raw_os_error(libc::EMFILE);
-        assert_eq!(
-            driver_failure(&other, 1_234),
-            "driver: Too many open files (os error 24)"
-        );
+        let other = errno(libc::EMFILE);
+        assert_eq!(driver_failure(&other, 1_234), format!("driver: {other}"));
     }
 
     fn parse(args: &[&str]) -> Option<Command> {
