@@ -267,20 +267,20 @@ pub fn render_file_head(
         Part::Whole { size } => {
             out.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
             put_date(date, out);
-            out.extend_from_slice(
-                format!("Content-Type: {content_type}\r\nContent-Length: {size}\r\n").as_bytes(),
+            // Writing into a `Vec` never fails.
+            let _infallible = write!(
+                out,
+                "Content-Type: {content_type}\r\nContent-Length: {size}\r\n"
             );
         }
         Part::Range { first, last, size } => {
             out.extend_from_slice(b"HTTP/1.1 206 Partial Content\r\n");
             put_date(date, out);
             let len = last.saturating_sub(first).saturating_add(1);
-            out.extend_from_slice(
-                format!(
-                    "Content-Type: {content_type}\r\nContent-Length: {len}\r\n\
-                     Content-Range: bytes {first}-{last}/{size}\r\n"
-                )
-                .as_bytes(),
+            let _infallible = write!(
+                out,
+                "Content-Type: {content_type}\r\nContent-Length: {len}\r\n\
+                 Content-Range: bytes {first}-{last}/{size}\r\n"
             );
         }
     }
@@ -586,6 +586,26 @@ mod tests {
         );
         let expected = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=utf-8\r\nContent-Length: 1234\r\n{VALIDATORS_1234}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+    }
+
+    /// A 200's head is appended after the bytes already there, with its
+    /// `Date` (the 206's is pinned by `renders_partial_content_head`).
+    #[test]
+    fn renders_file_head_after_existing_bytes() {
+        let date = rfc_date();
+        let mut out = b"x".to_vec();
+        render_file_head(
+            "image/png",
+            Part::Whole { size: 1234 },
+            &validators(1234),
+            Persistence::KeepAlive,
+            Some(&date),
+            &mut out,
+        );
+        let expected = format!(
+            "xHTTP/1.1 200 OK\r\n{DATE_LINE}Content-Type: image/png\r\nContent-Length: 1234\r\n{VALIDATORS_1234}Accept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n\r\n"
         );
         assert_eq!(String::from_utf8(out).unwrap(), expected);
     }
