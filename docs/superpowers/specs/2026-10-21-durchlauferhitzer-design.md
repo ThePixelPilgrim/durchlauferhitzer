@@ -280,7 +280,7 @@ Structure and values:
   Static routes may set neither.
 - **FR-CFG-19** [done] `on_file_change abort | allow_growth;` is optional
   on static routes (default `abort`) and an error on proxy routes.
-  *[Stage 8, done:]* also optional on a proxy route with `internal_files`
+  *(Stage 8:)* also optional on a proxy route with `internal_files`
   (FR-CFG-26).
 - **FR-CFG-20** [done] The `limits` block may override these defaults:
 
@@ -2830,8 +2830,8 @@ stage 4 (its tests are in `driver/`).
   still count. The sim's late-timer mode (NFR-TEST-07) pins both orders
   (tests in `sim/tests/late_timers.rs`).
 - **DRV-07** Static and `internal_files` roots are opened once at startup
-  (`RootId` indexes `static_roots()`, which lists both); an empty segment list means the root itself (open
-  `"."`).
+  (`RootId` indexes `static_roots()`, which lists both); an empty segment
+  list means the root itself (open `"."`).
 - **DRV-08** Files are opened with `openat2(RESOLVE_BENEATH |
   RESOLVE_NO_SYMLINKS)` relative to the root and `O_RDONLY | O_NONBLOCK |
   O_NOCTTY | O_CLOEXEC` (never create, truncate or write; `O_NONBLOCK` so a

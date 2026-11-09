@@ -2,8 +2,11 @@
 Just another HTTP proxy with very little features. HTTPS is planned for a later stage.
 
 It serves static files and forwards requests to backends, routed by virtual
-host and path prefix, on Linux (`epoll`, `openat2`, `sendfile`). It is pure
-Rust; its one dependency is `libc`. See
+host and path prefix, on Linux (`epoll`, `openat2`, `sendfile`). It also
+sends the files a backend names with `X-Sendfile` or `X-Accel-Redirect`
+below a route's `internal_files` root, and answers a single byte range of
+any file it sends with a 206. It is pure Rust; its one dependency is
+`libc`. See
 [`examples/durchlauferhitzer.conf`](examples/durchlauferhitzer.conf) for a
 documented configuration, and the
 [design spec](docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md)
@@ -52,8 +55,8 @@ durchlauferhitzer --check examples/durchlauferhitzer.conf
 
 prints `ok` (exit 0), or the first error as `<path>:<line>:<column>:
 <message>` on stderr (exit 1); a file that cannot be read is
-`durchlauferhitzer: <path>: <reason>` (exit 1). It only reads the file: no socket is bound and
-no static root is opened.
+`durchlauferhitzer: <path>: <reason>` (exit 1). It only reads the file:
+no socket is bound and no static or `internal_files` root is opened.
 
 ## Try it
 
