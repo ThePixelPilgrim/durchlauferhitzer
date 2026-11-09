@@ -10,7 +10,7 @@ Status: approved — **single source of truth** for what the product must do.
   *withdrawn*. Plans, reviews, ledgers and commit messages cite IDs instead
   of restating requirements. A new owner decision is written here first
   (new ID or edited text), then cited.
-- Status tags: **[done]** implemented and tested (stages 1–8);
+- Status tags: **[done]** implemented and tested (stages 1–9);
   **[done in core; driver stage 4]** the core's half is done and the
   epoll driver's is due (none left after stage 4); **[done; X stage N]**
   done, with the follow-up X due in stage N (e.g. NFR-MAINT-04's CI
@@ -3009,7 +3009,7 @@ project working and tested.
    single-range requests for static and backend files (FR-STATIC-19).
    Useful when the files are on the proxy's machine (same host or shared
    storage).
-9. **Guarantee hardening** — from the qmail review
+9. **Guarantee hardening** [done] — from the qmail review
    (`docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): the kernel
    memory backstop (NFR-RES-09), `--check` warnings and the guaranteed
    install (FR-PROC-08), the `GET`/`HEAD` body rule (FR-PROXY-01) and
