@@ -330,15 +330,20 @@ Structure and values:
     refused (503) connections, the shared 4 KiB lingering scratch buffer,
     and driver-side buffers (disk readahead, the log buffer).
   - Arithmetic saturates; nothing wraps.
-- **FR-CFG-25** [done] (owner decision 2026-10-29, stage 5 brainstorm) The optional top-level
+- **FR-CFG-25** [done; defaults stage 9] (owner decision 2026-10-29, stage 5 brainstorm) The optional top-level
   `containment` block sets how strictly the containment layers of
   FR-PROC-06 apply:
 
   | key | values | default |
   |---|---|---|
-  | `landlock` | `off`, `best_effort`, `required` | `best_effort` |
-  | `seccomp` | `off`, `best_effort`, `required` | `best_effort` |
-  | `seccomp_action` | `fail`, `kill` | `fail` |
+  | `landlock` | `off`, `best_effort`, `required` | `required` |
+  | `seccomp` | `off`, `best_effort`, `required` | `required` |
+  | `seccomp_action` | `fail`, `kill` | `kill` |
+
+  *(Owner decision 2026-11-09, stage 9; `best_effort`, `best_effort`,
+  `fail` until it lands:)* the defaults are the guaranteed install
+  (FR-PROC-08), so an unwritten block means the strict layers; an
+  operator on a kernel without a layer writes `best_effort` on purpose.
 
   `best_effort` uses the layer where the kernel supports it and otherwise
   logs that it is missing and serves; `required` makes a missing or only
@@ -698,7 +703,15 @@ Each requirement carries its status.
 
 Forwarding and identity:
 
-- **FR-PROXY-01** [done] Any method token is forwarded.
+- **FR-PROXY-01** [done] Any method token is forwarded. *(Owner decision
+  2026-11-09, the TE.0 row of NFR-SEC-14)* [stage 9]: a `GET` or `HEAD`
+  whose head frames a body (`Transfer-Encoding: chunked`, or a
+  `Content-Length` above 0; `Content-Length: 0` is no body, FR-HTTP-08)
+  → 400 and close, the body unread (FR-CONN-05), before any backend
+  connect and before any `100 Continue` (FR-PROXY-25). Static routes
+  keep their 413 (FR-STATIC-04). *RFC 9110 §9.3.1 gives such content no
+  meaning; a backend that ignores it would read the body as a second
+  request, with the proxy's routing and rewriting bypassed.*
 - **FR-PROXY-02** [done] A client has at most one upstream at a time.
   *(Stages 3–6, superseded by pooling for pooled routes:)* one fresh
   backend connection per request, with `Connection: close` toward the
@@ -1840,7 +1853,8 @@ Failures, persistence, timeouts:
   plan:)* bad arguments exit 1, with the usage (FR-PROC-01).
 - **FR-PROC-06** [done] Containment: Landlock restricts file access to
   the static roots; seccomp allow-lists the system calls. (owner decision 2026-10-29, stage 5 brainstorm)
-  - Each layer is `off`, `best_effort` (the default) or `required` per
+  - Each layer is `off`, `best_effort` or `required` (the default since
+    the owner decision 2026-11-09, stage 9; `best_effort` before) per
     FR-CFG-25. Best effort: used where the kernel supports it; where it is
     missing, or only partly supported, the startup log says so in one line
     and the server serves. Required: a missing or only partly supported
@@ -2128,13 +2142,16 @@ Failures, persistence, timeouts:
   environment.* `--check` keeps its contract (FR-PROC-01: `ok` on stdout,
   exit 0 for a valid config) and additionally prints one line per
   warning on stderr, `<config-path>: warning: <message>`, exit still 0.
-  Warnings: `landlock` or `seccomp` not `required` (`best_effort` serves
-  on a kernel without the layer; `off` never uses it); `seccomp_action
-  fail` (an unexpected system call is answered, not fatal). The memory
-  backstop NFR-RES-09 would set is printed too, as an informational
-  line in the same shape (`<config-path>: memory backstop: <bytes>`).
-  The same warnings appear in the startup log (FR-LOG-05, kind
-  `containment`). The README gains a "Guaranteed install" section: the
+  Warnings: `landlock` or `seccomp` written `best_effort` or `off`
+  (`best_effort` serves on a kernel without the layer; `off` never uses
+  it); `seccomp_action fail` (an unexpected system call is answered,
+  not fatal). Since `required` and `kill` are the defaults (FR-CFG-25,
+  owner decision 2026-11-09), a warning always names an explicit
+  choice. The memory backstop NFR-RES-09 would set is printed too, as
+  an informational line in the same shape (`<config-path>: memory
+  backstop: <bytes> bytes`). The startup log shows the same choices:
+  each `containment` line (FR-LOG-05) carries the configured
+  `mode=<off|best_effort|required>` after `layer=`. The README gains a "Guaranteed install" section: the
   config and platform the security requirements are claimed for
   (`required` on both layers, `seccomp_action kill`, `user` set, Linux
   ≥ 6.2 for Landlock ABI 3, `memory_limit` with the backstop), stating
@@ -2238,7 +2255,7 @@ Failures, persistence, timeouts:
   | Any row above, split at any byte | the same verdict | NFR-ROB-02 | `prefix_never_contradicts_full`, `incremental_parser_matches_stateless` (both parsers); `split_independent` (chunked); `every_split_point_gives_identical_responses` (`sim/tests/faults/split.rs`) |
   | Whole exchanges: every forwarded byte against a model written from this spec | — | NFR-SEC-02/03 | the randomized proxy net `sim/tests/faults/proxy/` with `sim/tests/support/model_http.rs` |
   | Shapes nobody thought of | never a panic, bounded work and memory | NFR-SEC-13, NFR-SEC-10 | fuzz targets `request_head`, `chunked`, `response_head` (nightly) |
-  | **TE.0, a body on `GET`/`HEAD`:** a chunked or `Content-Length` body on a bodiless method, forwarded verbatim (FR-PROXY-01) to a backend that ignores it and reads the body as a second request | **open** (owner decision 3) | FR-PROXY-01, FR-PROXY-22 | the backend's second response is dropped and the upstream closed (FR-PROXY-22), so no other client's exchange is poisoned; but the smuggled request runs on the backend with the proxy's routing and rewriting bypassed — no test pins this today |
+  | TE.0, a body on `GET`/`HEAD`: a chunked or `Content-Length` body on a bodiless method, which a backend that ignores it would read as a second request | C 400 on proxy routes (static: 413) [stage 9; owner decision 2026-11-09] | FR-PROXY-01, FR-STATIC-04 | stage 9: `get_with_a_body_is_400_without_connect`, `head_with_a_chunked_body_is_400_without_connect` (`sim/tests/proxy/bodies.rs`), the proxy net's `400 body on GET or HEAD` bucket; until then the backend's second response is dropped and the upstream closed (FR-PROXY-22) |
 
   Last review: 2026-11-09 (the ledger's creation).
 
@@ -2899,8 +2916,10 @@ project working and tested.
 9. **Guarantee hardening** — from the qmail review
    (`docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): the kernel
    memory backstop (NFR-RES-09), `--check` warnings and the guaranteed
-   install (FR-PROC-08), and open decisions 3 and 4 if the owner takes
-   them. The framing-variant ledger (NFR-SEC-14) is already in force.
+   install (FR-PROC-08), the `GET`/`HEAD` body rule (FR-PROXY-01) and
+   the `required`/`kill` defaults (FR-CFG-25), both decided 2026-11-09.
+   The framing-variant ledger (NFR-SEC-14) is already in force. Plan:
+   `docs/superpowers/plans/2026-11-09-stage-9-guarantee-hardening.md`.
 10. **Later, maybe** — *Hung-disk handling (recorded for a better future
    solution):* today a hung `openat2` keeps its connection slot until the
    disk answers (FR-CONN-11), which bounds the damage at `max_connections`
@@ -2935,16 +2954,9 @@ recommendation (if any) is not implemented.
    `memory_limit` budget, see FR-CFG-21 and NFR-RES-01.
 2. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
     lengths, IPv6 spellings).
-3. FR-PROXY-01 — a body on `GET` or `HEAD` toward a backend (the TE.0
-   row of NFR-SEC-14). RFC 9110 §9.3.1 gives such content no meaning and
-   lets a server reject it. *Recommendation:* reject a `Transfer-Encoding`
-   or a non-zero `Content-Length` on `GET` and `HEAD` with 400 on every
-   route (static routes already answer 413, FR-STATIC-04), so a backend
-   that ignores the body cannot read it as a second request. Stage 9 if
-   taken.
-4. FR-CFG-25 — the `containment` defaults. Today `best_effort` and
-   `seccomp_action fail`, so a kernel without a layer serves after one
-   log line. *Recommendation:* make `required` and `kill` the defaults
-   once FR-PROC-08 documents the guaranteed install, so the default
-   config is the guaranteed one; operators on older kernels write
-   `best_effort` on purpose. Stage 9 if taken.
+3. ~~FR-PROXY-01 — a body on `GET` or `HEAD` toward a backend (the TE.0
+   row of NFR-SEC-14)~~ — **decided 2026-11-09**: 400 on proxy routes,
+   static routes keep their 413; see FR-PROXY-01, stage 9.
+4. ~~FR-CFG-25 — the `containment` defaults~~ — **decided 2026-11-09**:
+   `required`, `required`, `kill` are the defaults; see FR-CFG-25 and
+   FR-PROC-08, stage 9.
