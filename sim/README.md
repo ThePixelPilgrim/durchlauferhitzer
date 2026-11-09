@@ -100,6 +100,8 @@ tests/
     resets.rs           backend resets behind readable bytes (DRV-10)
     timeouts.rs         the backend timeouts as configured `limits`, the
                         client's half-close, the failure log kinds
+    head_limits.rs      a backend head over `max_head` during a stalled
+                        upload: the 502 once certain, else the 408
     pool.rs             backend connection pooling: reuse across
                         clients, idle hygiene and timeout, the safe retry
     internal_files.rs   `internal_files` routes: file headers stripped
@@ -161,7 +163,8 @@ tests/
       outcome.rs          exchanges, timings and the outcomes they allow
       draw.rs             drawing an exchange: plain ones, timed scenarios
       drive.rs            stories, rounds, backends
-      timed.rs            the timed scenarios, each alone in its round
+      timed.rs            the timed scenarios, each alone in its round;
+                          where a head over `max_head` is certain
       round_end.rs        the end of a round: windows open, streams end,
                           nothing left open
       check.rs            the oracle: each story against the model

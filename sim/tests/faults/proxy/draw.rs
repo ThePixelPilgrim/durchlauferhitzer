@@ -165,10 +165,13 @@ fn timed_exchange(
         1 => (ConnectBehaviour::Accept, Timing::Silent),
         2 => {
             let s = script.as_ref()?;
-            (
-                ConnectBehaviour::Accept,
-                Timing::PartialHead(rng.usize(1..s.head_end)),
-            )
+            // Now and then past the point where a head over `max_head`
+            // is certain (FR-PROXY-14): a 502 before the head ends.
+            let k = match too_large_from(s, net) {
+                Some(from) if rng.bool() => rng.usize(from..s.head_end),
+                Some(_) | None => rng.usize(1..s.head_end),
+            };
+            (ConnectBehaviour::Accept, Timing::PartialHead(k))
         }
         3 => (
             ConnectBehaviour::Accept,
@@ -194,10 +197,13 @@ fn timed_exchange(
         }
         7 => {
             let s = script.as_ref()?;
-            // A head left incomplete, or interim heads that are complete.
-            let k = match rng.choice(&s.interim_ends) {
-                Some(&end) if rng.bool() => end,
-                Some(_) | None => rng.usize(1..s.head_end),
+            // A head left incomplete, or interim heads that are complete,
+            // or now and then a head over `max_head` past the point where
+            // that is certain (FR-PROXY-14).
+            let k = match (rng.choice(&s.interim_ends), too_large_from(s, net)) {
+                (Some(_) | None, Some(from)) if rng.bool() => rng.usize(from..s.head_end),
+                (Some(&end), Some(_) | None) if rng.bool() => end,
+                (Some(_) | None, Some(_) | None) => rng.usize(1..s.head_end),
             };
             let sent = rng.usize(0..body);
             (

@@ -4,7 +4,8 @@
 //! bodies in `responses.rs`, configured timeouts and the client's
 //! half-close in `timeouts.rs`, backend resets behind readable bytes in
 //! `resets.rs`, backend connection pooling and the safe retry in
-//! `pool.rs`, the file headers of `internal_files` routes in
+//! `pool.rs`, a backend head over `max_head` during a stalled upload in
+//! `head_limits.rs`, the file headers of `internal_files` routes in
 //! `internal_files.rs`, the files a backend names in `backend_files.rs`.
 //! The routes outside `pool.rs` and `backend_files.rs` say `pool off;`:
 //! they pin the one-connection-per-request path (FR-PROXY-02), which the
@@ -13,6 +14,7 @@
 mod backend_files;
 mod bodies;
 mod expect;
+mod head_limits;
 mod internal_files;
 mod pool;
 mod resets;

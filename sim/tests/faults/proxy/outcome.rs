@@ -454,6 +454,30 @@ fn forward_alts(
             "connect timeout, body read with the head",
             "connect timeout, body unread",
         ),
+        // A head over `max_head` is a 502 once that is certain, before it
+        // ends and before any deadline (FR-PROXY-14; nightly fix
+        // 2026-11-09, seed 99897); an unread body closes the client.
+        (ConnectBehaviour::Accept, Timing::PartialHead(k) | Timing::HeadDuringUpload { k, .. })
+            if ex.script.as_ref().is_some_and(|s| too_large_at(s, net, k)) =>
+        {
+            let mut tags = tags;
+            tags.push("head too large before its end");
+            let (persistences, up) = match ex.timing {
+                Timing::HeadDuringUpload { sent, .. } => (vec![Persistence::Close], upload(sent)),
+                Timing::Normal
+                | Timing::Early { .. }
+                | Timing::Eager
+                | Timing::ConnectHang
+                | Timing::Silent
+                | Timing::PartialHead(_)
+                | Timing::ClientBodyStall(_)
+                | Timing::BackendBodyStall(_)
+                | Timing::RelayStall(_)
+                | Timing::ClientStall => (vec![req.persistence], full),
+            };
+            let kind = BackendFailure::BadResponse(ResponseError::HeadTooLarge);
+            core_fail(kind, persistences, cont, up, &tags)
+        }
         (ConnectBehaviour::Accept, Timing::Silent | Timing::PartialHead(_)) => core_fail(
             BackendFailure::ResponseTimeout,
             vec![req.persistence],

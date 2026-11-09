@@ -876,7 +876,19 @@ Response head toward the client:
 Backend response parsing:
 
 - **FR-PROXY-14** [done] Backend response heads obey `max_head` and
-  `max_headers`; a violation → 502 (FR-PROXY-26).
+  `max_headers`; a violation → 502 (FR-PROXY-26). *(Nightly fix
+  2026-11-09, seed 99897; a clarification of the parser's existing
+  behaviour.)* As for request heads (FR-HTTP-06), each verdict is given
+  as soon as it is certain: once more than `max_head` bytes of one head
+  (interim or final, each counted on its own, FR-PROXY-18) are in without
+  its blank line, or the upstream's receive buffer is full, it is the 502
+  at once, without waiting for the head's end or its LF. A deadline due
+  later does not come first: while the client's upload stalls, that 502
+  precedes the body idle timeout's 408 (FR-PROXY-29), and the unread body
+  closes the client (FR-PROXY-26). A head with at most `max_head` bytes
+  in may still fit and gets no verdict yet. Tests
+  `head_over_max_head_beats_the_stalled_body`,
+  `head_at_max_head_waits_and_the_stalled_body_is_408`.
 - **FR-PROXY-15** [done] The status line is `HTTP/1.1` or `HTTP/1.0`, SP,
   exactly three digits 100–599, SP (required even when the reason is
   empty), a reason of printable ASCII and HTAB, CRLF. Header lines follow

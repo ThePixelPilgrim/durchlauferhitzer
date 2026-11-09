@@ -294,6 +294,7 @@ pub(crate) const REQUIRED: &[&str] = &[
     "early response",
     "eager response",
     "head deadline during the upload",
+    "head too large before its end",
     "pipelined after a chunked body",
     "400 bad request chunk",
     "400 Connection names framing",

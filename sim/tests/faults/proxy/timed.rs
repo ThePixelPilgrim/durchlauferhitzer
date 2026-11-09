@@ -3,6 +3,28 @@
 
 use super::*;
 
+/// Where a backend's final head is certainly over `max_head`, if it is:
+/// once more than `max_head` of its bytes are in without its blank line
+/// (or the upstream's buffer is full), it is a 502 at once, before the
+/// head ends and before any deadline (FR-PROXY-14, judged as soon as it
+/// is certain as FR-HTTP-06 does for requests; nightly fix 2026-11-09,
+/// seed 99897). Interim heads before it count on their own (FR-PROXY-18).
+pub(crate) fn too_large_from(script: &Script, net: &NetConfig) -> Option<usize> {
+    match script.reply {
+        Reply::Fail(BackendFailure::BadResponse(ResponseError::HeadTooLarge)) => {}
+        Reply::Fail(_) | Reply::Relay(_) | Reply::File(_) => return None,
+    }
+    let head_start = script.interim_ends.last().copied().unwrap_or(0);
+    let n = (net.max_head + 1).min(net.upstream_recv_capacity());
+    Some(head_start + n).filter(|&from| from < script.head_end)
+}
+
+/// `script`'s first `k` bytes alone get the 502 for a head over
+/// `max_head` (`too_large_from`).
+pub(crate) fn too_large_at(script: &Script, net: &NetConfig, k: usize) -> bool {
+    too_large_from(script, net).is_some_and(|from| k >= from)
+}
+
 /// Advance by `d` but 1 ms, check that nothing happened on the
 /// connection, then by the last millisecond.
 fn wait_for(sim: &mut Sim, story: &mut Story, d: Duration, assign: &mut Assign) {
@@ -46,6 +68,22 @@ pub(crate) fn run_timed(
         .as_ref()
         .map(|s| s.wire.clone())
         .unwrap_or_default();
+    // A head certainly over `max_head` is answered at once: no deadline
+    // to wait for.
+    let early_502 = match timing {
+        Timing::PartialHead(k) | Timing::HeadDuringUpload { k, .. } => {
+            ex.script.as_ref().is_some_and(|s| too_large_at(s, net, k))
+        }
+        Timing::Normal
+        | Timing::Early { .. }
+        | Timing::Eager
+        | Timing::ConnectHang
+        | Timing::Silent
+        | Timing::ClientBodyStall(_)
+        | Timing::BackendBodyStall(_)
+        | Timing::RelayStall(_)
+        | Timing::ClientStall => false,
+    };
     let interim_ends = ex
         .script
         .as_ref()
@@ -109,7 +147,9 @@ pub(crate) fn run_timed(
             } else {
                 net.body_idle
             };
-            wait_for(sim, story, d, assign);
+            if !early_502 {
+                wait_for(sim, story, d, assign);
+            }
         }
         Timing::BackendBodyStall(j) => {
             sim.set_default_backend_window(Window::Budget(head_len + j));
@@ -140,7 +180,9 @@ pub(crate) fn run_timed(
             sim.run_until_idle();
             let capped = !interim_ends.contains(&k) && net.response <= net.body_idle;
             let d = if capped { net.response } else { net.body_idle };
-            wait_for(sim, story, d, assign);
+            if !early_502 {
+                wait_for(sim, story, d, assign);
+            }
         }
         Timing::Normal | Timing::Early { .. } | Timing::Eager => {}
     }
