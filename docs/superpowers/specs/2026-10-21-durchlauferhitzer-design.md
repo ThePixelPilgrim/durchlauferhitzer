@@ -330,7 +330,7 @@ Structure and values:
     refused (503) connections, the shared 4 KiB lingering scratch buffer,
     and driver-side buffers (disk readahead, the log buffer).
   - Arithmetic saturates; nothing wraps.
-- **FR-CFG-25** [done; defaults stage 9] (owner decision 2026-10-29, stage 5 brainstorm) The optional top-level
+- **FR-CFG-25** [done] (owner decision 2026-10-29, stage 5 brainstorm) The optional top-level
   `containment` block sets how strictly the containment layers of
   FR-PROC-06 apply:
 
@@ -340,9 +340,8 @@ Structure and values:
   | `seccomp` | `off`, `best_effort`, `required` | `required` |
   | `seccomp_action` | `fail`, `kill` | `kill` |
 
-  *(Owner decision 2026-11-09, stage 9; `best_effort`, `best_effort`,
-  `fail` until it lands:)* the defaults are the guaranteed install
-  (FR-PROC-08), so an unwritten block means the strict layers; an
+  *(Owner decision 2026-11-09, stage 9:)* the defaults are the guaranteed
+  install (FR-PROC-08), so an unwritten block means the strict layers; an
   operator on a kernel without a layer writes `best_effort` on purpose.
 
   `best_effort` uses the layer where the kernel supports it and otherwise
@@ -1853,9 +1852,8 @@ Failures, persistence, timeouts:
   plan:)* bad arguments exit 1, with the usage (FR-PROC-01).
 - **FR-PROC-06** [done] Containment: Landlock restricts file access to
   the static roots; seccomp allow-lists the system calls. (owner decision 2026-10-29, stage 5 brainstorm)
-  - Each layer is `off`, `best_effort` or `required` (the default since
-    the owner decision 2026-11-09, stage 9; `best_effort` before) per
-    FR-CFG-25. Best effort: used where the kernel supports it; where it is
+  - Each layer is `off`, `best_effort` or `required` (the default; owner
+    decision 2026-11-09) per FR-CFG-25. Best effort: used where the kernel supports it; where it is
     missing, or only partly supported, the startup log says so in one line
     and the server serves. Required: a missing or only partly supported
     layer stops startup (exit 2) with a message naming the layer and what is

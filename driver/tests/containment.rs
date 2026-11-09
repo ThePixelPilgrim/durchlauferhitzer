@@ -34,7 +34,8 @@ fn after_notes(error: &str) -> String {
     format!("kind=shared_ports uid={}\n{error}", non_root_uid())
 }
 
-const SECCOMP_ACTIVE: &str = "kind=containment layer=seccomp state=active action=fail log=kernel";
+/// The seccomp line under the default `seccomp_action kill` (FR-CFG-25).
+const SECCOMP_ACTIVE: &str = "kind=containment layer=seccomp state=active action=kill log=kernel";
 const SECCOMP_OFF: &str = "kind=containment layer=seccomp state=off";
 const SECCOMP_MISSING: &str = "kind=containment layer=seccomp state=missing";
 const LANDLOCK_OFF: &str = "kind=containment layer=landlock state=off";
@@ -154,7 +155,8 @@ fn assert_every_thread(pid: u32, key: &str, value: &str) {
     }
 }
 
-/// The defaults: both layers on, the filter in every thread with
+/// The defaults (no block: both layers required, `seccomp_action kill`):
+/// both layers on, the filter in every thread with
 /// `no_new_privs` (TSYNC covers the disk workers started before it).
 #[test]
 fn by_default_both_layers_are_active_in_every_thread() {
@@ -253,10 +255,11 @@ fn a_required_seccomp_the_kernel_lacks_is_exit_2() {
     );
 }
 
+/// Seccomp written `best_effort`; Landlock stays at its default.
 #[test]
 fn a_seccomp_the_kernel_lacks_is_logged_missing_under_best_effort() {
     let site = Site::new();
-    let (_server, mut lines) = site.start("", seccomp_hidden());
+    let (_server, mut lines) = site.start("seccomp best_effort;", seccomp_hidden());
     lines.wait_for(&landlock_line(Seccomp::Unfiltered));
     lines.wait_for(SECCOMP_MISSING);
     let response = get(site.addr, "/inside.txt");
@@ -283,10 +286,26 @@ fn a_required_landlock_the_kernel_lacks_is_exit_2() {
     );
 }
 
+/// FR-CFG-25 (owner decision 2026-11-09): without a `containment` block
+/// Landlock is required, so a kernel without it is exit 2. Run as
+/// non-root: a root start without `user` is refused (exit 2) at the
+/// privilege drop, before containment is reached.
+#[test]
+fn an_absent_block_requires_landlock() {
+    let site = Site::new();
+    let output = run(&[&site.config("")], landlock_hidden());
+    assert_exit(&output, 2);
+    assert_eq!(
+        text(&output.stderr),
+        "durchlauferhitzer: landlock is required but the kernel has none\n"
+    );
+}
+
+/// Landlock written `best_effort`; seccomp stays at its default.
 #[test]
 fn a_landlock_the_kernel_lacks_is_logged_missing_under_best_effort() {
     let site = Site::new();
-    let (_server, mut lines) = site.start("", landlock_hidden());
+    let (_server, mut lines) = site.start("landlock best_effort;", landlock_hidden());
     lines.wait_for(LANDLOCK_MISSING);
     lines.wait_for(SECCOMP_ACTIVE);
     let response = get(site.addr, "/inside.txt");
@@ -294,8 +313,9 @@ fn a_landlock_the_kernel_lacks_is_logged_missing_under_best_effort() {
 }
 
 /// Owner decision 2026-11-01 (FR-PROC-06): a layer the kernel offers
-/// but refuses to apply is exit 2 in every mode, also under the default
-/// `best_effort`: `landlock_restrict_self` refused with `EPERM`.
+/// but refuses to apply is exit 2 in every mode, also under `best_effort`
+/// (written here for Landlock): `landlock_restrict_self` refused with
+/// `EPERM`.
 #[test]
 fn a_landlock_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
     if abi() == Abi::Missing {
@@ -307,7 +327,7 @@ fn a_landlock_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
         filter: Filter::LandlockRestrictEperm,
         ..Setup::non_root()
     };
-    let output = run(&[&site.config("")], setup);
+    let output = run(&[&site.config("landlock best_effort;")], setup);
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),
@@ -316,8 +336,8 @@ fn a_landlock_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
     );
 }
 
-/// The same for seccomp: `SECCOMP_GET_ACTION_AVAIL` answers, then
-/// `SECCOMP_SET_MODE_FILTER` is refused with `EINVAL`.
+/// The same for seccomp, written `best_effort`: `SECCOMP_GET_ACTION_AVAIL`
+/// answers, then `SECCOMP_SET_MODE_FILTER` is refused with `EINVAL`.
 #[test]
 fn a_seccomp_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
     let site = Site::new();
@@ -325,7 +345,7 @@ fn a_seccomp_the_kernel_refuses_to_apply_is_exit_2_under_best_effort() {
         filter: Filter::SeccompInstallEinval,
         ..Setup::non_root()
     };
-    let output = run(&[&site.config("")], setup);
+    let output = run(&[&site.config("seccomp best_effort;")], setup);
     assert_exit(&output, 2);
     assert_eq!(
         text(&output.stderr),

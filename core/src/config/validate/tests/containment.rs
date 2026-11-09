@@ -35,9 +35,9 @@ fn defaults_without_the_block() {
     assert_eq!(
         config.containment,
         Containment {
-            landlock: Layer::BestEffort,
-            seccomp: Layer::BestEffort,
-            seccomp_action: SeccompAction::Fail,
+            landlock: Layer::Required,
+            seccomp: Layer::Required,
+            seccomp_action: SeccompAction::Kill,
         }
     );
     assert_eq!(config.containment, Containment::default());
@@ -60,14 +60,21 @@ fn layers_and_action_parse() {
         Containment {
             landlock: Layer::Required,
             seccomp: Layer::Off,
-            seccomp_action: SeccompAction::Fail,
+            seccomp_action: SeccompAction::Kill,
         }
     );
-    let config = ok(&with_containment(
-        "landlock best_effort;\n  seccomp required;",
-    ));
+    // A half-written block keeps the default for the layer it leaves out.
+    let config = ok(&with_containment("seccomp required;"));
+    assert_eq!(config.containment.landlock, Layer::Required);
+    assert_eq!(config.containment.seccomp, Layer::Required);
+    let config = ok(&with_containment("landlock best_effort;"));
     assert_eq!(config.containment.landlock, Layer::BestEffort);
     assert_eq!(config.containment.seccomp, Layer::Required);
+    let config = ok(&with_containment(
+        "landlock best_effort;\n  seccomp best_effort;",
+    ));
+    assert_eq!(config.containment.landlock, Layer::BestEffort);
+    assert_eq!(config.containment.seccomp, Layer::BestEffort);
     let config = ok(&with_containment("landlock off;"));
     assert_eq!(config.containment.landlock, Layer::Off);
 }
@@ -76,7 +83,7 @@ fn layers_and_action_parse() {
 fn seccomp_action_parses() {
     let config = ok(&with_containment("seccomp_action kill;"));
     assert_eq!(config.containment.seccomp_action, SeccompAction::Kill);
-    assert_eq!(config.containment.seccomp, Layer::BestEffort);
+    assert_eq!(config.containment.seccomp, Layer::Required);
     let config = ok(&with_containment(
         "seccomp required;\n  seccomp_action fail;",
     ));

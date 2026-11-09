@@ -71,6 +71,9 @@ echo '<p>hello</p>' > /tmp/durchlauferhitzer/www/index.html
 target/release/durchlauferhitzer examples/durchlauferhitzer.conf
 ```
 
+On a kernel without Landlock or seccomp the example needs
+`containment { landlock best_effort; seccomp best_effort; }` to start.
+
 and in another terminal:
 
 ```sh
@@ -111,12 +114,12 @@ cannot apply (below).
 After startup the server confines itself (config block `containment`,
 see the example config): Landlock lets it only read beneath its static and
 `internal_files` roots, and a seccomp filter allows only the system calls it
-needs. Each layer is `best_effort` (the default: used where the kernel has it,
-otherwise logged as missing), `required` (missing or partial is exit 2)
-or `off`; the startup log says what applies (`kind=containment ...`, one
-line per layer). A blocked call gets
-`EPERM` (or ends the process with `seccomp_action kill`) and is logged by
-the kernel:
+needs. Each layer is `required` (the default: missing or partial is exit 2),
+`best_effort` (used where the kernel has it, otherwise logged as missing and
+the server serves) or `off`; the startup log says what applies
+(`kind=containment ...`, one line per layer). A blocked call ends the
+process (`seccomp_action kill`, the default) or, with `seccomp_action fail`,
+gets `EPERM`; either way the kernel logs it:
 
 ```sh
 journalctl -k | grep seccomp    # or, without systemd: dmesg | grep seccomp

@@ -32,7 +32,8 @@ pub enum Layer {
     Off,
     /// Use it where the kernel supports it; otherwise log and serve.
     BestEffort,
-    /// A missing or partly supported layer is a startup error.
+    /// A missing or partly supported layer is a startup error. The
+    /// default.
     Required,
 }
 
@@ -41,11 +42,14 @@ pub enum Layer {
 pub enum SeccompAction {
     /// It returns an error and the server keeps running.
     Fail,
-    /// The process ends at once.
+    /// The process ends at once. The default.
     Kill,
 }
 
-/// The `containment` block (FR-CFG-25).
+/// The `containment` block (FR-CFG-25). Its defaults, used for every
+/// setting the block leaves out (or when there is no block), are the strict
+/// ones: `landlock required`, `seccomp required`, `seccomp_action kill`
+/// (owner decision 2026-11-09).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Containment {
     pub landlock: Layer,
@@ -56,9 +60,9 @@ pub struct Containment {
 impl Default for Containment {
     fn default() -> Self {
         Self {
-            landlock: Layer::BestEffort,
-            seccomp: Layer::BestEffort,
-            seccomp_action: SeccompAction::Fail,
+            landlock: Layer::Required,
+            seccomp: Layer::Required,
+            seccomp_action: SeccompAction::Kill,
         }
     }
 }

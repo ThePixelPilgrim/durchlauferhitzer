@@ -3,7 +3,11 @@
 //! seccomp kill switch: `DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1` adds
 //! `containment { landlock required; seccomp required; seccomp_action
 //! kill; }` to every config written with [`Containment::Switch`], so an
-//! unexpected system call ends the server (FR-PROC-06, FR-CFG-25).
+//! unexpected system call ends the server (FR-PROC-06, FR-CFG-25). Since
+//! the defaults of 2026-11-09 (`required`, `required`, `kill`) that block
+//! equals the default, so every server test runs under kill with or
+//! without the switch; it is kept for CI's existing step and a possible
+//! future `fail`-mode run.
 
 use std::fs;
 use std::path::{Path, PathBuf};
