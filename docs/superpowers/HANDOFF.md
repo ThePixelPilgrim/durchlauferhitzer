@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-08, after stage 8 closed its tasks.
+Last updated 2026-11-09, after the qmail review wrote stage 9's requirements into the spec.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -15,6 +15,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 6 Restart | done (`22fd0ce..` this handoff) — record: `docs/superpowers/reviews/2026-11-06-stage-6-review.md` |
 | 7 Efficiency | done (`71d3867..` this handoff) — record: `docs/superpowers/reviews/2026-11-07-stage-7-review.md`. The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
 | 8 Backend-directed file serving | done (`862e951..` this handoff; plan `docs/superpowers/plans/2026-11-07-stage-8-internal-files.md`, Tasks 1–7 ✅) — **next: the stage 8 whole-branch review** over `862e951..main`, then its record `docs/superpowers/reviews/<date>-stage-8-review.md` |
+| 9 Guarantee hardening | spec'd 2026-11-09 (record: `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): NFR-RES-09 kernel memory backstop, FR-PROC-08 `--check` warnings and the guaranteed install, NFR-SEC-14 framing-variant ledger (in force, review due 2027-11); open decisions 3 (body on `GET`/`HEAD`, TE.0) and 4 (`required` defaults) await the owner. **After the stage 8 review:** brainstorm is done (the lessons record), next is the stage 9 plan (`writing-plans`), then subagent-driven execution |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
@@ -35,6 +36,8 @@ Each stage's review record lists its owner decisions, rulings, final review, fix
 - This container boots with IPv6 disabled: IPv6 tests skip here and are required in CI. It runs as root, so root tests run here.
 
 ## Carry-forwards to later stages
+
+- qmail-review carry-forwards (lessons 6–9 and 11 in `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): a nightly run on the newest kernel and glibc; numeric `uid:gid` for `user` to skip NSS; an opener process when TLS arrives; product line count beside the nightly benchmarks; name the supported TLS deployment in the README.
 
 - After the stage 7 merge: check that the first scheduled nightly publish logs `refused 0`, and compare CPU against the NFR-PERF-01/02 targets over the next two nightlies (bisect if it stays high).
 - Stage 8 carry-forwards: the `proxy-file` NFR-PERF target (owner, from its first nightly); multipart ranges (`multipart/byteranges`) still not served (a several-range request gets the whole file); nginx's other `X-Accel-*` features (expiry, buffering, rate limits, named locations) unsupported.

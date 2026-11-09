@@ -2119,12 +2119,36 @@ Failures, persistence, timeouts:
 
 ---
 
+- **FR-PROC-08** [stage 9] `--check` warnings and the guaranteed install
+  (owner decision 2026-11-09, qmail review). *qmail's security guarantee
+  covered Bernstein's documented install only; Debian's differed, and
+  that is where the hole was reachable. The documented install is the
+  one the security requirements are claimed for, and the tool that
+  validates a config says when a config leaves one of them to the
+  environment.* `--check` keeps its contract (FR-PROC-01: `ok` on stdout,
+  exit 0 for a valid config) and additionally prints one line per
+  warning on stderr, `<config-path>: warning: <message>`, exit still 0.
+  Warnings: `landlock` or `seccomp` not `required` (`best_effort` serves
+  on a kernel without the layer; `off` never uses it); `seccomp_action
+  fail` (an unexpected system call is answered, not fatal). The memory
+  backstop NFR-RES-09 would set is printed too, as an informational
+  line in the same shape (`<config-path>: memory backstop: <bytes>`).
+  The same warnings appear in the startup log (FR-LOG-05, kind
+  `containment`). The README gains a "Guaranteed install" section: the
+  config and platform the security requirements are claimed for
+  (`required` on both layers, `seccomp_action kill`, `user` set, Linux
+  ≥ 6.2 for Landlock ABI 3, `memory_limit` with the backstop), stating
+  that outside it NFR-SEC-12 and NFR-RES-09 hold only as far as the
+  kernel allows. The example config shows the guaranteed values, with
+  the softer ones in comments, not the other way round.
+
 ## Non-functional requirements
 
 ### NFR-SEC — Security
 
 - **NFR-SEC-01** [done] No request smuggling: every framing
   ambiguity is a hard rejection (FR-HTTP-03…08, -09a, FR-PROXY-16, -19).
+  The known desync variants and what pins each are listed in NFR-SEC-14.
 - **NFR-SEC-02** [done in stage 3 Task 9] A backend receives exactly one
   well-framed request per client request: `Content-Length` +
   `Transfer-Encoding`, duplicate lengths, chunk-extension and trailer
@@ -2178,6 +2202,45 @@ Failures, persistence, timeouts:
   brainstorm:* `cargo-fuzz` (libFuzzer, nightly Rust) as test-only tooling
   (NFR-MAINT-02); nothing of it reaches the binary, which stays on stable
   Rust (NFR-PORT-06). Runs nightly and on demand (NFR-TEST-08).
+- **NFR-SEC-14** [done; next review due 2027-11] Framing-variant ledger
+  (owner decision 2026-11-09, from the qmail review,
+  `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`). *qmail's
+  parsers held for 28 years, yet pristine qmail accepts a bare LF as a
+  line end, which the 2023 SMTP-smuggling research turned into a hole:
+  the threat model aged, not the code. HTTP/1.1 desync research keeps
+  producing variants, so the known ones are listed here with the
+  requirement and the test that pin each. The ledger is re-read against
+  the literature once a year and whenever a new variant is published; a
+  published variant without a row is a gap and gets a row and a test in
+  the next task. A row may say "open" and point at an owner decision.*
+  C = from the client, B = from the backend:
+
+  | Variant | Verdict | Requirement | Pinned by |
+  |---|---|---|---|
+  | CL.TE / TE.CL: both `Content-Length` and `Transfer-Encoding` | C 400, B 502 | FR-HTTP-08, FR-PROXY-16 | `rejects_malformed_heads` (`core/src/http/request/tests.rs`), `rejects_malformed_responses` (`core/src/http/response_head/tests.rs`) |
+  | CL.CL: two `Content-Length` lines; a list (`5, 5`), sign, non-digits, overflow | C 400, B 502 | FR-HTTP-08, FR-PROXY-16 | the same two tests (the list form is a B case; C rejects it as non-digits) |
+  | TE.TE: a `Transfer-Encoding` other than exactly `chunked` (`gzip, chunked`), two TE lines | C 400, B 502 | FR-HTTP-08, FR-PROXY-16 | the same two tests |
+  | `Transfer-Encoding` in HTTP/1.0, either direction | C 400, B 502 | FR-HTTP-08, FR-PROXY-16 | the same two tests; `transfer_encoding_to_http10_client_is_502_also_without_a_body` (`sim/tests/proxy/responses/http10.rs`) |
+  | Bare LF, CR without LF, LF-only heads (the SMTP-smuggling shape) | C 400, B 502; in a chunked body: cut | FR-HTTP-03, FR-PROXY-15, FR-PROXY-19 | `rejects_malformed_heads`, `rejects_malformed_responses`; `bare_lf_rejected`, `cr_without_lf_rejected` (`core/src/http/chunked/tests.rs`) |
+  | obs-fold continuation lines hiding a header | C 400, B 502 | FR-HTTP-04, FR-PROXY-15 | the same head tests |
+  | Whitespace before the colon; controls, NUL or obs-text in names or values | C 400, B 502 | FR-HTTP-04/05, FR-PROXY-13/15 | the same head tests; `obs_text_in_values_is_rejected` |
+  | `Connection` naming `content-length`, `transfer-encoding` or `host` (hop-by-hop removal would reframe) | C 400, B 502 | FR-HTTP-09a, FR-PROXY-16 | `connection_naming_framing_headers_is_rejected` (both parsers) |
+  | Chunk extensions, trailers, signed, blank or oversize sizes, data longer than its size, bytes after the `0` chunk | C 400 or cut, B 502 or cut | FR-PROXY-19, FR-PROXY-22 | `extension_rejected`, `trailer_rejected`, `leading_plus_and_whitespace_rejected`, `overflow_rejected`, `size_longer_than_32_characters_rejected`, `data_longer_than_declared_rejected` (`core/src/http/chunked/tests.rs`); `chunk_extension_from_client_is_400` (`sim/tests/proxy/bodies.rs`); `bad_chunk_after_head_cuts_both` (`sim/tests/proxy/responses.rs`) |
+  | CL.0: a body on a request that is answered without reading it | lingering close; the body is never read as the next request | FR-STATIC-04, FR-HTTP-10, FR-CONN-05 | `pipelined_request_after_body_is_not_forwarded` (`sim/tests/proxy/bodies.rs`); static routes: 413 and close |
+  | Bytes after a complete body, or a second response, from a backend | dropped, upstream closed, never pooled again | FR-PROXY-22, FR-PROXY-02 | `extra_bytes_after_content_length_never_forwarded`, `second_response_never_forwarded` (`sim/tests/proxy/responses.rs`) |
+  | Pipelined bytes beyond the head | kept for the next request, never sent with the current one | FR-PROXY-22 | `leaves_pipelined_bytes_unconsumed` (request tests); `pipelined_requests_in_one_read`, `pipelined_bytes_beyond_head_limit` (`sim/tests/faults/split.rs`) |
+  | Framing of 1xx, 204, 304 and HEAD responses; `101` | judged like final heads; 101 → 502 | FR-PROXY-16 | `interim_heads_are_judged_like_final_ones`, `switching_protocols_is_an_error` (response-head tests); `no_content_and_not_modified_have_no_body`, `head_response_carries_no_body`, `switching_protocols_is_502` (`sim/tests/proxy/responses.rs`) |
+  | `Expect` tricks: lists, repeats, other values | 417 | FR-PROXY-25 | `expect_header`, `expect_is_checked_last` (request tests) |
+  | Absolute-form, authority-form and asterisk-form targets (`PRI * HTTP/2.0`), `CONNECT` | 400 | FR-HTTP-11 | `core/src/http/target.rs` tests (`NotOriginForm`) |
+  | Request-line shapes: leading CRLF, double or trailing spaces, HTTP/0.9, `HTTP/2.0` | 400 / 505 | FR-HTTP-01/02 | `rejects_malformed_heads` |
+  | Non-canonical `Content-Length` (leading zeros) toward the backend | re-rendered canonical | FR-PROXY-10 | `content_length_is_rendered_without_leading_zeros` (`core/src/http/forward/tests.rs`) |
+  | Close-delimited backend response (no length at all) | relayed; the client connection closes too | FR-PROXY-16 | `close_delimited_response_closes_client` (`sim/tests/proxy/responses.rs`) |
+  | Any row above, split at any byte | the same verdict | NFR-ROB-02 | `prefix_never_contradicts_full`, `incremental_parser_matches_stateless` (both parsers); `split_independent` (chunked); `every_split_point_gives_identical_responses` (`sim/tests/faults/split.rs`) |
+  | Whole exchanges: every forwarded byte against a model written from this spec | — | NFR-SEC-02/03 | the randomized proxy net `sim/tests/faults/proxy/` with `sim/tests/support/model_http.rs` |
+  | Shapes nobody thought of | never a panic, bounded work and memory | NFR-SEC-13, NFR-SEC-10 | fuzz targets `request_head`, `chunked`, `response_head` (nightly) |
+  | **TE.0, a body on `GET`/`HEAD`:** a chunked or `Content-Length` body on a bodiless method, forwarded verbatim (FR-PROXY-01) to a backend that ignores it and reads the body as a second request | **open** (owner decision 3) | FR-PROXY-01, FR-PROXY-22 | the backend's second response is dropped and the upstream closed (FR-PROXY-22), so no other client's exchange is poisoned; but the smuggled request runs on the backend with the proxy's routing and rewriting bypassed — no test pins this today |
+
+  Last review: 2026-11-09 (the ledger's creation).
 
 ### NFR-RES — Resource bounds
 
@@ -2291,6 +2354,31 @@ Failures, persistence, timeouts:
   total deadline (FR-CONN-06).
 - **NFR-RES-08** [done] No busy waiting: the core only reacts to events
   and exposes its next deadline.
+- **NFR-RES-09** [stage 9] Kernel-enforced memory backstop (owner
+  decision 2026-11-09, qmail review). *qmail's one memory hole,
+  CVE-2005-1513, was reachable only without `softlimit`, an optional
+  step of its documented install that Debian's packaging dropped; Qualys
+  exploited it in 2020. NFR-RES-01's bound is arithmetic the server
+  trusts about itself; the kernel is asked to hold it too, so an
+  accounting mistake becomes an abort, not growth.* At startup, once the
+  config is loaded and before the first accept, the driver sets a
+  process memory limit, soft and hard alike so the process cannot raise
+  it again, to `memory_limit` plus a fixed allowance for what
+  NFR-RES-01 leaves outside the budget: the refused-connection send
+  buffers, the lingering scratch, the readahead and log buffers, the
+  worker threads' stacks and the allocator's own overhead. The allowance
+  is a constant of the driver, measured and documented in the plan with
+  its margin; the startup log names the limit set. An allocation the
+  kernel refuses aborts the process (Rust's allocation-failure abort),
+  which the supervisor restarts: serving on with less memory than the
+  config promises is not an option. An inherited hard limit already
+  below the backstop fails startup (exit 2) naming both numbers, like
+  NFR-RES-05. *Builder notes:* `RLIMIT_DATA` (Linux ≥ 4.7 counts private
+  writable mappings: the heap and thread stacks, not glibc's `PROT_NONE`
+  arena reservations) is the expected choice over `RLIMIT_AS`, which
+  glibc's per-thread arenas inflate; the plan justifies the choice with
+  a measurement on glibc and musl. `--check` prints the backstop it
+  would set (FR-PROC-08).
 
 ### NFR-ROB — Robustness
 
@@ -2808,7 +2896,12 @@ project working and tested.
    single-range requests for static and backend files (FR-STATIC-19).
    Useful when the files are on the proxy's machine (same host or shared
    storage).
-9. **Later, maybe** — *Hung-disk handling (recorded for a better future
+9. **Guarantee hardening** — from the qmail review
+   (`docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): the kernel
+   memory backstop (NFR-RES-09), `--check` warnings and the guaranteed
+   install (FR-PROC-08), and open decisions 3 and 4 if the owner takes
+   them. The framing-variant ledger (NFR-SEC-14) is already in force.
+10. **Later, maybe** — *Hung-disk handling (recorded for a better future
    solution):* today a hung `openat2` keeps its connection slot until the
    disk answers (FR-CONN-11), which bounds the damage at `max_connections`
    but lets one dead mount occupy slots. A driver-side timeout that answers
@@ -2820,7 +2913,7 @@ project working and tested.
    (conflicts with the seccomp decision, revisit with the io_uring
    driver). HTTPS with a pure-Rust crypto provider, io_uring
    driver, file-descriptor passing from same-host backends (`SCM_RIGHTS`).
-10. **Caching, after everything else** — a small Varnish-style response
+11. **Caching, after everything else** — a small Varnish-style response
     cache in front of proxy routes, with far fewer features than Varnish.
 
 ## Left to the builder
@@ -2842,3 +2935,16 @@ recommendation (if any) is not implemented.
    `memory_limit` budget, see FR-CFG-21 and NFR-RES-01.
 2. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
     lengths, IPv6 spellings).
+3. FR-PROXY-01 — a body on `GET` or `HEAD` toward a backend (the TE.0
+   row of NFR-SEC-14). RFC 9110 §9.3.1 gives such content no meaning and
+   lets a server reject it. *Recommendation:* reject a `Transfer-Encoding`
+   or a non-zero `Content-Length` on `GET` and `HEAD` with 400 on every
+   route (static routes already answer 413, FR-STATIC-04), so a backend
+   that ignores the body cannot read it as a second request. Stage 9 if
+   taken.
+4. FR-CFG-25 — the `containment` defaults. Today `best_effort` and
+   `seccomp_action fail`, so a kernel without a layer serves after one
+   log line. *Recommendation:* make `required` and `kill` the defaults
+   once FR-PROC-08 documents the guaranteed install, so the default
+   config is the guaranteed one; operators on older kernels write
+   `best_effort` on purpose. Stage 9 if taken.
