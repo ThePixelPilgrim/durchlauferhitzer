@@ -365,7 +365,11 @@ Structure and values:
   backend direction; a root holding `?` is refused (every `X-Sendfile`
   value would be a bad path, FR-PROXY-32), and so is a root holding `=`
   or `,` or a prefix holding `,` (Rack splits `X-Accel-Mapping` on `,`
-  and then on the first `=`, so the hint would break).
+  and then on the first `=`, so the hint would break). *(Owner decision
+  2026-11-09, stage 8 review:)* an `internal_files` root equal to or
+  below a static root (compared component by component) is a config
+  error: its files would be public through the static route. A root
+  above a static root is allowed.
 - **FR-CFG-22** [done] Durations are `<u64>` followed by `ms`, `s` or `m`;
   sizes are plain bytes or `<u64>` followed by `KiB`, `MiB` or `GiB`; any
   other form, or an overflowing value, is an error.
@@ -666,9 +670,11 @@ Core-generated responses:
     */size` and `Accept-Ranges: bytes` right after `Content-Length`; its
     file is closed at once (nothing is read) and the connection's
     persistence is kept.
-  - An empty file: every range is 416 (taking "does not overlap"
-    literally; RFC 9110 section 14.1.3 would serve a suffix range of an
-    empty file).
+  - An empty file: its `Range` is ignored and the whole (empty) file
+    goes out with `200` *(owner decision 2026-11-09, stage 8 review:
+    replaces "every range is 416"; RFC 9110 section 14.2 lets a server
+    ignore `Range`, and section 14.1.1 would call a suffix range
+    satisfiable)*.
   - `If-Range` with a date means exactly the bytes of the file's
     `Last-Modified` IMF-fixdate; RFC 9110 section 13.1.5's check that a
     date modified within the `Date` second is weak is not applied. A
@@ -793,6 +799,8 @@ Request head toward the backend:
   backend too, like `Proxy-*`, so a backend only sees identity headers
   the proxy sets (`X-Forwarded-For`, FR-PROXY-08; `X-Forwarded-Proto`,
   FR-PROXY-09). *Owner decision 2026-10-27 (stage 3 final review M8).*
+  *(Owner decision 2026-11-09, stage 8 review:)* a client header whose
+  name, with `_` read as `-`, is one of these is removed too.
   They are not hop-by-hop: a backend's response keeps headers of these
   names (FR-PROXY-12). Tests `client_identity_headers_are_removed`,
   `identity_headers_in_a_response_pass_through`; the proxy net sends
@@ -1158,7 +1166,9 @@ Failures, persistence, timeouts:
   - **Stripping.** `X-Sendfile`, `X-Accel-Redirect`, `X-Sendfile-Type`
     and `X-Accel-Mapping` are removed from every client request on every
     proxy route (forged copies of the last two steered Rack's choice of
-    path); `X-Sendfile` and `X-Accel-Redirect` are removed from every
+    path), *(owner decision 2026-11-09, stage 8 review:)* and so is any
+    client header whose name, with `_` read as `-`, is one of them (CGI
+    servers such as Rack map both to the same key); `X-Sendfile` and `X-Accel-Redirect` are removed from every
     backend response on every proxy route;
     on an `x-accel-redirect` route every `X-Accel-*` response header is
     removed too. None reaches a backend from a client, or a client from a
