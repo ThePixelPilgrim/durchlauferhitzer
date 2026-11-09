@@ -1,6 +1,7 @@
 //! Validation of the syntax tree into the configuration model.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use crate::routing::same_segments;
 use super::lexer::Pos;
 use super::model::{
     BodyLimit, Config, ConfigError, ConfigErrorKind, Containment, Layer, Limits, Route,
-    SeccompAction, VirtualHost, worst_case_per_connection,
+    RouteAction, SeccompAction, VirtualHost, worst_case_per_connection,
 };
 use super::syntax::{Block, Item, Setting, parse};
 use super::units::{parse_duration, parse_size};
@@ -485,7 +486,47 @@ fn check_memory_budget(config: &Config, pos: Pos) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn parse_host(block: &Block, seen: &mut Vec<String>) -> Result<VirtualHost, ConfigError> {
+/// FR-CFG-26 (owner decision 2026-11-09): no `internal_files` root may be
+/// equal to or below a static root of any host, compared component by
+/// component (both are validated absolute paths without `.`, `..`, empty
+/// components or a trailing `/`), or its files would be public through
+/// the static route. A root above a static root is fine. `internal_roots`
+/// holds each `internal_files` root with the position of its setting.
+fn check_internal_roots(
+    config: &Config,
+    internal_roots: &[(PathBuf, Pos)],
+) -> Result<(), ConfigError> {
+    let static_roots = || {
+        config
+            .hosts
+            .iter()
+            .flat_map(|host| &host.routes)
+            .filter_map(|route| match &route.action {
+                RouteAction::Static { root, .. } => Some(root),
+                RouteAction::Proxy(_) => None,
+            })
+    };
+    for (internal_root, pos) in internal_roots {
+        if let Some(static_root) = static_roots().find(|root| internal_root.starts_with(root)) {
+            return fail(
+                ConfigErrorKind::InternalFilesUnderStatic {
+                    internal_root: internal_root.to_string_lossy().into_owned(),
+                    static_root: static_root.to_string_lossy().into_owned(),
+                },
+                *pos,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Parses one `host` block; each `internal_files` root is pushed to
+/// `internal_roots` with the position of its setting.
+fn parse_host(
+    block: &Block,
+    seen: &mut Vec<String>,
+    internal_roots: &mut Vec<(PathBuf, Pos)>,
+) -> Result<VirtualHost, ConfigError> {
     if block.args.is_empty() {
         return fail(
             ConfigErrorKind::WrongValueCount("host".to_string()),
@@ -506,7 +547,12 @@ fn parse_host(block: &Block, seen: &mut Vec<String>) -> Result<VirtualHost, Conf
         match item {
             Item::Setting(setting) => return unknown_key(&setting.key, setting.pos),
             Item::Block(inner) if inner.name == "path" => {
-                let route = parse_route(inner)?;
+                let (route, internal_pos) = parse_route(inner)?;
+                if let (RouteAction::Proxy(proxy), Some(pos)) = (&route.action, internal_pos) {
+                    if let Some(files) = &proxy.internal_files {
+                        internal_roots.push((files.root.clone(), pos));
+                    }
+                }
                 // Equal segments are the same route (`/api` and `/api/`),
                 // compared decoded as the router does (`/@a` and `/%40a`).
                 if routes
@@ -541,6 +587,7 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
     let mut first_host_pos: Option<Pos> = None;
     let mut hosts: Vec<VirtualHost> = Vec::new();
     let mut seen_hosts: Vec<String> = Vec::new();
+    let mut internal_roots: Vec<(PathBuf, Pos)> = Vec::new();
     for item in &items {
         match item {
             Item::Setting(setting) => match setting.key.as_str() {
@@ -578,7 +625,7 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
                 }
                 "host" => {
                     first_host_pos.get_or_insert(block.pos);
-                    hosts.push(parse_host(block, &mut seen_hosts)?);
+                    hosts.push(parse_host(block, &mut seen_hosts, &mut internal_roots)?);
                 }
                 other => return unknown_key(other, block.pos),
             },
@@ -598,6 +645,7 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
         containment: containment.unwrap_or_default(),
         hosts,
     };
+    check_internal_roots(&config, &internal_roots)?;
     check_memory_budget(&config, limits_pos.or(first_host_pos).unwrap_or(start))?;
     Ok(config)
 }
