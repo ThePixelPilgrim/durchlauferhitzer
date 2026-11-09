@@ -363,3 +363,137 @@ fn a_drain_closes_the_pool() {
         assert_eq!(sim.idle_closes().get(&IdleClose::Drain), Some(&1));
     }
 }
+
+/// Nightly issue #3 (seed 48287): a complete, keep-alive, chunked response
+/// whose backend resets right at its body end. The bytes that would have
+/// followed the body are never sent, so nothing followed its end in the
+/// read that completed it: the connection is pooled (FR-PROXY-02,
+/// FR-PROXY-22 only closes on bytes that arrive).
+const CHUNKED_201: &[u8] =
+    b"HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+const CHUNKED_201_RELAYED: &[u8] =
+    b"HTTP/1.1 201 Created\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+const POST: &[u8] = b"POST /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\n\r\nhi";
+const POST_FORWARDED: &[u8] = b"POST /x HTTP/1.1\r\nhost: example.test\r\n\
+    content-length: 2\r\nx-forwarded-for: 192.0.2.1\r\nx-forwarded-proto: http\r\n\r\nhi";
+
+/// A's first exchange, answered by `CHUNKED_201` and pooled.
+fn pooled_after_chunked(sim: &mut Sim) -> (ConnId, UpstreamId) {
+    let a = request(sim, GET);
+    let up = only_upstream(sim);
+    assert_eq!(sim.take_backend_request(up), FORWARDED, "{}", sim.trace());
+    sim.backend_send(up, CHUNKED_201);
+    sim.run_until_idle();
+    assert_eq!(sim.take_received(a), CHUNKED_201_RELAYED, "{}", sim.trace());
+    assert_eq!(
+        sim.upstream_holder(up),
+        Some(UpstreamHolder::Pool),
+        "{}",
+        sim.trace()
+    );
+    (a, up)
+}
+
+fn proxied_201(c: ConnId) -> Log {
+    Log::ProxiedResponse {
+        conn: c,
+        peer: peer(),
+        backend: BackendId(0),
+        status: 201,
+        request: summary(Method::Get, "/api/x"),
+    }
+}
+
+/// Seed 48287's case: the reset arrives only after the next request (a
+/// POST, never replayed) went out on the reused connection: the POST is
+/// answered 502 (FR-PROXY-26), and the client never sees anything of the
+/// first exchange's backend beyond its complete response.
+#[test]
+fn a_reset_at_the_body_end_seen_after_the_reuse_is_a_502_for_a_post() {
+    let mut sim = Sim::new(POOLED);
+    let (a, up) = pooled_after_chunked(&mut sim);
+    sim.send(a, POST);
+    sim.run_until_idle();
+    assert_eq!(sim.upstreams(), [up], "reused\n{}", sim.trace());
+    assert_eq!(
+        sim.take_backend_request(up),
+        POST_FORWARDED,
+        "{}",
+        sim.trace()
+    );
+    sim.backend_reset(up);
+    sim.run_until_idle();
+    assert_eq!(sim.upstreams(), [up], "no retry\n{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    let received = sim.take_received(a);
+    assert!(
+        received.starts_with(b"HTTP/1.1 502 Bad Gateway\r\n"),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(
+        sim.logs(),
+        &[
+            proxied_201(a),
+            Log::BackendFailed {
+                conn: a,
+                peer: peer(),
+                backend: BackendId(0),
+                kind: BackendFailure::Reset,
+            },
+            Log::Response {
+                conn: a,
+                peer: peer(),
+                status: Status::BadGateway,
+                request: Some(summary(Method::Other("POST".to_owned()), "/api/x")),
+            },
+        ],
+        "{}",
+        sim.trace()
+    );
+}
+
+/// The same reset seen before the reuse, by the silence check (the idle
+/// watch held back): the POST connects afresh, nothing was sent on the
+/// dead connection, and the failed check is logged.
+#[test]
+fn a_reset_at_the_body_end_seen_before_the_reuse_connects_afresh() {
+    let mut sim = Sim::new(POOLED);
+    sim.hold_idle_reads(true);
+    let (a, up) = pooled_after_chunked(&mut sim);
+    sim.backend_reset(up);
+    sim.send(a, POST);
+    sim.run_until_idle();
+    let fresh = UpstreamId(2);
+    assert_eq!(sim.upstreams(), [up, fresh], "{}", sim.trace());
+    assert_eq!(
+        sim.take_backend_request(fresh),
+        POST_FORWARDED,
+        "{}",
+        sim.trace()
+    );
+    sim.backend_send(fresh, OK);
+    sim.run_until_idle();
+    assert_eq!(sim.take_received(a), RELAYED, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[
+            proxied_201(a),
+            Log::BackendNotSilent {
+                conn: a,
+                peer: peer(),
+                backend: BackendId(0),
+                request: summary(Method::Other("POST".to_owned()), "/api/x"),
+            },
+            Log::ProxiedResponse {
+                conn: a,
+                peer: peer(),
+                backend: BackendId(0),
+                status: 200,
+                request: summary(Method::Other("POST".to_owned()), "/api/x"),
+            },
+        ],
+        "{}",
+        sim.trace()
+    );
+}

@@ -947,6 +947,14 @@ Bodies:
   end are never forwarded, in either direction: from the backend they are
   dropped and the upstream closed; from the client they stay buffered as
   the next pipelined request.
+  *(Nightly fix 2026-11-09, seed 48287:)* "bytes after" are bytes that
+  arrive: a backend that resets or ends its connection exactly at the body
+  end sent none, so its connection may be pooled as FR-PROXY-02 says; the
+  reset is caught by the silence check (fresh connect) or, arriving late,
+  by the reusing request (the retry rule, else 502, FR-PROXY-26). Pinned by
+  `a_reset_at_the_body_end_seen_before_the_reuse_connects_afresh` and
+  `a_reset_at_the_body_end_seen_after_the_reuse_is_a_502_for_a_post`
+  (`sim/tests/proxy/pool.rs`).
 - **FR-PROXY-23** [done] `max_request_body`: a `Content-Length` over the
   limit → 413 before connecting; a chunked body passing it → both
   connections cut. Payload bytes are counted with saturating arithmetic.
