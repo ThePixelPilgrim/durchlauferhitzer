@@ -37,6 +37,8 @@ Each stage's review record lists its owner decisions, rulings, final review, fix
 
 ## Carry-forwards to later stages
 
+- Nightly issues (2026-11-09): #3 (seed 48287) was a model bug the stage 8 review's `839e9ac` had already fixed; the case is pinned by two deterministic tests in `sim/tests/proxy/pool.rs` and a FR-PROXY-22 clarification. #5 (the 65536-connection backstop test in containers) is fixed by `3bee322`; close it when the next nightly is green. #4 (seed 99897) is being settled the same way (replay at `8f68af3`, deterministic pin on `main`). Nightly seeds stop reproducing once later commits change the random draws, so a nightly failure is replayed at its run's commit, never only at `main`.
+
 - qmail-review carry-forwards (lessons 6–9 and 11 in `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): a nightly run on the newest kernel and glibc; numeric `uid:gid` for `user` to skip NSS; an opener process when TLS arrives; product line count beside the nightly benchmarks; name the supported TLS deployment in the README.
 
 - After the stage 7 merge: check that the first scheduled nightly publish logs `refused 0`, and compare CPU against the NFR-PERF-01/02 targets over the next two nightlies (bisect if it stays high).
