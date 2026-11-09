@@ -149,12 +149,15 @@ pub(crate) fn random_static_request(rng: &mut fastrand::Rng, tree: &Tree) -> Vec
     let drawn = drawn_static_request(rng, tree);
     // Now and then, for a request without conditional lines (their rare
     // cases stay as common as they were), a range longer than a chunk of
-    // a file of several chunks instead, drawn from a stream of its own
-    // (the draws above stay what they were).
+    // a file of several chunks instead, or a range of a kind the coverage
+    // holds to a floor, each drawn from a stream of its own (the draws
+    // above stay what they were).
     if String::from_utf8_lossy(&drawn).contains("\r\nIf-") {
         return drawn;
     }
-    long_range_request(rng.get_seed(), tree).unwrap_or(drawn)
+    long_range_request(rng.get_seed(), tree)
+        .or_else(|| kind_range_request(rng.get_seed(), tree))
+        .unwrap_or(drawn)
 }
 
 fn drawn_static_request(rng: &mut fastrand::Rng, tree: &Tree) -> Vec<u8> {
