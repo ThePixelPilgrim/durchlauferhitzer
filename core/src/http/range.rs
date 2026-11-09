@@ -5,8 +5,9 @@
 //! Only a single `bytes` range is served. Several ranges (no
 //! `multipart/byteranges`), several `Range` lines, a malformed `Range` or
 //! another unit get the whole file, as RFC 9110 allows; so does every
-//! method but `GET`, and an empty file (owner decision 2026-11-09). `If-Range` keeps the range only for the file's own
-//! strong `ETag` or exactly its `Last-Modified` bytes, on one line
+//! method but `GET`, and an empty file (owner decision 2026-11-09).
+//! `If-Range` keeps the range only for the file's own strong `ETag` or
+//! exactly its `Last-Modified` bytes, on one line
 //! (planner calls, stage 8 plan).
 
 use super::conditional::{EntityTag, Validators, entity_tag, own_stamp};
