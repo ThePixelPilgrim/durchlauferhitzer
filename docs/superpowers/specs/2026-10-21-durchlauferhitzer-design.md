@@ -10,7 +10,7 @@ Status: approved — **single source of truth** for what the product must do.
   *withdrawn*. Plans, reviews, ledgers and commit messages cite IDs instead
   of restating requirements. A new owner decision is written here first
   (new ID or edited text), then cited.
-- Status tags: **[done]** implemented and tested (stages 1–7);
+- Status tags: **[done]** implemented and tested (stages 1–8);
   **[done in core; driver stage 4]** the core's half is done and the
   epoll driver's is due (none left after stage 4); **[done; X stage N]**
   done, with the follow-up X due in stage N (e.g. NFR-MAINT-04's CI
@@ -280,7 +280,7 @@ Structure and values:
   Static routes may set neither.
 - **FR-CFG-19** [done] `on_file_change abort | allow_growth;` is optional
   on static routes (default `abort`) and an error on proxy routes.
-  *[Stage 8:]* also optional on a proxy route with `internal_files`
+  *[Stage 8, done:]* also optional on a proxy route with `internal_files`
   (FR-CFG-26).
 - **FR-CFG-20** [done] The `limits` block may override these defaults:
 
@@ -349,7 +349,7 @@ Structure and values:
   once. The setting is only meaningful with `seccomp` not `off`; written
   with `seccomp off` it is an error (*builder call*: a setting that does
   nothing is refused rather than ignored).
-- **FR-CFG-26** [stage 8] (owner decisions 2026-11-07, stage 8
+- **FR-CFG-26** [done] (owner decisions 2026-11-07, stage 8
   brainstorm) `internal_files x-sendfile <root>;` or
   `internal_files x-accel-redirect <prefix> <root>;` is optional on a
   proxy route, at most once, and an error on a static route
@@ -374,7 +374,8 @@ Structure and values:
 - **FR-CFG-24** [done] `examples/durchlauferhitzer.conf` documents every
   config key with its default and the user-visible behaviour; a test keeps
   it loadable. Each stage that adds a key updates it (stage 3: the three
-  backend limits, forwarded headers, 502/504, `Expect`).
+  backend limits, forwarded headers, 502/504, `Expect`; stage 8:
+  `internal_files`).
 
 ### FR-HTTP — Request parsing, targets, framing, fixed responses
 
@@ -622,7 +623,7 @@ Core-generated responses:
   `If-Modified-Since` give 304 per RFC 9110 (`If-None-Match` wins), a
   malformed one is ignored as the RFC requires; `If-Match`,
   `If-Unmodified-Since` are ignored (no 412); `If-Range` is FR-STATIC-19
-  (stage 8; ignored before).
+  (since stage 8).
   *(Owner decision 2026-11-07, stage 7 review:)* at most 16 distinct
   entity tags of an `If-None-Match` are kept; further ones are ignored
   (worst case a 200 instead of a 304), so the request's state stays
@@ -638,7 +639,7 @@ Core-generated responses:
   20xx, a fixed rule instead of RFC 9110's 50-year window; it differs
   only for years the RFC places in the 2070s.
 
-- **FR-STATIC-19** [stage 8] Range requests (RFC 9110 §14). *(Owner
+- **FR-STATIC-19** [done] Range requests (RFC 9110 §14). *(Owner
   decision 2026-11-07, stage 8 brainstorm: for static routes and for
   backend-directed files, FR-PROXY-32, alike.)* Every file response
   carries `Accept-Ranges: bytes`. A `GET` with one valid `bytes` range
@@ -1147,7 +1148,7 @@ Failures, persistence, timeouts:
   over `max_response_body`, a `Transfer-Encoding` toward an HTTP/1.0
   client [done in stage 3 Task 7]); proxied responses are logged as
   `ProxiedResponse` with the backend's status (FR-LOG-02).
-- **FR-PROXY-32** [stage 8] Backend-directed file serving. *(Owner
+- **FR-PROXY-32** [done] Backend-directed file serving. *(Owner
   decisions 2026-11-07, stage 8 brainstorm.)* A backend's answer may ask
   the proxy to send a file from a folder on this machine: the backend
   decides who gets what, the proxy does the sending.
@@ -2665,8 +2666,8 @@ stage 4 (its tests are in `driver/`).
   late: the events handled in that one late wake, before `TimerFired`,
   still count. The sim's late-timer mode (NFR-TEST-07) pins both orders
   (tests in `sim/tests/late_timers.rs`).
-- **DRV-07** Static roots are opened once at startup (`RootId` indexes
-  `static_roots()`); an empty segment list means the root itself (open
+- **DRV-07** Static and `internal_files` roots are opened once at startup
+  (`RootId` indexes `static_roots()`, which lists both); an empty segment list means the root itself (open
   `"."`).
 - **DRV-08** Files are opened with `openat2(RESOLVE_BENEATH |
   RESOLVE_NO_SYMLINKS)` relative to the root and `O_RDONLY | O_NONBLOCK |
@@ -2791,10 +2792,12 @@ project working and tested.
    and the safe retry (FR-PROXY-02), eager I/O and a 32 KiB upstream
    buffer, the `tc netem` measurements, the NFR-PERF targets; `splice`
    and N threads dropped by measurement.
-8. **Backend-directed file serving** — a backend's `X-Sendfile` or
+8. **Backend-directed file serving** [done] — a backend's `X-Sendfile` or
    `X-Accel-Redirect` asks the proxy to send a file from the route's
-   `internal_files` folder (FR-PROXY-32, FR-CFG-26). Useful when the
-   files are on the proxy's machine (same host or shared storage).
+   `internal_files` folder (FR-PROXY-32, FR-CFG-26), with Rack's hints;
+   single-range requests for static and backend files (FR-STATIC-19).
+   Useful when the files are on the proxy's machine (same host or shared
+   storage).
 9. **Later, maybe** — *Hung-disk handling (recorded for a better future
    solution):* today a hung `openat2` keeps its connection slot until the
    disk answers (FR-CONN-11), which bounds the damage at `max_connections`

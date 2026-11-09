@@ -87,8 +87,8 @@
 //! Rules for files:
 //!
 //! - The core allocates [`FileId`]s, sequentially from 1, and never reuses
-//!   one. A [`RootId`] indexes [`Core::static_roots`]: the driver opens each
-//!   root once at startup.
+//!   one. A [`RootId`] indexes [`Core::static_roots`] (static and
+//!   `internal_files` roots): the driver opens each root once at startup.
 //! - `OpenFile` comes for a static route's request, or from a proxy
 //!   exchange: a backend's `200` on an `internal_files` route that names a
 //!   file (FR-PROXY-32) opens it below that route's root, its upstream
