@@ -1761,6 +1761,8 @@ Failures, persistence, timeouts:
       malloc's arena limit set to 1 (`mallopt(M_ARENA_MAX, 1)`, while the
       process has one thread), so no worker thread ever reads
       `/sys/devices/system/cpu/online` (FR-PROC-06); nothing on musl;
+      glibc refusing the limit is a startup error (exit 2:
+      `cannot limit glibc's malloc arenas (M_ARENA_MAX)`);
   7. the privilege drop (FR-PROC-03; exit 2);
   7a. *(stage 5 Task 5)* Landlock (FR-PROC-06), while the process has
       one thread and before anything else opens a path (exit 2 for a

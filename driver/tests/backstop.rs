@@ -152,8 +152,18 @@ fn answer_requests(mut stream: TcpStream) {
 /// Sends `request` (and `body`) on a fresh connection and returns the
 /// whole response (the request asks for `Connection: close`).
 fn exchange(addr: SocketAddr, request: &str, body: &[u8]) -> Vec<u8> {
+    exchange_within(addr, request, body, PATIENCE)
+}
+
+/// [`exchange`] with the read timeout `patience`.
+fn exchange_within(
+    addr: SocketAddr,
+    request: &str,
+    body: &[u8],
+    patience: std::time::Duration,
+) -> Vec<u8> {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    stream.set_read_timeout(Some(patience)).unwrap();
     stream.write_all(request.as_bytes()).unwrap();
     stream.write_all(body).unwrap();
     let mut response = Vec::new();
@@ -497,10 +507,11 @@ fn static_requests_on_every_slot(line: &str) {
         );
     }
     assert_alive(&mut server);
-    let response = exchange(
+    let response = exchange_within(
         addr,
         "GET /ok.txt HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",
         &[],
+        SURVIVE_PATIENCE,
     );
     assert!(
         response.starts_with(b"HTTP/1.1 200 OK\r\n"),
@@ -586,7 +597,7 @@ fn survives_worst_case_proxy_requests_on_every_slot() {
     after_the_probe(addr);
     let mut streams = send_together(addr, &requests);
     // Every exchange waits on the backend at once.
-    let deadline = std::time::Instant::now() + PATIENCE;
+    let deadline = std::time::Instant::now() + SURVIVE_PATIENCE;
     while arrived.load(Ordering::SeqCst) < SLOTS && std::time::Instant::now() < deadline {
         assert_alive(&mut server);
         thread::sleep(std::time::Duration::from_millis(10));
@@ -610,14 +621,14 @@ fn survives_worst_case_proxy_requests_on_every_slot() {
     // Closed, the clients leave their lingering slots; then a plain
     // request is served again.
     drop(streams);
-    let deadline = std::time::Instant::now() + PATIENCE;
+    let deadline = std::time::Instant::now() + SURVIVE_PATIENCE;
     let request = format!(
         "POST /x HTTP/1.1\r\nHost: {host}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n"
     );
-    let mut response = exchange(addr, &request, b"ok");
+    let mut response = exchange_within(addr, &request, b"ok", SURVIVE_PATIENCE);
     while response.starts_with(b"HTTP/1.1 503 ") && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(10));
-        response = exchange(addr, &request, b"ok");
+        response = exchange_within(addr, &request, b"ok", SURVIVE_PATIENCE);
     }
     assert!(
         response.starts_with(b"HTTP/1.1 200 OK\r\n"),
