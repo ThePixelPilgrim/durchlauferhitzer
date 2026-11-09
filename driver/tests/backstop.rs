@@ -373,6 +373,12 @@ fn serves_the_smoke_load_under_the_smallest_budget() {
 /// smallest `memory_limit` FR-CFG-21 accepts for the config.
 const SLOTS: usize = 60;
 
+/// The read timeout of the survive tests' clients. They assert that the
+/// server survives, not how fast it answers: a server starved of CPU may
+/// take long to parse 60 request lines of 256 KiB, and a timeout read as
+/// the end of stream would fail a server that is still serving.
+const SURVIVE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// `limits` for [`SLOTS`] connections from one address, `extra` added
 /// (`max_request_line` and `max_head`), with the smallest `memory_limit`
 /// FR-CFG-21 accepts for `text_of`'s routes.
@@ -393,7 +399,7 @@ fn every_slot_limits(text_of: impl Fn(&str) -> String, extra: &str) -> String {
 /// time the probe's end has been read too. Then every slot is free.
 fn after_the_probe(addr: SocketAddr) {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    stream.set_read_timeout(Some(SURVIVE_PATIENCE)).unwrap();
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: unknown.invalid\r\n\r\n")
         .unwrap();
@@ -415,7 +421,7 @@ fn send_together(addr: SocketAddr, requests: &[Vec<u8>]) -> Vec<TcpStream> {
         .iter()
         .map(|_| {
             let stream = TcpStream::connect(addr).unwrap();
-            stream.set_read_timeout(Some(PATIENCE)).unwrap();
+            stream.set_read_timeout(Some(SURVIVE_PATIENCE)).unwrap();
             stream
         })
         .collect();
