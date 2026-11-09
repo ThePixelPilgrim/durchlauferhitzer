@@ -55,7 +55,8 @@ src/
   backend.rs          scripted backends, upstream pumping and invariants
   backend/hints.rs    the head buffer's room for Rack's hints
   pool.rs             the core's idle pool as the sim sees it: idle
-                      hygiene and drain checks, idle closes by cause
+                      hygiene and drain checks, idle closes by cause,
+                      every upstream ever idle
   fs.rs               the in-memory file system
   tests.rs            unit tests of the sim's own invariant checks
 tests/
@@ -151,7 +152,9 @@ tests/
                           merged head, the exact bytes or the abort, the
                           logs; parked only after `Content-Length: 0`
                           (checked whenever an upstream idles or is
-                          reused); the file coverage gate
+                          reused), and then always unless the backend
+                          ended or a drain began (checked on the answer,
+                          by `Sim::ever_pooled`); the file coverage gate
       response.rs         random backend responses (hostile ones among
                           them) and the model of what the client receives
       outcome.rs          exchanges, timings and the outcomes they allow
@@ -191,7 +194,9 @@ valid paths, every bad-path class, traversals, the header twice, any
 body framing; clients add `Range`, `If-Range` and conditional lines for
 those files; the file arrives byte-exact behind the merged head, or as
 its 304, 416, 404 or 502, or cut by a file that changes while sent, and
-an upstream is parked after a file only after `Content-Length: 0`;
+an upstream is parked after a file only after `Content-Length: 0`, and
+always then while serving if the exchange is reusable and its backend
+kept the connection and sent nothing more (`file-must-park`);
 each file coverage name is required at least 15 times per 1000 seeds). Each
 exchange is predicted by a model written from the spec, not from the core:
 the backend must receive exactly the rewritten request and the client's
