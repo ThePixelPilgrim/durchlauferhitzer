@@ -15,14 +15,14 @@ binary.
   process it does not hand over gets `SIGHUP`; one that never reached
   its event loop is killed after 10 s. Its fork runs `setsid` and the
   binary only once it is listed in `<pidfile>.draining` (a "go" line
-  on a private FIFO): killed before that, the helper leaves nothing
-  running.
+  on a private FIFO; a list it cannot write is exit 1): killed before
+  that, the helper leaves nothing running.
 - `openrc/durchlauferhitzer` — the OpenRC script (`start`, `stop`,
   `checkconfig`, `reload`), modelled on Alpine's haproxy script; `stop`
   also ends the processes a reload left (`<pidfile>.draining`: draining,
-  or not handed over by a killed helper; each by pid and start time).
-  Install
-  it as `/etc/init.d/durchlauferhitzer`, the helper as
+  or not handed over by a killed helper; each by pid and start time,
+  checked again before every signal). Install it as
+  `/etc/init.d/durchlauferhitzer`, the helper as
   `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`.
 - `openrc/durchlauferhitzer.confd` — its settings, as
   `/etc/conf.d/durchlauferhitzer` (`ready_timeout`, `reload_grace`, ...).
