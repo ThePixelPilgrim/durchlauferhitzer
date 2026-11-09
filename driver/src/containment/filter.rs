@@ -69,7 +69,8 @@ enum Rule {
     Socket,
     /// `mmap`, `mprotect`: `prot` (argument 2) without `PROT_EXEC`.
     NoExec,
-    /// `clone`: exactly the flags the libc's `pthread_create` passes.
+    /// `clone`: exactly the flags a libc's `pthread_create` passes (two sets,
+    /// accepted for every libc).
     Thread,
     /// `prctl`: only the options in [`PRCTL_OPTIONS`].
     Prctl,
@@ -116,15 +117,16 @@ const fn e(name: &'static str, nr: u32, rule: Rule) -> Entry {
 
 /// x86_64 (`strace -f` over the driver tests on Ubuntu 24.04, glibc 2.39).
 /// Entries under `cfg(target_env = "musl")` replace or add to glibc's
-/// where musl makes other calls (Alpine 3.24, musl 1.2.6; NFR-PORT-02),
+/// where musl makes other calls (Alpine 3.24, musl 1.2.6, and Rust's
+/// static musl 1.2.5; NFR-PORT-02),
 /// each naming the musl function.
 const X86_64: &[Entry] = &[
     // The loop: epoll, and reads and writes of the wake eventfd, the
     // signalfd, the sockets and the log on stderr; closing descriptors.
-    #[cfg(not(target_env = "musl"))]
+    // glibc and musl 1.2.5 issue `epoll_wait`; musl 1.2.6 issues
+    // `epoll_pwait` with no signal mask. Both are allowed for either libc:
+    // a libc update under `seccomp_action kill` must not end the server.
     e("epoll_wait", 232, Rule::Allow),
-    // musl's `epoll_wait` is `epoll_pwait` with no signal mask.
-    #[cfg(target_env = "musl")]
     e("epoll_pwait", 281, Rule::Allow),
     e("epoll_ctl", 233, Rule::Allow),
     e("read", 0, Rule::Allow),
@@ -347,9 +349,11 @@ const fn arg(i: u32) -> u32 {
 const JEQ: u32 = libc::BPF_JEQ;
 const JSET: u32 = libc::BPF_JSET;
 
-/// The libc's `pthread_create` flags (`clone`): glibc's (≥ 2.34), and on
-/// musl the same plus `CLONE_DETACHED`, which the kernel ignores.
-const THREAD_FLAGS: u32 = GLIBC_THREAD_FLAGS | MUSL_THREAD_FLAGS;
+/// The `pthread_create` flags (`clone`) accepted for every libc, each as an
+/// exact match: glibc's (≥ 2.34; also musl 1.2.5's), and the same plus
+/// `CLONE_DETACHED`, which musl 1.2.6 adds and the kernel ignores. A libc
+/// update under `seccomp_action kill` must not end the server.
+const THREAD_FLAGS: &[u32] = &[GLIBC_THREAD_FLAGS, GLIBC_THREAD_FLAGS | DETACHED_FLAG];
 
 /// glibc's `pthread_create` flags (glibc ≥ 2.34).
 const GLIBC_THREAD_FLAGS: u32 = (libc::CLONE_VM
@@ -362,12 +366,8 @@ const GLIBC_THREAD_FLAGS: u32 = (libc::CLONE_VM
     | libc::CLONE_PARENT_SETTID
     | libc::CLONE_CHILD_CLEARTID) as u32;
 
-/// What musl's `pthread_create` adds: `CLONE_DETACHED` (`linux/sched.h`;
-/// not in the `libc` crate).
-#[cfg(target_env = "musl")]
-const MUSL_THREAD_FLAGS: u32 = 0x0040_0000;
-#[cfg(not(target_env = "musl"))]
-const MUSL_THREAD_FLAGS: u32 = 0;
+/// `CLONE_DETACHED` (`linux/sched.h`; not in the `libc` crate).
+const DETACHED_FLAG: u32 = 0x0040_0000;
 
 /// The instructions after an entry's number matched; `pid` is the
 /// server's.
@@ -393,12 +393,7 @@ fn body(rule: Rule, deny: u32, pid: u32) -> Vec<libc::sock_filter> {
             ret(libc::SECCOMP_RET_ALLOW),
             ret(deny),
         ],
-        Rule::Thread => vec![
-            load(arg(0)),
-            jump(JEQ, THREAD_FLAGS, 0, 1),
-            ret(libc::SECCOMP_RET_ALLOW),
-            ret(deny),
-        ],
+        Rule::Thread => one_of(arg(0), THREAD_FLAGS, deny),
         Rule::Prctl => one_of(arg(0), PRCTL_OPTIONS, deny),
         Rule::Fcntl => one_of(arg(1), FCNTL_COMMANDS, deny),
         Rule::Futex => one_of(arg(1), FUTEX_OPERATIONS, deny),

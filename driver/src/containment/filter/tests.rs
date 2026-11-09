@@ -15,16 +15,12 @@ const KILL: u32 = libc::SECCOMP_RET_KILL_PROCESS;
 /// The server's pid the programs are built for.
 const PID: u32 = 4242;
 
-/// `CLONE_DETACHED`, which musl's `pthread_create` adds.
+/// `CLONE_DETACHED`, which musl 1.2.6's `pthread_create` adds.
 const CLONE_DETACHED: u64 = 0x0040_0000;
 
-/// The thread flags the libc's `pthread_create` passes to `clone`.
-const THREAD: u64 = GLIBC_THREAD
-    | if cfg!(target_env = "musl") {
-        CLONE_DETACHED
-    } else {
-        0
-    };
+/// The thread flags of `pthread_create`: glibc's (also musl 1.2.5's);
+/// the filter also accepts them plus `CLONE_DETACHED`, for every libc.
+const THREAD: u64 = GLIBC_THREAD;
 
 /// glibc's.
 const GLIBC_THREAD: u64 = (libc::CLONE_VM
@@ -290,22 +286,17 @@ fn clone_only_as_a_thread_and_clone3_is_enosys() {
         let clone = nr(arch, "clone");
         let run_clone = |flags: u64| run(prog, &call(arch, clone, [flags, 1, 2, 3, 4, 0]));
         assert_eq!(run_clone(THREAD), ALLOW);
+        assert_eq!(run_clone(THREAD | CLONE_DETACHED), ALLOW);
         // A fork, a vfork, a thread in new namespaces, a thread that also
         // asks for a signal on exit.
         let sigchld = libc::SIGCHLD as u64;
         let vfork = (libc::CLONE_VM | libc::CLONE_VFORK) as u64 | sigchld;
-        // The other libc's thread flags.
-        let other = if cfg!(target_env = "musl") {
-            GLIBC_THREAD
-        } else {
-            GLIBC_THREAD | CLONE_DETACHED
-        };
         for flags in [
             sigchld,
             vfork,
             THREAD | libc::CLONE_NEWUSER as u64,
             THREAD | sigchld,
-            other,
+            THREAD | CLONE_DETACHED | sigchld,
             0,
         ] {
             assert_eq!(run_clone(flags), expected(action), "{flags:#x}");
@@ -538,24 +529,16 @@ fn tkill_only_for_sigabrt_to_the_main_thread_and_only_on_musl() {
     });
 }
 
-/// x86_64's `epoll_wait`: glibc makes the call; musl's `epoll_wait` is
-/// `epoll_pwait` (aarch64 has only `epoll_pwait`).
+/// x86_64 allows both epoll waits for every libc: glibc and musl 1.2.5
+/// issue `epoll_wait`, musl 1.2.6 issues `epoll_pwait`.
 #[test]
-fn x86_64_lists_the_epoll_wait_of_its_libc() {
+fn x86_64_allows_both_epoll_waits() {
     for action in ACTIONS {
         let prog = program(Arch::X86_64, action, PID);
-        let (wait, pwait) = (232, 281);
-        let (listed, other) = if cfg!(target_env = "musl") {
-            (pwait, wait)
-        } else {
-            (wait, pwait)
-        };
         let args = [6, 0x1000, 256, u64::MAX, 0, 8];
-        assert_eq!(run(&prog, &call(Arch::X86_64, listed, args)), ALLOW);
-        assert_eq!(
-            run(&prog, &call(Arch::X86_64, other, args)),
-            expected(action)
-        );
+        for nr in [232, 281] {
+            assert_eq!(run(&prog, &call(Arch::X86_64, nr, args)), ALLOW);
+        }
     }
 }
 
@@ -619,13 +602,15 @@ fn the_program_fits_with_room_to_spare_and_every_jump_lands_inside() {
 
 #[test]
 fn both_tables_list_the_same_calls() {
+    // aarch64 has only `epoll_pwait`, which x86_64 lists next to its
+    // `epoll_wait`; `ppoll` is aarch64's `poll`.
     let aarch64_name = |name: &'static str| match name {
-        "epoll_wait" => "epoll_pwait",
         "poll" => "ppoll",
         other => other,
     };
     let x86: Vec<(&str, Rule)> = table(Arch::X86_64)
         .iter()
+        .filter(|e| e.name != "epoll_wait")
         .map(|e| (aarch64_name(e.name), e.rule))
         .collect();
     let arm: Vec<(&str, Rule)> = table(Arch::Aarch64)

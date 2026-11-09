@@ -2486,6 +2486,9 @@ Failures, persistence, timeouts:
   `CAP_SYS_RESOURCE` is gone before anything could raise it. The disk
   workers are spawned after it, so an allowance that is too small fails
   startup (the thread spawn is refused, exit 2), not a loaded server.
+  The 65536-connection test runs in CI's root step and in the container
+  jobs (Alpine; nightly older glibc), which start with a raised `nofile`
+  ulimit because Docker's root has no `CAP_SYS_RESOURCE`.
 
 ### NFR-ROB — Robustness
 

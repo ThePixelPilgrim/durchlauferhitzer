@@ -203,7 +203,10 @@ jobs:
       # unconfined make /proc/sys writable, as in ci.yml's Alpine job: the
       # restart tests write net.ipv4.tcp_migrate_req, in the container's
       # own network namespace.
+      # The 65536-connection backstop test needs ~262 000 descriptors and
+      # Docker's root cannot raise the hard limit (no CAP_SYS_RESOURCE).
       options: >-
+        --ulimit nofile=1048576:1048576
         --security-opt seccomp=unconfined --security-opt systempaths=unconfined
         --security-opt apparmor=unconfined --cap-add SYS_PTRACE
     defaults:

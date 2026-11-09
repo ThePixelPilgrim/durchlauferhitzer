@@ -172,9 +172,12 @@ src/
                       check of a reused upstream),
                       `futex` private wait/wake and `pthread_join`'s wait,
                       `tgkill` SIGABRT to `pid`; `clone3` ENOSYS;
+                      both `epoll_wait` and `epoll_pwait` on x86_64 for
+                      every libc (musl 1.2.5 and 1.2.6 differ), `clone`
+                      with glibc's thread flags or the same plus
+                      `CLONE_DETACHED` (musl 1.2.6) for every libc;
                       musl's own entries under `cfg(target_env = "musl")`:
-                      `epoll_pwait` for x86_64's `epoll_wait`, `clone`
-                      with `CLONE_DETACHED`, the thread list lock's shared
+                      the thread list lock's shared
                       `futex` wait/wake, `tkill` SIGABRT to the main
                       thread;
                       `clock_gettime`, the vDSO fallback), the action for
@@ -402,7 +405,8 @@ tests/
                     a hard limit one byte short is exit 2 with both
                     numbers; 64 disk threads start and serve, 65536
                     connections start (root with CAP_SYS_RESOURCE, or a
-                    high enough hard RLIMIT_NOFILE; skipped otherwise),
+                    high enough hard RLIMIT_NOFILE, which CI's container
+                    jobs get from `--ulimit nofile`; skipped otherwise),
                     8 static GETs of 1 MiB and 8 proxied POSTs of 64 KiB
                     are served, the server alive afterwards
   budget.rs         NFR-RES-05 in the binary with RLIMIT_NOFILE lowered

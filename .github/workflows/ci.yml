@@ -187,7 +187,10 @@ jobs:
         # stop leave no zombies.
         shell: bash
         run: |
+          # The 65536-connection backstop test needs ~262 000 descriptors and
+          # Docker's root cannot raise the hard limit (no CAP_SYS_RESOURCE).
           docker run -d --init --name alpine \
+            --ulimit nofile=1048576:1048576 \
             --security-opt seccomp=unconfined \
             --security-opt systempaths=unconfined \
             --security-opt apparmor=unconfined \
