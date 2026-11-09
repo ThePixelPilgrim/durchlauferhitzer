@@ -382,7 +382,8 @@ tests/
                     bytes); `/etc/passwd` is a 502 (`bad_file_path`)
                     with none of its bytes, a symlink in the root out of
                     it and one inside it a 404; a client's forged file
-                    headers never reach the backend, Rack's hints do;
+                    headers (`X_Accel_Mapping` too) never reach the
+                    backend, Rack's hints do;
                     after `Content-Length: 0` two requests share one
                     backend connection; every head is compared byte for
                     byte with one built from the sim's model

@@ -362,14 +362,17 @@ fn symlink_in_the_root_is_404() {
 }
 
 /// FR-PROXY-32 Stripping and Hints: a client's file headers never reach
-/// the backend, which gets Rack's hints for its route instead.
+/// the backend, which gets Rack's hints for its route instead; nor does
+/// one spelled with `_` for `-` (`X_Accel_Mapping`, which a CGI server
+/// reads as the same key; owner decision 2026-11-09).
 #[test]
 fn client_cannot_forge_file_headers() {
     let site = Site::new();
     let backend = Backend::start(site.root.clone());
     let (running, addr) = site.serve(backend.addr);
     let forged = "X-Sendfile: /etc/passwd\r\nX-Accel-Redirect: /protected/../x\r\n\
-                  X-Sendfile-Type: X-Sendfile\r\nX-Accel-Mapping: /=/protected/\r\n";
+                  X-Sendfile-Type: X-Sendfile\r\nX-Accel-Mapping: /=/protected/\r\n\
+                  X_Accel_Mapping: /etc/=/protected/\r\n";
     let (head, body) = exchange(addr, "/a/plain", forged);
     // Relayed (FR-PROXY-12): the backend's lines, then the core's
     // `Date` (the backend sent none), lowercase like every relayed line.
@@ -393,6 +396,8 @@ fn client_cannot_forge_file_headers() {
         "/protected/../x",
         "x-sendfile-type: x-sendfile",
         "x-accel-mapping: /=/",
+        "x_accel_mapping",
+        "/etc/=/protected/",
     ] {
         assert!(!got.contains(value), "{value} reached the backend: {got}");
     }

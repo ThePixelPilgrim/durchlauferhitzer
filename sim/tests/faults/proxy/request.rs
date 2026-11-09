@@ -38,8 +38,10 @@ pub(crate) struct Request {
     pub(crate) chunk_ends: Vec<usize>,
     /// Coverage tag of the smuggling or edge case it carries, if any.
     pub(crate) tag: Option<&'static str>,
-    /// `forged-file-header` when it carries a file header and is
-    /// forwarded (FR-PROXY-32); counted once the backend got the head.
+    /// `underscore-spelled-header` when it carries a header withheld for
+    /// its name read with `_` as `-` (FR-PROXY-06, -32), else
+    /// `forged-file-header` when it carries a file header, and is
+    /// forwarded; counted once the backend got the head.
     pub(crate) file_tag: Option<&'static str>,
     /// On an `internal_files` route: the file (below the root) its
     /// conditional and range lines are for (`internal::wish_lines`).
@@ -357,6 +359,7 @@ pub(crate) fn random_proxy_request(
     let forged_any = forged
         .iter()
         .any(|(name, _)| is_forged(&name.to_ascii_lowercase()));
+    let underscored_any = forged.iter().any(|(name, _)| name.contains('_'));
     for (name, value) in forged {
         lines.push(Line { name, value });
     }
@@ -568,6 +571,7 @@ pub(crate) fn random_proxy_request(
         })
     };
     let file_tag = match &verdict {
+        Verdict::Forward(_) if underscored_any => Some("underscore-spelled-header"),
         Verdict::Forward(_) if forged_any => Some("forged-file-header"),
         Verdict::Forward(_) | Verdict::BadBody { .. } | Verdict::Parse(_) | Verdict::Answer(..) => {
             None
@@ -628,6 +632,17 @@ const CLIENT_IDENTITY: [&str; 5] = [
     "x-forwarded-host",
     "x-forwarded-port",
 ];
+
+/// Whether a client header (lowercased) never reaches the backend for its
+/// name: a client identity or file header (FR-PROXY-06, -32), also once
+/// every `_` in it is read as `-` (owner decision 2026-11-09), and any
+/// `_` spelling of `x-forwarded-for` (implementer call, FR-PROXY-06).
+fn withheld(name_lower: &str) -> bool {
+    let dashed = name_lower.replace('_', "-");
+    CLIENT_IDENTITY.contains(&dashed.as_str())
+        || is_forged(&dashed)
+        || (dashed != name_lower && dashed == "x-forwarded-for")
+}
 
 /// The hop-by-hop list of FR-PROXY-06/-12, plus the names `Connection`
 /// lists.
@@ -766,7 +781,7 @@ fn forward(j: &Judged, route: &RouteConfig) -> Forward {
         // headers (`X-Forwarded-Proto`, `Forwarded`, `X-Real-IP`,
         // `X-Forwarded-Host`, `X-Forwarded-Port`) are not forwarded, nor
         // are the file headers (FR-PROXY-32).
-        if is_hop(&name, j.tokens) || CLIENT_IDENTITY.contains(&name.as_str()) || is_forged(&name) {
+        if is_hop(&name, j.tokens) || withheld(&name) {
             continue;
         }
         let value = trim_ows(&l.value);

@@ -140,7 +140,8 @@ tests/
                           them) and the model of what the backend receives
       chunks.rs           payloads and chunked bodies, with framing defects
       files.rs            `internal_files` routes, forged and backend file
-                          headers, Rack's hints (FR-PROXY-32)
+                          headers (also spelled with `_` for `-`, identity
+                          headers too), Rack's hints (FR-PROXY-06, -32)
       internal.rs         backend-directed files, what is drawn: a random
                           file tree per root, the clients' conditional
                           and range lines for one of its files, the
@@ -188,7 +189,8 @@ and hostile heads; bytes after the body; resets and ends of stream anywhere,
 a reset also queued right behind the bytes before it, `backend_reset_after`;
 random windows), on two proxy routes beside a static one, with random body
 limits and timeouts, and now and then `internal_files` (FR-PROXY-32: forged
-file headers from clients, file headers from backends, Rack's hints, and
+file headers from clients (also spelled with `_` for `-`, as are identity
+headers), file headers from backends, Rack's hints, and
 backends' `200`s naming files of a random tree below the route's root:
 valid paths, every bad-path class, traversals, the header twice, any
 body framing; clients add `Range`, `If-Range` and conditional lines for
