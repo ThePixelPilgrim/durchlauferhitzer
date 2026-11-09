@@ -2106,10 +2106,13 @@ Failures, persistence, timeouts:
     root-run script writes the list, and a pid with its start time names
     one process (a reused pid has another start time). The fork runs
     `setsid` and the binary only once it is listed (it waits for a "go"
-    line on a FIFO only the script writes): a script killed before that
-    leaves the fork the end of file, and it exits without running the
-    binary. Every end of the script's FIFOs is opened before the fork,
-    so no process it starts ever blocks in an open. *(I1:)* right before the SIGHUP the new
+    line on a FIFO only the script writes): a list that cannot be
+    written stops the script (exit 1) before that, and a script killed
+    before that leaves the fork the end of file, and it exits without
+    running the binary. Every end of the script's FIFOs is opened before
+    the fork, so no process it starts ever blocks in an open. `stop`
+    checks each listed pid's start time again before every signal and
+    poll, so a pid reused while it runs is never signalled. *(I1:)* right before the SIGHUP the new
     process must still run the binary: if it died during the grace, the
     pid file names the old process again, the old pid leaves the list,
     and the script exits 1 without signalling it (also when the old

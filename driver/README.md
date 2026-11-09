@@ -343,6 +343,9 @@ tests/
   restart/helper.rs `restart.rs`'s second half (a module of that test
                     binary): the helper's refusals, the grace, the lock,
                     `stop_post` and `listen` changes
+  restart/killed.rs a module of `restart.rs` too: the helper killed, or
+                    unable to list its new process, before the binary
+                    runs (stubs on its `PATH` hold it in that window)
   smoke.rs          the end-to-end smoke run (NFR-TEST-07): one binary
                     serving a static and a proxy host to a test backend,
                     200 requests over 32 parallel keep-alive connections

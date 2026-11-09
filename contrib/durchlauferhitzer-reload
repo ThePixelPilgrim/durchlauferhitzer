@@ -22,8 +22,8 @@
 #     once, so the OpenRC script's stop ends it should this helper be
 #     killed before the handover, also while that pid is still this
 #     helper's fork on its way to <binary>. The fork runs <binary> only
-#     once it is listed; a helper killed before that leaves nothing
-#     running (the fork exits).
+#     once it is listed (if the list cannot be written, stop here); a
+#     helper killed before that leaves nothing running (the fork exits).
 #  5. Wait for "ready" (at least the timeout, default 30 s, measured on
 #     the clock). Otherwise stop the new process (below) and leave the old
 #     one untouched. Once ready, the new process steers every new
@@ -325,15 +325,15 @@ esac
 # higher ones). Its pid is this shell's fork, which runs setsid, which
 # runs the binary: listed at once, it is on its way to the binary, which
 # the OpenRC script's stop allows for (it matches pid and start time).
-# The fork waits on a second FIFO, "go", written once it is listed (or
-# its listing failed, with a warning), so the binary never runs
-# unlisted. Every FIFO end is opened here before the fork (an end opened
+# The fork waits on a second FIFO, "go", written once it is listed, so
+# the binary never runs unlisted: a list that cannot be written stops
+# the helper (exit 1) before "go". Every FIFO end is opened here before the fork (an end opened
 # read-write first lets the others open at once), so no process ever
 # blocks in an open: the fork gets the write end of "ready" (fd 4, its
 # fd 3) and the read end of "go" (fd 6); this shell keeps the read end
 # of "ready" (fd 5, for the reader) and the only write end of "go" (fd
-# 7). A helper killed before "go" leaves the fork the end of file: it
-# exits, the binary never started.
+# 7). A helper that stops or is killed before "go" leaves the fork the
+# end of file: it exits, the binary never started.
 { printf '' >>"$logfile"; } 2>/dev/null || fail "cannot append to $logfile"
 dir=$(mktemp -d) || fail "mktemp -d failed"
 fifo=$dir/ready go=$dir/go
@@ -352,8 +352,10 @@ exec 6<"$go"
 ) &
 new=$!
 exec 4>&- 6<&-
-list_draining '' "$new" ||
-	warn "cannot list the new process (pid $new) in $draining"
+if ! list_draining '' "$new"; then
+	exec 7>&-
+	fail "cannot list the new process (pid $new) in $draining"
+fi
 printf 'go\n' >&7
 exec 7>&-
 
