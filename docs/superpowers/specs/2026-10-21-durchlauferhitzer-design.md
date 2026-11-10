@@ -51,7 +51,11 @@ way that matters.
 
 ## Non-goals (for now)
 
-- HTTPS / TLS of any kind (later stage; would need a pure-Rust crypto provider).
+- HTTPS / TLS of any kind (later stage; would need a pure-Rust crypto
+  provider). *Owner direction 2026-11-10:* TLS termination is a separate
+  process with no disk access, launched by durchlauferhitzer and talking
+  to it only through one fixed channel; the design is being brainstormed
+  (open decision 5).
 - Forward-proxy mode (absolute-form request targets, `CONNECT`).
 - HTTP/2, HTTP/3, WebSockets / `Upgrade`.
 - Regex or rewrite rules, wildcard hosts, load balancing across backends.
@@ -1715,6 +1719,11 @@ Failures, persistence, timeouts:
   systemd sockets too (owner decision 2026-10-28, O3: never root after
   binding; exit 2 otherwise); it is
   looked up with `getpwnam_r` (an unknown user is exit 2; *owner
+  decision 2026-11-10, stage 10* [stage 10]: `user` also accepts
+  `<uid>:<gid>`, two decimal numbers, which skips the lookup — no NSS
+  module runs inside the still-root process (the qmail review's lesson
+  7); uid 0 or gid 0 is exit 2 like a root-group name; `--check` and the
+  startup log show which form was used; *owner
   decision 2026-10-29, OA3:* so is a user whose primary group is 0,
   `user <name>: its primary group is 0 (root); the server never keeps
   group root after binding`), and the process drops to it for good:
@@ -2037,6 +2046,16 @@ Failures, persistence, timeouts:
   - All containment code lives in one small driver module behind one
     interface, so a build without it (a future unikernel port, NFR-PORT-07)
     can leave it out without touching the core.
+- **FR-PROC-07a** [stage 10] The OpenRC script supervises (owner
+  decision 2026-11-10): an unexpected exit of the server (the memory
+  backstop's abort, a `seccomp_action kill`) is restarted, as the README's
+  systemd unit does with `Restart=on-abnormal`, so the guaranteed
+  install (FR-PROC-08) holds under OpenRC too. *Builder call to make:*
+  OpenRC's `supervise-daemon` with `respawn_*` settings, if the reload
+  helper's take-over (`--ready-fd`, the draining list) works under it;
+  if it cannot, the README states that OpenRC installs are not
+  restarted and why, and FR-PROC-08's guaranteed install names systemd
+  only.
 - **FR-PROC-07** [done] Zero-downtime restart: no connection is lost.
   *(Owner decisions 2026-11-04, stage 6 brainstorm:)* a restart must not
   drop or reset a single connection, accepted or still queued; that is
@@ -2696,6 +2715,15 @@ Failures, persistence, timeouts:
 - **NFR-MAINT-10** [done] Each crate has a README describing its purpose and
   layout, updated with module changes; source files stay small (no file in
   `core/src/` over ~900 lines).
+- **NFR-MAINT-12** [stage 10] Product size is measured (owner decision
+  2026-11-10, the qmail review's lesson 9: lines are the one lever on
+  the bug count). The nightly records the product's source lines (the
+  non-blank, non-comment lines of `core/src` and `driver/src` with every
+  test module and `tests/` directory left out; the counting rule is a
+  script under `scripts/` with its own test) beside the benchmark rows,
+  charted on the `benchmarks` branch's page; each stage's review record
+  states the stage's delta with its reason. No gate: a number people
+  look at, not one that fails a build.
 - **NFR-MAINT-11** [done] Every change passes `cargo fmt --check`,
   `cargo clippy --workspace --all-targets --locked -- -D warnings`,
   `cargo test --workspace --locked`, `scripts/check-product-deps.sh` and
@@ -2908,7 +2936,16 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   the restart tests (FR-PROC-07; its container may set
   `tcp_migrate_req`); a `restart soak` job loops the restart tests about
   20 times on glibc and on Alpine (musl), so a rare lost connection is
-  caught and filed like any nightly failure.
+  caught and filed like any nightly failure. *(Owner decision
+  2026-11-10, stage 10)* [stage 10]: two more jobs. `pressure` runs the
+  driver test suite (under the kill switch) while busy loops occupy
+  every core twice over, since contention-only libc paths never show in
+  quiet runs (stage 9's glibc arena read); its failures are filed like
+  the older-glibc job's. `newest libc` runs the driver tests under kill
+  on the newest glibc and the newest musl available as container images
+  (the builder picks the images, e.g. a rolling Fedora and Alpine edge),
+  the counterpart of the Debian 12 leg, since both libc-version gaps of
+  stage 9 came from a libc the gate had never run.
 
   *(Owner decision 2026-11-02:)* a failing nightly job files or updates a
   GitHub issue, keyed by a stable fingerprint of the failure, not of the
@@ -3107,7 +3144,13 @@ project working and tested.
    the `required`/`kill` defaults (FR-CFG-25), both decided 2026-11-09.
    The framing-variant ledger (NFR-SEC-14) is already in force. Plan:
    `docs/superpowers/plans/2026-11-09-stage-9-guarantee-hardening.md`.
-10. **Later, maybe** — *Hung-disk handling (recorded for a better future
+10. **Carry-forwards** [stage 10] — from the stage 9 record and the qmail
+    review: the `pressure` and `newest libc` nightly jobs (NFR-TEST-08),
+    `user <uid>:<gid>` (FR-PROC-03), product size beside the benchmarks
+    (NFR-MAINT-12), OpenRC supervision (FR-PROC-07a), the
+    `sim/tests/proxy/bodies.rs` split (NFR-MAINT-10). Plan:
+    `docs/superpowers/plans/2026-11-10-stage-10-carry-forwards.md`.
+11. **Later, maybe** — *Hung-disk handling (recorded for a better future
    solution):* today a hung `openat2` keeps its connection slot until the
    disk answers (FR-CONN-11), which bounds the damage at `max_connections`
    but lets one dead mount occupy slots. A driver-side timeout that answers
@@ -3119,7 +3162,7 @@ project working and tested.
    (conflicts with the seccomp decision, revisit with the io_uring
    driver). HTTPS with a pure-Rust crypto provider, io_uring
    driver, file-descriptor passing from same-host backends (`SCM_RIGHTS`).
-11. **Caching, after everything else** — a small Varnish-style response
+12. **Caching, after everything else** — a small Varnish-style response
     cache in front of proxy routes, with far fewer features than Varnish.
 
 ## Left to the builder
@@ -3147,3 +3190,14 @@ recommendation (if any) is not implemented.
 4. ~~FR-CFG-25 — the `containment` defaults~~ — **decided 2026-11-09**:
    `required`, `required`, `kill` are the defaults; see FR-CFG-25 and
    FR-PROC-08, stage 9.
+5. TLS termination as a separate process (owner direction 2026-11-10;
+   brainstorm in progress, design document to follow): whether the
+   data path uses the kernel's TLS record layer (kTLS: the handshake
+   process hands the finished connection's keys to the kernel and passes
+   the socket to the server, which then serves it like a plain one, with
+   `sendfile`) or the handshake process relays plaintext over a socket
+   pair; whether the private key lives in a third, signing-only process;
+   whether the children run under their own uids and an empty network
+   namespace; which pure-Rust crypto provider; which kernel floor and
+   which TLS features (1.3 only, resumption, ALPN, client certificates)
+   the first version has.

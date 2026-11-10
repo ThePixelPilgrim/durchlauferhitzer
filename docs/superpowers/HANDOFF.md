@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-09, after stage 9 closed (final review, fix wave, record); next stage chosen by the owner.
+Last updated 2026-11-10, stage 10 (carry-forwards) planned; TLS separation brainstorm in progress.
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -16,6 +16,7 @@ A new session should start from the latest `main`, read this file first, then `C
 | 7 Efficiency | done (`71d3867..` this handoff) — record: `docs/superpowers/reviews/2026-11-07-stage-7-review.md`. The Eyra spike: `docs/superpowers/spikes/2026-11-06-eyra.md` — no, revisit later |
 | 8 Backend-directed file serving | done (`862e951..` this handoff) — record: `docs/superpowers/reviews/2026-11-09-stage-8-review.md` |
 | 9 Guarantee hardening | done (`4c999c1..dccd243`, `92b3c36`, `acc3577..dd8f1c6` and this record; the stage 8 review's fix wave `92b3c36..acc3577` landed in between) — record: `docs/superpowers/reviews/2026-11-09-stage-9-review.md`; brainstorm: `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`. Containment defaults `required`/`required`/`kill` (FR-CFG-25); the kernel memory backstop `RLIMIT_DATA` = `memory_limit` + 4 MiB + `disk_threads` × (2 MiB + 256 KiB) + `max_connections` × (8 KiB + 3 × `max_head`) (NFR-RES-09; the final review's live attack found in-flight request state missing from the first allowance — fixed, with two survive-worst-case tests); glibc limited to one malloc arena so no worker thread ever opens `/sys/devices/system/cpu/online` (found under CPU pressure); `--check` warnings and the guaranteed install (FR-PROC-08); a body on `GET`/`HEAD` is 400 (FR-PROXY-01); the NFR-SEC-14 framing ledger (review due 2027-11); the CI containers' `nofile` ulimit; both epoll waits and both clone flag sets for every libc. **Watch the CI run of `main` for the final landing; close nightly issue #5 when the next nightly is green.** |
+| 10 Carry-forwards | planned 2026-11-10 — plan `docs/superpowers/plans/2026-11-10-stage-10-carry-forwards.md` (owner decisions in the spec: NFR-TEST-08 `pressure` and `newest libc` jobs, FR-PROC-03 `user <uid>:<gid>`, NFR-MAINT-12 product size, FR-PROC-07a OpenRC supervision, the `bodies.rs` split). **Next: Task 1** (the `pressure` job), then 2–6, one at a time. TLS: the owner's direction (a separate termination process, no disk, launched by the server, one fixed channel) is in the spec's Non-goals and open decision 5; the design document follows the brainstorm |
 
 Requirements live in the spec with stable IDs (FR-…, NFR-…, DRV-…); plans, reviews and ledger lines cite those IDs instead of restating requirements, and new owner decisions go into the spec first. Open owner decisions are listed at the end of the spec.
 
