@@ -397,7 +397,14 @@ fn every_slot_limits(text_of: impl Fn(&str) -> String, extra: &str) -> String {
     let probe = load(&text_of(&format!("{counts} memory_limit 1024GiB;"))).unwrap();
     let smallest =
         (SLOTS as u64 * worst_case_per_connection(&probe.limits, probe.route_mix())).max(MIB);
-    format!("{counts} memory_limit {smallest}; disk_threads 4;")
+    // The survive tests assert survival, not latency: on a starved
+    // runner (the nightly `pressure` job) receiving 60 request lines of
+    // 256 KiB outlasts the 10 s default `header_timeout` (a 408), and a
+    // send could stall the same way.
+    format!(
+        "{counts} memory_limit {smallest}; disk_threads 4; \
+         header_timeout 120s; send_idle_timeout 120s;"
+    )
 }
 
 /// Waits until the readiness probe's slot is free. `Running::start`'s
