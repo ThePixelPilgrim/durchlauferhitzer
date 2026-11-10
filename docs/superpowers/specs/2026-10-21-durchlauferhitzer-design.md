@@ -54,8 +54,9 @@ way that matters.
 - HTTPS / TLS of any kind (later stage; would need a pure-Rust crypto
   provider). *Owner direction 2026-11-10:* TLS termination is a separate
   process with no disk access, launched by durchlauferhitzer and talking
-  to it only through one fixed channel; the design is being brainstormed
-  (open decision 5).
+  to it only through one fixed channel; the handshake is a minimal TLS
+  1.3 profile of our own on top of the kernel's record layer (owner,
+  2026-11-10); the design is being brainstormed (open decision 5).
 - Forward-proxy mode (absolute-form request targets, `CONNECT`).
 - HTTP/2, HTTP/3, WebSockets / `Upgrade`.
 - Regex or rewrite rules, wildcard hosts, load balancing across backends.
@@ -3191,13 +3192,21 @@ recommendation (if any) is not implemented.
    `required`, `required`, `kill` are the defaults; see FR-CFG-25 and
    FR-PROC-08, stage 9.
 5. TLS termination as a separate process (owner direction 2026-11-10;
-   brainstorm in progress, design document to follow): whether the
-   data path uses the kernel's TLS record layer (kTLS: the handshake
-   process hands the finished connection's keys to the kernel and passes
-   the socket to the server, which then serves it like a plain one, with
-   `sendfile`) or the handshake process relays plaintext over a socket
-   pair; whether the private key lives in a third, signing-only process;
-   whether the children run under their own uids and an empty network
-   namespace; which pure-Rust crypto provider; which kernel floor and
-   which TLS features (1.3 only, resumption, ALPN, client certificates)
-   the first version has.
+   brainstorm in progress, design document to follow). **Decided so far
+   (owner, 2026-11-10):** (a) three guarantees must hold even with the
+   handshake process fully compromised: no file access, no private key,
+   no other client's plaintext; (b) because a stock TLS library derives
+   the traffic secrets in the process that runs the handshake, which
+   gives up (a)'s third guarantee, the handshake is a minimal TLS 1.3
+   server profile of our own, in its own crate: handshake only (the
+   ClientHello, the server flight, the client's Finished, the handshake
+   records, alerts, key update derivation), TLS 1.3 only, no client
+   certificates, no resumption, no 0-RTT; the kernel's TLS record layer
+   (kTLS) carries application data, so the server owns the socket and
+   keeps `sendfile`; mirroring another crate's interface is a
+   nice-to-have behind getting it right, safe and fast. Still open: the
+   split of the crate across the terminator and the signer and the
+   channel between the three processes; which primitives are written
+   here and which come from a reviewed pure-Rust crate; the kernel
+   floor and what a kernel without kTLS gets; uids and namespaces of
+   the children; the cipher suites and groups offered.
