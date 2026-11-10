@@ -1,7 +1,8 @@
 name: Nightly
 
-# Long randomized runs, fuzzing, an older glibc, the restart soak and the
-# benchmarks (NFR-TEST-08, NFR-SEC-13, NFR-PORT-01, FR-PROC-07,
+# Long randomized runs, fuzzing, an older glibc, tests under CPU pressure,
+# the restart soak and the benchmarks (NFR-TEST-08, NFR-SEC-13,
+# NFR-PORT-01, FR-PROC-07,
 # NFR-PERF-08): daily, and by hand with smaller or larger budgets.
 on:
   schedule:
@@ -32,6 +33,10 @@ on:
         description: "Run only the tc netem benchmarks (bench --netem, NFR-PERF-05), skipping every other job"
         type: boolean
         default: false
+      only_job:
+        description: "Run only this job (long-runs, fuzz, older-glibc, pressure, restart-soak or bench); empty runs them all. For trying a job on a branch"
+        type: string
+        default: ""
 
 # The jobs only read the repository; only `report` writes issues, and
 # only `bench-publish` writes (the `benchmarks` branch).
@@ -59,7 +64,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     name: long runs (${{ matrix.arch }})
-    if: ${{ !inputs.bench_netem }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'long-runs') }}
     runs-on: ${{ matrix.runner }}
     # Full budget: about 8 min on 4 cores, plus the build.
     timeout-minutes: 60
@@ -112,7 +117,7 @@ jobs:
 
   fuzz:
     name: fuzz
-    if: ${{ !inputs.bench_netem }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'fuzz') }}
     runs-on: ubuntu-latest
     # Full budget: 4 x 600 s plus install and build, about 45 min.
     timeout-minutes: 90
@@ -189,7 +194,7 @@ jobs:
     # glibc than the runners' (Task 6 runs every server under kill), and
     # the restart tests run (FR-PROC-07; owner decision 2026-11-06).
     name: older glibc (debian 12)
-    if: ${{ !inputs.bench_netem }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'older-glibc') }}
     runs-on: ubuntu-latest
     # About 1.5 min.
     timeout-minutes: 30
@@ -272,6 +277,70 @@ jobs:
           path: failure.json
           if-no-files-found: ignore
 
+  pressure:
+    # The driver tests under the seccomp kill switch while busy loops
+    # occupy every core twice over (NFR-TEST-08): a libc path that only
+    # runs under contention (stage 9: glibc's malloc opening a sysfs file
+    # from a worker thread) never shows in a quiet run. Not root: the
+    # job is about contention, and the 65536-connection backstop test
+    # skips without DURCHLAUFERHITZER_REQUIRE_ROOT.
+    name: pressure (x86_64)
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'pressure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+      - name: Build the tests (quiet)
+        # Compile before the loops start, so the build is not slowed
+        # and the timed tests are what runs under pressure.
+        run: cargo test -p durchlauferhitzer --locked --no-run
+      - name: Start the busy loops
+        # 2 x nproc loops of `sh -c 'while :; do :; done'`; their pids
+        # are kept for the step that kills them.
+        run: |
+          set -euo pipefail
+          n=$(( 2 * $(nproc) ))
+          echo "busy loops: $n (nproc $(nproc))"
+          : > loops.pids
+          for _ in $(seq "$n"); do
+            sh -c 'while :; do :; done' &
+            echo $! >> loops.pids
+          done
+          sleep 1
+          echo "started $(wc -l < loops.pids) loops"
+          uptime
+      - name: Driver tests under seccomp kill, under pressure
+        # Landlock and the rest skip with a `skipped:` line where the
+        # runner lacks them; listed by the next step.
+        run: |
+          set -euo pipefail
+          echo "busy loops alive: $(ps -o pid= -p "$(paste -sd, loops.pids)" | wc -l)" | tee pressure.log
+          cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee -a pressure.log
+        env:
+          DURCHLAUFERHITZER_TEST_SECCOMP_KILL: "1"
+      - name: Stop the busy loops
+        if: always()
+        run: |
+          if [ -f loops.pids ]; then xargs -r kill < loops.pids || true; fi
+          uptime
+      - name: Skips
+        if: always()
+        run: grep 'skipped:' pressure.log || echo "no skips"
+      - name: Failure record
+        if: failure()
+        run: >-
+          python3 scripts/nightly-report.py record --job pressure --arch x86_64
+          --run-url "$RUN_URL" --out failure.json pressure.log
+      - name: Upload the failure record
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-failure-pressure
+          path: failure.json
+          if-no-files-found: ignore
+
   restart-soak:
     # The restart tests (driver/tests/restart.rs, FR-PROC-07) looped
     # RESTART_RUNS times, on glibc (the runner, the test binary run with
@@ -288,7 +357,7 @@ jobs:
           - { arch: x86_64, runner: ubuntu-latest, libc: musl }
           - { arch: arm64, runner: ubuntu-24.04-arm, libc: musl }
     name: restart soak (${{ matrix.arch }}, ${{ matrix.libc }})
-    if: ${{ !inputs.bench_netem }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'restart-soak') }}
     runs-on: ${{ matrix.runner }}
     # One run takes about 30 s: 20 runs about 10 min, plus the build.
     timeout-minutes: 60
@@ -404,7 +473,7 @@ jobs:
     # in the rows stays true. The bench runs as the runner user; only
     # its strace pass runs as root (`sudo -n`).
     name: bench
-    if: ${{ !inputs.bench_netem }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'bench') }}
     runs-on: ubuntu-24.04
     # Full budget: 5 runs x 7 scenarios x about 27 s, plus one run of
     # the 1k-idle and proxy-large scenarios (about 60 s), plus the builds.
@@ -649,7 +718,7 @@ jobs:
     name: report failures
     # `bench-netem` is left out: it runs only when dispatched by hand,
     # whose caller reads its result directly.
-    needs: [long-runs, fuzz, older-glibc, restart-soak, bench, bench-publish]
+    needs: [long-runs, fuzz, older-glibc, pressure, restart-soak, bench, bench-publish]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

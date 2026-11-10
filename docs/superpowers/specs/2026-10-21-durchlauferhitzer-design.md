@@ -2963,6 +2963,10 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   (the builder picks the images, e.g. a rolling Fedora and Alpine edge),
   the counterpart of the Debian 12 leg, since both libc-version gaps of
   stage 9 came from a libc the gate had never run.
+  *Planner call (stage 10 plan, Task 1):* `pressure` starts `2 x nproc`
+  busy loops (`sh -c 'while :; do :; done'`), runs as the runner user on
+  `ubuntu-24.04`, and has a 40-minute timeout; the nightly's `only_job`
+  dispatch input runs a single job.
 
   *(Owner decision 2026-11-02:)* a failing nightly job files or updates a
   GitHub issue, keyed by a stable fingerprint of the failure, not of the

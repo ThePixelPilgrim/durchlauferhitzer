@@ -76,6 +76,7 @@ JOBS = {
     "long-runs": "long runs",
     "fuzz": "fuzz",
     "older-glibc": "older glibc",
+    "pressure": "pressure",
     "restart-soak": "restart soak",
     "bench": "bench",
     "bench-publish": "bench publish",
@@ -93,6 +94,11 @@ OLDER_GLIBC_ENV = (
 OLDER_GLIBC_CMD = "cargo test -p durchlauferhitzer --locked"
 OLDER_GLIBC_WHERE = (
     "as root in debian:12 with net.ipv4.tcp_migrate_req=1, as the older glibc job runs it"
+)
+PRESSURE_ENV = "DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1"
+PRESSURE_WHERE = (
+    "with two busy loops per core running beside it, as the pressure job runs it: "
+    "sh -c 'while :; do :; done' &, started 2 x $(nproc) times"
 )
 RESTART_SOAK_ENV = (
     "DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 "
@@ -207,7 +213,7 @@ def describe(job, f):
     elif kind == "timeout-or-cancelled":
         key = f"{job}|timeout-or-cancelled"
         reason = "timed out or was cancelled, no failure record"
-    elif job == "older-glibc":
+    elif job in ("older-glibc", "pressure"):
         key = f"{job}|{test}"
         reason = f"{test} failed"
     elif job == "restart-soak":
@@ -402,8 +408,9 @@ def record_fuzz(logs, workspace, toolchain):
     return failures
 
 
-def record_older_glibc(text, workspace):
-    """The failures of the older-glibc job: each failed test by name."""
+def record_older_glibc(text, workspace, env=OLDER_GLIBC_ENV, where=OLDER_GLIBC_WHERE):
+    """The failures of the older-glibc job (or, with its own `env` and
+    `where`, the pressure job): each failed test by name."""
     if text is None:
         return [_unrecognized("The job left no log; see the run.")]
     panics = parse_panics(text)
@@ -414,13 +421,13 @@ def record_older_glibc(text, workspace):
         panic_text = ""
         if mine:
             panic_text = _cap("\n".join([mine[-1]["header"]] + mine[-1]["lines"]))
-        replay = f"{OLDER_GLIBC_ENV} {OLDER_GLIBC_CMD} {target} -- {test} --exact --nocapture"
+        replay = f"{env} {OLDER_GLIBC_CMD} {target} -- {test} --exact --nocapture"
         failures.append(
             _failure(
                 kind="test",
                 test=f"{label}::{test}" if label else test,
                 panic_text=panic_text,
-                replay=" ".join(replay.split()) + f"  # {OLDER_GLIBC_WHERE}",
+                replay=" ".join(replay.split()) + f"  # {where}",
             )
         )
     return failures or [_unrecognized("No failed test found in the log; see the run.")]
@@ -536,6 +543,7 @@ _LEG = re.compile(r"^(?P<label>[a-z ]+?)(?: \((?P<args>[^()]*)\))?$")
 _SINGLE_ARCH = {
     "fuzz": "x86_64",
     "older-glibc": "x86_64",
+    "pressure": "x86_64",
     "bench": "x86_64",
     "bench-publish": "x86_64",
 }
@@ -801,6 +809,8 @@ def main(argv=None):
                 failures = record_long_runs(text, args.workspace, args.seeds)
             elif args.job == "bench":
                 failures = record_bench(text)
+            elif args.job == "pressure":
+                failures = record_older_glibc(text, args.workspace, PRESSURE_ENV, PRESSURE_WHERE)
             elif args.job == "restart-soak":
                 failures = record_restart_soak(text, args.workspace, args.arch, args.libc)
             else:

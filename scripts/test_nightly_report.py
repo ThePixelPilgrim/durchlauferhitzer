@@ -294,6 +294,17 @@ class OlderGlibc(unittest.TestCase):
         self.assertEqual(nr.describe("older-glibc", a), nr.describe("older-glibc", b))
 
 
+class Pressure(unittest.TestCase):
+    def test_filed_as_pressure_with_its_own_replay(self):
+        (f,) = nr.record_older_glibc(DEBIAN_LOG, WS, nr.PRESSURE_ENV, nr.PRESSURE_WHERE)
+        self.assertIn("DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1 cargo test", f["replay"])
+        self.assertNotIn("REQUIRE_ROOT", f["replay"])
+        fp, title = nr.describe("pressure", f)
+        self.assertTrue(title.startswith("nightly: pressure — containment::"))
+        self.assertNotEqual(fp, nr.describe("older-glibc", f)[0])
+        self.assertEqual(nr.parse_leg("pressure (x86_64)"), ("pressure", "x86_64", ""))
+
+
 # The restart soak's log: the loop's run markers, then each run of the
 # restart test binary (`--nocapture`); one test fails in two of three runs.
 SOAK_LOG = """\
