@@ -23,7 +23,7 @@ pub const REQUIRE_ROOT: &str = "DURCHLAUFERHITZER_REQUIRE_ROOT";
 pub const REQUIRE_MIGRATE: &str = "DURCHLAUFERHITZER_REQUIRE_MIGRATE";
 pub const MIGRATE: &str = "/proc/sys/net/ipv4/tcp_migrate_req";
 
-/// The reload helper, run with `sh`.
+/// The reload helper, run with `sh` (one test runs it with `bash`).
 pub const HELPER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../contrib/durchlauferhitzer-reload"
@@ -242,7 +242,13 @@ impl Site {
     /// Starts the reload helper with `conf` and `more` arguments (timeout,
     /// grace) and returns at once, its output piped.
     pub fn spawn_reload(&self, conf: &Path, more: &[&str]) -> Child {
-        self.helper(conf, more)
+        self.spawn_reload_with("sh", conf, more)
+    }
+
+    /// [`Site::spawn_reload`] with the helper run by `shell` (e.g. `bash`,
+    /// which reports killed jobs where dash and busybox ash do not).
+    pub fn spawn_reload_with(&self, shell: &str, conf: &Path, more: &[&str]) -> Child {
+        self.helper_with(shell, conf, more)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -252,7 +258,12 @@ impl Site {
 
     /// The helper's command line for `conf`, then `more`.
     fn helper(&self, conf: &Path, more: &[&str]) -> Command {
-        let mut cmd = Command::new("sh");
+        self.helper_with("sh", conf, more)
+    }
+
+    /// The helper's command line, run by `shell`.
+    fn helper_with(&self, shell: &str, conf: &Path, more: &[&str]) -> Command {
+        let mut cmd = Command::new(shell);
         cmd.arg(HELPER)
             .args([&self.bin, conf, &self.pidfile, &self.log])
             .args(more)

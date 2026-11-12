@@ -2035,11 +2035,15 @@ Failures, persistence, timeouts:
     the kernel (`SECCOMP_FILTER_FLAG_LOG`: the audit or kernel log, with the
     call number); the startup log says so, so an operator knows where to
     look. *Builder call:* the allow-list is proven by running the end-to-end
-    tests under `kill` in CI on the x86_64 and aarch64 runners (Ubuntu
-    24.04's glibc) and in a Debian 12 container (glibc 2.36) on x86_64,
-    and on musl in Alpine containers on both (NFR-PORT-02). *(Stage 6
-    Task 6, builder calls for musl:)* *(owner ruling 2026-11-09, stage 9
-    CI fix: a libc update under `seccomp_action kill` must not end the
+    tests under `kill` on these libc versions (as of 2026-11-12):
+    - x86_64 runners labelled `ubuntu-latest`: Ubuntu 26.04, glibc 2.43;
+    - jobs pinned to `ubuntu-24.04` (the nightly `pressure` job) and the
+      aarch64 runners (`ubuntu-24.04-arm`): Ubuntu 24.04, glibc 2.39;
+    - a Debian 12 container on x86_64: glibc 2.36;
+    - Alpine containers on both architectures: musl (NFR-PORT-02).
+
+    *(Stage 6 Task 6, builder calls for musl:)* *(owner ruling
+    2026-11-09, stage 9 CI fix: a libc update under `seccomp_action kill` must not end the
     server)* x86_64 allows both `epoll_wait` and `epoll_pwait` for every
     libc (glibc and musl 1.2.5 issue the first, Alpine's musl 1.2.6 the
     second); `clone` accepts glibc's thread flag set or the same plus

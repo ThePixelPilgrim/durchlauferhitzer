@@ -761,6 +761,22 @@ fn a_new_process_that_ignores_sighup_is_left_to_stop_post() {
 /// grace: exit 1, no success claimed.
 #[test]
 fn both_processes_ending_during_the_grace_is_exit_1() {
+    both_end_during_the_grace("sh");
+}
+
+/// The same under bash, which (also as Fedora's `sh`) reports a killed
+/// background job on its stderr unless the helper disowns it: the stderr
+/// stays the helper's own message (stage 10, issue #10).
+#[test]
+fn under_bash_a_killed_new_process_adds_no_job_notice() {
+    if Command::new("bash").arg("-c").arg(":").status().is_err() {
+        eprintln!("skipped: no bash on PATH");
+        return;
+    }
+    both_end_during_the_grace("bash");
+}
+
+fn both_end_during_the_grace(shell: &str) {
     let _serial = serial();
     if !can_restart() {
         return;
@@ -770,7 +786,7 @@ fn both_processes_ending_during_the_grace_is_exit_1() {
     let old_conf = site.config("old", &[addr], "old");
     let new_conf = site.config("new", &[addr], "new");
     let mut old = site.start(&old_conf);
-    let helper = site.spawn_reload(&new_conf, &["10", "3"]);
+    let helper = site.spawn_reload_with(shell, &new_conf, &["10", "3"]);
     let new = await_new_pid(&site.pidfile, old.pid());
     signal_pid(new, "KILL");
     signal_pid(old.pid(), "KILL");
