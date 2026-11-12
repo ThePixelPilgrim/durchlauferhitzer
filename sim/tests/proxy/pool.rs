@@ -497,3 +497,168 @@ fn a_reset_at_the_body_end_seen_before_the_reuse_connects_afresh() {
         sim.trace()
     );
 }
+
+/// Nightly issue #8 (seed 175664): a `GET` or `HEAD` with
+/// `Content-Length: 0` has no body (FR-PROXY-01, FR-HTTP-08), so it is
+/// replayed like one without the header (FR-PROXY-26).
+const GET_LENGTH_0: &[u8] =
+    b"GET /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 0\r\n\r\n";
+const GET_LENGTH_0_FORWARDED: &[u8] = b"GET /x HTTP/1.1\r\nhost: example.test\r\n\
+    content-length: 0\r\nx-forwarded-for: 192.0.2.1\r\nx-forwarded-proto: http\r\n\r\n";
+const HEAD_LENGTH_0: &[u8] =
+    b"HEAD /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 0\r\n\r\n";
+const HEAD_LENGTH_0_FORWARDED: &[u8] = b"HEAD /x HTTP/1.1\r\nhost: example.test\r\n\
+    content-length: 0\r\nx-forwarded-for: 192.0.2.1\r\nx-forwarded-proto: http\r\n\r\n";
+
+/// `request` goes out on the idle `up`, which the backend resets before
+/// any response byte: the replay on a fresh connection gets `OK`. Returns
+/// what the client received.
+fn reset_then_replayed(
+    sim: &mut Sim,
+    a: ConnId,
+    up: UpstreamId,
+    request: &[u8],
+    forwarded: &[u8],
+) -> Vec<u8> {
+    sim.send(a, request);
+    sim.run_until_idle();
+    assert_eq!(sim.upstreams(), [up], "reused\n{}", sim.trace());
+    assert_eq!(
+        sim.take_backend_request(up),
+        [FORWARDED, forwarded].concat(),
+        "{}",
+        sim.trace()
+    );
+    sim.backend_reset(up);
+    sim.run_until_idle();
+    let fresh = UpstreamId(2);
+    assert_eq!(sim.upstreams(), [up, fresh], "{}", sim.trace());
+    assert_eq!(
+        sim.take_backend_request(fresh),
+        forwarded,
+        "{}",
+        sim.trace()
+    );
+    sim.backend_send(fresh, OK);
+    sim.run_until_idle();
+    sim.take_received(a)
+}
+
+fn retried(c: ConnId, method: Method) -> Log {
+    Log::BackendRetried {
+        conn: c,
+        peer: peer(),
+        backend: BackendId(0),
+        kind: BackendFailure::Reset,
+        request: summary(method, "/api/x"),
+    }
+}
+
+#[test]
+fn a_get_with_content_length_zero_is_retried_once() {
+    let mut sim = Sim::new(POOLED);
+    let (a, up) = idle_after_one(&mut sim);
+    let received = reset_then_replayed(&mut sim, a, up, GET_LENGTH_0, GET_LENGTH_0_FORWARDED);
+    assert_eq!(received, RELAYED, "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[proxied(a), retried(a, Method::Get), proxied(a)],
+        "{}",
+        sim.trace()
+    );
+}
+
+#[test]
+fn a_head_with_content_length_zero_is_retried_once() {
+    let mut sim = Sim::new(POOLED);
+    let (a, up) = idle_after_one(&mut sim);
+    let received = reset_then_replayed(&mut sim, a, up, HEAD_LENGTH_0, HEAD_LENGTH_0_FORWARDED);
+    assert_eq!(
+        received,
+        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n",
+        "{}",
+        sim.trace()
+    );
+    let head = Log::ProxiedResponse {
+        conn: a,
+        peer: peer(),
+        backend: BackendId(0),
+        status: 200,
+        request: summary(Method::Head, "/api/x"),
+    };
+    assert_eq!(
+        sim.logs(),
+        &[proxied(a), retried(a, Method::Head), head],
+        "{}",
+        sim.trace()
+    );
+}
+
+/// The other side of the boundary: a `GET` with one body byte never
+/// reaches a backend, pooled connection or not (FR-PROXY-01): a 400, and
+/// the idle connection is left alone.
+#[test]
+fn a_get_with_content_length_one_is_400_and_takes_no_pooled_connection() {
+    let mut sim = Sim::new(POOLED);
+    let (a, up) = idle_after_one(&mut sim);
+    sim.send(
+        a,
+        b"GET /api/x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 1\r\n\r\nz",
+    );
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_received(a),
+        fixed(Status::BadRequest, Persistence::Close, BodyMode::Full),
+        "{}",
+        sim.trace()
+    );
+    assert_eq!(sim.upstreams(), [up], "{}", sim.trace());
+    assert_eq!(
+        sim.take_backend_request(up),
+        FORWARDED,
+        "nothing more\n{}",
+        sim.trace()
+    );
+    assert_eq!(
+        sim.upstream_holder(up),
+        Some(UpstreamHolder::Pool),
+        "{}",
+        sim.trace()
+    );
+}
+
+/// Seed 175664's case: the client resets once its `GET` went out on a
+/// reused connection, before the backend failed it. The core closes the
+/// upstream at once (FR-PROXY-26): nothing is retried, and no 502 is
+/// written.
+#[test]
+fn a_client_reset_before_the_reused_connection_fails_is_not_retried() {
+    let mut sim = Sim::new(POOLED);
+    let (a, up) = idle_after_one(&mut sim);
+    sim.send(a, GET_LENGTH_0);
+    sim.run_until_idle();
+    assert_eq!(
+        sim.take_backend_request(up),
+        [FORWARDED, GET_LENGTH_0_FORWARDED].concat(),
+        "{}",
+        sim.trace()
+    );
+    sim.reset(a);
+    sim.run_until_idle();
+    assert_eq!(sim.upstreams(), [up], "no replay\n{}", sim.trace());
+    assert_eq!(sim.upstream_holder(up), None, "{}", sim.trace());
+    assert_eq!(sim.open_upstreams(), 0, "{}", sim.trace());
+    assert!(sim.take_received(a).is_empty(), "{}", sim.trace());
+    assert_eq!(
+        sim.logs(),
+        &[
+            proxied(a),
+            Log::Reset {
+                conn: a,
+                peer: peer()
+            }
+        ],
+        "{}",
+        sim.trace()
+    );
+}

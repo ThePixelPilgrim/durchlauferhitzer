@@ -1127,6 +1127,19 @@ Failures, persistence, timeouts:
   behind a response head still queued for the client may cut part of that
   head, as it cuts both connections; the spec makes no flush promise, and
   the client sees a broken response either way.
+  *(Nightly fix 2026-11-12, seed 175664; a clarification of the core's
+  existing behaviour, the fix is in the proxy net's model.)* "Without a
+  body" in the retry rule means no body bytes: a `GET` or `HEAD` with
+  `Content-Length: 0` is replayed like one without the header, the same
+  reading as FR-PROXY-01 and FR-HTTP-08. The retry needs the reused
+  connection to fail while the core still holds it: a client that resets
+  first closes the upstream at once (above), so nothing failed under the
+  request, and nothing is replayed or answered 502 (tests
+  `a_get_with_content_length_zero_is_retried_once`,
+  `a_head_with_content_length_zero_is_retried_once`,
+  `a_get_with_content_length_one_is_400_and_takes_no_pooled_connection`,
+  `a_client_reset_before_the_reused_connection_fails_is_not_retried`,
+  `sim/tests/proxy/pool.rs`).
 - **FR-PROXY-27** [done] A backend that answers before the request body
   is complete: the response is forwarded, body forwarding stops, and the
   client closes after the response (its body is unread). This holds also

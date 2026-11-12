@@ -26,6 +26,11 @@ pub(crate) struct Run {
     /// the backend did it yet.
     pub(crate) stale: Option<Stale>,
     pub(crate) stale_done: bool,
+    /// The core let go of the reused `up` before its backend killed it
+    /// (the client went first, FR-PROXY-26): nothing failed under the
+    /// request, and its script never runs (nightly fix 2026-11-12, seed
+    /// 175664).
+    pub(crate) outrun: bool,
     /// The core replayed the request after this failure (FR-PROXY-26):
     /// `up` is the replay's fresh upstream, `stale_got` what the dead one
     /// received.
@@ -505,7 +510,10 @@ fn do_step(
                 }
                 // The core let go of it first (the client went): it never
                 // died under the request.
-                _ => run.stale = None,
+                _ => {
+                    run.stale = None;
+                    run.outrun = true;
+                }
             }
         }
         Step::Accept(i) => {

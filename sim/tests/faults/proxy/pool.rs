@@ -689,8 +689,11 @@ fn replayable(ex: &Exchange) -> bool {
 
 /// How a reused connection fails before any response byte in `ex`, if it
 /// does: it was stale, or the script resets or ends before its first
-/// byte.
+/// byte. Nothing failed if the core let go of it first (`Run::outrun`).
 fn fails_first(ex: &Exchange, run: &Run) -> Option<BackendFailure> {
+    if run.outrun {
+        return None;
+    }
     if let Some(stale) = run.stale {
         return (!stale.half()).then(|| stale.kind());
     }
