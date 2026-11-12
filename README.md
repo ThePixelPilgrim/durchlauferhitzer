@@ -5,21 +5,34 @@ It serves static files and forwards requests to backends, routed by virtual
 host and path prefix, on Linux (`epoll`, `openat2`, `sendfile`). It also
 sends the files a backend names with `X-Sendfile` or `X-Accel-Redirect`
 below a route's `internal_files` root, and answers a single byte range of
-any file it sends with a 206. It runs on Linux 5.14 or later; its
-[containment](#containment) is complete from Linux 6.2. It is pure Rust;
-its one dependency is `libc`. See
+any file it sends with a 206. See [Requirements](#requirements) for the
+kernel and toolchain it needs,
 [`examples/durchlauferhitzer.conf`](examples/durchlauferhitzer.conf) for a
 documented configuration, and the
 [design spec](docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md)
 for every rule.
 
+## Requirements
+
+To run the binary:
+
+- Linux 5.14 or later, x86_64 or aarch64, glibc or musl (CI tests all
+  four, musl on Alpine).
+- Linux 6.2 or later for the full [containment](#containment); 6.10 or
+  later lets Landlock alone restrict every right.
+- A supervisor and the other items of a [guaranteed
+  install](#guaranteed-install), for the security requirements to hold.
+
+To build it:
+
+- The stable Rust toolchain pinned in `rust-toolchain.toml`.
+- On Alpine, `gcc` and `musl-dev` for the linker.
+- No other dependency: it is pure Rust, and `libc` is its one crate.
+
 ## Build
 
-Linux 5.14 or later on x86_64 or aarch64, with glibc or musl (CI builds
-and tests all four, musl on Alpine), and the stable Rust toolchain pinned
-in `rust-toolchain.toml`. The binary links the system libc dynamically
-(`.cargo/config.toml` turns off musl's default static linking); on Alpine
-the linker needs `gcc` and `musl-dev`:
+The binary links the system libc dynamically (`.cargo/config.toml` turns
+off musl's default static linking):
 
 ```sh
 cargo build --release --locked
