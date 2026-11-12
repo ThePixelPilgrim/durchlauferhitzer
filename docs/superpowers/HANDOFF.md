@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-12, stage 10 (carry-forwards) Task 1 done; TLS separation brainstorm in progress (primitives decided).
+Last updated 2026-11-12, stage 10 (carry-forwards) Task 1 done, nightly issue #8 fixed; TLS separation brainstorm in progress (primitives decided).
 A new session should start from the latest `main`, read this file first, then `CLAUDE.md` (see its "Branches and main" rules).
 
 ## State
@@ -43,7 +43,7 @@ Each stage's review record lists its owner decisions, rulings, final review, fix
 
 ## Carry-forwards to later stages
 
-- Nightly issues (2026-11-09): #3 (seed 48287) was a model bug the stage 8 review's `839e9ac` had already fixed; the case is pinned by two deterministic tests in `sim/tests/proxy/pool.rs` and a FR-PROXY-22 clarification. #5 (the 65536-connection backstop test in containers) is fixed by `3bee322`; close it when the next nightly is green. #4 (seed 99897) was a model bug too (a timeout expected for any incomplete backend head, where FR-PROXY-14 gives the 502 as soon as `max_head` is exceeded): pinned by `sim/tests/proxy/head_limits.rs`, a FR-PROXY-14 clarification and the FR-PROXY-17 ruling; the net now draws the case on purpose (`head too large before its end`). Nightly seeds stop reproducing once later commits change the random draws, so a nightly failure is replayed at its run's commit, never only at `main`.
+- Nightly issues (2026-11-09): #3 (seed 48287) was a model bug the stage 8 review's `839e9ac` had already fixed; the case is pinned by two deterministic tests in `sim/tests/proxy/pool.rs` and a FR-PROXY-22 clarification. #5 (the 65536-connection backstop test in containers) is fixed by `3bee322`; close it when the next nightly is green. #4 (seed 99897) was a model bug too (a timeout expected for any incomplete backend head, where FR-PROXY-14 gives the 502 as soon as `max_head` is exceeded): pinned by `sim/tests/proxy/head_limits.rs`, a FR-PROXY-14 clarification and the FR-PROXY-17 ruling; the net now draws the case on purpose (`head too large before its end`). Nightly seeds stop reproducing once later commits change the random draws, so a nightly failure is replayed at its run's commit, never only at `main`. #8 (seed 175664, 2026-11-12) was the proxy net's model for the third time: a planned stale kill, or a scripted backend failure, that the client's own reset outran was still counted as a backend failure, so the model demanded a retry the core had correctly not made (FR-PROXY-26); fixed by the model's `outrun` flag (`sim/tests/faults/proxy/drive.rs`), pinned by four tests in `sim/tests/proxy/pool.rs` and one hand-driven story in `sim/tests/faults/proxy/drive/tests.rs`; the 100 000-seed sweep passed. Lesson: a nightly model failure's cousin paths are searched for and guarded in the same fix, with a pin each.
 
 - qmail-review carry-forwards (lessons 6–9 and 11 in `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): a nightly run on the newest kernel and glibc; numeric `uid:gid` for `user` to skip NSS; an opener process when TLS arrives; product line count beside the nightly benchmarks; name the supported TLS deployment in the README.
 
