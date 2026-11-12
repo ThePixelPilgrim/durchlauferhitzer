@@ -163,6 +163,8 @@ tests/
       outcome.rs          exchanges, timings and the outcomes they allow
       draw.rs             drawing an exchange: plain ones, timed scenarios
       drive.rs            stories, rounds, backends
+      drive/tests.rs      a story driven by hand: a client that resets
+                          before its reused connection fails
       timed.rs            the timed scenarios, each alone in its round;
                           where a head over `max_head` is certain
       round_end.rs        the end of a round: windows open, streams end,

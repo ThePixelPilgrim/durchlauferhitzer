@@ -1129,17 +1129,22 @@ Failures, persistence, timeouts:
   the client sees a broken response either way.
   *(Nightly fix 2026-11-12, seed 175664; a clarification of the core's
   existing behaviour, the fix is in the proxy net's model.)* "Without a
-  body" in the retry rule means no body bytes: a `GET` or `HEAD` with
-  `Content-Length: 0` is replayed like one without the header, the same
-  reading as FR-PROXY-01 and FR-HTTP-08. The retry needs the reused
-  connection to fail while the core still holds it: a client that resets
-  first closes the upstream at once (above), so nothing failed under the
-  request, and nothing is replayed or answered 502 (tests
-  `a_get_with_content_length_zero_is_retried_once`,
-  `a_head_with_content_length_zero_is_retried_once`,
-  `a_get_with_content_length_one_is_400_and_takes_no_pooled_connection`,
-  `a_client_reset_before_the_reused_connection_fails_is_not_retried`,
-  `sim/tests/proxy/pool.rs`).
+  body" in the retry rule means no body bytes. A `GET` or `HEAD` with
+  `Content-Length: 0` is replayed like one without the header. This is
+  the reading of FR-PROXY-01 and FR-HTTP-08.
+
+  The retry needs the reused connection to fail while the core still
+  holds it. A client that resets first closes the upstream at once
+  (above). Nothing then failed under the request, so nothing is
+  replayed and no 502 is written. Tests, in `sim/tests/proxy/pool.rs`
+  unless named otherwise:
+
+  - `a_get_with_content_length_zero_is_retried_once`
+  - `a_head_with_content_length_zero_is_retried_once`
+  - `a_get_with_content_length_one_is_400_and_takes_no_pooled_connection`
+  - `a_client_reset_before_the_reused_connection_fails_is_not_retried`
+  - `a_client_reset_before_a_scripted_reset_needs_no_retry`, in
+    `sim/tests/faults/proxy/drive/tests.rs`, for the proxy net's model
 - **FR-PROXY-27** [done] A backend that answers before the request body
   is complete: the response is forwarded, body forwarding stops, and the
   client closes after the response (its body is unread). This holds also

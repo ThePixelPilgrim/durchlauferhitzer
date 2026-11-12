@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// What happened in one exchange, as the driver saw it.
 #[derive(Debug, Default)]
 pub(crate) struct Run {
@@ -26,10 +29,12 @@ pub(crate) struct Run {
     /// the backend did it yet.
     pub(crate) stale: Option<Stale>,
     pub(crate) stale_done: bool,
-    /// The core let go of the reused `up` before its backend killed it
+    /// The core let go of the reused `up` before its backend failed it
     /// (the client went first, FR-PROXY-26): nothing failed under the
-    /// request, and its script never runs (nightly fix 2026-11-12, seed
-    /// 175664).
+    /// request (nightly fix 2026-11-12, seed 175664). Set by
+    /// `Step::StaleKill` when a planned stale kill found `up` gone, and by
+    /// `Step::Backend` when the script was to start on an `up` already
+    /// gone (`drive/tests.rs`).
     pub(crate) outrun: bool,
     /// The core replayed the request after this failure (FR-PROXY-26):
     /// `up` is the replay's fresh upstream, `stale_got` what the dead one
@@ -440,6 +445,17 @@ fn do_step(
             let (Some(up), Some(script)) = (run.up, story.exchanges[i].script.as_ref()) else {
                 return;
             };
+            // The client went first and the core let go of the reused
+            // `up`: whatever the script does now fails nothing under the
+            // request. A replay's closed upstream never clears the first
+            // failure (`retried`).
+            if run.reused.is_some()
+                && run.retried.is_none()
+                && run.sent == 0
+                && sim.upstream_holder(up).is_none()
+            {
+                run.outrun = true;
+            }
             if run.sent < target {
                 // An `exact` script goes in one piece (`Ctx::exact`).
                 let mut n = if script.exact {
