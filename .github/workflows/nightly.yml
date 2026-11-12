@@ -34,9 +34,10 @@ on:
         type: boolean
         default: false
       only_job:
-        description: "Run only this job (long-runs, fuzz, older-glibc, pressure, restart-soak or bench); empty runs them all. For trying a job on a branch"
-        type: string
-        default: ""
+        description: "Run only this job (for trying a job on a branch); all runs every job. bench_netem takes precedence over only_job"
+        type: choice
+        options: [all, long-runs, fuzz, older-glibc, pressure, restart-soak, bench]
+        default: all
 
 # The jobs only read the repository; only `report` writes issues, and
 # only `bench-publish` writes (the `benchmarks` branch).
@@ -64,7 +65,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     name: long runs (${{ matrix.arch }})
-    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'long-runs') }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'all' || inputs.only_job == 'long-runs') }}
     runs-on: ${{ matrix.runner }}
     # Full budget: about 8 min on 4 cores, plus the build.
     timeout-minutes: 60
@@ -117,7 +118,7 @@ jobs:
 
   fuzz:
     name: fuzz
-    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'fuzz') }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'all' || inputs.only_job == 'fuzz') }}
     runs-on: ubuntu-latest
     # Full budget: 4 x 600 s plus install and build, about 45 min.
     timeout-minutes: 90
@@ -194,7 +195,7 @@ jobs:
     # glibc than the runners' (Task 6 runs every server under kill), and
     # the restart tests run (FR-PROC-07; owner decision 2026-11-06).
     name: older glibc (debian 12)
-    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'older-glibc') }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'all' || inputs.only_job == 'older-glibc') }}
     runs-on: ubuntu-latest
     # About 1.5 min.
     timeout-minutes: 30
@@ -285,7 +286,7 @@ jobs:
     # job is about contention, and the 65536-connection backstop test
     # skips without DURCHLAUFERHITZER_REQUIRE_ROOT.
     name: pressure (x86_64)
-    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'pressure') }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'all' || inputs.only_job == 'pressure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -316,7 +317,10 @@ jobs:
         # runner lacks them; listed by the next step.
         run: |
           set -euo pipefail
-          echo "busy loops alive: $(ps -o pid= -p "$(paste -sd, loops.pids)" | wc -l)" | tee pressure.log
+          alive=$(ps -o pid= -p "$(paste -sd, loops.pids)" | wc -l)
+          want=$(( 2 * $(nproc) ))
+          echo "busy loops alive: $alive (want $want)" | tee pressure.log
+          if [ "$alive" -ne "$want" ]; then echo "busy loops alive != 2 x nproc" >&2; exit 1; fi
           cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee -a pressure.log
         env:
           DURCHLAUFERHITZER_TEST_SECCOMP_KILL: "1"
@@ -357,7 +361,7 @@ jobs:
           - { arch: x86_64, runner: ubuntu-latest, libc: musl }
           - { arch: arm64, runner: ubuntu-24.04-arm, libc: musl }
     name: restart soak (${{ matrix.arch }}, ${{ matrix.libc }})
-    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'restart-soak') }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'all' || inputs.only_job == 'restart-soak') }}
     runs-on: ${{ matrix.runner }}
     # One run takes about 30 s: 20 runs about 10 min, plus the build.
     timeout-minutes: 60
@@ -473,7 +477,7 @@ jobs:
     # in the rows stays true. The bench runs as the runner user; only
     # its strace pass runs as root (`sudo -n`).
     name: bench
-    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'bench') }}
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'all' || inputs.only_job == 'bench') }}
     runs-on: ubuntu-24.04
     # Full budget: 5 runs x 7 scenarios x about 27 s, plus one run of
     # the 1k-idle and proxy-large scenarios (about 60 s), plus the builds.

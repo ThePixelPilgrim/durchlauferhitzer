@@ -272,7 +272,7 @@ class Fuzz(unittest.TestCase):
 
 class OlderGlibc(unittest.TestCase):
     def test_the_failing_test_name(self):
-        (f,) = nr.record_older_glibc(DEBIAN_LOG, WS)
+        (f,) = nr.record_driver_tests(DEBIAN_LOG, WS)
         self.assertEqual(f["kind"], "test")
         self.assertEqual(f["test"], "containment::seccomp_kill_on_unlisted_call")
         self.assertIn("server exited with signal 31", f["panic_text"])
@@ -289,14 +289,14 @@ class OlderGlibc(unittest.TestCase):
         )
 
     def test_only_the_name_counts(self):
-        (a,) = nr.record_older_glibc(DEBIAN_LOG, WS)
-        (b,) = nr.record_older_glibc(DEBIAN_LOG.replace("211:5", "300:1").replace("37 ms", "5 ms"), WS)
+        (a,) = nr.record_driver_tests(DEBIAN_LOG, WS)
+        (b,) = nr.record_driver_tests(DEBIAN_LOG.replace("211:5", "300:1").replace("37 ms", "5 ms"), WS)
         self.assertEqual(nr.describe("older-glibc", a), nr.describe("older-glibc", b))
 
 
 class Pressure(unittest.TestCase):
     def test_filed_as_pressure_with_its_own_replay(self):
-        (f,) = nr.record_older_glibc(DEBIAN_LOG, WS, nr.PRESSURE_ENV, nr.PRESSURE_WHERE)
+        (f,) = nr.record_driver_tests(DEBIAN_LOG, WS, nr.PRESSURE_ENV, nr.PRESSURE_WHERE)
         self.assertIn("DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1 cargo test", f["replay"])
         self.assertNotIn("REQUIRE_ROOT", f["replay"])
         fp, title = nr.describe("pressure", f)
@@ -679,7 +679,7 @@ class Apply(unittest.TestCase):
         recs = []
         for i in range(4):
             log = DEBIAN_LOG.replace("seccomp_kill_on_unlisted_call", "case_%s" % "abcd"[i])
-            recs.append(_record("older-glibc", "x86_64", nr.record_older_glibc(log, WS)))
+            recs.append(_record("older-glibc", "x86_64", nr.record_driver_tests(log, WS)))
         calls, summary = self.run_report(recs, [])
         self.assertEqual(len([c for c in calls if c[0][:2] == ["issue", "create"]]), 3)
         self.assertIn("not filed", summary)
@@ -891,7 +891,7 @@ class Cli(unittest.TestCase):
                     self.assertIn(RUN, body)
 
     def test_a_missing_log_is_unrecognized(self):
-        self.assertEqual(nr.record_older_glibc(None, WS)[0]["kind"], "unrecognized")
+        self.assertEqual(nr.record_driver_tests(None, WS)[0]["kind"], "unrecognized")
 
 
 if __name__ == "__main__":

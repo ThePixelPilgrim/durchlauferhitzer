@@ -10,6 +10,7 @@ record  In a failing nightly job: read its logs, write a small failure
                 --run-url URL --out failure.json long-runs.log
             nightly-report.py record --job fuzz ... logs/request_head.log ...
             nightly-report.py record --job older-glibc ... driver-tests.log
+            nightly-report.py record --job pressure ... pressure.log
             nightly-report.py record --job restart-soak --libc musl ... soak.log
             nightly-report.py record --job bench ... bench.log
 
@@ -408,7 +409,7 @@ def record_fuzz(logs, workspace, toolchain):
     return failures
 
 
-def record_older_glibc(text, workspace, env=OLDER_GLIBC_ENV, where=OLDER_GLIBC_WHERE):
+def record_driver_tests(text, workspace, env=OLDER_GLIBC_ENV, where=OLDER_GLIBC_WHERE):
     """The failures of the older-glibc job (or, with its own `env` and
     `where`, the pressure job): each failed test by name."""
     if text is None:
@@ -810,11 +811,11 @@ def main(argv=None):
             elif args.job == "bench":
                 failures = record_bench(text)
             elif args.job == "pressure":
-                failures = record_older_glibc(text, args.workspace, PRESSURE_ENV, PRESSURE_WHERE)
+                failures = record_driver_tests(text, args.workspace, PRESSURE_ENV, PRESSURE_WHERE)
             elif args.job == "restart-soak":
                 failures = record_restart_soak(text, args.workspace, args.arch, args.libc)
             else:
-                failures = record_older_glibc(text, args.workspace)
+                failures = record_driver_tests(text, args.workspace)
         rec = make_record(args.job, args.arch, args.run_url, failures, libc=args.libc)
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(rec, fh, indent=1)

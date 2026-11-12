@@ -400,10 +400,15 @@ fn every_slot_limits(text_of: impl Fn(&str) -> String, extra: &str) -> String {
     // The survive tests assert survival, not latency: on a starved
     // runner (the nightly `pressure` job) receiving 60 request lines of
     // 256 KiB outlasts the 10 s default `header_timeout` (a 408), and a
-    // send could stall the same way.
+    // send could stall the same way. The proxy test's exchanges likewise
+    // outlast the 5 s `backend_connect_timeout` (the single-threaded
+    // server is still parsing other heads when it expires: a 504) and
+    // the 60 s `backend_response_timeout` (the backend answers only once
+    // all 60 requests arrived).
     format!(
         "{counts} memory_limit {smallest}; disk_threads 4; \
-         header_timeout 120s; send_idle_timeout 120s;"
+         header_timeout 120s; send_idle_timeout 120s; \
+         backend_connect_timeout 120s; backend_response_timeout 120s;"
     )
 }
 
@@ -610,7 +615,32 @@ fn survives_worst_case_proxy_requests_on_every_slot() {
         thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_alive(&mut server);
-    assert_eq!(arrived.load(Ordering::SeqCst), SLOTS);
+    if arrived.load(Ordering::SeqCst) != SLOTS {
+        // What the clients whose request never arrived were told.
+        let mut silent = 0;
+        let mut told = Vec::new();
+        for (i, stream) in streams.iter_mut().enumerate() {
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let mut chunk = [0u8; 256];
+            match stream.read(&mut chunk) {
+                Ok(n) if n > 0 => {
+                    let head = text(&chunk[..n]);
+                    told.push(format!(
+                        "client {i}: {:?}",
+                        head.lines().next().unwrap_or("")
+                    ));
+                }
+                Ok(_) => told.push(format!("client {i}: closed")),
+                Err(_) => silent += 1,
+            }
+        }
+        panic!(
+            "{} of {SLOTS} requests reached the backend; {silent} clients silent; {told:?}",
+            arrived.load(Ordering::SeqCst)
+        );
+    }
     {
         let (lock, cvar) = &*release;
         *lock.lock().unwrap() = true;

@@ -2966,7 +2966,10 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   *Planner call (stage 10 plan, Task 1):* `pressure` starts `2 x nproc`
   busy loops (`sh -c 'while :; do :; done'`), runs as the runner user on
   `ubuntu-24.04`, and has a 40-minute timeout; the nightly's `only_job`
-  dispatch input runs a single job.
+  dispatch input runs a single job. The two backstop survive tests set
+  `header_timeout`, `send_idle_timeout`, `backend_connect_timeout` and
+  `backend_response_timeout` to 120 s, because they assert survival, not
+  latency (a starved runner outlasted the defaults).
 
   *(Owner decision 2026-11-02:)* a failing nightly job files or updates a
   GitHub issue, keyed by a stable fingerprint of the failure, not of the
