@@ -2991,6 +2991,16 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   `header_timeout`, `send_idle_timeout`, `backend_connect_timeout` and
   `backend_response_timeout` to 120 s, because they assert survival, not
   latency (a starved runner outlasted the defaults).
+  *Planner call (stage 10 plan, Task 2):* `newest libc` is one job with
+  two legs, both on `ubuntu-latest` (x86_64) with a 30-minute timeout:
+  - `newest libc (glibc)` runs in `fedora:latest`;
+  - `newest libc (musl)` runs in `alpine:edge`.
+  Both legs run in a container started by hand with the flags of CI's
+  Alpine job, and run the older glibc job's test command and environment
+  as root. The glibc leg fails its `Versions` step when the image's glibc
+  is not newer than the runners' 2.39. A failure is recorded as
+  `--job newest-libc --arch x86_64 --libc <glibc|musl>`, and its
+  fingerprint includes the libc, so each leg files its own issue.
 
   *(Owner decision 2026-11-02:)* a failing nightly job files or updates a
   GitHub issue, keyed by a stable fingerprint of the failure, not of the

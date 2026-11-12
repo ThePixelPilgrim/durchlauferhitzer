@@ -1,9 +1,9 @@
 name: Nightly
 
-# Long randomized runs, fuzzing, an older glibc, tests under CPU pressure,
-# the restart soak and the benchmarks (NFR-TEST-08, NFR-SEC-13,
-# NFR-PORT-01, FR-PROC-07,
-# NFR-PERF-08): daily, and by hand with smaller or larger budgets.
+# Long randomized runs, fuzzing, an older glibc, the newest glibc and
+# musl, tests under CPU pressure, the restart soak and the benchmarks
+# (NFR-TEST-08, NFR-SEC-13, NFR-PORT-01, FR-PROC-07, NFR-PERF-08):
+# daily, and by hand with smaller or larger budgets.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -36,7 +36,7 @@ on:
       only_job:
         description: "Run only this job (for trying a job on a branch); all runs every job. bench_netem takes precedence over only_job"
         type: choice
-        options: [all, long-runs, fuzz, older-glibc, pressure, restart-soak, bench]
+        options: [all, long-runs, fuzz, older-glibc, pressure, newest-libc, restart-soak, bench]
         default: all
 
 # The jobs only read the repository; only `report` writes issues, and
@@ -344,6 +344,131 @@ jobs:
           name: nightly-failure-pressure
           path: failure.json
           if-no-files-found: ignore
+
+  newest-libc:
+    # The newest libc on both C libraries (NFR-TEST-08, owner decision
+    # 2026-11-10): the driver tests under the seccomp kill switch, as
+    # root, on a rolling glibc newer than the runners' and on Alpine
+    # edge's musl, so a call a new libc release makes is caught before a
+    # distribution ships it. Built like the older glibc job; both legs in
+    # a container started by hand, as ci.yml's Alpine job (its comments
+    # give the flags' reasons), with the work directory mounted at the
+    # same path.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { libc: glibc, image: "fedora:latest" }
+          - { libc: musl, image: "alpine:edge" }
+    name: newest libc (${{ matrix.libc }})
+    if: ${{ !inputs.bench_netem && (inputs.only_job == '' || inputs.only_job == 'all' || inputs.only_job == 'newest-libc') }}
+    runs-on: ubuntu-latest
+    # About 3 min.
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: docker exec libc sh -e {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start the container
+        # As root in the container, so `nobody` must reach the binaries
+        # and the temp dirs (driver/README.md).
+        shell: bash
+        run: |
+          docker run -d --init --name libc \
+            --ulimit nofile=1048576:1048576 \
+            --security-opt seccomp=unconfined \
+            --security-opt systempaths=unconfined \
+            --security-opt apparmor=unconfined \
+            --cap-add SYS_PTRACE \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv6.conf.lo.disable_ipv6=0 \
+            --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
+            -v /home/runner/work:/home/runner/work \
+            -w "$GITHUB_WORKSPACE" \
+            -e PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            -e CARGO_TARGET_DIR=/tmp/target \
+            -e TMPDIR=/tmp \
+            "$IMAGE" sleep infinity
+        env:
+          IMAGE: ${{ matrix.image }}
+      - name: Install build tools (glibc)
+        # gcc is only the linker against the system libc (the failure
+        # record is written on the host). --allowerasing: the image's
+        # curl-minimal, if it has one, gives way to curl.
+        if: matrix.libc == 'glibc'
+        run: |
+          dnf install -y --allowerasing ca-certificates curl gcc glibc-devel git util-linux
+          command -v setpriv
+      - name: Install build tools (musl)
+        if: matrix.libc == 'musl'
+        run: |
+          apk add --no-cache bash curl gcc musl-dev git util-linux
+          command -v setpriv
+      - name: Install rustup and the pinned toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          rustup toolchain install
+      - name: Versions
+        # The glibc leg checks that its glibc is newer than the runners'
+        # (2.39, ubuntu 24.04): a rolling image that fell behind would
+        # test nothing new.
+        run: |
+          rustup show
+          uname -r
+          if [ "$LIBC" = glibc ]; then
+            # sed reads all of ldd's output (no SIGPIPE).
+            ldd --version | sed -n 1p
+            v=$(ldd --version | sed -n '1s/.* //p')
+            newest=$(printf '%s\n' 2.39 "$v" | sort -V | tail -n 1)
+            if [ "$v" = 2.39 ] || [ "$newest" != "$v" ]; then
+              echo "glibc $v is not newer than the runners' 2.39" >&2
+              exit 1
+            fi
+          else
+            apk info -v musl
+            /lib/ld-musl-x86_64.so.1 2>&1 | sed -n 1,2p
+          fi
+        env:
+          LIBC: ${{ matrix.libc }}
+      - name: Driver tests under seccomp kill
+        # As the older glibc job: root-only tests run; Landlock and
+        # tcp_migrate_req (the restart tests) are required. Every skip
+        # prints a `skipped:` line, listed by the next step.
+        run: |
+          docker exec -e DURCHLAUFERHITZER_REQUIRE_ROOT=1 \
+            -e DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 \
+            -e DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 \
+            -e DURCHLAUFERHITZER_TEST_SECCOMP_KILL=1 \
+            libc bash -c '
+              set -euo pipefail
+              echo 1 > /proc/sys/net/ipv4/tcp_migrate_req
+              cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee driver-tests.log'
+        shell: bash
+      - name: Skips
+        if: always()
+        shell: bash
+        run: grep 'skipped:' driver-tests.log || echo "no skips"
+      - name: Failure record
+        if: failure()
+        shell: bash
+        run: >-
+          python3 scripts/nightly-report.py record --job newest-libc --arch x86_64
+          --libc "$LIBC" --run-url "$RUN_URL" --out failure.json driver-tests.log
+        env:
+          LIBC: ${{ matrix.libc }}
+      - name: Upload the failure record
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-failure-newest-libc-${{ matrix.libc }}
+          path: failure.json
+          if-no-files-found: ignore
+      - name: Stop the container
+        if: always()
+        shell: bash
+        run: docker rm -f libc
 
   restart-soak:
     # The restart tests (driver/tests/restart.rs, FR-PROC-07) looped
@@ -722,7 +847,7 @@ jobs:
     name: report failures
     # `bench-netem` is left out: it runs only when dispatched by hand,
     # whose caller reads its result directly.
-    needs: [long-runs, fuzz, older-glibc, pressure, restart-soak, bench, bench-publish]
+    needs: [long-runs, fuzz, older-glibc, pressure, newest-libc, restart-soak, bench, bench-publish]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

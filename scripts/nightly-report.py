@@ -11,6 +11,7 @@ record  In a failing nightly job: read its logs, write a small failure
             nightly-report.py record --job fuzz ... logs/request_head.log ...
             nightly-report.py record --job older-glibc ... driver-tests.log
             nightly-report.py record --job pressure ... pressure.log
+            nightly-report.py record --job newest-libc --libc musl ... driver-tests.log
             nightly-report.py record --job restart-soak --libc musl ... soak.log
             nightly-report.py record --job bench ... bench.log
 
@@ -35,6 +36,7 @@ normalized text, which names the failure, not the seed or input:
   fuzz         job, target, and the same panic location and message, or
                the kind (oom, timeout, leak, crash);
   older glibc  job and the failing test's name;
+  newest libc  job, libc and the failing test's name;
   restart soak job, architecture, libc and the failing test's name (each
                failing test once, however many of the looped runs it
                failed);
@@ -78,6 +80,7 @@ JOBS = {
     "fuzz": "fuzz",
     "older-glibc": "older glibc",
     "pressure": "pressure",
+    "newest-libc": "newest libc",
     "restart-soak": "restart soak",
     "bench": "bench",
     "bench-publish": "bench publish",
@@ -101,6 +104,12 @@ PRESSURE_WHERE = (
     "with two busy loops per core running beside it, as the pressure job runs it: "
     "sh -c 'while :; do :; done' &, started 2 x $(nproc) times"
 )
+NEWEST_LIBC_WHERE = {
+    "glibc": "as root in fedora:latest with net.ipv4.tcp_migrate_req=1, "
+    "as the newest libc job runs it",
+    "musl": "as root in alpine:edge with net.ipv4.tcp_migrate_req=1, "
+    "as the newest libc job runs it",
+}
 RESTART_SOAK_ENV = (
     "DURCHLAUFERHITZER_REQUIRE_ROOT=1 DURCHLAUFERHITZER_REQUIRE_MIGRATE=1 "
     "DURCHLAUFERHITZER_REQUIRE_LANDLOCK=1 DURCHLAUFERHITZER_REQUIRE_IPV6=1"
@@ -208,6 +217,8 @@ def describe(job, f):
         label = f"fuzz {test}"
     if job == "restart-soak" and f.get("libc"):
         label = f"restart soak ({f.get('arch', '')}, {f['libc']})"
+    if job == "newest-libc" and f.get("libc"):
+        label = f"newest libc ({f['libc']})"
     if kind == "unrecognized":
         key = f"{job}|unrecognized"
         reason = "failed without a recognized failure"
@@ -219,6 +230,9 @@ def describe(job, f):
         reason = f"{test} failed"
     elif job == "restart-soak":
         key = f"{job}|{f.get('arch', '')}|{f.get('libc', '')}|{test}"
+        reason = f"{test} failed"
+    elif job == "newest-libc":
+        key = f"{job}|{f.get('libc', '')}|{test}"
         reason = f"{test} failed"
     elif job == "bench" and kind == "bench":
         label = f"bench {test}"
@@ -411,8 +425,8 @@ def record_fuzz(logs, workspace, toolchain):
 
 def record_driver_tests(text, workspace, env=OLDER_GLIBC_ENV, where=OLDER_GLIBC_WHERE):
     """The failures of a driver-test job: each failed test by name. Serves
-    the older-glibc job (the defaults) and the pressure job (its own `env`
-    and `where`)."""
+    the older-glibc job (the defaults), and the pressure and newest-libc
+    jobs (their own `env` and `where`)."""
     if text is None:
         return [_unrecognized("The job left no log; see the run.")]
     panics = parse_panics(text)
@@ -565,6 +579,8 @@ def parse_leg(name):
         return job, args[0], ""
     if job == "restart-soak" and len(args) == 2:
         return job, args[0], args[1]
+    if job == "newest-libc" and len(args) == 1:
+        return job, "x86_64", args[0]
     return None
 
 
@@ -672,8 +688,8 @@ def _occurrence(o, run_url):
     name = JOBS.get(o["job"], o["job"])
     if o["job"] == "fuzz" and f.get("test"):
         name = f"fuzz {f['test']}"
-    if o["job"] == "restart-soak" and f.get("libc"):
-        name = f"restart soak {f['libc']}"
+    if o["job"] in ("restart-soak", "newest-libc") and f.get("libc"):
+        name = f"{JOBS[o['job']]} {f['libc']}"
     if o["job"] == "bench" and f.get("test"):
         name = f"bench {f['test']}"
     head = f"{name} ({o['arch']})" if o["arch"] else name
@@ -789,7 +805,7 @@ def main(argv=None):
     r.add_argument("--out", required=True)
     r.add_argument("--workspace", default=os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
     r.add_argument("--toolchain", default="nightly", help="fuzz: the nightly toolchain")
-    r.add_argument("--libc", default="", help="restart soak: glibc or musl")
+    r.add_argument("--libc", default="", help="restart soak, newest libc: glibc or musl")
     r.add_argument("--seeds", default=os.environ.get("SIM_SEEDS"), help="long runs: SIM_SEEDS")
     r.add_argument("logs", nargs="*")
     s = sub.add_parser("report", help="file or update issues from the records")
@@ -813,6 +829,11 @@ def main(argv=None):
                 failures = record_bench(text)
             elif args.job == "pressure":
                 failures = record_driver_tests(text, args.workspace, PRESSURE_ENV, PRESSURE_WHERE)
+            elif args.job == "newest-libc":
+                where = NEWEST_LIBC_WHERE.get(args.libc, f"as the newest libc job runs it ({args.libc})")
+                failures = record_driver_tests(text, args.workspace, OLDER_GLIBC_ENV, where)
+                for f in failures:
+                    f["libc"] = args.libc
             elif args.job == "restart-soak":
                 failures = record_restart_soak(text, args.workspace, args.arch, args.libc)
             else:
