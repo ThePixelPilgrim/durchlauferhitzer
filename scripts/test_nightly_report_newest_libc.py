@@ -106,6 +106,14 @@ class NewestLibc(unittest.TestCase):
         self.assertEqual(f["kind"], "timeout-or-cancelled")
         self.assertTrue(nr.describe("newest-libc", f)[1].startswith("nightly: newest libc (musl) — "))
 
+    def test_every_failing_binary_is_recorded(self):
+        # `--no-fail-fast`: cargo runs every test binary, so two can fail.
+        log = KILL_LOG + KILL_LOG.replace("tests/containment.rs", "tests/restart/main.rs").replace(
+            "serves_under_kill", "reload_loses_nothing"
+        )
+        tests = [f["test"] for f in nr.record_driver_tests(log, WS)]
+        self.assertEqual(tests, ["containment::serves_under_kill", "restart::reload_loses_nothing"])
+
 
 if __name__ == "__main__":
     unittest.main()

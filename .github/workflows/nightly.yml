@@ -256,7 +256,7 @@ jobs:
         run: |
           set -euo pipefail
           echo 1 > /proc/sys/net/ipv4/tcp_migrate_req
-          cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee driver-tests.log
+          cargo test -p durchlauferhitzer --locked --no-fail-fast -- --nocapture 2>&1 | tee driver-tests.log
         env:
           DURCHLAUFERHITZER_REQUIRE_ROOT: "1"
           DURCHLAUFERHITZER_REQUIRE_MIGRATE: "1"
@@ -321,7 +321,7 @@ jobs:
           want=$(( 2 * $(nproc) ))
           echo "busy loops alive: $alive (want $want)" | tee pressure.log
           if [ "$alive" -ne "$want" ]; then echo "busy loops alive != 2 x nproc" >&2; exit 1; fi
-          cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee -a pressure.log
+          cargo test -p durchlauferhitzer --locked --no-fail-fast -- --nocapture 2>&1 | tee -a pressure.log
         env:
           DURCHLAUFERHITZER_TEST_SECCOMP_KILL: "1"
       - name: Stop the busy loops
@@ -346,14 +346,10 @@ jobs:
           if-no-files-found: ignore
 
   newest-libc:
-    # The newest libc on both C libraries (NFR-TEST-08, owner decision
-    # 2026-11-10): the driver tests under the seccomp kill switch, as
-    # root, on a rolling glibc newer than the runners' and on Alpine
-    # edge's musl, so a call a new libc release makes is caught before a
-    # distribution ships it. Built like the older glibc job; both legs in
-    # a container started by hand, as ci.yml's Alpine job (its comments
-    # give the flags' reasons), with the work directory mounted at the
-    # same path.
+    # The driver tests under the seccomp kill switch, as root, on a
+    # rolling glibc newer than the runner's and on Alpine edge's musl
+    # (NFR-TEST-08, owner decision 2026-11-10). Both legs run in a
+    # container started by hand with ci.yml's Alpine job's flags.
     strategy:
       fail-fast: false
       matrix:
@@ -416,11 +412,16 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain none
           rustup toolchain install
+      - name: The runner's glibc
+        id: runner
+        if: matrix.libc == 'glibc'
+        shell: bash
+        run: |
+          ldd --version | sed -n 1p
+          echo "glibc=$(ldd --version | sed -n '1s/.* //p')" >> "$GITHUB_OUTPUT"
       - name: Versions (glibc)
-        # The image's glibc must be newer than the runners' (2.39, ubuntu
-        # 24.04): a rolling image that fell behind would test nothing new.
-        # The step runs in the container, which has none of the step's
-        # `env`, so each leg has its own step.
+        # An image whose glibc is not newer than the runner's tests
+        # nothing new. Steps in the container get no step `env`.
         if: matrix.libc == 'glibc'
         run: |
           rustup show
@@ -428,9 +429,10 @@ jobs:
           # sed reads all of ldd's output (no SIGPIPE).
           ldd --version | sed -n 1p
           v=$(ldd --version | sed -n '1s/.* //p')
-          newest=$(printf '%s\n' 2.39 "$v" | sort -V | tail -n 1)
-          if [ "$v" = 2.39 ] || [ "$newest" != "$v" ]; then
-            echo "glibc $v is not newer than the runners' 2.39" >&2
+          host=${{ steps.runner.outputs.glibc }}
+          newest=$(printf '%s\n' "$host" "$v" | sort -V | tail -n 1)
+          if [ -z "$host" ] || [ "$v" = "$host" ] || [ "$newest" != "$v" ]; then
+            echo "glibc $v is not newer than the runner's ${host:-unknown}" >&2
             exit 1
           fi
       - name: Versions (musl)
@@ -452,7 +454,7 @@ jobs:
             libc bash -c '
               set -euo pipefail
               echo 1 > /proc/sys/net/ipv4/tcp_migrate_req
-              cargo test -p durchlauferhitzer --locked -- --nocapture 2>&1 | tee driver-tests.log'
+              cargo test -p durchlauferhitzer --locked --no-fail-fast -- --nocapture 2>&1 | tee driver-tests.log'
         shell: bash
       - name: Skips
         if: always()

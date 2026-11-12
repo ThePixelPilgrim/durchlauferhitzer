@@ -2996,12 +2996,16 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   - `newest libc (glibc)` runs in `fedora:latest`;
   - `newest libc (musl)` runs in `alpine:edge`.
   Both legs run in a container started by hand with the flags of CI's
-  Alpine job, and run the older glibc job's test command and environment
-  as root. The glibc leg fails its `Versions (glibc)` step when the
-  image's glibc is not newer than the runners' 2.39. A failure is
-  recorded as
+  Alpine job, because a job `container:` cannot differ per leg. Both run
+  the older glibc job's test command and environment as root. The glibc
+  leg fails its `Versions (glibc)` step when the image's glibc is not
+  newer than the runner's, read from the runner on each run
+  (`ubuntu-latest` moves too). A failure is recorded as
   `--job newest-libc --arch x86_64 --libc <glibc|musl>`, and its
-  fingerprint includes the libc, so each leg files its own issue.
+  fingerprint includes the libc, so each leg files its own issue. The
+  driver test steps of `older glibc`, `pressure` and `newest libc` run
+  with `--no-fail-fast`, so one failing test binary does not hide the
+  rest.
 
   *(Owner decision 2026-11-02:)* a failing nightly job files or updates a
   GitHub issue, keyed by a stable fingerprint of the failure, not of the
