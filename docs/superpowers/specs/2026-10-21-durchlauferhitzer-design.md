@@ -3246,7 +3246,7 @@ recommendation (if any) is not implemented.
    the Rust-to-Lean translators (Aeneas, hax) accept (no trait objects,
    plain generics, no interior mutability), so a machine-checked proof
    of its state machine and key schedule can follow later without a
-   rewrite. Still open: the split of the crate across the terminator
+   rewrite (sources in the survey's addendum of 2026-11-12). Still open: the split of the crate across the terminator
    and the signer and the channel between the three processes; the
    kernel floor and what a kernel without kTLS gets; uids and
    namespaces of the children; the groups offered beyond X25519.

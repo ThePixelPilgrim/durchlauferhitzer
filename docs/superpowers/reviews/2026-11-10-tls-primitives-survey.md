@@ -287,6 +287,17 @@ orion = { version = "=0.18.1", default-features = false }
 
 `unsafe` counts per crate (linux): aes 60, base16ct 4, base64ct 4, block-buffer 20, chacha20 47, cmov 25 (7 `asm!`), const-oid 1, cpufeatures 11, crypto-bigint 14, curve25519-dalek 33, curve25519-dalek-derive 5, der 4, elliptic-curve 2, getrandom 109, graviola 343, hybrid-array 37, inout 30, libc 731, libcrux-intrinsics 192, libcrux-platform 2, libcrux-secrets 18 (4 `asm!`), libcrux-traits 4, num-traits 1, pem-rfc7468 1, poly1305 50, polyval 24, proc-macro2 4, rand 14, semver 47, sha2 39 (6 `asm!`, riscv/loongarch), subtle 2, syn 2.x 67 / 3.x 77, unicode-ident 2, zeroize 17 (1 `asm!`). All other crates: 0.
 
+## Addendum 2026-11-12: Rust-to-Lean verification (open decision 5 (g))
+
+The owner asked whether writing the primitives in a proof assistant and extracting them is an option. The current tools run the other way, from Rust to Lean: the Rust that ships is translated (Charon then Aeneas, or hax) into a Lean model, and the proofs are done on the model. The Lean-first direction exists for Coq (fiat-crypto, extracted to Rust, used by the `fiat` backend above) and F* (HACL*, extracted through C to Rust as libcrux). None of these covers the compiled binary's side channels. Sources, read as abstracts and summaries only, not in full:
+
+- Microsoft Research, *Scaling Verification of Cryptographic Software with Aeneas, Rust, and Lean* (arXiv 2609.15648, September 2026): https://arxiv.org/abs/2609.15648 — applies Aeneas to SymCrypt; a Lean development of about 237 KLOC proves safety, panic-freedom and functional correctness for about 16.7 KLOC of Rust, including SHA-3 and ML-KEM ported from C; the proofs were written by agents and checked by the Lean kernel; side-channel protection is stated as out of scope.
+- *A Rust-to-Lean Verification Pipeline with AI Provers: An Experience Report* (arXiv 2605.30106, May 2026): https://arxiv.org/html/2605.30106 — the pipeline runs Charon on a crate, then Aeneas to produce Lean, with hax as the alternative; it lists extraction gaps and Lean toolchain drift between the tools as the practical obstacles.
+- Leonardo de Moura, *Lean 4: A Unified Platform for Programming and Verification* (NFM 2026 slides): https://leodemoura.github.io/static/nfm2026/ — names Signal Shot, a joint effort of the Lean FRO, Signal and the Beneficial AI Foundation to verify the Signal protocol and its Rust implementation, and Google's Anneal, a verification tool for unsafe Rust.
+- Runtime Verification, *From Rust Code to Mathematical Proof: How We Verify Safety-Critical Rust* (May 2026): https://runtimeverification.com/blog/from-rust-source-code-to-mathematical-proof — applies hax and Aeneas to Plonky3 and RISC Zero, two Rust cryptographic libraries.
+
+What this changed in the decision: nothing for the primitives (no Lean-verified set of the five exists as crates); for the handshake crate, the design constraint that it is written in the Rust subset Aeneas and hax translate, so a proof of its state machine and key schedule can follow without a rewrite.
+
 ## Sources
 
 - crates.io API: `https://crates.io/api/v1/crates/<name>` and `/reverse_dependencies`, `/owner_user`, `/owner_team`, `/<ver>/dependencies` for every crate named above (fetched 2026-11-10)
