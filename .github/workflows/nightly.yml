@@ -401,12 +401,6 @@ jobs:
         run: |
           apk add --no-cache bash curl gcc musl-dev git util-linux
           command -v setpriv
-      - name: DEBUG bash job notices (container)
-        run: sh scripts/debug-bash-notice.sh sh bash "bash --posix"
-      - name: DEBUG bash job notices (runner)
-        if: matrix.libc == 'glibc'
-        shell: bash
-        run: sh scripts/debug-bash-notice.sh sh bash "bash --posix" dash
       - name: Install rustup and the pinned toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
