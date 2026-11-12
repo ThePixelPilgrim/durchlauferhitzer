@@ -3,8 +3,9 @@
 Running durchlauferhitzer without systemd (FR-PROC-07). Not part of the
 binary.
 
-- `durchlauferhitzer-reload` — POSIX `sh` (dash, busybox ash): restarts a
-  running server without losing a connection. Steps and requirements:
+- `durchlauferhitzer-reload` — POSIX `sh` (dash, busybox ash, bash):
+  restarts a running server without losing a connection. Steps and
+  requirements:
   [`../README.md`](../README.md#restart-without-systemd). It sets
   `net.ipv4.tcp_migrate_req` to 1 and does not restore it. After `ready`
   it waits a grace (default 1 s, its sixth argument) before the SIGHUP,
