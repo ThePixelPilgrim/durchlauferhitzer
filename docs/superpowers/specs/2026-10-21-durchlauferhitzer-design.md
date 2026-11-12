@@ -2997,7 +2997,7 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   - `newest libc (musl)` runs in `alpine:edge`.
   Both legs run in a container started by hand with the flags of CI's
   Alpine job, and run the older glibc job's test command and environment
-  as root. The glibc leg fails its `Versions` step when the image's glibc
+  as root. The glibc leg fails its `Versions (glibc)` step when the image's glibc
   is not newer than the runners' 2.39. A failure is recorded as
   `--job newest-libc --arch x86_64 --libc <glibc|musl>`, and its
   fingerprint includes the libc, so each leg files its own issue.

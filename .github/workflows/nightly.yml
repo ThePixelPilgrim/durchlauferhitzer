@@ -410,28 +410,30 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain none
           rustup toolchain install
-      - name: Versions
-        # The glibc leg checks that its glibc is newer than the runners'
-        # (2.39, ubuntu 24.04): a rolling image that fell behind would
-        # test nothing new.
+      - name: Versions (glibc)
+        # The image's glibc must be newer than the runners' (2.39, ubuntu
+        # 24.04): a rolling image that fell behind would test nothing new.
+        # The step runs in the container, which has none of the step's
+        # `env`, so each leg has its own step.
+        if: matrix.libc == 'glibc'
         run: |
           rustup show
           uname -r
-          if [ "$LIBC" = glibc ]; then
-            # sed reads all of ldd's output (no SIGPIPE).
-            ldd --version | sed -n 1p
-            v=$(ldd --version | sed -n '1s/.* //p')
-            newest=$(printf '%s\n' 2.39 "$v" | sort -V | tail -n 1)
-            if [ "$v" = 2.39 ] || [ "$newest" != "$v" ]; then
-              echo "glibc $v is not newer than the runners' 2.39" >&2
-              exit 1
-            fi
-          else
-            apk info -v musl
-            /lib/ld-musl-x86_64.so.1 2>&1 | sed -n 1,2p
+          # sed reads all of ldd's output (no SIGPIPE).
+          ldd --version | sed -n 1p
+          v=$(ldd --version | sed -n '1s/.* //p')
+          newest=$(printf '%s\n' 2.39 "$v" | sort -V | tail -n 1)
+          if [ "$v" = 2.39 ] || [ "$newest" != "$v" ]; then
+            echo "glibc $v is not newer than the runners' 2.39" >&2
+            exit 1
           fi
-        env:
-          LIBC: ${{ matrix.libc }}
+      - name: Versions (musl)
+        # The dynamic loader prints musl's version (and exits 1).
+        if: matrix.libc == 'musl'
+        run: |
+          rustup show
+          uname -r
+          /lib/ld-musl-x86_64.so.1 2>&1 | sed -n 1,2p
       - name: Driver tests under seccomp kill
         # As the older glibc job: root-only tests run; Landlock and
         # tcp_migrate_req (the restart tests) are required. Every skip
