@@ -2954,7 +2954,8 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   `tcp_migrate_req`); a `restart soak` job loops the restart tests about
   20 times on glibc and on Alpine (musl), so a rare lost connection is
   caught and filed like any nightly failure. *(Owner decision
-  2026-11-10, stage 10)* [stage 10]: two more jobs. `pressure` runs the
+  2026-11-10, stage 10)* [done for `pressure`, 2026-11-12; `newest libc`
+  stage 10]: two more jobs. `pressure` runs the
   driver test suite (under the kill switch) while busy loops occupy
   every core twice over, since contention-only libc paths never show in
   quiet runs (stage 9's glibc arena read); its failures are filed like
