@@ -633,7 +633,15 @@ fn survives_worst_case_proxy_requests_on_every_slot() {
                     ));
                 }
                 Ok(_) => told.push(format!("client {i}: closed")),
-                Err(_) => silent += 1,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    silent += 1
+                }
+                Err(e) => told.push(format!("client {i}: error {e}")),
             }
         }
         panic!(

@@ -410,8 +410,9 @@ def record_fuzz(logs, workspace, toolchain):
 
 
 def record_driver_tests(text, workspace, env=OLDER_GLIBC_ENV, where=OLDER_GLIBC_WHERE):
-    """The failures of the older-glibc job (or, with its own `env` and
-    `where`, the pressure job): each failed test by name."""
+    """The failures of a driver-test job: each failed test by name. Serves
+    the older-glibc job (the defaults) and the pressure job (its own `env`
+    and `where`)."""
     if text is None:
         return [_unrecognized("The job left no log; see the run.")]
     panics = parse_panics(text)

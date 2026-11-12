@@ -2965,8 +2965,10 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   stage 9 came from a libc the gate had never run.
   *Planner call (stage 10 plan, Task 1):* `pressure` starts `2 x nproc`
   busy loops (`sh -c 'while :; do :; done'`), runs as the runner user on
-  `ubuntu-24.04`, and has a 40-minute timeout; the nightly's `only_job`
-  dispatch input runs a single job. The two backstop survive tests set
+  `ubuntu-24.04`, and has a 40-minute timeout; the job fails if fewer
+  than `2 x nproc` busy loops are alive when the tests start; the nightly's
+  `only_job` dispatch input is a choice input whose default `all` runs
+  every job and which otherwise runs a single job. The two backstop survive tests set
   `header_timeout`, `send_idle_timeout`, `backend_connect_timeout` and
   `backend_response_timeout` to 120 s, because they assert survival, not
   latency (a starved runner outlasted the defaults).

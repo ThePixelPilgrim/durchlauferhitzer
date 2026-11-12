@@ -270,7 +270,7 @@ class Fuzz(unittest.TestCase):
         self.assertEqual([f["test"] for f in failures], ["chunked"])
 
 
-class OlderGlibc(unittest.TestCase):
+class DriverTests(unittest.TestCase):
     def test_the_failing_test_name(self):
         (f,) = nr.record_driver_tests(DEBIAN_LOG, WS)
         self.assertEqual(f["kind"], "test")
