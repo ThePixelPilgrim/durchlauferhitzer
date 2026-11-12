@@ -2676,12 +2676,28 @@ Failures, persistence, timeouts:
   `libgcc_s`, both linked dynamically from the system (NFR-PORT-02), are
   the only exception. No `cc`/`cmake` build
   scripts, no `*-sys` crates except `libc`, no OpenSSL, `ring` or
-  `aws-lc-rs`; TLS, if ever, uses a pure-Rust provider.
+  `aws-lc-rs`; TLS uses pure-Rust crates (open decision 5). *Owner
+  decision 2026-11-12 (the inline-`asm!` allowance):* assembly files
+  and build scripts that assemble or compile anything stay banned;
+  inline `asm!` is allowed only in product crates named in
+  `scripts/check-product-deps.sh`'s allow-list, each entry carrying the
+  number of `asm!` sites compiled for the product targets and the
+  instructions they contain, copied here; the check fails when a
+  crate's count changes, so a crate update that adds a site stops the
+  build until it is read. The allowance exists for one purpose:
+  constant-time selection and secret wiping, which no compiler
+  guarantees from source. Allowed today: `cmov` (x86_64: `test` then
+  `cmovnz`, two sites; aarch64: `csel`, two sites) and `zeroize` (one
+  site, an `asm!` block containing only a comment, the optimisation
+  barrier that keeps a wipe from being removed as a dead store). Lands
+  with the TLS stage.
 - **NFR-MAINT-02** [done] Test-only tooling (e.g. `cargo-fuzz`) may contain
   C/C++ as long as none of it reaches the binary.
 - **NFR-MAINT-03** [done] Minimal product dependencies: the core has zero
   `[dependencies]` and no build script; the planned product total is
-  `libc` (driver only). A new dependency needs a concrete reason std cannot
+  `libc` (driver only) plus, with the TLS stage, the cryptographic
+  primitives named in open decision 5 (the one thing std cannot
+  reasonably cover). A new dependency needs a concrete reason std cannot
   cover, is justified in its commit message, pinned in the committed
   `Cargo.lock` (enforced with `--locked`), uses minimal features, and has
   its full transitive tree checked for build scripts and C sources.
@@ -3204,9 +3220,33 @@ recommendation (if any) is not implemented.
    certificates, no resumption, no 0-RTT; the kernel's TLS record layer
    (kTLS) carries application data, so the server owns the socket and
    keeps `sendfile`; mirroring another crate's interface is a
-   nice-to-have behind getting it right, safe and fast. Still open: the
-   split of the crate across the terminator and the signer and the
-   channel between the three processes; which primitives are written
-   here and which come from a reviewed pure-Rust crate; the kernel
-   floor and what a kernel without kTLS gets; uids and namespaces of
-   the children; the cipher suites and groups offered.
+   nice-to-have behind getting it right, safe and fast. **Decided
+   2026-11-12 (owner), after the primitives survey
+   (`docs/superpowers/reviews/2026-11-10-tls-primitives-survey.md`):**
+   (c) the primitives are not written here; they come from the
+   RustCrypto family: `sha2`, `hmac`, `hkdf`, `chacha20poly1305`,
+   `x25519-dalek` over `curve25519-dalek` built on the Coq-extracted
+   `fiat-crypto` field arithmetic (the `fiat` backend, which also drops
+   the proc macro), and `p256` with `ecdsa` for P-256 signing with
+   RFC 6979 deterministic nonces; versions pinned, default features
+   off, the tree vendored into the repo and read once, `cargo vet` with
+   in-repo audit records (no public audit covers the current versions),
+   RUSTSEC advisories checked in the gate; libcrux is revisited when it
+   leaves 0.0.x. (d) One cipher suite to start, ChaCha20-Poly1305; a
+   second suite (AES-GCM) only on a measured need. (e) Inline `asm!`
+   allowed as NFR-MAINT-01 now says. (f) Requirements for the design
+   document: the crates' correctness is pinned here by known-answer
+   and adversarial vectors (RFC 8448 handshake traces, RFC 6979 A.2.5,
+   Google's Wycheproof sets for every primitive, X25519's added by us
+   since its crate does not ship them); the signer's signing path runs
+   under a secret-tracking constant-time check of the built binary in
+   the nightly on both architectures, since no proof or source review
+   covers the compiled binary's side channels. (g) *Controller's call,
+   marked as such:* the handshake crate is written in the Rust subset
+   the Rust-to-Lean translators (Aeneas, hax) accept (no trait objects,
+   plain generics, no interior mutability), so a machine-checked proof
+   of its state machine and key schedule can follow later without a
+   rewrite. Still open: the split of the crate across the terminator
+   and the signer and the channel between the three processes; the
+   kernel floor and what a kernel without kTLS gets; uids and
+   namespaces of the children; the groups offered beyond X25519.

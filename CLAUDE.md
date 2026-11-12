@@ -59,8 +59,13 @@ Requirements live in the design spec (`docs/superpowers/specs/2026-10-21-durchla
   2026-11-05).
 - That rules out any crate that compiles or links C/C++/assembly: no `cc`
   or `cmake` build scripts, no `*-sys` crates other than `libc`, no
-  OpenSSL, `ring`, or `aws-lc-rs`. If TLS crypto is ever needed, use a
-  pure-Rust provider (e.g. `rustls` with a RustCrypto-based provider).
+  OpenSSL, `ring`, or `aws-lc-rs`. TLS crypto comes from the pure-Rust
+  crates named in the spec's open decision 5 (owner, 2026-11-12).
+- Inline `asm!` is the one narrow exception (owner, 2026-11-12): allowed
+  only in product crates on the dependency check's allow-list, with
+  the number of sites and their instructions recorded in the spec
+  (NFR-MAINT-01), for constant-time selection and secret wiping only.
+  Assembly files and build scripts that assemble anything stay banned.
 - Scope: the shipped product. Test-only tooling (e.g. `cargo-fuzz` /
   libFuzzer) may contain C/C++, as long as none of it reaches the binary.
   An automated check (CI) verifies the product's dependency tree.
