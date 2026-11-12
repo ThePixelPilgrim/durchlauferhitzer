@@ -72,6 +72,7 @@ Each stage's review record lists its owner decisions, rulings, final review, fix
 - Commit trailer lines (from the session's attribution reminder) end every commit message.
 - Fast-forward `main` after every task that passes review and the gate (standing permission, 2026-10-26); never rewrite `main`.
 - Pure Rust, zero product dependencies, no `unsafe`, exhaustive enums (no `_ =>` on enums), enums over bools, no `too_many_arguments` allow in core, bounded memory, illegal states unrepresentable, files under 900 lines. Fable must not implement (delegate to Opus/Sonnet).
+- **Reader-facing prose** (owner, 2026-11-12, CLAUDE.md "Reader-facing prose"): three or more parallel items go in a list or table, one idea per paragraph, no nested parentheses, no "the same holds for" cross-references; reviewers cite it when they flag prose.
 - The owner prefers asking before inventing; give a recommendation, list every decision taken on their behalf ("calls I made") in the report.
 
 ## How a task is run

@@ -5,8 +5,9 @@ It serves static files and forwards requests to backends, routed by virtual
 host and path prefix, on Linux (`epoll`, `openat2`, `sendfile`). It also
 sends the files a backend names with `X-Sendfile` or `X-Accel-Redirect`
 below a route's `internal_files` root, and answers a single byte range of
-any file it sends with a 206. It is pure Rust; its one dependency is
-`libc`. See
+any file it sends with a 206. It runs on Linux 5.14 or later; its
+[containment](#containment) is complete from Linux 6.2. It is pure Rust;
+its one dependency is `libc`. See
 [`examples/durchlauferhitzer.conf`](examples/durchlauferhitzer.conf) for a
 documented configuration, and the
 [design spec](docs/superpowers/specs/2026-10-21-durchlauferhitzer-design.md)
@@ -134,34 +135,54 @@ cannot apply (below).
 
 ## Containment
 
-After startup the server confines itself (config block `containment`,
-see the example config): Landlock lets it only read beneath its static and
-`internal_files` roots, and a seccomp filter allows only the system calls it
-needs. Each layer is `required` (the default: missing or partial is exit 2),
-`best_effort` (used where the kernel has it, otherwise logged as missing and
-the server serves) or `off`; the startup log says what applies
-(`kind=containment layer=<name> mode=<configured> state=<applied> ...`,
-one line per layer). A blocked call ends the
-process (`seccomp_action kill`, the default) or, with `seccomp_action fail`,
-gets `EPERM`; either way the kernel logs it:
+After startup the server confines itself (config block `containment`, see
+the example config). Two layers apply:
+
+- **Landlock** lets it only read beneath its static and `internal_files`
+  roots.
+- **seccomp** allows only the system calls it needs.
+
+Each layer has a mode:
+
+- `required` (the default): a missing or partial layer is exit 2.
+- `best_effort`: used where the kernel has it, otherwise logged as missing
+  and the server serves.
+- `off`.
+
+The startup log says what applies, one line per layer:
+`kind=containment layer=<name> mode=<configured> state=<applied> ...`.
+
+`seccomp_action` says what a blocked system call does:
+
+- `kill` (the default): the call ends the process.
+- `fail`: the call gets `EPERM`.
+
+Either way the kernel logs it:
 
 ```sh
 journalctl -k | grep seccomp    # or, without systemd: dmesg | grep seccomp
 ```
 
-Use Linux 6.2 or later (6.10 or later restricts every right with
-Landlock alone; before 6.2 truncation is not restricted), and static and
-`internal_files` roots the server's user cannot write. Landlock never
-restricts `O_PATH` opens: the existence and metadata (size, owner, times)
-of paths outside the roots stay visible to the server process itself, not
-their contents. Clients cannot see them: requests resolve beneath the roots
-(`openat2` `RESOLVE_BENEATH`).
+Requirements:
 
-Under containment a panic's backtrace (`RUST_BACKTRACE`) is not
-symbolized; with `seccomp_action kill` the attempt ends the process by
-SIGSYS. The same holds for an allocation the memory backstop refuses:
-with `RUST_BACKTRACE` set, that abort ends by SIGSYS too (the kernel log
-then shows a seccomp kill, not a filter gap); without it, by SIGABRT.
+- Linux 6.2 or later. Before 6.2 Landlock does not restrict truncation;
+  from 6.10 Landlock alone restricts every right.
+- Static and `internal_files` roots the server's user cannot write.
+
+Landlock never restricts `O_PATH` opens: the existence and metadata (size,
+owner, times) of paths outside the roots stay visible to the server process
+itself, not their contents. Clients cannot see them: requests resolve beneath
+the roots (`openat2` `RESOLVE_BENEATH`).
+
+Under containment a panic's backtrace (`RUST_BACKTRACE`) is not symbolized,
+and how a crash ends depends on that variable and on `seccomp_action`. A
+SIGSYS from this table is a seccomp kill in the kernel log, not a filter
+gap:
+
+| Crash | `RUST_BACKTRACE` unset | set, `seccomp_action fail` | set, `seccomp_action kill` |
+|---|---|---|---|
+| a panic | as without containment | the backtrace prints unsymbolized | SIGSYS, from the backtrace attempt |
+| an allocation the memory backstop refuses | SIGABRT | SIGABRT, the backtrace unsymbolized | SIGSYS, from the backtrace attempt |
 
 ## Guaranteed install
 

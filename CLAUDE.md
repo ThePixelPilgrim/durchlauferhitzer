@@ -108,6 +108,25 @@ The superpowers skills are vendored as project skills in `.claude/skills/`
 - After every push, state in the chat the SHA(s) of the commit(s) that were
   committed and pushed.
 
+## Reader-facing prose (mandatory)
+
+Applies to README files, `docs/` (except the spec's requirement entries),
+the example config, `--help` and `--check` output; not to commit messages.
+
+- Three or more parallel items (modes, options, outcomes, requirements,
+  versions) go in a list or table, never in one sentence joined by "or",
+  commas or semicolons. The default gets its own item, marked as such.
+- A paragraph carries one idea. A sentence carries one fact and at most
+  one parenthesis; a nested parenthesis becomes a list item or a new
+  sentence.
+- A section leads with what the feature does for the operator, then the
+  configuration, then the caveats, each in its own paragraph, list or
+  table.
+- "The same holds for" and similar cross-references are replaced by
+  stating the fact again, or by a table with one row per case.
+- Reviewers cite this section when they flag prose; a doc change that
+  breaks a rule fails the task review like a failing lint.
+
 ## Development
 
 - Strict red/green TDD: write the failing test, run it and see it fail, then
