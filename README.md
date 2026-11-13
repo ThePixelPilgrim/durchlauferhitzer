@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="durchlauferhitzer logo: a copper pipe bent into a U with a red and a blue ring on a dark heat-exchanger plate" width="240">
+</p>
+
 # durchlauferhitzer
 Just another HTTP proxy with very little features. HTTPS is planned for a later stage.
 
