@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-17. Stage 10 (carry-forwards) is in progress: all six tasks are done, and the stage's whole-branch review is next. The TLS separation brainstorm is in progress beside it (see [TLS](#tls)).
+Last updated 2026-11-17. Stages 1 to 10 are done. Stage 10 (carry-forwards) closed with its whole-branch review and fix wave. The next work is the kTLS spike and the TLS design (see [TLS](#tls)); no stage 11 plan exists yet.
 
 Read this file first for the state of work. Before any work, follow the "Branches and main" steps in `CLAUDE.md`:
 
@@ -9,17 +9,18 @@ Read this file first for the state of work. Before any work, follow the "Branche
 
 ## Next
 
-The next session runs the due checks, then the stage 10 whole-branch review.
+The next session runs the due checks, then prepares the kTLS spike. The owner chooses what stage 11 holds.
 
 1. **Checks that are due:**
    - After the first scheduled nightly from `main`: check the product-lines chart ([Task 4](#task-4-product-line-count)).
    - The first full-budget scheduled nightly on `main` is the real check of the nightly's durations ([Maintenance](#maintenance)).
    - Close nightly issue #8, with the owner's OK. Its fix is on `main`, and the scheduled nightly of 2026-11-17 was green (run 44076916380 on `b8b13e4`).
 2. **Waiting for the owner:**
-   - The Go for the stage 10 whole-branch review, over the stage's range on `main` from `fe604e4` on.
-   - The open decision on an OpenRC wrapper ([Task 5](#task-5-openrc-supervision)).
+   - What stage 11 holds. Candidates are in the spec's Timeline and in [Carry-forwards](#carry-forwards-to-later-stages).
+   - Open decision 6 in the spec: an OpenRC wrapper ([Task 5](#task-5-openrc-supervision)).
+   - Whether the OpenRC pid guard is planned as a task ([Final review](#final-review-and-fix-wave)).
    - The `proxy-file` NFR-PERF target, still to be set from its first nightly ([Stage 8 carry-forwards](#stage-8-carry-forwards)).
-3. **Can run alongside:** the kTLS spike, on a GitHub runner ([TLS](#tls)).
+3. **Next piece of work:** the kTLS spike, on a GitHub runner ([TLS](#tls)). It precedes the TLS design document.
 4. **Standing constraints:**
    - `nightly.yml` is at 899 lines: the next addition must split it first.
    - The fuzz job's pinned nightly toolchain needs a bump by hand now and then ([Maintenance](#maintenance)).
@@ -39,7 +40,7 @@ Stages 1 to 9 are done; stage 10 is in progress.
 | 7 Efficiency | done | `71d3867..` this handoff | [`docs/superpowers/reviews/2026-11-07-stage-7-review.md`](reviews/2026-11-07-stage-7-review.md) |
 | 8 Backend-directed file serving | done | `862e951..` this handoff | [`docs/superpowers/reviews/2026-11-09-stage-8-review.md`](reviews/2026-11-09-stage-8-review.md) |
 | 9 Guarantee hardening | done | see note below | [`docs/superpowers/reviews/2026-11-09-stage-9-review.md`](reviews/2026-11-09-stage-9-review.md) |
-| 10 Carry-forwards | Tasks 1 to 6 done, whole-branch review due | per task, see [Stage 10](#stage-10-in-progress) | plan [`docs/superpowers/plans/2026-11-10-stage-10-carry-forwards.md`](plans/2026-11-10-stage-10-carry-forwards.md) |
+| 10 Carry-forwards | done | `462a967..` this handoff; per task, see [Stage 10](#stage-10-in-progress) | [`docs/superpowers/reviews/2026-11-17-stage-10-review.md`](reviews/2026-11-17-stage-10-review.md) |
 
 Notes on the table:
 
@@ -71,7 +72,7 @@ Key documents:
 
 ## Stage 10 in progress
 
-All six tasks are done; the whole-branch review is next. Task 5 ended as a documented gap, not an implementation.
+Stage 10 is done: all six tasks, the whole-branch review and its fix wave. Task 5 ended as a documented gap, not an implementation. The section keeps its heading, because other sections link to it.
 
 ### Task 1: nightly `pressure` job
 
@@ -161,6 +162,23 @@ All six tasks are done; the whole-branch review is next. Task 5 ended as a docum
 - The `expect_100_continue_*` tests stay in `bodies.rs`, because `expect.rs` (508 lines) would pass 600 with them.
 - The proxy test binary lists 135 tests before and after.
 - `sim/tests/proxy/main.rs` is at 778 lines.
+
+### Final review and fix wave
+
+The whole-branch review at `8208d59` found no Critical and no Important defect, and seven Minor findings. The record is [`docs/superpowers/reviews/2026-11-17-stage-10-review.md`](reviews/2026-11-17-stage-10-review.md).
+
+- Fix wave: `64817d2`, `06dafbd`, `acfa425`.
+- Six findings are fixed:
+  - `user` id 4294967295 is an invalid value (FR-CFG-11);
+  - a name with uid 0 is refused before the drop with a clear message (FR-PROC-03);
+  - nightly fingerprints carry the leg for set-up failures and timeouts (NFR-TEST-08);
+  - the `benchmarks` README is rewritten when it differs (NFR-MAINT-12);
+  - a night without `bench.csv` still gets its lines row (NFR-MAINT-12);
+  - the spec's Timeline and Open decisions match the outcome, with open decision 6 for the OpenRC wrapper.
+- The seventh fix was withdrawn. A path-based guard against a reused pid in the OpenRC script did worse than stock OpenRC in two cases: an unreadable executable and a moved binary.
+- The OpenRC script, `contrib/test-openrc.sh` and `ci.yml` are byte-identical to `8208d59`.
+- The README and FR-PROC-07a state the pid-reuse hazard and the manual way out. That recovery sequence was checked against the OpenRC 0.63.2 source, not run.
+- Product size at the end of the stage: 15413 lines (core 9702, driver 5711), 59 more than at `462a967`.
 
 ## TLS
 
@@ -387,6 +405,18 @@ Open:
 - A syscall regression alarm.
 - Parse/route allocation nits.
 - `sendfile` blocking on evicted pages (DRV-09).
+
+### Stage 10 carry-forwards
+
+The stage record lists these under "Deferred" and "Accepted gaps".
+
+- Guard the OpenRC main pid by pid plus start time, as `stop_post` does for the draining list. It is a planned task with tests under real OpenRC.
+- Unverified: a monitor that runs `restart` while a reload is mid-handover may leave the pid file naming the old process.
+- Unverified: the pressure job's false-failure rate rests on four green runs.
+- The publish job appends rows again when it is re-run for the same commit and date.
+- The publish job may fail when no artifact exists at all.
+- After `zap`, processes a reload left draining are not ended.
+- `sim/tests/proxy/main.rs` is at 778 lines.
 
 ### Later
 
