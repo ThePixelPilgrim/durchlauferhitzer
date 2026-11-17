@@ -178,12 +178,16 @@ class InlineTestModules(unittest.TestCase):
             fn real() {}
             #[cfg(any(test, fuzzing))]
             fn shared() {}
+            #[cfg(all(test, unix))]
+            fn narrower() {}
             #[cfg( test )]
             fn spaced() {}
             """
         )
-        # Counted: the first four lines; `cfg( test )` is `cfg(test)`.
-        self.assertEqual(pl.count_text(text), 4)
+        # Counted: the first six lines; `cfg( test )` is `cfg(test)`.
+        # `cfg(all(test, ..))` is test-only code counted as product: a
+        # documented over-count.
+        self.assertEqual(pl.count_text(text), 6)
 
 
 class CfgTestOnOtherItems(unittest.TestCase):
@@ -323,6 +327,21 @@ class Tree(unittest.TestCase):
             # Not Rust.
             write(root, "notes.txt", "text\n")
             self.assertEqual(pl.count_tree([root]), 2 + 3 + 2 + 1)
+
+    def test_a_test_module_declared_inside_an_inline_module(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "src")
+            # lib.rs: 4 lines (`mod outer {`, `mod inner {`, two closes).
+            write(root, "lib.rs", "mod outer {\n    mod inner {\n        #[cfg(test)]\n        mod t;\n    }\n}\n")
+            # a.rs: 3 lines (`fn a`, `mod deep {`, its close).
+            write(root, "a.rs", "fn a() {}\nmod deep {\n    #[cfg(test)]\n    mod t;\n}\n")
+            # Skipped: where rustc finds the two `t` modules.
+            write(root, "outer/inner/t.rs", "fn t() {}\n")
+            write(root, "a/deep/t.rs", "fn t() {}\n")
+            # Counted: 1 line each (not the declared paths).
+            write(root, "outer/t.rs", "fn k() {}\n")
+            write(root, "a/t.rs", "fn k() {}\n")
+            self.assertEqual(pl.count_tree([root]), 4 + 3 + 1 + 1)
 
     def test_a_product_file_whose_name_only_contains_tests_is_counted(self):
         with tempfile.TemporaryDirectory() as d:

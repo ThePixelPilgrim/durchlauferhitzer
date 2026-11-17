@@ -10,7 +10,8 @@ non-comment lines of the product's Rust sources (`core/src` and
 - an item under `#[cfg(test)]` is dropped, from the attribute's line to
   the line where the item ends (see `_item_end`);
 - a `#[cfg(test)] mod name;` also skips the module's file (`name.rs`)
-  and directory (`name/`) beside its parent module, as rustc finds them.
+  and directory (`name/`) beside its parent module, as rustc finds them
+  (inside inline modules too: `mod a { mod b; }` is `a/b.rs`).
 
 Comments (`//`, `///`, `//!`, `/* */`, nested) are not counted; a line
 with code and a comment is. String and character literals are code, so a
@@ -26,8 +27,8 @@ A sketch of Rust's lexer, not a parser. Its known approximations, each
 with the direction of its error:
 
 - An attribute written before `#[cfg(test)]` stays counted (over).
-- `#[cfg(any(test, ..))]`, `#![cfg(test)]` and `#[path]` are not
-  recognised: that code stays counted (over).
+- `#[cfg(any(test, ..))]`, `#[cfg(all(test, ..))]`, `#![cfg(test)]` and
+  `#[path]` are not recognised: that code stays counted (over).
 - A test-only statement or field ends at its first `;`, `,` or block at
   bracket depth 0. A comma between angle brackets (`let x: Map<A, B>`)
   ends it early (over); an `if` with an `else` ends after the first block
@@ -59,6 +60,7 @@ _BLOCK_ITEM = re.compile(
 # Items that end at a `;` only (braces nest like brackets).
 _SEMI_ITEM = re.compile(_VIS + r"(?:use|const|static|type)\b")
 _MOD_DECL = re.compile(_VIS + r"mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+_INLINE_MOD = re.compile(r"\bmod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
 _COMMIT = re.compile(r"[0-9a-f]{7,40}", re.ASCII)
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 
@@ -171,15 +173,29 @@ def _item_end(m, i):
         elif depth == 0 and ch in stops:
             if ch != "{":
                 return j
-            braces = 0
-            while j < n:
-                braces += {"{": 1, "}": -1}.get(m[j], 0)
-                if braces == 0:
-                    return j
-                j += 1
-            return n - 1
+            return _closing_brace(m, j)
         j += 1
     return n - 1
+
+
+def _closing_brace(m, j):
+    """The index of the `}` closing the `{` at `j` of the mask (the
+    mask's end if none)."""
+    braces = 0
+    for k in range(j, len(m)):
+        braces += {"{": 1, "}": -1}.get(m[k], 0)
+        if braces == 0:
+            return k
+    return len(m) - 1
+
+
+def _enclosing_modules(m, pos):
+    """The names of the inline modules (`mod name { .. }`) around `pos`
+    of the mask, outermost first."""
+    return [
+        a.group(1) for a in _INLINE_MOD.finditer(m, 0, pos)
+        if pos < _closing_brace(m, a.end() - 1)
+    ]
 
 
 def test_regions(m):
@@ -236,10 +252,10 @@ def count_tree(roots):
                 m = mask(fh.read())
             masks[path] = (m, test_regions(m))
     skipped_files, skipped_dirs = set(), []
-    for path, (_, regions) in masks.items():
-        for _, _, name in regions:
+    for path, (m, regions) in masks.items():
+        for start, _, name in regions:
             if name:
-                base = os.path.join(_module_dir(path), name)
+                base = os.path.join(_module_dir(path), *_enclosing_modules(m, start), name)
                 skipped_files.add(base + ".rs")
                 skipped_dirs.append(base + os.sep)
     total = 0

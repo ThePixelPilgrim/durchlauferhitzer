@@ -523,6 +523,21 @@ class ProductLines(unittest.TestCase):
             self.assertEqual(len(self._read(f["results"]).splitlines()), 2)
             self.assertIn("line [9]", self._read(f["page"]))
 
+    def test_a_partial_lines_artifact_publishes_the_bench_rows(self):
+        # The count may fail on its own (`continue-on-error`): its file
+        # is then empty (the shell's redirect) or cut short.
+        for partial in ([""], [LINES_HEADER], [LINES_HEADER, "2026-11-06,abc12"], ["date,com"]):
+            with tempfile.TemporaryDirectory() as d:
+                f = self._files(d, [row("2026-11-06", "static-small", 1, 1)], partial,
+                                published=[LINES_HEADER, lrow("2026-11-05", 9)])
+                code, out = self._publish(f)
+                self.assertEqual(code, 0, partial)
+                self.assertIn("product lines:", out, partial)
+                self.assertEqual(self._read(f["lines"]).splitlines(),
+                                 [LINES_HEADER, lrow("2026-11-05", 9)], partial)
+                self.assertEqual(len(self._read(f["results"]).splitlines()), 2, partial)
+                self.assertIn("line [9]", self._read(f["page"]), partial)
+
     def test_a_bad_published_lines_csv_leaves_the_section_out(self):
         with tempfile.TemporaryDirectory() as d:
             f = self._files(d, [row("2026-11-06", "static-small", 1, 1)], published=["evil"])

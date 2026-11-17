@@ -2806,18 +2806,23 @@ Failures, persistence, timeouts:
   `;`, `,` or block at bracket depth 0, or before the bracket closing
   around it; a `#[cfg(test)] mod name;` also skips that module's file
   and directory as rustc finds them (`name.rs`, `name/` beside a
-  `mod.rs`/`lib.rs`/`main.rs`, else under the declaring file's stem),
-  so `*_tests.rs` files count as test modules. Line comments, doc
+  `mod.rs`/`lib.rs`/`main.rs`, else under the declaring file's stem,
+  below the inline modules around the declaration: `mod a { mod b; }`
+  is `a/b.rs`), so `*_tests.rs` files count as test modules. Line comments, doc
   comments and (nested) block comments are not counted; a line with
   code and a comment is; string, raw-string and char literals are code,
   so a `//`, `/*`, `#[cfg(test)]` or brace inside one changes nothing,
   and a `cfg(test)` inside a comment is ignored. Known approximations,
   with their error direction: attributes written before `#[cfg(test)]`
-  stay counted (over); `#[cfg(any(test, ..))]`, `#![cfg(test)]` and
-  `#[path]` are not recognised (over); a test-only statement or field
+  stay counted (over); `#[cfg(any(test, ..))]`,
+  `#[cfg(all(test, ..))]`, `#![cfg(test)]` and `#[path]` are not
+  recognised (over); a test-only statement or field
   ends early at a comma inside angle brackets, and an `if`/`else` after
   its first block (over); lines are dropped whole, so code sharing a
   line with the attribute or the item's end is not counted (under).
+  The nightly's counting step may fail on its own
+  (`continue-on-error`): that night has no lines row, and its benchmark
+  rows are published all the same.
   The count at 5e2c3a8: 15 407 lines (core 9 702, driver 5 705).
   *Planner calls (stage 10 plan):* the series is a sibling CSV,
   `product-lines.csv` (`date,commit,lines`) beside `results.csv` on the

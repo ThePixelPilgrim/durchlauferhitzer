@@ -141,16 +141,6 @@ budget keeps its rows as the run's `bench-results` artifact. The publish takes o
 the rows of the run's own commit dated within a day of the run
 (`bench-chart.py --append ... --commit <sha>`); any other row is refused.
 
-The `bench` job also counts the product's source lines (NFR-MAINT-12).
-`scripts/product-lines.py` writes `product-lines.csv` (`date,commit,lines`).
-That file travels in the `bench-results` artifact beside `bench.csv`.
-
-The publish appends its row to `product-lines.csv` on the `benchmarks` branch.
-It takes the row under the same commit and date checks as the benchmark rows.
-`BENCHMARKS.md` charts it as `Product source lines`.
-
-An artifact without the file is published all the same: its benchmark rows are taken.
-
 ```
 bisect.sh      the `git bisect run` script (tested by scripts/test_bench_bisect.py)
 src/
@@ -166,3 +156,18 @@ src/
   netem.rs     --netem: the namespace, the veth pair, netem, the pause and its recovery
   row.rs       the CSV row and the date
 ```
+
+## Product source lines
+
+The nightly also charts the product's size (NFR-MAINT-12).
+`BENCHMARKS.md` shows it as `Product source lines`.
+
+The `bench` job runs `scripts/product-lines.py`, which writes `product-lines.csv` (`date,commit,lines`).
+That file travels in the `bench-results` artifact beside `bench.csv`.
+
+The publish appends its row to `product-lines.csv` on the `benchmarks` branch.
+It takes the row under the same commit and date checks as the benchmark rows.
+
+A failing count never stops the benchmarks: the step may fail on its own.
+An artifact without the file, or with a broken one, is published all the same.
+Its benchmark rows are taken; no lines row is.

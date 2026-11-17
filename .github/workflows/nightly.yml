@@ -603,7 +603,7 @@ jobs:
   bench:
     # The benchmarks (NFR-PERF-08, bench/README.md): the release binary
     # through the fixed scenarios, one CSV row per scenario and run, and
-    # the product's source lines (NFR-MAINT-12, scripts/product-lines.py),
+    # the product's source lines (NFR-MAINT-12; that step may fail alone),
     # uploaded for `bench-publish`. A pinned image, so the runner label
     # in the rows stays true. The bench runs as the runner user; only
     # its strace pass runs as root (`sudo -n`).
@@ -627,6 +627,7 @@ jobs:
           cargo build --release --locked -p durchlauferhitzer
           cargo build --release --locked --manifest-path bench/Cargo.toml
       - name: Product source lines
+        continue-on-error: true
         run: python3 -I scripts/product-lines.py --csv --commit "${GITHUB_SHA::7}" --date "$(date -u +%F)" > product-lines.csv
       - name: Benchmarks
         run: |
