@@ -2220,49 +2220,35 @@ Failures, persistence, timeouts:
   `src/librc/librc-daemon.c` lines 567-611) and `restart` starts the
   server again (`start-stop-daemon --stop` finding nothing still exits
   0, `src/start-stop-daemon/start-stop-daemon.c` lines 824-834; the
-  script's `stop_post` ends what a reload left). *(Controller ruling,
-  stage 10 final review:)* OpenRC's own `status` and `stop` do not
-  check the pid file's process (`status` reports crashed only on
-  ESRCH, `stop` signals whatever holds the pid; `src/shared/schedules.c`
-  lines 256-257), so a reused pid would read as started and get the
-  stop's signals. The script therefore overrides `stop` and `status`
-  and sorts the pid file's process three ways *(controller ruling,
-  stage 10 final re-review)*:
-  - server: its executable (`/proc/<pid>/exe`, " (deleted)" stripped,
-    as the reload helper's step 3 reads it) was read and is one of the
-    server's: the real path recorded at start (`start_post`) and after
-    each successful `reload` (`service_set_value server_exe`), the real
-    path of the command OpenRC recorded at start (`service_get_value
-    command`), or that of the current `command` (a reload runs that
-    one). An edited `command=` or a switched symlink thus never makes
-    the running server a stranger;
-  - stranger: its executable was read and is none of these;
-  - unknown: anything else, the guard's "cannot tell": no pid, not
-    running, a zombie, the executable unreadable, or the start time
-    changed between the reads before and after the executable.
-  Only a stranger is handled by the script: `status` of a started
-  service reports crashed with exit status 32; `stop` signals nothing,
-  removes the pid file with a warning and succeeds, so `restart` starts
-  the server again. Server and unknown go to OpenRC's own
-  `default_status` and `default_stop`, so the guard never does worse
-  than stock OpenRC. Reading another user's executable needs root with
-  `CAP_SYS_PTRACE`: in a container that drops it, and for a non-root
-  `status`, the server's process reads as unknown, giving stock OpenRC
-  behaviour (a healthy server reports started; there is no protection
-  against a reused pid). `scripts/test-openrc-guard.sh` pins the three
-  outcomes, the edited command and the switched symlink by sourcing the
-  script with OpenRC's functions stubbed, under sh, dash, bash and
-  busybox ash where present; CI runs it as the runner user and as root
-  on glibc, and as root in the Alpine job, where its unknown case may
-  not skip. Removing the pid file in `stop_pre` would not do:
-  `start-stop-daemon --stop` without a pid file matches every process
-  running `command`, other instances included. `contrib/test-openrc.sh`
-  pins the `crashed` status with exit status 32 and the `restart` that
+  script's `stop_post` ends what a reload left). *Caveat, part of
+  the documented gap (controller ruling, stage 10 final review):*
+  OpenRC knows the server only by the pid file's pid. `status` reports
+  crashed only when `kill(pid, 0)` gives ESRCH, with no executable
+  match (`src/librc/librc-daemon.c` lines 566-611), and `stop` signals
+  whatever holds that pid (`rc_find_pids(NULL, NULL, 0, pid)`,
+  `src/shared/schedules.c` lines 256-257). After a crash whose pid has
+  been reused, `status` reports started (exit 0, so a monitor keyed on
+  32 does not fire) and `stop` or `restart` send the other process
+  SIGTERM, then SIGKILL after the `retry` schedule. The README tells
+  the operator to compare `readlink /proc/$(cat
+  /run/durchlauferhitzer.pid)/exe` with the binary before a `restart`
+  after an unnoticed crash and, when they differ, to run `rc-service
+  durchlauferhitzer zap`, remove the pid file, then `start`. Verified
+  against 0.63.2: `zap` (`cmd_zap`, `src/openrc-run/openrc-run.c`) only
+  marks the service stopped, which clears its options and daemon
+  records; it runs no script function (no `stop_post`), signals
+  nothing and leaves the pid file. A `start` with the stale pid file
+  present refuses ("already running"), because `start-stop-daemon
+  --start` finds the reused pid (`start-stop-daemon.c` lines 836-847);
+  hence the `rm`. *Carry-forward, not done:* guard the main pid by pid
+  plus start time (field 22 of `/proc/<pid>/stat`), as `stop_post`
+  does for the draining list; a path-based check was tried in the stage
+  10 final review and withdrawn, because a moved binary or an
+  unreadable executable made it do worse than stock OpenRC.
+  `contrib/test-openrc.sh` pins the `crashed` status with exit status
+  32 and the `restart` that
   serves again, once for a crash after a reload and once without one;
-  both were observed in CI's Alpine job (OpenRC 0.63.2). Its step 9
-  pins the reused pid (an unrelated `sleep` in the pid file): `status`
-  crashed with 32, `restart` serves, the `sleep` still runs; observed
-  green in CI's Alpine job (run of 64817d2). A `restart`
+  both were observed in CI's Alpine job (OpenRC 0.63.2). A `restart`
   while an old process still drains waits for `stop_post`, bounded by
   the script's `retry` (default `TERM/35/KILL/5`). The README's "OpenRC:
   no restart after a crash" says so and why, the conf.d warns against

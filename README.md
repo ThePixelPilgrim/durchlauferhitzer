@@ -377,35 +377,42 @@ After such an end, the operator restarts the server by hand:
 A `restart` waits while an old process from a reload still drains, at
 most as long as the conf.d's `retry` allows (40 s by default).
 
-The script never signals a process it knows is not the server. The
-kernel may hand the crashed server's pid to a new, unrelated process,
-and the pid file then names that process. The script sorts the pid
-file's process into one of three cases:
+Caveat: OpenRC knows the server only by the pid in the pid file. After
+a crash the kernel may give that pid to another process. OpenRC then
+treats that process as the server:
 
-| Case | When | `status` | `stop` and `restart` |
-|---|---|---|---|
-| Server | Its executable was read and is the server's binary. | OpenRC's own | OpenRC's own |
-| Stranger | Its executable was read and is another file. | `crashed`, exit status 32 | Signal nothing, remove the pid file with a warning. `restart` then starts the server. |
-| Unknown | Its executable cannot be read, or the pid does not run. | OpenRC's own | OpenRC's own |
+- `status` reports started and exits 0, so a monitor keyed on exit
+  status 32 does not fire.
+- `stop` and `restart` signal that other process: `SIGTERM`, then
+  `SIGKILL` once the `retry` schedule has run out.
 
-The server's binary is the one `command` named at the start or at the
-last `reload`, or the current `command`. A binary replaced in place
-still counts as the server's.
+So after a crash that was not noticed at once, check the pid file's
+process before a `restart`. As root, run:
 
-Reading the server's executable needs root with `CAP_SYS_PTRACE`,
-because the server runs as `user`. Without it the server's process
-always reads as unknown. That holds in two cases:
+```sh
+readlink /proc/$(cat /run/durchlauferhitzer.pid)/exe
+```
 
-- In a container that drops `CAP_SYS_PTRACE`, the script behaves as
-  stock OpenRC. There is no protection against a reused pid.
-- A `status` run as non-root behaves as stock OpenRC. It reports a
-  healthy server as started, and a reused pid as started too.
+What it prints decides the next step:
 
-OpenRC itself checks only that the pid exists.
+| Output | Meaning | Next step |
+|---|---|---|
+| The server's binary, `/usr/sbin/durchlauferhitzer` by default (the conf.d's `command`) | The server runs. A binary replaced in place shows ` (deleted)` at the end. | `restart` is safe. |
+| Another file | The pid now belongs to another process. | Do not run `restart`; run the three commands below. |
+| Nothing, and `/proc/<pid>` does not exist | The pid no longer runs. | `restart` is safe. |
+| Nothing, but `/proc/<pid>` exists | The executable cannot be read, for example in a container without `CAP_SYS_PTRACE`. | Run `cat /proc/<pid>/comm` instead: the server shows `durchlauferhitz`. |
+
+When the pid belongs to another process, run these three commands:
+
+1. `rc-service durchlauferhitzer zap` marks the service stopped. It
+   signals nothing.
+2. `rm /run/durchlauferhitzer.pid` removes the stale pid file. Without
+   this step `start` refuses, because the pid still runs.
+3. `rc-service durchlauferhitzer start` starts the server again.
 
 A monitor can stand in for the operator. It keys on the exit status 32
-of `status` and then runs `restart`. Run it as root with
-`CAP_SYS_PTRACE` to catch a reused pid as well.
+of `status` and then runs `restart`. It does not see a crash whose pid
+has been reused.
 
 The [guaranteed install](#guaranteed-install) needs the
 [systemd service](#systemd-socket-activation), which restarts the
