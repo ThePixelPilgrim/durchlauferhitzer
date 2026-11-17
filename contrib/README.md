@@ -24,7 +24,11 @@ binary.
   or not handed over by a killed helper; each by pid and start time,
   checked again before every signal). Install it as
   `/etc/init.d/durchlauferhitzer`, the helper as
-  `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`.
+  `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`. It does
+  not restart the server after an abnormal exit, because
+  `supervise-daemon` cannot carry a reload's hand-over
+  ([`../README.md`](../README.md#openrc-no-restart-after-a-crash)).
+  Use systemd where the server must come back on its own.
 - `openrc/durchlauferhitzer.confd` — its settings, as
   `/etc/conf.d/durchlauferhitzer` (`ready_timeout`, `reload_grace`, ...).
 - `test-openrc.sh <binary>` — POSIX `sh`, as root on a throwaway system

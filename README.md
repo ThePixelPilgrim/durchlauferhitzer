@@ -244,12 +244,13 @@ warns when a config leaves part of it to the kernel
   only: kernel memory (socket buffers, epoll state, the page cache) is
   outside `RLIMIT_DATA`; bound it with the service's cgroup
   (`MemoryMax=`) or the TCP memory sysctls;
-- a supervisor that restarts the process when it ends abnormally (a
-  blocked system call under `kill`, an aborted allocation), such as the
-  [systemd service](#systemd-socket-activation) below (its
-  `Restart=on-abnormal`). The OpenRC script in
-  [`contrib/openrc`](contrib/openrc) starts and reloads the server but
-  does not restart it.
+- systemd as the supervisor. The
+  [systemd service](#systemd-socket-activation) below restarts the
+  process when it ends abnormally (its `Restart=on-abnormal`). Such an
+  end is a blocked system call under `kill` or an aborted allocation.
+  The OpenRC script does not restart the server, so an OpenRC install
+  is outside the guaranteed install
+  ([OpenRC: no restart after a crash](#openrc-no-restart-after-a-crash)).
 
 Outside it, least privilege (NFR-SEC-12) and the kernel-enforced memory
 backstop (NFR-RES-09) hold only as far as the kernel allows.
@@ -348,6 +349,44 @@ It exits 0, or 1 with the reason. Notes:
   running as `user`: that needs root with `CAP_SYS_PTRACE` (as root
   normally has on a host; not in a container that drops it). Without it
   the helper warns and releases the lock without waiting.
+
+## OpenRC: no restart after a crash
+
+The OpenRC script in [`contrib/openrc`](contrib/openrc) runs the server
+and reloads it without losing a connection. It does not restart the
+server when the server ends abnormally. Such an end is one of these:
+
+- a system call outside the allow-list under `seccomp_action kill`;
+- an allocation beyond the memory backstop;
+- any other crash, or a kill from outside.
+
+After such an end, the operator restarts the server by hand:
+
+1. `rc-service durchlauferhitzer status` reports `crashed`.
+2. `rc-service durchlauferhitzer restart` starts the server again. Its
+   stop step also ends the processes a reload left draining.
+
+A monitor that runs these two commands can stand in for the operator.
+The [guaranteed install](#guaranteed-install) needs the
+[systemd service](#systemd-socket-activation), which restarts the
+server on its own.
+
+OpenRC's own supervisor, `supervise-daemon`, cannot carry the reload's
+hand-over. These are its limits in OpenRC 0.63.2, the version Alpine
+3.24 ships:
+
+- It restarts its process after every exit, a clean exit 0 included.
+  After a reload the old process exits 0 once it has drained. So
+  `supervise-daemon` would start a second server beside the new one.
+- It watches only the process it started itself. Nothing hands it the
+  pid of another process. So the process a reload starts would never be
+  restarted.
+- A reload by signal through it would leave the port without a
+  listener. The old process closes its listeners at the `SIGHUP`, and
+  the restart follows only once its drain has ended.
+
+Do not set `supervisor=supervise-daemon` in
+`/etc/conf.d/durchlauferhitzer`: `reload` then no longer works.
 
 ## Signals and exit codes
 

@@ -2,7 +2,10 @@
 # shellcheck shell=sh disable=SC2034 # the variables are read by openrc-run
 # durchlauferhitzer under OpenRC (FR-PROC-07), modelled on Alpine's haproxy
 # script. Settings: /etc/conf.d/durchlauferhitzer. `reload` restarts
-# without losing a connection (durchlauferhitzer-reload).
+# without losing a connection (durchlauferhitzer-reload). Not supervised
+# (FR-PROC-07a): supervise-daemon respawns after every exit and watches
+# only its own child, so it cannot carry the reload's hand-over (README,
+# "OpenRC: no restart after a crash").
 
 description="durchlauferhitzer HTTP server"
 extra_commands="checkconfig"

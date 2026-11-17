@@ -23,3 +23,7 @@
 # How `stop` ends the server: SIGTERM, then SIGKILL; keep the first wait
 # above the config's shutdown_timeout.
 #retry=TERM/35/KILL/5
+
+# The script does not restart the server after a crash. Do not set
+# `supervisor=supervise-daemon` here: `reload` then no longer works.
+# The README's section "OpenRC: no restart after a crash" says why.

@@ -2098,7 +2098,8 @@ Failures, persistence, timeouts:
   - All containment code lives in one small driver module behind one
     interface, so a build without it (a future unikernel port, NFR-PORT-07)
     can leave it out without touching the core.
-- **FR-PROC-07a** [stage 10] The OpenRC script supervises (owner
+- **FR-PROC-07a** [documented gap; stage 10] The OpenRC script
+  supervises (owner
   decision 2026-11-10): an unexpected exit of the server (the memory
   backstop's abort, a `seccomp_action kill`) is restarted, as the README's
   systemd unit does with `Restart=on-abnormal`, so the guaranteed
@@ -2107,7 +2108,43 @@ Failures, persistence, timeouts:
   helper's take-over (`--ready-fd`, the draining list) works under it;
   if it cannot, the README states that OpenRC installs are not
   restarted and why, and FR-PROC-08's guaranteed install names systemd
-  only.
+  only. *Outcome (stage 10 Task 5): it cannot; documented gap.*
+  `supervise-daemon` of OpenRC 0.63.2 (Alpine 3.24's) cannot carry the
+  take-over, from its source (`src/supervise-daemon/supervise-daemon.c`
+  at tag 0.63.2):
+  - it respawns its child after every exit, exit 0 included (the reap
+    at line 756 leads to the respawn at 765-791; the status is only
+    logged), so the old process that exits 0 after a reload's drain is
+    started again beside the new one: two serving processes;
+  - it supervises only the process it forked (`waitpid(child_pid)`,
+    line 756; `child_pid` is set only by its own `fork`, lines 791 and
+    1288, or read back on `--reexec`, line 1168); its control FIFO
+    takes only `sig <n>` (lines 709-722) and it is no subreaper, so
+    nothing hands it the process a reload starts, which is never
+    restarted;
+  - its `--pidfile` is the supervisor's own (line 675; `supervise-daemon(8)`),
+    so the helper's step 3 refuses the reload, and `stop` signals the
+    supervisor, which stops only its own child (line 750);
+  - a reload through it (`--signal HUP`, lines 1341-1353) closes the
+    listeners at once, and the respawn follows only after the drain
+    (up to `restart_timeout`): no listener in between, which breaks
+    FR-PROC-07.
+  The OpenRC script therefore stays on `start-stop-daemon` without
+  supervision. After an abnormal exit `rc-service durchlauferhitzer
+  status` reports `crashed` (the pid file's process is gone,
+  `src/librc/librc-daemon.c` lines 567-611) and `restart` starts the
+  server again (`start-stop-daemon --stop` finding nothing still exits
+  0, `src/start-stop-daemon/start-stop-daemon.c` lines 824-834; the
+  script's `stop_post` ends what a reload left). The README's "OpenRC:
+  no restart after a crash" says so and why, the conf.d warns against
+  `supervisor=supervise-daemon`, and FR-PROC-08's guaranteed install
+  names systemd as its supervisor. *Planner calls (stage 10 plan):* no
+  respawn delay or limits are set, as nothing respawns; a POSIX `sh`
+  wrapper as `supervise-daemon`'s child, which would itself start every
+  server (the reload's included) and exit abnormally only when the
+  serving one does, was not built: it is a supervisor of our own, not
+  the builder call above, and would need an owner decision. Reload and
+  supervision do not interact, since there is none under OpenRC.
 - **FR-PROC-07** [done] Zero-downtime restart: no connection is lost.
   *(Owner decisions 2026-11-04, stage 6 brainstorm:)* a restart must not
   drop or reset a single connection, accepted or still queued; that is
@@ -2326,6 +2363,11 @@ Failures, persistence, timeouts:
   that outside it NFR-SEC-12 and NFR-RES-09 hold only as far as the
   kernel allows. The example config shows the guaranteed values, with
   the softer ones in comments, not the other way round.
+  *(Stage 10 Task 5, FR-PROC-07a's documented gap:)* the guaranteed
+  install includes a supervisor that restarts the server after an
+  abnormal exit, and names systemd only (the README's service,
+  `Restart=on-abnormal`): the OpenRC script does not restart the
+  server, so an OpenRC install is outside the guaranteed install.
   *Planner calls (stage 9 plan, Task 3):* the warnings come from the
   core (`Containment::softenings`, one `Softening` per softer setting),
   in config order (`landlock`, `seccomp`, `seccomp_action`), then the
