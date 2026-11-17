@@ -36,7 +36,7 @@ pub(crate) const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
 pub(crate) const OK_RELAYED: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
 
 /// The backend answers `OK`; the client gets it and stays open.
-pub(crate) fn answer_ok(sim: &mut Sim, c: ConnId, up: UpstreamId) {
+fn answer_ok(sim: &mut Sim, c: ConnId, up: UpstreamId) {
     sim.backend_send(up, OK);
     sim.run_until_idle();
     assert_eq!(sim.take_received(c), OK_RELAYED, "{}", sim.trace());
@@ -110,7 +110,7 @@ fn chunked_upload_forwarded_verbatim() {
 }
 
 /// The `Received` lengths of `conn` in the trace, in order.
-pub(crate) fn client_reads(sim: &Sim, conn: ConnId) -> Vec<usize> {
+fn client_reads(sim: &Sim, conn: ConnId) -> Vec<usize> {
     let prefix = format!("conn={} Received len=", conn.0);
     sim.trace()
         .lines()
