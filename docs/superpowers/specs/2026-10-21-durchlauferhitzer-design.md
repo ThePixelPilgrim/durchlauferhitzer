@@ -5,99 +5,165 @@ Status: approved — **single source of truth** for what the product must do.
 
 ## How to read this spec
 
-- Every requirement has a stable ID (`FR-HTTP-07`, `NFR-RES-04`, `DRV-05`).
-  IDs are never renumbered or reused; a dropped requirement stays listed as
-  *withdrawn*. Plans, reviews, ledgers and commit messages cite IDs instead
-  of restating requirements. A new owner decision is written here first
-  (new ID or edited text), then cited.
-- Status tags: **[done]** implemented and tested (stages 1–9);
-  **[done in core; driver stage 4]** the core's half is done and the
-  epoll driver's is due (none left after stage 4); **[done; X stage N]**
-  done, with the follow-up X due in stage N (e.g. NFR-MAINT-04's CI
-  hardening); **[stage N]** due in that stage of the timeline;
-  **[open]** waits for an owner decision (see "Open decisions" at the
-  end). "since stage N" notes when a decision was taken.
+Every requirement has a stable ID and a status tag. Plans, reviews,
+ledgers and commit messages cite the ID instead of restating the
+requirement.
+
+- IDs look like `FR-HTTP-07`, `NFR-RES-04` and `DRV-05`.
+- IDs are never renumbered or reused.
+- A dropped requirement stays listed as *withdrawn*.
+- A new owner decision is written here first, then cited. It gets a new
+  ID or edited text.
 - Rationale is kept short and next to its requirement, in *italics*.
 - Exact enum names, module layout and buffer sizes are implementation
-  details unless a requirement names them; the driver contract lives in the
-  module docs of `core/src/core/contract.rs` (summarised as DRV-…).
+  details unless a requirement names them.
+- The driver contract lives in the module docs of
+  `core/src/core/contract.rs`. It is summarised as DRV-….
+
+The status tags mean:
+
+| Tag | Meaning |
+|---|---|
+| **[done]** | Implemented and tested (stages 1–9). |
+| **[done in core; driver stage 4]** | The core's half is done and the epoll driver's is due. None are left after stage 4. |
+| **[done; X stage N]** | Done, with the follow-up X due in stage N. Example: NFR-MAINT-04's CI hardening. |
+| **[stage N]** | Due in that stage of the timeline. |
+| **[open]** | Waits for an owner decision (see "Open decisions" at the end). |
+
+A note "since stage N" says when a decision was taken.
 
 ## Intent
 
-A barebones, security-first HTTP server for Linux that serves static files
-and forwards requests to backends (a minimal reverse proxy), routed by
-virtual host and path prefix. "Barebones" is the feature: little code, almost
-no dependencies, strict parsing, every case handled explicitly.
+durchlauferhitzer is a barebones, security-first HTTP server for Linux.
+It serves static files and forwards requests to backends (a minimal
+reverse proxy), routed by virtual host and path prefix.
 
-It will not face the internet until its owner trusts it. Trust comes from
-strict red/green TDD against a fully simulated environment (network, clock,
-file system, backends) in which clients and backends can misbehave in every
-way that matters.
+"Barebones" is the feature:
+
+- little code;
+- almost no dependencies;
+- strict parsing;
+- every case handled explicitly.
+
+It will not face the internet until its owner trusts it. Trust comes
+from strict red/green TDD against a fully simulated environment, in
+which clients and backends can misbehave in every way that matters. The
+simulation covers:
+
+- the network;
+- the clock;
+- the file system;
+- the backends.
 
 ## Goals
 
+The server routes requests by virtual host and path prefix, and its
+protocol logic is a deterministic core that never does real I/O.
+
 - Virtual hosts selected by the `Host` header (FR-ROUTE).
-- Per-host path-prefix routes, each either serving static files (FR-STATIC)
-  or proxying to one backend (FR-PROXY); optional `strip_prefix;` on proxy
-  routes (segment-wise, no regex).
-- A small hand-rolled config format with SCSS-like nested blocks (FR-CFG).
-- A sans-IO core: all protocol logic is deterministic state machines that
-  never touch a real socket, clock, or file. The same core runs under the
-  simulation in tests and under an `epoll` driver in production.
-- Pervasive enums with exhaustive matching, so the compiler points at every
-  place a new state, event, or error must be handled (NFR-MAINT).
-- Performance work comes later, but nothing wasteful now: no needless copies,
-  no unbounded buffers, no busy-waiting (NFR-RES, NFR-PERF).
+- Per-host path-prefix routes. Each route does one of two things:
+  - serve static files (FR-STATIC);
+  - proxy to one backend (FR-PROXY).
+
+  Proxy routes take an optional `strip_prefix;`. It works segment-wise,
+  with no regex.
+- A small hand-rolled config format with SCSS-like nested blocks
+  (FR-CFG).
+- A sans-IO core. All protocol logic is deterministic state machines
+  that never touch any of these:
+  - a real socket;
+  - a real clock;
+  - a real file.
+
+  The same core runs under the simulation in tests and under an `epoll`
+  driver in production.
+- Pervasive enums with exhaustive matching (NFR-MAINT). The compiler
+  then points at every place that must handle:
+  - a new state;
+  - a new event;
+  - a new error.
+- Performance work comes later, but nothing wasteful now (NFR-RES,
+  NFR-PERF):
+  - no needless copies;
+  - no unbounded buffers;
+  - no busy-waiting.
 
 ## Non-goals (for now)
 
-- HTTPS / TLS of any kind (later stage; would need a pure-Rust crypto
-  provider). *Owner direction 2026-11-10:* TLS termination is a separate
-  process with no disk access, launched by durchlauferhitzer and talking
-  to it only through one fixed channel; the handshake is a minimal TLS
-  1.3 profile of our own on top of the kernel's record layer (owner,
-  2026-11-10); the design is being brainstormed (open decision 5).
+These features are out of scope for now. Some of them come in a later
+stage.
+
+- HTTPS / TLS of any kind. It is a later stage and would need a
+  pure-Rust crypto provider. The design is being brainstormed (open
+  decision 5). *Owner direction 2026-11-10:*
+  - TLS termination is a separate process with no disk access.
+  - durchlauferhitzer launches it and talks to it only through one
+    fixed channel.
+  - The handshake is a minimal TLS 1.3 profile of our own on top of the
+    kernel's record layer (owner, 2026-11-10).
 - Forward-proxy mode (absolute-form request targets, `CONNECT`).
-- HTTP/2, HTTP/3, WebSockets / `Upgrade`.
-- Regex or rewrite rules, wildcard hosts, load balancing across backends.
-- Config hot-reload (restart instead; zero-downtime restart is stage 6).
-- Directory listings, compression. *(Range requests: a goal since the
-  owner decision 2026-11-07, FR-STATIC-19.)*
+- HTTP/2.
+- HTTP/3.
+- WebSockets / `Upgrade`.
+- Regex or rewrite rules.
+- Wildcard hosts.
+- Load balancing across backends.
+- Config hot-reload. Restart instead; zero-downtime restart is stage 6.
+- Directory listings and compression. *(Range requests: a goal since
+  the owner decision 2026-11-07, FR-STATIC-19.)*
 - Response caching (last stage, see timeline).
-- Minimum transfer rates (slow-but-moving peers are bounded by caps and
-  idle timeouts only).
-- io_uring (rejected: bypasses seccomp; poor kernel security track record).
-  The driver interface is completion-shaped so it could be added later.
+- Minimum transfer rates. Slow-but-moving peers are bounded by caps and
+  idle timeouts only.
+- io_uring. It was rejected because it bypasses seccomp and has a poor
+  kernel security track record. The driver interface is
+  completion-shaped so it could be added later.
 
 ## Anti-goals
 
 These would make the project a failure even if everything "works":
 
-- Any C code in the repo or the product's dependency tree (the system libc,
-  glibc or musl, and the toolchain's `libgcc_s` are the sole exception) —
-  NFR-MAINT-01.
+- Any C code in the repo or the product's dependency tree —
+  NFR-MAINT-01. The sole exception is the system libc (glibc or musl)
+  and the toolchain's `libgcc_s`.
 - A dependency tree that grows for convenience — NFR-MAINT-03.
-- Being usable as an open proxy: the destination of a proxied request is
-  only ever a backend named in the config — NFR-SEC-08.
-- Escaping a static root by any means (`..`, percent-encoding, symlinks) —
-  NFR-SEC-04.
-- Request smuggling: any ambiguity in message framing is a hard rejection —
-  NFR-SEC-01.
-- A slow client, slow disk, or slow backend stalling other connections —
-  NFR-SEC-11.
+- Being usable as an open proxy — NFR-SEC-08. The destination of a
+  proxied request is only ever a backend named in the config.
+- Escaping a static root by any means — NFR-SEC-04. That includes:
+  - `..`;
+  - percent-encoding;
+  - symlinks.
+- Request smuggling — NFR-SEC-01. Any ambiguity in message framing is a
+  hard rejection.
+- Any of these stalling other connections — NFR-SEC-11:
+  - a slow client;
+  - a slow disk;
+  - a slow backend.
 
 ## Hard constraints (from the owner)
 
-Each is a requirement below: Rust only, the system libc the only C (NFR-MAINT-01/02);
-minimal crates, `libc` the only planned product dependency (NFR-MAINT-03/04);
-strict red/green TDD (NFR-MAINT-09); everything tested on a simulated
-network/clock/file system/backends with fault injection (NFR-TEST-01);
-`epoll` for sockets, `sendfile` for static files (DRV-11, DRV-08); core as
-explicit state machines, not `async` (NFR-MAINT-08); exhaustive enums
-enforced by lints (NFR-MAINT-06); `strip_prefix` is the option name
-(FR-CFG-17).
+The owner set these constraints, and each is a requirement below.
+
+- **Rust only.** The system libc is the only C (NFR-MAINT-01/02).
+- **Minimal crates.** `libc` is the only planned product dependency
+  (NFR-MAINT-03/04).
+- **Strict red/green TDD** (NFR-MAINT-09).
+- **Simulated testing.** Everything is tested with fault injection
+  (NFR-TEST-01) on simulated:
+  - network;
+  - clock;
+  - file system;
+  - backends.
+- **`epoll` for sockets** (DRV-11).
+- **`sendfile` for static files** (DRV-08).
+- **Explicit state machines.** The core is written as explicit state
+  machines, not `async` (NFR-MAINT-08).
+- **Exhaustive enums**, enforced by lints (NFR-MAINT-06).
+- **`strip_prefix`** is the option name (FR-CFG-17).
 
 ## Architecture
+
+A core without I/O turns events into actions. A driver does the I/O:
+the simulation driver in tests, the `epoll` driver in production.
 
 ```
           ┌──────────────── core (no I/O, no unsafe, no deps) ───────────────┐
@@ -110,44 +176,84 @@ enforced by lints (NFR-MAINT-06); `strip_prefix` is the option name
 
 ### The core
 
-- Input: `Event` enum, e.g. client accepted, bytes received, peer closed,
-  write completed, backend connected / failed / received, file opened /
-  chunk ready / file error, timer fired. Every `handle` call carries the
-  current monotonic time.
-- Output: `Action` enum, e.g. set interest, shut down writing, close, open a
-  backend connection, open a file, `readahead` a chunk, close a file, emit a
-  log entry. Bytes are not carried in actions: the driver reads into and
-  writes from core-owned buffers, and `sendfile`s the file segment the core
-  exposes (DRV-04, DRV-08).
-- Per-connection state is an enum whose variants carry only data valid in
-  that state (e.g. only a forwarding state owns an upstream id), each with
-  its own deadline. Each transition consumes the old state and returns the
-  new one plus actions.
-- Connections, files and upstreams are referred to by opaque ids:
-  connection ids are allocated by the driver; file ids and upstream ids by
-  the core (sequentially from 1, never reused); backends by index into
-  `Core::backends()`, static roots by index into `Core::static_roots()`.
-  The core never holds OS handles.
-- Single-threaded, no locks. Config is immutable after load.
-- Lints: NFR-ROB-01 (no panics), NFR-MAINT-05 (`unsafe`), NFR-MAINT-06
-  (exhaustive enums). Tests may use `unwrap`/`expect`/`panic!`/indexing
-  (`clippy.toml` `allow-*-in-tests`).
+The core is single-threaded and never holds OS handles. Each call takes
+an `Event` and returns `Action`s.
+
+- **Input** is the `Event` enum. Every `handle` call carries the
+  current monotonic time. Examples of events:
+  - client accepted;
+  - bytes received;
+  - peer closed;
+  - write completed;
+  - backend connected;
+  - backend failed;
+  - backend received;
+  - file opened;
+  - chunk ready;
+  - file error;
+  - timer fired.
+- **Output** is the `Action` enum. Examples of actions:
+  - set interest;
+  - shut down writing;
+  - close;
+  - open a backend connection;
+  - open a file;
+  - `readahead` a chunk;
+  - close a file;
+  - emit a log entry.
+- **Bytes are not carried in actions** (DRV-04, DRV-08). The driver
+  reads into and writes from core-owned buffers. It `sendfile`s the
+  file segment the core exposes.
+- **Per-connection state** is an enum whose variants carry only data
+  valid in that state. For example, only a forwarding state owns an
+  upstream id.
+  - Each state has its own deadline.
+  - Each transition consumes the old state and returns the new one plus
+    actions.
+- **Opaque ids.** Connections, files and upstreams are referred to by
+  opaque ids. The core never holds OS handles.
+  - Connection ids are allocated by the driver.
+  - File ids and upstream ids are allocated by the core, sequentially
+    from 1, never reused.
+  - Backends are referred to by index into `Core::backends()`.
+  - Static roots are referred to by index into `Core::static_roots()`.
+- **Single-threaded, no locks.** Config is immutable after load.
+- **Lints.** These requirements are enforced by lints:
+  - NFR-ROB-01 (no panics);
+  - NFR-MAINT-05 (`unsafe`);
+  - NFR-MAINT-06 (exhaustive enums).
+
+  Tests may use the following, through `clippy.toml`
+  `allow-*-in-tests`:
+  - `unwrap`;
+  - `expect`;
+  - `panic!`;
+  - indexing.
 
 ### Drivers
 
+All threading and multiplexing lives in the driver. There are two
+drivers, one for tests and one for production.
+
 - **Simulation driver** (tests, `sim/`): see NFR-TEST.
-- **epoll driver** (production, stage 4): non-blocking sockets on `epoll`;
-  timers via the `epoll_wait` timeout from the core's next deadline;
-  monotonic clock. Static files: a small worker pool runs the opens
-  (`openat2` + `fstat`) and `readahead` for the next chunk (the places that
-  may block on disk) and reports completion through an `eventfd`; answers
-  may arrive in any order. The loop then does a non-blocking `sendfile` of
-  that chunk, and parks the connection on `EPOLLOUT` if the client is slow.
-  A slow client costs a parked connection, never a thread. Requirements on
-  every driver: DRV-…; the full contract is in the `core` module docs.
-- All threading and multiplexing lives in the driver. Multi-core later =
-  N driver threads, each with its own `epoll` and core, sharing the port via
-  `SO_REUSEPORT` (NFR-PERF-07).
+- **epoll driver** (production, stage 4). A slow client costs a parked
+  connection, never a thread.
+  - Sockets are non-blocking, on `epoll`.
+  - Timers use the `epoll_wait` timeout, taken from the core's next
+    deadline.
+  - The clock is monotonic.
+  - Static files: a small worker pool runs the opens (`openat2` +
+    `fstat`) and `readahead` for the next chunk. These are the places
+    that may block on disk.
+  - The pool reports completion through an `eventfd`. Answers may
+    arrive in any order.
+  - The loop then does a non-blocking `sendfile` of that chunk. It
+    parks the connection on `EPOLLOUT` if the client is slow.
+  - Requirements on every driver: DRV-…. The full contract is in the
+    `core` module docs.
+- **Multi-core, later**, means N driver threads (NFR-PERF-07). Each has
+  its own `epoll` and core, and they share the port via
+  `SO_REUSEPORT`.
 
 ---
 
@@ -3292,136 +3398,257 @@ stage 4 (its tests are in `driver/`).
 
 ## Timeline
 
+Stages 1 to 9 are done and stage 10 is planned. Stages 11 and 12 are
+for later.
+
 Each stage is a separately planned and reviewed chunk that leaves the
 project working and tested.
 
-1. **Foundations** [done] — workspace, lints, config parser + validation,
-   core `Event`/`Action`/state enums, simulation harness (net + clock),
-   strict HTTP/1.1 request parsing, vhost + path routing answering
-   404/400/4xx with fixed responses, limits and timeouts. No real I/O.
-2. **Static files** [done] — simulated file system, path decoding and
-   validation, open/readahead/sendfile actions, index.html, content types,
-   HEAD, mid-transfer failures.
-3. **Reverse proxy** [done] — backend connections in the simulation,
-   header handling, `strip_prefix`, body streaming with backpressure,
-   502/504, misbehaving backends.
-4. **epoll driver + binary** [done] — the real driver, worker pool, `eventfd`,
-   `sendfile`, `openat2`, logging output, CLI, privilege drop, systemd
-   socket activation, SIGTERM drain, a few smoke tests over real loopback
-   sockets. First runnable release.
-5. **Containment** [done] — Landlock (restrict file access to static roots),
-   seccomp (allow-list of syscalls), both best effort unless required by
-   the config (FR-PROC-06, FR-CFG-25); long randomized simulation runs and
-   fuzzing, nightly and on demand (NFR-TEST-08, NFR-SEC-13); IPv6 per-IP
-   grouping by a settable prefix and a fair refused pool (FR-CONN-13).
-6. **Zero-downtime restart** [done] — FR-PROC-07 (no connection lost; SIGHUP
-   restart drain, `restart_timeout`, `--ready-fd`, `SO_REUSEPORT`, an
-   OpenRC script), musl builds on Alpine (NFR-PORT-02).
-7. **Efficiency** [done] — nightly benchmarks charted on the `benchmarks`
-   branch (NFR-PERF-08), conditional requests (FR-STATIC-18), `MSG_MORE`,
-   the deadline index, backend connection pooling with a silence check
-   and the safe retry (FR-PROXY-02), eager I/O and a 32 KiB upstream
-   buffer, the `tc netem` measurements, the NFR-PERF targets; `splice`
-   and N threads dropped by measurement.
-8. **Backend-directed file serving** [done] — a backend's `X-Sendfile` or
+1. **Foundations** [done]. No real I/O. The stage delivered:
+   - the workspace;
+   - lints;
+   - the config parser and validation;
+   - the core `Event`, `Action` and state enums;
+   - the simulation harness (network and clock);
+   - strict HTTP/1.1 request parsing;
+   - virtual-host and path routing, answering 404/400/4xx with fixed
+     responses;
+   - limits and timeouts.
+2. **Static files** [done]. The stage delivered:
+   - the simulated file system;
+   - path decoding and validation;
+   - open, readahead and sendfile actions;
+   - index.html;
+   - content types;
+   - HEAD;
+   - mid-transfer failures.
+3. **Reverse proxy** [done]. The stage delivered:
+   - backend connections in the simulation;
+   - header handling;
+   - `strip_prefix`;
+   - body streaming with backpressure;
+   - 502/504;
+   - misbehaving backends.
+4. **epoll driver and binary** [done]. This was the first runnable
+   release. The stage delivered:
+   - the real driver;
+   - the worker pool;
+   - `eventfd`;
+   - `sendfile`;
+   - `openat2`;
+   - logging output;
+   - the CLI;
+   - privilege drop;
+   - systemd socket activation;
+   - SIGTERM drain;
+   - a few smoke tests over real loopback sockets.
+5. **Containment** [done]. The stage delivered:
+   - Landlock, which restricts file access to static roots;
+   - seccomp, an allow-list of syscalls;
+   - long randomized simulation runs and fuzzing, nightly and on demand
+     (NFR-TEST-08, NFR-SEC-13);
+   - IPv6 per-IP grouping by a settable prefix and a fair refused pool
+     (FR-CONN-13).
+
+   Landlock and seccomp are both best effort unless required by the
+   config (FR-PROC-06, FR-CFG-25).
+6. **Zero-downtime restart** [done]. No connection is lost (FR-PROC-07).
+   The stage delivered:
+   - SIGHUP restart drain;
+   - `restart_timeout`;
+   - `--ready-fd`;
+   - `SO_REUSEPORT`;
+   - an OpenRC script;
+   - musl builds on Alpine (NFR-PORT-02).
+7. **Efficiency** [done]. The stage delivered:
+   - nightly benchmarks charted on the `benchmarks` branch
+     (NFR-PERF-08);
+   - conditional requests (FR-STATIC-18);
+   - `MSG_MORE`;
+   - the deadline index;
+   - backend connection pooling with a silence check and the safe retry
+     (FR-PROXY-02);
+   - eager I/O and a 32 KiB upstream buffer;
+   - the `tc netem` measurements;
+   - the NFR-PERF targets.
+
+   `splice` and N threads were dropped by measurement.
+8. **Backend-directed file serving** [done]. A backend's `X-Sendfile` or
    `X-Accel-Redirect` asks the proxy to send a file from the route's
-   `internal_files` folder (FR-PROXY-32, FR-CFG-26), with Rack's hints;
-   single-range requests for static and backend files (FR-STATIC-19).
-   Useful when the files are on the proxy's machine (same host or shared
-   storage).
-9. **Guarantee hardening** [done] — from the qmail review
-   (`docs/superpowers/reviews/2026-11-09-qmail-lessons.md`): the kernel
-   memory backstop (NFR-RES-09), `--check` warnings and the guaranteed
-   install (FR-PROC-08), the `GET`/`HEAD` body rule (FR-PROXY-01) and
-   the `required`/`kill` defaults (FR-CFG-25), both decided 2026-11-09.
+   `internal_files` folder (FR-PROXY-32, FR-CFG-26).
+   - Rack's hints are supported.
+   - Single-range requests work for static and backend files
+     (FR-STATIC-19).
+
+   This is useful when the files are on the proxy's machine (same host
+   or shared storage).
+9. **Guarantee hardening** [done]. The work comes from the qmail review
+   (`docs/superpowers/reviews/2026-11-09-qmail-lessons.md`). The stage
+   delivered:
+   - the kernel memory backstop (NFR-RES-09);
+   - `--check` warnings and the guaranteed install (FR-PROC-08);
+   - the `GET`/`HEAD` body rule (FR-PROXY-01), decided 2026-11-09;
+   - the `required`/`kill` defaults (FR-CFG-25), decided 2026-11-09.
+
    The framing-variant ledger (NFR-SEC-14) is already in force. Plan:
    `docs/superpowers/plans/2026-11-09-stage-9-guarantee-hardening.md`.
-10. **Carry-forwards** [stage 10] — from the stage 9 record and the qmail
-    review: the `pressure` and `newest libc` nightly jobs (NFR-TEST-08),
-    `user <uid>:<gid>` (FR-PROC-03), product size beside the benchmarks
-    (NFR-MAINT-12), OpenRC supervision (FR-PROC-07a), the
-    `sim/tests/proxy/bodies.rs` split (NFR-MAINT-10). Plan:
-    `docs/superpowers/plans/2026-11-10-stage-10-carry-forwards.md`.
-11. **Later, maybe** — *Hung-disk handling (recorded for a better future
-   solution):* today a hung `openat2` keeps its connection slot until the
-   disk answers (FR-CONN-11), which bounds the damage at `max_connections`
-   but lets one dead mount occupy slots. A driver-side timeout that answers
-   `FileFailed` early was rejected: the syscall cannot be cancelled, so
-   worker threads would pile up instead of slots. Candidates: a per-root
-   health breaker (after N slow or hung opens, mark the root unhealthy and
-   answer its requests 503 at once, without opening, until a probe open
-   succeeds); cancellable opens via io_uring `OPENAT` with linked timeouts
-   (conflicts with the seccomp decision, revisit with the io_uring
-   driver). HTTPS with a pure-Rust crypto provider, io_uring
-   driver, file-descriptor passing from same-host backends (`SCM_RIGHTS`).
-12. **Caching, after everything else** — a small Varnish-style response
-    cache in front of proxy routes, with far fewer features than Varnish.
+10. **Carry-forwards** [stage 10]. The work comes from the stage 9
+    record and the qmail review. Plan:
+    `docs/superpowers/plans/2026-11-10-stage-10-carry-forwards.md`. The
+    stage covers:
+    - the `pressure` and `newest libc` nightly jobs (NFR-TEST-08);
+    - `user <uid>:<gid>` (FR-PROC-03);
+    - product size beside the benchmarks (NFR-MAINT-12);
+    - OpenRC supervision (FR-PROC-07a);
+    - the `sim/tests/proxy/bodies.rs` split (NFR-MAINT-10).
+11. **Later, maybe**. The candidates are:
+    - HTTPS with a pure-Rust crypto provider;
+    - an io_uring driver;
+    - file-descriptor passing from same-host backends (`SCM_RIGHTS`);
+    - hung-disk handling, recorded for a better future solution.
+
+    *Hung-disk handling:* today a hung `openat2` keeps its connection
+    slot until the disk answers (FR-CONN-11). That bounds the damage at
+    `max_connections`, but lets one dead mount occupy slots.
+
+    A driver-side timeout that answers `FileFailed` early was rejected.
+    The syscall cannot be cancelled, so worker threads would pile up
+    instead of slots.
+
+    The candidate solutions are:
+    - A per-root health breaker. After N slow or hung opens, it marks
+      the root unhealthy. It then answers the root's requests 503 at
+      once, without opening, until a probe open succeeds.
+    - Cancellable opens via io_uring `OPENAT` with linked timeouts. This
+      conflicts with the seccomp decision; revisit it with the io_uring
+      driver.
+12. **Caching, after everything else**. A small Varnish-style response
+    cache in front of proxy routes, with far fewer features than
+    Varnish.
 
 ## Left to the builder
 
-- Exact default values for limits and timeouts not fixed above
-  (conservative, documented in the example config).
-- Module layout within crates, names of enum variants, buffer sizes not
-  fixed above (e.g. upstream buffers, subject to NFR-RES-04).
-- Edge-triggered vs level-triggered `epoll`, readahead chunk size, worker
-  pool size.
+The builder chooses these details where the spec does not fix them:
+
+- Exact default values for limits and timeouts not fixed above. They
+  are conservative and documented in the example config.
+- Module layout within crates.
+- Names of enum variants.
+- Buffer sizes not fixed above, e.g. upstream buffers, subject to
+  NFR-RES-04.
+- Edge-triggered vs level-triggered `epoll`.
+- Readahead chunk size.
+- Worker pool size.
 
 ## Open decisions (owner)
 
-Each blocks or shapes the requirement named; until decided, the
-recommendation (if any) is not implemented.
+Items 2 and 5 are still open; item 5 is partly decided. Items 1, 3 and
+4 are decided.
 
-1. ~~FR-CFG-21 — upper bounds for `max_connections`, `max_request_line` and
-   the other limits~~ — **decided 2026-10-27**: per-key caps plus a
+Each item blocks or shapes the requirement named. Until it is decided,
+the recommendation (if any) is not implemented.
+
+1. ~~FR-CFG-21 — upper bounds for `max_connections`, `max_request_line`
+   and the other limits~~ — **decided 2026-10-27**: per-key caps plus a
    `memory_limit` budget, see FR-CFG-21 and NFR-RES-01.
-2. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
-    lengths, IPv6 spellings).
+2. FR-CFG-12 — stricter host-name checks:
+   - `-a-`;
+   - `999.999.1.1`;
+   - label lengths;
+   - IPv6 spellings.
 3. ~~FR-PROXY-01 — a body on `GET` or `HEAD` toward a backend (the TE.0
    row of NFR-SEC-14)~~ — **decided 2026-11-09**: 400 on proxy routes,
    static routes keep their 413; see FR-PROXY-01, stage 9.
 4. ~~FR-CFG-25 — the `containment` defaults~~ — **decided 2026-11-09**:
    `required`, `required`, `kill` are the defaults; see FR-CFG-25 and
    FR-PROC-08, stage 9.
-5. TLS termination as a separate process (owner direction 2026-11-10;
-   brainstorm in progress, design document to follow). **Decided so far
-   (owner, 2026-11-10):** (a) three guarantees must hold even with the
-   handshake process fully compromised: no file access, no private key,
-   no other client's plaintext; (b) because a stock TLS library derives
-   the traffic secrets in the process that runs the handshake, which
-   gives up (a)'s third guarantee, the handshake is a minimal TLS 1.3
-   server profile of our own, in its own crate: handshake only (the
-   ClientHello, the server flight, the client's Finished, the handshake
-   records, alerts, key update derivation), TLS 1.3 only, no client
-   certificates, no resumption, no 0-RTT; the kernel's TLS record layer
-   (kTLS) carries application data, so the server owns the socket and
-   keeps `sendfile`; mirroring another crate's interface is a
-   nice-to-have behind getting it right, safe and fast. **Decided
-   2026-11-12 (owner), after the primitives survey
+5. TLS termination as a separate process. Decisions (a) to (g) below
+   are taken; the points under "Still open" are not. This follows the
+   owner direction 2026-11-10. The brainstorm is in progress, and a
+   design document will follow.
+
+   **Decided so far (owner, 2026-11-10):**
+
+   - **(a)** Three guarantees must hold even with the handshake process
+     fully compromised:
+     - no file access;
+     - no private key;
+     - no other client's plaintext.
+   - **(b)** The handshake is a minimal TLS 1.3 server profile of our
+     own, in its own crate.
+     - The reason: a stock TLS library derives the traffic secrets in
+       the process that runs the handshake. That gives up (a)'s third
+       guarantee.
+     - Handshake only. That covers:
+       - the ClientHello;
+       - the server flight;
+       - the client's Finished;
+       - the handshake records;
+       - alerts;
+       - key update derivation.
+     - TLS 1.3 only.
+     - No client certificates.
+     - No resumption.
+     - No 0-RTT.
+     - The kernel's TLS record layer (kTLS) carries application data.
+       So the server owns the socket and keeps `sendfile`.
+     - Mirroring another crate's interface is a nice-to-have behind
+       getting it right, safe and fast.
+
+   **Decided 2026-11-12 (owner), after the primitives survey
    (`docs/superpowers/reviews/2026-11-10-tls-primitives-survey.md`):**
-   (c) the primitives are not written here; they come from the
-   RustCrypto family: `sha2`, `hmac`, `hkdf`, `chacha20poly1305`,
-   `x25519-dalek` over `curve25519-dalek` built on the Coq-extracted
-   `fiat-crypto` field arithmetic (the `fiat` backend, which also drops
-   the proc macro), and `p256` with `ecdsa` for P-256 signing with
-   RFC 6979 deterministic nonces; versions pinned, default features
-   off, the tree vendored into the repo and read once, `cargo vet` with
-   in-repo audit records (no public audit covers the current versions),
-   RUSTSEC advisories checked in the gate; libcrux is revisited when it
-   leaves 0.0.x. (d) One cipher suite to start, ChaCha20-Poly1305; a
-   second suite (AES-GCM) only on a measured need. (e) Inline `asm!`
-   allowed as NFR-MAINT-01 now says. (f) Requirements for the design
-   document: the crates' correctness is pinned here by known-answer
-   and adversarial vectors (RFC 8448 handshake traces, RFC 6979 A.2.5,
-   Google's Wycheproof sets for every primitive, X25519's added by us
-   since its crate does not ship them); the signer's signing path runs
-   under a secret-tracking constant-time check of the built binary in
-   the nightly on both architectures, since no proof or source review
-   covers the compiled binary's side channels. (g) *Controller's call,
-   marked as such:* the handshake crate is written in the Rust subset
-   the Rust-to-Lean translators (Aeneas, hax) accept (no trait objects,
-   plain generics, no interior mutability), so a machine-checked proof
-   of its state machine and key schedule can follow later without a
-   rewrite (sources in the survey's addendum of 2026-11-12). Still open: the split of the crate across the terminator
-   and the signer and the channel between the three processes; the
-   kernel floor and what a kernel without kTLS gets; uids and
-   namespaces of the children; the groups offered beyond X25519.
+
+   - **(c)** The primitives are not written here. They come from the
+     RustCrypto family:
+     - `sha2`;
+     - `hmac`;
+     - `hkdf`;
+     - `chacha20poly1305`;
+     - `x25519-dalek` over `curve25519-dalek`, built on the
+       Coq-extracted `fiat-crypto` field arithmetic. This is the `fiat`
+       backend, which also drops the proc macro.
+     - `p256` with `ecdsa` for P-256 signing with RFC 6979
+       deterministic nonces.
+
+     How the crates are handled:
+     - versions pinned;
+     - default features off;
+     - the tree vendored into the repo and read once;
+     - `cargo vet` with in-repo audit records, because no public audit
+       covers the current versions;
+     - RUSTSEC advisories checked in the gate.
+
+     libcrux is revisited when it leaves 0.0.x.
+   - **(d)** One cipher suite to start, ChaCha20-Poly1305. A second
+     suite (AES-GCM) only on a measured need.
+   - **(e)** Inline `asm!` allowed as NFR-MAINT-01 now says.
+   - **(f)** Requirements for the design document:
+     - The crates' correctness is pinned here by known-answer and
+       adversarial vectors:
+       - RFC 8448 handshake traces;
+       - RFC 6979 A.2.5;
+       - Google's Wycheproof sets for every primitive. We add X25519's
+         ourselves, since its crate does not ship them.
+     - The signer's signing path runs under a secret-tracking
+       constant-time check of the built binary in the nightly on both
+       architectures. This is needed because no proof or source review
+       covers the compiled binary's side channels.
+   - **(g)** *Controller's call, marked as such:* the handshake crate is
+     written in the Rust subset the Rust-to-Lean translators (Aeneas,
+     hax) accept. That subset means:
+     - no trait objects;
+     - plain generics;
+     - no interior mutability.
+
+     So a machine-checked proof of its state machine and key schedule
+     can follow later without a rewrite. Sources are in the survey's
+     addendum of 2026-11-12.
+
+   **Still open:**
+
+   - the split of the crate across the terminator and the signer;
+   - the channel between the three processes;
+   - the kernel floor;
+   - what a kernel without kTLS gets;
+   - uids and namespaces of the children;
+   - the groups offered beyond X25519.
