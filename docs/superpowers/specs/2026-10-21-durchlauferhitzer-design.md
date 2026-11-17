@@ -5,9 +5,8 @@ Status: approved — **single source of truth** for what the product must do.
 
 ## How to read this spec
 
-Every requirement has a stable ID and a status tag. Plans, reviews,
-ledgers and commit messages cite the ID instead of restating the
-requirement.
+Every requirement has a stable ID. Plans, reviews, ledgers and commit
+messages cite the ID instead of restating the requirement.
 
 - IDs look like `FR-HTTP-07`, `NFR-RES-04` and `DRV-05`.
 - IDs are never renumbered or reused.
@@ -20,7 +19,7 @@ requirement.
 - The driver contract lives in the module docs of
   `core/src/core/contract.rs`. It is summarised as DRV-….
 
-The status tags mean:
+The common status tags are below; the table is not complete.
 
 | Tag | Meaning |
 |---|---|
@@ -48,12 +47,8 @@ reverse proxy), routed by virtual host and path prefix.
 It will not face the internet until its owner trusts it. Trust comes
 from strict red/green TDD against a fully simulated environment, in
 which clients and backends can misbehave in every way that matters. The
-simulation covers:
-
-- the network;
-- the clock;
-- the file system;
-- the backends.
+simulation covers the network, the clock, the file system and the
+backends.
 
 ## Goals
 
@@ -70,18 +65,11 @@ protocol logic is a deterministic core that never does real I/O.
 - A small hand-rolled config format with SCSS-like nested blocks
   (FR-CFG).
 - A sans-IO core. All protocol logic is deterministic state machines
-  that never touch any of these:
-  - a real socket;
-  - a real clock;
-  - a real file.
-
-  The same core runs under the simulation in tests and under an `epoll`
+  that never touch a real socket, clock or file. The same core runs under the simulation in tests and under an `epoll`
   driver in production.
 - Pervasive enums with exhaustive matching (NFR-MAINT). The compiler
-  then points at every place that must handle:
-  - a new state;
-  - a new event;
-  - a new error.
+  then points at every place that must handle a new state, event or
+  error.
 - Performance work comes later, but nothing wasteful now (NFR-RES,
   NFR-PERF):
   - no needless copies;
@@ -90,8 +78,7 @@ protocol logic is a deterministic core that never does real I/O.
 
 ## Non-goals (for now)
 
-These features are out of scope for now. Some of them come in a later
-stage.
+These features are out of scope for now.
 
 - HTTPS / TLS of any kind. It is a later stage and would need a
   pure-Rust crypto provider. The design is being brainstormed (open
@@ -128,31 +115,28 @@ These would make the project a failure even if everything "works":
 - A dependency tree that grows for convenience — NFR-MAINT-03.
 - Being usable as an open proxy — NFR-SEC-08. The destination of a
   proxied request is only ever a backend named in the config.
-- Escaping a static root by any means — NFR-SEC-04. That includes:
-  - `..`;
-  - percent-encoding;
-  - symlinks.
+- Escaping a static root by any means — NFR-SEC-04. That includes
+  `..`, percent-encoding and symlinks.
 - Request smuggling — NFR-SEC-01. Any ambiguity in message framing is a
   hard rejection.
-- Any of these stalling other connections — NFR-SEC-11:
-  - a slow client;
-  - a slow disk;
-  - a slow backend.
+- A slow client, slow disk or slow backend stalling other connections
+  — NFR-SEC-11.
 
 ## Hard constraints (from the owner)
 
 The owner set these constraints, and each is a requirement below.
 
-- **Rust only.** The system libc is the only C (NFR-MAINT-01/02).
-- **Minimal crates.** `libc` is the only planned product dependency
-  (NFR-MAINT-03/04).
+- **Rust only** (NFR-MAINT-01/02). No C in the repo or in the
+  product's dependency tree. The system libc (glibc or musl) and the
+  toolchain's `libgcc_s` are the only exception. Inline `asm!` is
+  allowed narrowly, for constant-time selection and secret wiping only
+  (owner decision 2026-11-12).
+- **Minimal crates** (NFR-MAINT-03/04). The planned product
+  dependencies are `libc` (driver only) and, with the TLS stage, the
+  cryptographic primitives named in open decision 5.
 - **Strict red/green TDD** (NFR-MAINT-09).
-- **Simulated testing.** Everything is tested with fault injection
-  (NFR-TEST-01) on simulated:
-  - network;
-  - clock;
-  - file system;
-  - backends.
+- **Simulated testing.** Everything is tested on a simulated network,
+  clock, file system and backends, with fault injection (NFR-TEST-01).
 - **`epoll` for sockets** (DRV-11).
 - **`sendfile` for static files** (DRV-08).
 - **Explicit state machines.** The core is written as explicit state
@@ -180,27 +164,12 @@ The core is single-threaded and never holds OS handles. Each call takes
 an `Event` and returns `Action`s.
 
 - **Input** is the `Event` enum. Every `handle` call carries the
-  current monotonic time. Examples of events:
-  - client accepted;
-  - bytes received;
-  - peer closed;
-  - write completed;
-  - backend connected;
-  - backend failed;
-  - backend received;
-  - file opened;
-  - chunk ready;
-  - file error;
-  - timer fired.
-- **Output** is the `Action` enum. Examples of actions:
-  - set interest;
-  - shut down writing;
-  - close;
-  - open a backend connection;
-  - open a file;
-  - `readahead` a chunk;
-  - close a file;
-  - emit a log entry.
+  current monotonic time. Example events: client accepted, bytes
+  received, peer closed, write completed, backend connected / failed /
+  received, file opened / chunk ready / file error, timer fired.
+- **Output** is the `Action` enum. Example actions: set interest, shut
+  down writing, close, open a backend connection, open a file,
+  `readahead` a chunk, close a file, emit a log entry.
 - **Bytes are not carried in actions** (DRV-04, DRV-08). The driver
   reads into and writes from core-owned buffers. It `sendfile`s the
   file segment the core exposes.
@@ -223,12 +192,8 @@ an `Event` and returns `Action`s.
   - NFR-MAINT-05 (`unsafe`);
   - NFR-MAINT-06 (exhaustive enums).
 
-  Tests may use the following, through `clippy.toml`
-  `allow-*-in-tests`:
-  - `unwrap`;
-  - `expect`;
-  - `panic!`;
-  - indexing.
+  Tests may use `unwrap`, `expect`, `panic!` and indexing (`clippy.toml`
+  `allow-*-in-tests`).
 
 ### Drivers
 
@@ -3405,8 +3370,7 @@ Each stage is a separately planned and reviewed chunk that leaves the
 project working and tested.
 
 1. **Foundations** [done]. No real I/O. The stage delivered:
-   - the workspace;
-   - lints;
+   - the workspace and lints;
    - the config parser and validation;
    - the core `Event`, `Action` and state enums;
    - the simulation harness (network and clock);
@@ -3418,9 +3382,7 @@ project working and tested.
    - the simulated file system;
    - path decoding and validation;
    - open, readahead and sendfile actions;
-   - index.html;
-   - content types;
-   - HEAD;
+   - index.html, content types and HEAD;
    - mid-transfer failures.
 3. **Reverse proxy** [done]. The stage delivered:
    - backend connections in the simulation;
@@ -3431,13 +3393,9 @@ project working and tested.
    - misbehaving backends.
 4. **epoll driver and binary** [done]. This was the first runnable
    release. The stage delivered:
-   - the real driver;
-   - the worker pool;
-   - `eventfd`;
-   - `sendfile`;
-   - `openat2`;
-   - logging output;
-   - the CLI;
+   - the real driver, with the worker pool, `eventfd`, `sendfile` and
+     `openat2`;
+   - logging output and the CLI;
    - privilege drop;
    - systemd socket activation;
    - SIGTERM drain;
@@ -3454,10 +3412,8 @@ project working and tested.
    config (FR-PROC-06, FR-CFG-25).
 6. **Zero-downtime restart** [done]. No connection is lost (FR-PROC-07).
    The stage delivered:
-   - SIGHUP restart drain;
-   - `restart_timeout`;
-   - `--ready-fd`;
-   - `SO_REUSEPORT`;
+   - SIGHUP restart drain, with `restart_timeout`;
+   - `--ready-fd` and `SO_REUSEPORT`;
    - an OpenRC script;
    - musl builds on Alpine (NFR-PORT-02).
 7. **Efficiency** [done]. The stage delivered:
@@ -3475,10 +3431,9 @@ project working and tested.
    `splice` and N threads were dropped by measurement.
 8. **Backend-directed file serving** [done]. A backend's `X-Sendfile` or
    `X-Accel-Redirect` asks the proxy to send a file from the route's
-   `internal_files` folder (FR-PROXY-32, FR-CFG-26).
-   - Rack's hints are supported.
-   - Single-range requests work for static and backend files
-     (FR-STATIC-19).
+   `internal_files` folder (FR-PROXY-32, FR-CFG-26), with Rack's hints.
+   The stage also brought single-range requests for static and backend
+   files (FR-STATIC-19).
 
    This is useful when the files are on the proxy's machine (same host
    or shared storage).
@@ -3551,19 +3506,17 @@ the recommendation (if any) is not implemented.
 1. ~~FR-CFG-21 — upper bounds for `max_connections`, `max_request_line`
    and the other limits~~ — **decided 2026-10-27**: per-key caps plus a
    `memory_limit` budget, see FR-CFG-21 and NFR-RES-01.
-2. FR-CFG-12 — stricter host-name checks:
-   - `-a-`;
-   - `999.999.1.1`;
-   - label lengths;
-   - IPv6 spellings.
+2. FR-CFG-12 — stricter host-name checks (`-a-`, `999.999.1.1`, label
+   lengths, IPv6 spellings).
 3. ~~FR-PROXY-01 — a body on `GET` or `HEAD` toward a backend (the TE.0
    row of NFR-SEC-14)~~ — **decided 2026-11-09**: 400 on proxy routes,
    static routes keep their 413; see FR-PROXY-01, stage 9.
 4. ~~FR-CFG-25 — the `containment` defaults~~ — **decided 2026-11-09**:
    `required`, `required`, `kill` are the defaults; see FR-CFG-25 and
    FR-PROC-08, stage 9.
-5. TLS termination as a separate process. Decisions (a) to (g) below
-   are taken; the points under "Still open" are not. This follows the
+5. TLS termination as a separate process. Decisions (a) to (f) are
+   the owner's; (g) is a controller's call. The points under "Still
+   open" are not decided. This follows the
    owner direction 2026-11-10. The brainstorm is in progress, and a
    design document will follow.
 
@@ -3579,17 +3532,11 @@ the recommendation (if any) is not implemented.
      - The reason: a stock TLS library derives the traffic secrets in
        the process that runs the handshake. That gives up (a)'s third
        guarantee.
-     - Handshake only. That covers:
-       - the ClientHello;
-       - the server flight;
-       - the client's Finished;
-       - the handshake records;
-       - alerts;
-       - key update derivation.
-     - TLS 1.3 only.
-     - No client certificates.
-     - No resumption.
-     - No 0-RTT.
+     - Handshake only: the ClientHello, the server flight, the client's
+       Finished, the handshake records, alerts, and key update
+       derivation.
+     - TLS 1.3 only, with no client certificates, no resumption and no
+       0-RTT.
      - The kernel's TLS record layer (kTLS) carries application data.
        So the server owns the socket and keeps `sendfile`.
      - Mirroring another crate's interface is a nice-to-have behind
@@ -3600,10 +3547,8 @@ the recommendation (if any) is not implemented.
 
    - **(c)** The primitives are not written here. They come from the
      RustCrypto family:
-     - `sha2`;
-     - `hmac`;
-     - `hkdf`;
-     - `chacha20poly1305`;
+
+     - `sha2`, `hmac`, `hkdf` and `chacha20poly1305`;
      - `x25519-dalek` over `curve25519-dalek`, built on the
        Coq-extracted `fiat-crypto` field arithmetic. This is the `fiat`
        backend, which also drops the proc macro.
@@ -3611,11 +3556,12 @@ the recommendation (if any) is not implemented.
        deterministic nonces.
 
      How the crates are handled:
+
      - versions pinned;
      - default features off;
      - the tree vendored into the repo and read once;
-     - `cargo vet` with in-repo audit records, because no public audit
-       covers the current versions;
+     - `cargo vet` with in-repo audit records (no public audit covers
+       the current versions);
      - RUSTSEC advisories checked in the gate.
 
      libcrux is revisited when it leaves 0.0.x.
@@ -3624,21 +3570,20 @@ the recommendation (if any) is not implemented.
    - **(e)** Inline `asm!` allowed as NFR-MAINT-01 now says.
    - **(f)** Requirements for the design document:
      - The crates' correctness is pinned here by known-answer and
-       adversarial vectors:
-       - RFC 8448 handshake traces;
-       - RFC 6979 A.2.5;
-       - Google's Wycheproof sets for every primitive. We add X25519's
-         ourselves, since its crate does not ship them.
+       adversarial vectors: RFC 8448 handshake traces, RFC 6979 A.2.5,
+       and Google's Wycheproof sets for every primitive. We add
+       X25519's ourselves, since its crate does not ship them.
      - The signer's signing path runs under a secret-tracking
        constant-time check of the built binary in the nightly on both
        architectures. This is needed because no proof or source review
        covers the compiled binary's side channels.
+
+   **Controller's call, not an owner decision:**
+
    - **(g)** *Controller's call, marked as such:* the handshake crate is
      written in the Rust subset the Rust-to-Lean translators (Aeneas,
-     hax) accept. That subset means:
-     - no trait objects;
-     - plain generics;
-     - no interior mutability.
+     hax) accept. That subset has no trait objects, plain generics and
+     no interior mutability.
 
      So a machine-checked proof of its state machine and key schedule
      can follow later without a rewrite. Sources are in the survey's
