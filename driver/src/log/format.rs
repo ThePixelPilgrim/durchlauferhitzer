@@ -36,7 +36,7 @@ use durchlauferhitzer_core::{
     RequestLine, RequestSummary, TimeoutKind,
 };
 
-use super::{DriverLog, KeptReason, ShutdownPhase};
+use super::{DriverLog, KeptReason, ShutdownPhase, UserForm};
 
 /// Appends the line of a core entry to `out`, its `\n` included.
 ///
@@ -170,6 +170,16 @@ pub fn format_driver(entry: &DriverLog, out: &mut Vec<u8>) {
             out.extend_from_slice(b"kind=privileges action=kept reason=");
             out.extend_from_slice(match reason {
                 KeptReason::NotRoot => b"not_root",
+            });
+            out.push(b'\n');
+            return;
+        }
+        DriverLog::PrivilegesDropped { uid, gid, form } => {
+            // Numbers and a fixed word: plain.
+            let _ = write!(out, "kind=privileges action=dropped user={uid}:{gid} form=");
+            out.extend_from_slice(match form {
+                UserForm::Name => b"name",
+                UserForm::Ids => b"ids",
             });
             out.push(b'\n');
             return;

@@ -243,7 +243,11 @@ Structure and values:
   listener sets `IPV6_V6ONLY`, whatever the host's `bindv6only`); IPv4
   needs its own `listen` line, so `0.0.0.0:80` + `[::]:80` bind together
   (owner decision 2026-10-27) [done in stage 4].
-- **FR-CFG-11** [done] `user` matches `[a-z_][a-z0-9_-]{0,31}`.
+- **FR-CFG-11** [done] `user` matches `[a-z_][a-z0-9_-]{0,31}`, or
+  *(stage 10, FR-PROC-03)* is `<uid>:<gid>`: two decimal numbers (ASCII
+  digits only, no sign, each fitting 32 bits), neither 0. A value with a
+  `:` is never a name; a number alone (`user 1000;`) is a name and
+  invalid.
 - **FR-CFG-12** [done] A `host` block takes one or more names: ASCII
   letters, digits, `-` and `.` without a leading or trailing `.`, an IPv4
   literal, or a bracketed IPv6 literal (`[::1]`); names are stored
@@ -1536,8 +1540,10 @@ Failures, persistence, timeouts:
     - Driver kinds (FR-LOG-07): `kind=accept_failed errno`,
       `kind=socket_failed errno`, `kind=open_failed errno`,
       `kind=register_failed errno`, `kind=dropped count` (FR-LOG-06),
-      `kind=privileges action reason` (FR-PROC-03: `action=kept
-      reason=not_root`, the only values so far), `kind=shutdown phase
+      `kind=privileges action [reason | user form]` (FR-PROC-03:
+      `action=kept reason=not_root` as non-root; *(stage 10)*
+      `action=dropped user=<uid>:<gid> form=name|ids` as root after the
+      drop, `form` being how `user` was written), `kind=shutdown phase
       [detached]` (FR-PROC-05: `phase=draining`, `phase=aborting`,
       `phase=done detached=N`; FR-PROC-07: `phase=restarting`, and
       `phase=draining` after it when a SIGTERM turns the restart drain
@@ -1638,8 +1644,8 @@ Failures, persistence, timeouts:
   no path that closes a connection for a core bug (the core handles the
   driver bugs it detects itself, contract "Rules for files"); a kind is
   added with its first producer. *(Stage 4 Task 8:)* the one startup
-  kind is `privileges` (privileges kept although `user` is set,
-  FR-PROC-03); startup errors are not log entries but lines printed
+  kind is `privileges` (privileges kept although `user` is set, or,
+  since stage 10, dropped as root; FR-PROC-03); startup errors are not log entries but lines printed
   before the sink exists (FR-PROC-04). *(Stage 4 Task 9, controller
   ruling R4:)* the one shutdown kind is `shutdown`, one line per step
   (FR-PROC-05): `kind=shutdown phase=draining` once the first SIGTERM
@@ -1738,21 +1744,34 @@ Failures, persistence, timeouts:
   systemd sockets too (owner decision 2026-10-28, O3: never root after
   binding; exit 2 otherwise); it is
   looked up with `getpwnam_r` (an unknown user is exit 2; *owner
-  decision 2026-11-10, stage 10* [stage 10]: `user` also accepts
-  `<uid>:<gid>`, two decimal numbers, which skips the lookup — no NSS
-  module runs inside the still-root process (the qmail review's lesson
-  7); uid 0 or gid 0 is exit 2 like a root-group name; `--check` and the
-  startup log show which form was used; *owner
+  decision 2026-11-10, stage 10* [done 2026-11-17]: `user` also accepts
+  `<uid>:<gid>`, two decimal numbers (FR-CFG-11), which skips the
+  lookup — no NSS module runs inside the still-root process (the qmail
+  review's lesson 7); uid 0 or gid 0 is refused like a root-group name,
+  as a config error at the setting (exit 1, FR-PROC-05a; controller
+  ruling, stage 10 Task 3: core validation, so `--check` reports it
+  too); `--check` accepts both forms, and the startup log shows which
+  form was used; *owner
   decision 2026-10-29, OA3:* so is a user whose primary group is 0,
   `user <name>: its primary group is 0 (root); the server never keeps
   group root after binding`), and the process drops to it for good:
   the effective uid back to 0 first if it is not, then
   `setgroups([gid])`, `setgid`, `setuid`, then it checks that
   `setuid(0)` fails and that the real, effective and saved uids, and the
-  three gids, are all the user's (exit 2 on any failure). As non-root
+  three gids, are all the user's (exit 2 on any failure). *(Stage 10)*
+  the drop is logged once: `kind=privileges action=dropped
+  user=<uid>:<gid> form=name|ids` (FR-LOG-05). As non-root
   nothing is dropped; with `user` set, that is logged once (controller
   ruling R5): `kind=privileges action=kept reason=not_root`
-  (FR-LOG-05). *(Owner decision 2026-10-29, OA2, stage 4 final review:)*
+  (FR-LOG-05). *Planner calls (stage 10 plan):* the config holds
+  `user` as `enum User { Name(String), Ids { uid: u32, gid: u32 } }`
+  (core `config::model`, `Display` giving the written form); the log
+  token is `form=name` or `form=ids` (driver `UserForm`); the config
+  error is `user <uid>:<gid>: the server never runs as root after
+  binding` (`ConfigErrorKind::RootUser`, the value as written); the
+  driver keeps its gid-0 check for both forms (`user <value>: its
+  primary group is 0 (root); the server never keeps group root after
+  binding`), and `drop_to`'s `setuid(0)` check catches uid 0. *(Owner decision 2026-10-29, OA2, stage 4 final review:)*
   then, root or not (as root after the drop), every capability is
   cleared: the ambient set (`prctl(PR_CAP_AMBIENT,
   PR_CAP_AMBIENT_CLEAR_ALL)`), then the permitted, effective and
@@ -2528,7 +2547,8 @@ Failures, persistence, timeouts:
   otherwise startup fails (exit 2): `too few file descriptors
   (RLIMIT_NOFILE): the server needs <needed>, <hard limit> are
   available`. Known gap: a descriptor that the user lookup of the
-  privilege drop leaves open (an NSS client socket, e.g. sssd) is opened
+  privilege drop leaves open (an NSS client socket, e.g. sssd; none with
+  the numeric `user`, stage 10) is opened
   after the check and not counted; it costs at most a slot, and running
   out only logs `EMFILE` (DRV-16), never fails.
 - **NFR-RES-06** [done] Every opened file is closed

@@ -79,7 +79,9 @@ src/
                       not 0-2, not systemd's, inherited, not listening),
                       `Readiness::report` (`ready\n`, then closed)
     privileges.rs     A8: `drop_privileges` (root, any uid 0 (O6), needs
-                      `user`, not of primary gid 0 (OA3), and drops to it; non-root keeps, logged); no
+                      `user`, not of primary gid 0 (OA3), and drops to it,
+                      a name looked up or `<uid>:<gid>` as is, logged;
+                      non-root keeps, logged); no
                       port check (O7); then, root or not, every
                       capability cleared and checked (OA2)
   event_loop.rs     `Driver`: the epoll loop (wait with the timeout from
@@ -431,9 +433,10 @@ tests/
                     skipped with a printed reason, or a failure with
                     DURCHLAUFERHITZER_REQUIRE_ROOT=1) no `user`, an unknown
                     user and a user whose primary gid is 0 (OA3) are
-                    exit 2, `user nobody` drops every id
-                    (`drop_to` in the server's process) and serves (no
-                    `shared_ports` line), and a
+                    exit 2, a numeric id 0 is exit 1 (config),
+                    `user nobody` and `user 65534:65534` drop every id
+                    (`drop_to` in the server's process, logged with
+                    `form=`) and serve (no `shared_ports` line), and a
                     systemd socket below 1024 serves as nobody, root with
                     a systemd socket and no `user` is exit 2; a real
                     uid of 0 under an effective nobody counts as root

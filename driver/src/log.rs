@@ -75,6 +75,9 @@ pub enum DriverLog {
     /// `user` is set but the privileges were kept (FR-PROC-03, A8),
     /// logged once at startup.
     PrivilegesKept { reason: KeptReason },
+    /// As root, the process dropped to `user`'s ids (FR-PROC-03), logged
+    /// once at startup with the form `user` was written in.
+    PrivilegesDropped { uid: u32, gid: u32, form: UserForm },
     /// A step of the shutdown or restart (FR-PROC-05, FR-PROC-07, A9).
     Shutdown { phase: ShutdownPhase },
     /// A containment layer's outcome (FR-PROC-06), one per layer, logged
@@ -123,6 +126,15 @@ pub enum ShutdownPhase {
 pub enum KeptReason {
     /// The process does not run as root: there is nothing to drop.
     NotRoot,
+}
+
+/// How `user` was written (FR-PROC-03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserForm {
+    /// A name, looked up with `getpwnam_r`.
+    Name,
+    /// `<uid>:<gid>`: no lookup ran.
+    Ids,
 }
 
 /// One entry handed to a [`LogSink`].

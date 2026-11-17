@@ -10,7 +10,7 @@ use crate::routing::same_segments;
 use super::lexer::Pos;
 use super::model::{
     BodyLimit, Config, ConfigError, ConfigErrorKind, Containment, Layer, Limits, Route,
-    RouteAction, SeccompAction, VirtualHost, worst_case_per_connection,
+    RouteAction, SeccompAction, User, VirtualHost, worst_case_per_connection,
 };
 use super::syntax::{Block, Item, Setting, parse};
 use super::units::{parse_duration, parse_size};
@@ -117,6 +117,31 @@ fn valid_user(name: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// `user`: `<uid>:<gid>` (two decimal numbers, neither 0) or a valid
+/// name (FR-PROC-03). A value with a colon is never a name.
+fn parse_user(setting: &Setting) -> Result<User, ConfigError> {
+    let value = one_value(setting)?;
+    match value.split_once(':') {
+        Some((uid, gid)) => match (decimal_id(uid), decimal_id(gid)) {
+            (Some(0), Some(_)) | (Some(_), Some(0)) => {
+                fail(ConfigErrorKind::RootUser(value.to_string()), setting.pos)
+            }
+            (Some(uid), Some(gid)) => Ok(User::Ids { uid, gid }),
+            _ => Err(invalid_value("user", value, setting.pos)),
+        },
+        None if valid_user(value) => Ok(User::Name(value.to_string())),
+        None => Err(invalid_value("user", value, setting.pos)),
+    }
+}
+
+/// A user or group id: ASCII digits only (no sign), fitting a `u32`.
+fn decimal_id(text: &str) -> Option<u32> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// Absolute, no `.`, `..` or empty components, no trailing `/` except `/`.
@@ -580,7 +605,7 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
         pos: e.pos,
     })?;
     let mut listen: Option<Vec<SocketAddr>> = None;
-    let mut user: Option<String> = None;
+    let mut user: Option<User> = None;
     let mut limits: Option<Limits> = None;
     let mut limits_pos: Option<Pos> = None;
     let mut containment: Option<Containment> = None;
@@ -601,11 +626,7 @@ pub fn load(text: &str) -> Result<Config, ConfigError> {
                     if user.is_some() {
                         return duplicate_key("user", setting.pos);
                     }
-                    let value = one_value(setting)?;
-                    if !valid_user(value) {
-                        return Err(invalid_value("user", value, setting.pos));
-                    }
-                    user = Some(value.to_string());
+                    user = Some(parse_user(setting)?);
                 }
                 other => return unknown_key(other, setting.pos),
             },

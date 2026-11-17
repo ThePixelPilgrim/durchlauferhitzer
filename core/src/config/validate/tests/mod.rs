@@ -2,7 +2,7 @@
 
 use super::super::model::{
     BodyLimit, Containment, Limits, OnFileChange, Pooling, ProxyRoute, Route, RouteAction,
-    RouteMix, StripPrefix, VirtualHost, worst_case_per_connection,
+    RouteMix, StripPrefix, User, VirtualHost, worst_case_per_connection,
 };
 use super::super::syntax::SyntaxErrorKind;
 use super::route::RouteKey;
@@ -94,7 +94,7 @@ fn loads_spec_example() {
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let expected = Config {
         listen: vec![addr],
-        user: Some("www-data".to_string()),
+        user: Some(User::Name("www-data".to_string())),
         limits: Limits {
             max_connections: 1024,
             header_timeout: Duration::from_secs(10),
@@ -238,7 +238,99 @@ fn user_must_be_one_valid_name() {
         let config = ok(&cfg(&format!(
             "user {good};\nhost a {{ path / {{ static /s; }} }}\n"
         )));
-        assert_eq!(config.user.as_deref(), Some(good));
+        assert_eq!(config.user, Some(User::Name(good.to_string())));
+    }
+}
+
+/// A `user` with the server at 2:1 and one host, for the `user` tests.
+fn user_cfg(value: &str) -> String {
+    cfg(&format!(
+        "user {value};\nhost a {{ path / {{ static /s; }} }}\n"
+    ))
+}
+
+/// FR-PROC-03 (stage 10): `<uid>:<gid>` gives the ids, no name.
+#[test]
+fn user_accepts_numeric_ids() {
+    let config = ok(&user_cfg("1000:1000"));
+    assert_eq!(
+        config.user,
+        Some(User::Ids {
+            uid: 1000,
+            gid: 1000
+        })
+    );
+    let config = ok(&user_cfg("65534:4294967295"));
+    assert_eq!(
+        config.user,
+        Some(User::Ids {
+            uid: 65534,
+            gid: u32::MAX
+        })
+    );
+    assert_eq!(
+        User::Ids {
+            uid: 1000,
+            gid: 100
+        }
+        .to_string(),
+        "1000:100"
+    );
+    assert_eq!(User::Name("nobody".to_string()).to_string(), "nobody");
+}
+
+/// FR-PROC-03 (stage 10): uid 0 or gid 0 is root; a config error at the
+/// setting.
+#[test]
+fn user_refuses_root_ids() {
+    for value in ["0:1000", "1000:0", "0:0", "00:1000"] {
+        let (kind, line, column) = err(&user_cfg(value));
+        assert_eq!(
+            (kind.clone(), line, column),
+            (ConfigErrorKind::RootUser(value.to_string()), 2, 1),
+            "{value}"
+        );
+        let error = ConfigError {
+            kind,
+            pos: Pos { line, column },
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("2:1: user {value}: the server never runs as root after binding")
+        );
+    }
+}
+
+/// A name stays a name; a number without a colon is no id pair.
+#[test]
+fn user_name_still_a_name() {
+    let config = ok(&user_cfg("nobody"));
+    assert_eq!(config.user, Some(User::Name("nobody".to_string())));
+    assert_eq!(err(&user_cfg("1000")), (invalid("user", "1000"), 2, 1));
+}
+
+#[test]
+fn user_rejects_malformed_ids() {
+    for bad in [
+        "1000:",
+        ":1000",
+        ":",
+        "1000:1000:1",
+        "+1:1",
+        "1:+1",
+        "-1:1",
+        " 1:1",
+        "1:1 ",
+        "a:1",
+        "99999999999:1",
+        "1:4294967296",
+        "nobody:1",
+    ] {
+        assert_eq!(
+            err(&cfg(&format!("user \"{bad}\";\n"))),
+            (invalid("user", bad), 2, 1),
+            "{bad:?}"
+        );
     }
 }
 

@@ -8,8 +8,10 @@
 //! - After binding: as root, `user` is required (never root after
 //!   binding), its primary group must not be 0 (owner decision
 //!   2026-10-29, OA3: never group root either), and the process drops to
-//!   it for good (`drop_to`); as
-//!   non-root the ids are kept, and a set `user` is logged as kept.
+//!   it for good (`drop_to`), logged with the form `user` was written
+//!   in. A name is looked up; `<uid>:<gid>` is not (stage 10), so no NSS
+//!   module runs as root. As non-root the ids are kept, and a set `user`
+//!   is logged as kept.
 //! - Then, root or not, every capability is cleared (owner decision
 //!   2026-10-29, OA2): the ambient set, then the permitted, effective and
 //!   inheritable sets, checked with `capget`. Capabilities are per
@@ -17,14 +19,16 @@
 //!   before the signal mask and the disk workers), so every later
 //!   thread starts with none.
 
+use durchlauferhitzer_core::config::User;
+
 use super::Failure;
-use crate::log::{DriverLog, KeptReason};
+use crate::log::{DriverLog, KeptReason, UserForm};
 use crate::sys::caps::{Capabilities, capabilities, clear_ambient, clear_capabilities};
 use crate::sys::user::{Uids, drop_to, lookup_user, uids};
 
 /// A8, the drop (A11 step 7), then OA2, the capabilities: returns the
 /// entry to log once the log sink exists, if any.
-pub(super) fn drop_privileges(user: Option<&str>) -> Result<Option<DriverLog>, Failure> {
+pub(super) fn drop_privileges(user: Option<&User>) -> Result<Option<DriverLog>, Failure> {
     let note = drop_ids(user)?;
     clear_all_capabilities()?;
     Ok(note)
@@ -53,7 +57,7 @@ fn clear_all_capabilities() -> Result<(), Failure> {
 }
 
 /// A8: drops to `user` as root; keeps the ids as non-root.
-fn drop_ids(user: Option<&str>) -> Result<Option<DriverLog>, Failure> {
+fn drop_ids(user: Option<&User>) -> Result<Option<DriverLog>, Failure> {
     let ids = uids().map_err(|err| Failure(format!("getresuid: {err}")))?;
     match (privilege(ids), user) {
         (Privilege::NotRoot, None) => Ok(None),
@@ -63,24 +67,29 @@ fn drop_ids(user: Option<&str>) -> Result<Option<DriverLog>, Failure> {
         (Privilege::Root, None) => Err(Failure(
             "running as root without `user`: the server never keeps root after binding".to_owned(),
         )),
-        (Privilege::Root, Some(name)) => {
-            let (uid, gid) = match lookup_user(name) {
-                Ok(Some(ids)) => ids,
-                Ok(None) => return Err(Failure(format!("user {name}: no such user"))),
-                Err(err) => return Err(Failure(format!("user {name}: {err}"))),
+        (Privilege::Root, Some(user)) => {
+            let (uid, gid, form) = match user {
+                User::Name(name) => match lookup_user(name) {
+                    Ok(Some((uid, gid))) => (uid, gid, UserForm::Name),
+                    Ok(None) => return Err(Failure(format!("user {name}: no such user"))),
+                    Err(err) => return Err(Failure(format!("user {name}: {err}"))),
+                },
+                // No lookup: no NSS module runs as root (stage 10).
+                User::Ids { uid, gid } => (*uid, *gid, UserForm::Ids),
             };
+            // The config refuses gid 0 in `Ids`; checked for both forms.
             if gid == 0 {
                 return Err(Failure(format!(
-                    "user {name}: its primary group is 0 (root); \
+                    "user {user}: its primary group is 0 (root); \
                      the server never keeps group root after binding"
                 )));
             }
             drop_to(uid, gid).map_err(|err| {
                 Failure(format!(
-                    "cannot drop privileges to {name} (uid {uid}, gid {gid}): {err}"
+                    "cannot drop privileges to {user} (uid {uid}, gid {gid}): {err}"
                 ))
             })?;
-            Ok(None)
+            Ok(Some(DriverLog::PrivilegesDropped { uid, gid, form }))
         }
     }
 }

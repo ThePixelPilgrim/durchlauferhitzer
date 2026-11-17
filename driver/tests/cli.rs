@@ -82,6 +82,28 @@ fn check_on_a_valid_config_prints_ok() {
     );
 }
 
+/// Stage 10 (FR-PROC-03): the numeric `user` form passes `--check`.
+#[test]
+fn check_accepts_a_numeric_user() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        "ids.conf",
+        &config("127.0.0.1:8080", "user 1000:1000;", PROXY_ROUTE),
+        Containment::Switch,
+    );
+    let path = path.to_str().unwrap();
+    let output = run(&["--check", path], Setup::default());
+    assert_exit(&output, 0);
+    assert_eq!(text(&output.stdout), "ok\n");
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "{path}: memory backstop: {} bytes\n",
+            memory_backstop_bytes(path)
+        )
+    );
+}
+
 /// FR-PROC-08: the shipped example config is the guaranteed install, so
 /// `--check` warns about nothing; its one stderr line is the backstop,
 /// the figure the README shows for it (every README line naming the

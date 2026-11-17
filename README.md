@@ -150,6 +150,27 @@ cannot apply (below).
   roots the server drops to that user and group for good, and refuses to
   run as root otherwise (exit 2).
 
+`user` takes one of two forms:
+
+| Form | Example | What the server does as root |
+|---|---|---|
+| A user name | `user www-data;` | It looks up the uid and the primary group in the user database. |
+| `<uid>:<gid>` | `user 33:33;` | It uses the two numbers as written. No lookup runs. |
+
+The numeric form suits a hardened install. A name lookup runs the
+host's NSS modules inside the process while it is still root. The
+numeric form runs none of them.
+
+Neither id may be 0. A numeric `user` with uid 0 or gid 0 is a config
+error, and `--check` reports it. A name whose primary group is 0 is
+refused at startup (exit 2).
+
+The startup log shows the drop and the form that was used:
+
+```text
+kind=privileges action=dropped user=33:33 form=ids
+```
+
 ## Containment
 
 After startup the server confines itself (config block `containment`, see
@@ -211,7 +232,9 @@ warns when a config leaves part of it to the kernel
   required`, `seccomp_action kill` (writing no block gives the same);
   the startup log's `containment` lines show it as `mode=required`;
 - `user` set, when the server is started as root (or the service's own
-  `User=` under systemd socket activation);
+  `User=` under systemd socket activation). The numeric form
+  `user <uid>:<gid>;` is recommended: no NSS module then runs as root
+  ([Privileges](#privileges));
 - Linux 6.2 or later (Landlock ABI 3; 6.10 or later restricts every
   right with Landlock alone);
 - `memory_limit` sized for the host, with the memory backstop the server

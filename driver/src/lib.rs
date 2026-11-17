@@ -25,4 +25,4 @@ pub mod sys;
 mod systemd;
 
 pub use event_loop::{Driver, Exit, StopHandle};
-pub use log::{Buffered, DriverLog, KeptReason, LogEntry, LogSink, ShutdownPhase};
+pub use log::{Buffered, DriverLog, KeptReason, LogEntry, LogSink, ShutdownPhase, UserForm};

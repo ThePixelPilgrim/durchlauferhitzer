@@ -17,12 +17,33 @@ use super::syntax::SyntaxErrorKind;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub listen: Vec<SocketAddr>,
-    pub user: Option<String>,
+    pub user: Option<User>,
     pub limits: Limits,
     /// How strictly the containment layers apply (FR-CFG-25). The core
     /// only holds it; the driver enforces it.
     pub containment: Containment,
     pub hosts: Vec<VirtualHost>,
+}
+
+/// The `user` setting: whom a root process drops to after binding
+/// (FR-PROC-03).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum User {
+    /// A user name; the driver looks up its ids.
+    Name(String),
+    /// `<uid>:<gid>`: the ids themselves, so no lookup runs as root
+    /// (stage 10). Neither is 0.
+    Ids { uid: u32, gid: u32 },
+}
+
+impl fmt::Display for User {
+    /// As `user` takes it: the name, or `<uid>:<gid>` in decimal.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Name(name) => f.write_str(name),
+            Self::Ids { uid, gid } => write!(f, "{uid}:{gid}"),
+        }
+    }
 }
 
 /// How strictly one containment layer applies (FR-CFG-25).
@@ -357,6 +378,8 @@ pub enum ConfigErrorKind {
         value: String,
     },
     WrongValueCount(String),
+    /// A numeric `user` (as written) whose uid or gid is 0 (FR-PROC-03).
+    RootUser(String),
     /// A setting that does nothing given another (`with` is that setting as
     /// written, e.g. `seccomp off`).
     NoEffect {
@@ -408,6 +431,10 @@ impl fmt::Display for ConfigError {
             ConfigErrorKind::WrongValueCount(key) => {
                 write!(f, "wrong number of values for `{key}`")
             }
+            ConfigErrorKind::RootUser(value) => write!(
+                f,
+                "user {value}: the server never runs as root after binding"
+            ),
             ConfigErrorKind::NoEffect { key, with } => {
                 write!(f, "`{key}` has no effect with `{with}`")
             }

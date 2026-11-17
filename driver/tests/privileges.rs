@@ -4,12 +4,16 @@
 //!   set and every port at or above 1024, nothing is dropped, the server
 //!   runs and logs `kind=privileges action=kept reason=not_root`;
 //! - as non-root, a refused bind to a port below 1024 is exit 2 naming it;
+//! - root or not, a numeric `user` with uid 0 or gid 0 is a config error
+//!   (exit 1, FR-PROC-05a) at the setting;
 //! - as root (these tests skip with a printed reason unless the tests run
 //!   as root, and fail instead with `DURCHLAUFERHITZER_REQUIRE_ROOT=1`,
 //!   which CI's root step sets): `user` unset is exit 2, an unknown
 //!   user and one whose primary group is 0 (OA3) are exit 2, and with
 //!   `user nobody` the server drops to nobody (`drop_to`, in this
-//!   subprocess only) and serves; root is any uid 0
+//!   subprocess only), serves and logs `kind=privileges action=dropped`;
+//!   `user 65534:65534` drops the same way without the lookup (stage
+//!   10); root is any uid 0
 //!   (O6), so a real uid of 0 under an effective nobody counts as root;
 //! - root or not, every capability set of every server thread ends up
 //!   empty (OA2); a control (`cat /proc/self/status` with the same setup)
@@ -182,17 +186,47 @@ fn as_root_a_user_with_primary_gid_0_is_exit_2() {
     );
 }
 
+/// Stage 10 (FR-PROC-03): uid 0 or gid 0 in the numeric form is a
+/// config error at the setting, before anything starts, as root too.
+#[test]
+fn a_numeric_user_with_id_0_is_a_config_error() {
+    let dir = TempDir::new();
+    for value in ["65534:0", "0:65534"] {
+        let path = static_config(&dir, loopback(free_port()), &format!("user {value};"));
+        let output = run(&[&path], Setup::default());
+        assert_exit(&output, 1);
+        assert_eq!(
+            text(&output.stderr),
+            format!("{path}:2:1: user {value}: the server never runs as root after binding\n")
+        );
+    }
+}
+
 /// `drop_to` for real, in the server's process: every uid and gid is
 /// nobody's, the supplementary groups are only its group, and the server
-/// still serves its root (opened before the drop).
+/// still serves its root (opened before the drop). The drop is logged
+/// with its ids and the form of `user`.
 #[test]
 fn as_root_the_server_drops_to_the_user() {
+    assert_drops_to_nobody("user nobody;", "name");
+}
+
+/// Stage 10 (FR-PROC-03): `user <uid>:<gid>` drops exactly as the name
+/// does; only the lookup is skipped.
+#[test]
+fn as_root_the_server_drops_to_numeric_ids() {
+    assert_drops_to_nobody(&format!("user {NOBODY}:{NOBODY};"), "ids");
+}
+
+/// Starts a root server with `user` (nobody's, in the `form` given) and
+/// checks the drop and its log line.
+fn assert_drops_to_nobody(user: &str, form: &str) {
     if !root_or_skip() {
         return;
     }
     let dir = TempDir::new();
     let addr = loopback(free_port());
-    let path = static_config(&dir, addr, "user nobody;");
+    let path = static_config(&dir, addr, user);
     let server = Running::start(&[&path], Setup::default(), addr);
     // The listener accepts before the drop (it comes after binding): a
     // served request shows startup is over.
@@ -212,7 +246,13 @@ fn as_root_the_server_drops_to_the_user() {
     assert_eq!(field("Gid:"), [NOBODY; 4], "{status}");
     assert_eq!(field("Groups:"), [NOBODY], "{status}");
     let stderr = server.kill();
-    assert!(!stderr.contains("kind=privileges"), "{stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "{}\nkind=privileges action=dropped user={NOBODY}:{NOBODY} form={form}\n",
+            memory_backstop_line(&path)
+        )),
+        "{stderr}"
+    );
     // Bound as root: only root can join its ports.
     assert!(!stderr.contains("kind=shared_ports"), "{stderr}");
 }
@@ -429,5 +469,10 @@ fn a_real_uid_of_0_drops_every_uid() {
         .collect();
     assert_eq!(uids, [NOBODY; 4], "{status}");
     let stderr = server.kill();
-    assert!(!stderr.contains("kind=privileges"), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "\nkind=privileges action=dropped user={NOBODY}:{NOBODY} form=name\n"
+        )),
+        "{stderr}"
+    );
 }

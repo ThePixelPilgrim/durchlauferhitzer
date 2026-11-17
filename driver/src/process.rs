@@ -283,7 +283,7 @@ fn start_up(config: Config, probe: Probe) -> Result<Ready, Failure> {
             "cannot limit glibc's malloc arenas (M_ARENA_MAX)".to_owned(),
         ));
     }
-    notes.extend(privileges::drop_privileges(user.as_deref())?);
+    notes.extend(privileges::drop_privileges(user.as_ref())?);
     notes.extend(shared);
     let landlock = containment::restrict_files(&containment, &roots)?;
     Ok(Ready {
