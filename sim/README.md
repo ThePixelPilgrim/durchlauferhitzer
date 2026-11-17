@@ -92,7 +92,10 @@ tests/
                       (the routes but those of `pool.rs` and
                       `backend_files.rs` say `pool off;`)
     main.rs             heads, failures, timeouts; shared helpers
-    bodies.rs           request bodies, `100 Continue`, early responses
+    bodies.rs           request bodies, limits, `100 Continue`; the helpers
+                        the next two files share
+    body_timeouts.rs    stalled and cut request bodies, pipelining behind one
+    early_responses.rs  a backend that answers before the body is sent
     expect.rs           `Expect` on every route
     responses.rs        response bodies: chunked, close-delimited, none,
                         limits, interim heads, cuts

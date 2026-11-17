@@ -1,6 +1,7 @@
 //! Proxy routes end to end: the upstream interface between core and
 //! driver, with scripted backends behind it. Heads, failures and timeouts
-//! here; request bodies in `bodies.rs`, `Expect` in `expect.rs`, response
+//! here; request bodies in `bodies.rs`, `body_timeouts.rs` and
+//! `early_responses.rs`, `Expect` in `expect.rs`, response
 //! bodies in `responses.rs`, configured timeouts and the client's
 //! half-close in `timeouts.rs`, backend resets behind readable bytes in
 //! `resets.rs`, backend connection pooling and the safe retry in
@@ -13,6 +14,8 @@
 
 mod backend_files;
 mod bodies;
+mod body_timeouts;
+mod early_responses;
 mod expect;
 mod head_limits;
 mod internal_files;
