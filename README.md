@@ -24,7 +24,7 @@ To run the binary:
   four, musl on Alpine).
 - Linux 6.2 or later for the full [containment](#containment); 6.10 or
   later lets Landlock alone restrict every right.
-- A supervisor and the other items of a [guaranteed
+- systemd as the supervisor, and the other items of a [guaranteed
   install](#guaranteed-install), for the security requirements to hold.
 
 To build it:
@@ -362,11 +362,13 @@ server when the server ends abnormally. Such an end is one of these:
 
 After such an end, the operator restarts the server by hand:
 
-1. `rc-service durchlauferhitzer status` reports `crashed`.
+1. `rc-service durchlauferhitzer status` reports `crashed` and exits
+   with status 32.
 2. `rc-service durchlauferhitzer restart` starts the server again. Its
    stop step also ends the processes a reload left draining.
 
-A monitor that runs these two commands can stand in for the operator.
+A monitor can stand in for the operator. It keys on the exit status 32
+of `status` and then runs `restart`.
 The [guaranteed install](#guaranteed-install) needs the
 [systemd service](#systemd-socket-activation), which restarts the
 server on its own.

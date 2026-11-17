@@ -1,5 +1,6 @@
 #!/bin/sh
-# test-openrc.sh: the OpenRC script end to end (FR-PROC-07). POSIX sh.
+# test-openrc.sh: the OpenRC script end to end (FR-PROC-07, FR-PROC-07a).
+# POSIX sh.
 #
 # usage: test-openrc.sh <binary>
 #
@@ -22,8 +23,14 @@
 #     process's descriptors are listed and must be stdin (/dev/null), the
 #     log, the root, its one listener and its anonymous inodes (epoll,
 #     signalfd, eventfds): nothing inherited from the helper or OpenRC.
-#  7. `rc-service durchlauferhitzer stop` ends the new process and the
-#     draining old one.
+#  7. A crash after the reload: `kill -9` of the new process while the
+#     old one still drains; `status` reports crashed with exit status 32
+#     (FR-PROC-07a: the script does not restart the server); `restart`
+#     ends the draining old process (stop_post) and serves again; no
+#     other server process and no draining list are left.
+#  8. A crash without a reload: the same on the restarted process.
+#  9. `rc-service durchlauferhitzer stop` ends the server; no server
+#     process and no draining list are left.
 #
 # Exit 0 when every step passed; otherwise 1, with the step and the log.
 
@@ -67,6 +74,61 @@ get() {
 	curl -sS --max-time 5 -H 'Host: localhost' "http://127.0.0.1:$port/a.txt"
 }
 
+# Waits (at most 5 s) until the server answers $1; $2 names the step.
+answers() {
+	n=0
+	until got=$(get 2>/dev/null); do
+		n=$((n + 1))
+		[ "$n" -lt 50 ] || fail "$2: no answer"
+		sleep 0.1
+	done
+	[ "$got" = "$1" ] || fail "$2: got '$got', not '$1'"
+}
+
+# The pids of the running server processes: those whose executable is
+# $bin (" (deleted)" allowed: the binary is replaced in place).
+servers() {
+	for p in /proc/[0-9]*; do
+		e=$(readlink "$p/exe" 2>/dev/null) || continue
+		[ "${e% (deleted)}" = "$bin" ] && running "${p#/proc/}" &&
+			printf '%s\n' "${p#/proc/}"
+	done
+	return 0
+}
+
+# FR-PROC-07a: kills the serving process (the pid file's) with SIGKILL;
+# `status` must report crashed with exit status 32 (polled for at most
+# 5 s, until pid 1 has reaped it), then `restart` must serve $1 from a
+# new process, the only server process left, with no draining list.
+# $2 names the step.
+crash_and_restart() {
+	victim=$(cat "$pidfile")
+	kill -KILL "$victim" || fail "$2: cannot kill -9 pid $victim"
+	n=0
+	while :; do
+		st=0
+		out=$(rc-service "$svc" status 2>&1) || st=$?
+		[ "$st" -eq 0 ] || break
+		n=$((n + 1))
+		[ "$n" -lt 50 ] || fail "$2: status still reports success 5 s after kill -9 of $victim: $out"
+		sleep 0.1
+	done
+	echo "$out (exit status $st)"
+	case $out in
+	*crashed*) ;;
+	*) fail "$2: status does not report crashed: $out" ;;
+	esac
+	[ "$st" -eq 32 ] || fail "$2: status exit status $st, not 32"
+	rc-service "$svc" restart || fail "$2: restart"
+	cur=$(cat "$pidfile") || fail "$2: no pid file after restart"
+	[ "$cur" != "$victim" ] || fail "$2: the pid file still names $victim"
+	answers "$1" "$2"
+	echo "pid $cur answers '$got' after restart"
+	left=$(servers)
+	[ "$left" = "$cur" ] || fail "$2: server processes after restart: $(echo $left), not $cur alone"
+	[ ! -e "$pidfile.draining" ] || fail "$2: $pidfile.draining is left: $(cat "$pidfile.draining")"
+}
+
 config() {
 	cat <<EOF
 listen 127.0.0.1:$port;
@@ -106,13 +168,7 @@ openrc default
 step "3. start"
 rc-service "$svc" start || fail "start"
 old=$(cat "$pidfile")
-n=0
-until got=$(get 2>/dev/null); do
-	n=$((n + 1))
-	[ "$n" -lt 50 ] || fail "no answer after start"
-	sleep 0.1
-done
-[ "$got" = one ] || fail "start: got '$got', not 'one'"
+answers one start
 echo "pid $old answers '$got'"
 
 step "4. a slow client"
@@ -160,14 +216,25 @@ for fd in /proc/"$new"/fd/*; do
 done
 [ "$sockets" -eq 1 ] || fail "$sockets sockets, not the one listener"
 
-step "7. stop"
+step "7. a crash after the reload"
+running "$old" || fail "the old process $old no longer drains before the crash"
+crash_and_restart two "crash after reload"
+if running "$old"; then fail "the draining old process $old still runs after restart"; fi
+if running "$new"; then fail "the killed process $new still runs"; fi
+echo "pids $new (killed) and $old (draining) are gone"
+
+step "8. a crash without a reload"
+crash_and_restart two "crash without reload"
+
+step "9. stop"
+cur=$(cat "$pidfile")
 rc-service "$svc" stop || fail "stop"
 n=0
-while running "$new" || running "$old"; do
+while [ -n "$(servers)" ]; do
 	n=$((n + 1))
-	[ "$n" -lt 50 ] || fail "still running after stop: new $new $(running "$new" && echo yes), old $old $(running "$old" && echo yes)"
+	[ "$n" -lt 50 ] || fail "still running after stop: $(echo $(servers))"
 	sleep 0.1
 done
 [ ! -e "$pidfile.draining" ] || fail "$pidfile.draining is left"
-echo "pids $new and $old are gone"
+echo "pid $cur is gone, no server process left"
 echo "$me: ok"

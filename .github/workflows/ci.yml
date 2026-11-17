@@ -263,7 +263,8 @@ jobs:
         run: scripts/check-product-deps.sh
       - name: OpenRC end to end
         # Installs the script and starts, reloads (binary replaced in
-        # place), checks status and descriptors, stops (contrib/README.md).
+        # place), checks status and descriptors, recovers from a crash
+        # with restart (FR-PROC-07a), stops (contrib/README.md).
         run: contrib/test-openrc.sh /tmp/target/debug/durchlauferhitzer
       - name: Stop the container
         if: always()

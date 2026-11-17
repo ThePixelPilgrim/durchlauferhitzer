@@ -39,6 +39,10 @@ binary.
   the old process draining, `status` (started), the new process's
   descriptors (only stdin, the log, the root, its listener and its
   anonymous inodes), `stop` (the new and the draining old process end).
+  It also pins the recovery after a crash, once after a reload and once
+  without one. A `kill -9` of the serving process makes `status` report
+  `crashed` with exit status 32. Then `restart` serves again and leaves
+  no other server process.
   It installs into `/etc`, `/usr` and `/srv`: not for a real system.
 
 Tested by `driver/tests/restart.rs` (as root; CI's root step) and, under

@@ -2131,11 +2131,13 @@ Failures, persistence, timeouts:
     FR-PROC-07.
   The OpenRC script therefore stays on `start-stop-daemon` without
   supervision. After an abnormal exit `rc-service durchlauferhitzer
-  status` reports `crashed` (the pid file's process is gone,
+  status` reports `crashed` with exit status 32 (`_status` in
+  `sh/openrc-run.sh.in`; the pid file's process is gone,
   `src/librc/librc-daemon.c` lines 567-611) and `restart` starts the
   server again (`start-stop-daemon --stop` finding nothing still exits
   0, `src/start-stop-daemon/start-stop-daemon.c` lines 824-834; the
-  script's `stop_post` ends what a reload left). The README's "OpenRC:
+  script's `stop_post` ends what a reload left). `contrib/test-openrc.sh`
+  pins both, for a crash before and after a reload (fix round 1). The README's "OpenRC:
   no restart after a crash" says so and why, the conf.d warns against
   `supervisor=supervise-daemon`, and FR-PROC-08's guaranteed install
   names systemd as its supervisor. *Planner calls (stage 10 plan):* no
@@ -2143,7 +2145,12 @@ Failures, persistence, timeouts:
   wrapper as `supervise-daemon`'s child, which would itself start every
   server (the reload's included) and exit abnormally only when the
   serving one does, was not built: it is a supervisor of our own, not
-  the builder call above, and would need an owner decision. Reload and
+  the builder call above, and would need an owner decision. It would
+  also change the pid file and reload contract: the wrapper needs a pid
+  file of its own beside the server's (`supervise-daemon`'s `--pidfile`
+  names the supervisor), and `reload` would have to signal the wrapper
+  (`supervise-daemon --signal`), which then runs the helper, instead of
+  running the helper itself. Reload and
   supervision do not interact, since there is none under OpenRC.
 - **FR-PROC-07** [done] Zero-downtime restart: no connection is lost.
   *(Owner decisions 2026-11-04, stage 6 brainstorm:)* a restart must not
