@@ -2784,15 +2784,56 @@ Failures, persistence, timeouts:
 - **NFR-MAINT-10** [done] Each crate has a README describing its purpose and
   layout, updated with module changes; source files stay small (no file in
   `core/src/` over ~900 lines).
-- **NFR-MAINT-12** [stage 10] Product size is measured (owner decision
+- **NFR-MAINT-12** [done] Product size is measured (owner decision
   2026-11-10, the qmail review's lesson 9: lines are the one lever on
   the bug count). The nightly records the product's source lines (the
   non-blank, non-comment lines of `core/src` and `driver/src` with every
   test module and `tests/` directory left out; the counting rule is a
   script under `scripts/` with its own test) beside the benchmark rows,
   charted on the `benchmarks` branch's page; each stage's review record
-  states the stage's delta with its reason. No gate: a number people
-  look at, not one that fails a build.
+  states the stage's delta with its reason (from the stage after stage
+  9; stage 9's record is not amended). No gate: a number people look
+  at, not one that fails a build.
+  *Counting rule as implemented* (`scripts/product-lines.py`, pinned by
+  `scripts/test_product_lines.py`; a sketch of Rust's lexer, not a
+  parser): files named `tests.rs` or `test_support.rs` and directories
+  named `tests` or `test_support` are skipped; an item under
+  `#[cfg(test)]` (exactly that cfg, after any further attributes) is
+  dropped from the attribute's line to its end: a `mod`, `fn`, `impl`,
+  `struct`, `enum`, `trait` (and other block items) at its `;` or its
+  closing brace, a `use`, `const`, `static` or `type` at its `;`, and
+  anything else (a field, a struct-literal field, a statement) at its
+  `;`, `,` or block at bracket depth 0, or before the bracket closing
+  around it; a `#[cfg(test)] mod name;` also skips that module's file
+  and directory as rustc finds them (`name.rs`, `name/` beside a
+  `mod.rs`/`lib.rs`/`main.rs`, else under the declaring file's stem),
+  so `*_tests.rs` files count as test modules. Line comments, doc
+  comments and (nested) block comments are not counted; a line with
+  code and a comment is; string, raw-string and char literals are code,
+  so a `//`, `/*`, `#[cfg(test)]` or brace inside one changes nothing,
+  and a `cfg(test)` inside a comment is ignored. Known approximations,
+  with their error direction: attributes written before `#[cfg(test)]`
+  stay counted (over); `#[cfg(any(test, ..))]`, `#![cfg(test)]` and
+  `#[path]` are not recognised (over); a test-only statement or field
+  ends early at a comma inside angle brackets, and an `if`/`else` after
+  its first block (over); lines are dropped whole, so code sharing a
+  line with the attribute or the item's end is not counted (under).
+  The count at 5e2c3a8: 15 407 lines (core 9 702, driver 5 705).
+  *Planner calls (stage 10 plan):* the series is a sibling CSV,
+  `product-lines.csv` (`date,commit,lines`) beside `results.csv` on the
+  `benchmarks` branch, not rows in `results.csv`, whose columns are the
+  benchmark's; the `bench` job writes it beside `bench.csv` into the
+  `bench-results` artifact; the publish (`bench-chart.py --append-lines
+  .. --lines ..`) takes at most one row per run under the same commit
+  and date checks as the benchmark rows, and a missing or broken lines
+  CSV never fails the publish (an older commit's artifact has none).
+  The page's `Product source lines` section shows the latest record and
+  one chart, each date's last record, y from 0. The brief's literal
+  rule (`tests.rs`, `tests/`, `test_support`) missed out-of-line test
+  modules with other names (`eager_tests.rs`, `flow_tests.rs`, ..): the
+  `mod name;` resolution above follows this entry's "every test module".
+  `#[cfg(test)]` on items other than a `mod` is dropped too: that code
+  is not in the shipped binary.
 - **NFR-MAINT-11** [done] Every change passes `cargo fmt --check`,
   `cargo clippy --workspace --all-targets --locked -- -D warnings`,
   `cargo test --workspace --locked`, `scripts/check-product-deps.sh` and

@@ -385,5 +385,206 @@ class Append(unittest.TestCase):
                 self.assertEqual(len(blocks(fh.read())), 4)
 
 
+# The product's source lines (NFR-MAINT-12): a sibling CSV of
+# results.csv, one row per nightly.
+LINES_HEADER = "date,commit,lines"
+
+
+def lrow(date, lines, commit="abc1234"):
+    return f"{date},{commit},{lines}"
+
+
+class ProductLines(unittest.TestCase):
+    def _files(self, d, bench_rows, lines_rows=None, published=None):
+        """Writes the artifact (bench.csv, and product-lines.csv unless
+        `lines_rows` is None) and, if given, the published lines CSV;
+        returns their paths."""
+        art = os.path.join(d, "artifact")
+        pages = os.path.join(d, "pages")
+        os.makedirs(art)
+        os.makedirs(pages)
+        with open(os.path.join(art, "bench.csv"), "w") as fh:
+            fh.write("\n".join([HEADER] + bench_rows) + "\n")
+        if lines_rows is not None:
+            with open(os.path.join(art, "product-lines.csv"), "w") as fh:
+                fh.write("\n".join(lines_rows) + "\n")
+        if published is not None:
+            with open(os.path.join(pages, "product-lines.csv"), "w") as fh:
+                fh.write("\n".join(published) + "\n")
+        return {
+            "bench": os.path.join(art, "bench.csv"),
+            "new_lines": os.path.join(art, "product-lines.csv"),
+            "results": os.path.join(pages, "results.csv"),
+            "lines": os.path.join(pages, "product-lines.csv"),
+            "page": os.path.join(pages, "BENCHMARKS.md"),
+            "readme": os.path.join(pages, "README.md"),
+        }
+
+    def _publish(self, f, run=RUN):
+        args = ["--append", f["bench"]] + run + [
+            "--append-lines", f["new_lines"], "--lines", f["lines"], f["results"], f["page"]]
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(err):
+            code = bc.main(args)
+        return code, out.getvalue() + err.getvalue()
+
+    def _read(self, path):
+        with open(path) as fh:
+            return fh.read()
+
+    def test_lines_rows_are_validated(self):
+        good = lrow("2026-11-06", 15407)
+        bad = [
+            lrow("2026-11-06x", 1),
+            lrow("2026-13-06", 1),
+            lrow("2026-11-06", 1, commit="ABC1234"),
+            lrow("2026-11-06", 1, commit="abc1234`x"),
+            lrow("2026-11-06", "-1"),
+            lrow("2026-11-06", "1.5"),
+            lrow("2026-11-06", "nan"),
+            lrow("2026-11-06", "\u0661\u0662"),
+            lrow("2026-11-06", "1" * 16),
+            lrow("2026-11-06", 1) + ",extra",
+            "2026-11-06,abc1234",
+        ]
+        rows, dropped = bc.parse_lines("\n".join([LINES_HEADER, good] + bad) + "\n")
+        self.assertEqual(dropped, len(bad))
+        self.assertEqual([(r["date"], r["commit"], r["lines"]) for r in rows],
+                         [("2026-11-06", "abc1234", 15407)])
+        rows, dropped = bc.parse_lines(LINES_HEADER + "\n" + _csv_line(["2026-11-06", "abc1234", "12\n"]))
+        self.assertEqual((rows, dropped), ([], 1))
+
+    def test_a_wrong_lines_header_is_refused(self):
+        with self.assertRaises(ValueError):
+            bc.parse_lines("date,commit,loc\n2026-11-06,abc1234,1\n")
+
+    def test_the_runs_row_is_appended_and_charted(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [row("2026-11-06", "static-small", 1, 1)],
+                            [LINES_HEADER, lrow("2026-11-06", 15407)],
+                            published=[LINES_HEADER, lrow("2026-11-05", 15000, commit="0123abc")])
+            code, out = self._publish(f)
+            self.assertEqual(code, 0)
+            self.assertIn("product lines: appended 1 rows, dropped 0, refused 0", out)
+            self.assertEqual(self._read(f["lines"]).splitlines(),
+                             [LINES_HEADER, lrow("2026-11-05", 15000, commit="0123abc"),
+                              lrow("2026-11-06", 15407)])
+            self.assertEqual(len(self._read(f["results"]).splitlines()), 2)
+            md = self._read(f["page"])
+        section = md.split("## Product source lines", 1)[1]
+        self.assertIn("| 2026-11-06 | `abc1234` | 15407 |", section)
+        chart = blocks(section)[0]
+        self.assertIn('title "Product source lines"', chart)
+        self.assertIn('x-axis ["2026-11-05", "2026-11-06"]', chart)
+        self.assertIn("line [15000, 15407]", chart)
+        self.assertIn("y-axis \"source lines\" 0 --> 18489", chart)
+        self.assertIn("scripts/product-lines.py", section)
+        self.assertIn("product-lines.csv", section)
+
+    def test_only_one_row_of_the_runs_commit_and_date_is_appended(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [row("2026-11-06", "static-small", 1, 1)], [
+                LINES_HEADER,
+                lrow("2026-11-06", 1, commit="def5678"),
+                lrow("2026-11-04", 2),
+                "evil",
+                lrow("2026-11-07", 3),
+                lrow("2026-11-06", 4),
+            ])
+            code, out = self._publish(f)
+            self.assertEqual(code, 0)
+            self.assertIn("product lines: appended 1 rows, dropped 2, refused 2", out)
+            self.assertEqual(self._read(f["lines"]).splitlines(), [LINES_HEADER, lrow("2026-11-07", 3)])
+
+    def test_a_missing_lines_artifact_publishes_the_bench_rows(self):
+        # An older commit's nightly (replayed or bisected) has no
+        # product-lines.csv: the bench rows are published all the same.
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [row("2026-11-06", "static-small", 1, 1)])
+            code, out = self._publish(f)
+            self.assertEqual(code, 0)
+            self.assertIn("product lines: no", out)
+            self.assertIn("appended 1 rows", out)
+            self.assertFalse(os.path.exists(f["lines"]))
+            md = self._read(f["page"])
+        self.assertNotIn("Product source lines", md)
+        self.assertEqual(len(blocks(md)), 2)
+
+    def test_a_bad_lines_artifact_publishes_the_bench_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [row("2026-11-06", "static-small", 1, 1)],
+                            ["evil", lrow("2026-11-06", 1)],
+                            published=[LINES_HEADER, lrow("2026-11-05", 9)])
+            code, out = self._publish(f)
+            self.assertEqual(code, 0)
+            self.assertIn("product lines:", out)
+            self.assertIn("wrong header", out)
+            self.assertEqual(self._read(f["lines"]).splitlines(), [LINES_HEADER, lrow("2026-11-05", 9)])
+            self.assertEqual(len(self._read(f["results"]).splitlines()), 2)
+            self.assertIn("line [9]", self._read(f["page"]))
+
+    def test_a_bad_published_lines_csv_leaves_the_section_out(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [row("2026-11-06", "static-small", 1, 1)], published=["evil"])
+            code, out = self._publish(f)
+            self.assertEqual(code, 0)
+            self.assertNotIn("Product source lines", self._read(f["page"]))
+            self.assertIn("wrong header", out)
+
+    def test_append_lines_needs_lines_and_a_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [row("2026-11-06", "static-small", 1, 1)],
+                            [LINES_HEADER, lrow("2026-11-06", 1)])
+            for args, message in (
+                (["--append-lines", f["new_lines"]] + RUN, "--append-lines needs --lines"),
+                (["--append-lines", f["new_lines"], "--lines", f["lines"]], "--append-lines needs --commit"),
+            ):
+                err = io.StringIO()
+                with self.assertRaises(SystemExit, msg=args):
+                    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                        bc.main(args + [f["results"], f["page"]])
+                self.assertIn(message, err.getvalue())
+                self.assertFalse(os.path.exists(f["lines"]))
+
+    def test_the_section_takes_each_dates_last_record(self):
+        lines, _ = bc.parse_lines("\n".join([
+            LINES_HEADER,
+            lrow("2026-11-06", 100),
+            lrow("2026-11-06", 120, commit="def5678"),
+            lrow("2026-11-07", 110, commit="0123abc"),
+        ]))
+        md = bc.render([], lines)
+        self.assertIn("No results yet.", md)
+        section = md.split("## Product source lines", 1)[1]
+        self.assertIn("line [120, 110]", section)
+        self.assertIn("| 2026-11-07 | `0123abc` | 110 |", section)
+
+    def test_render_without_lines_has_no_section(self):
+        rows, _ = bc.parse(CSV)
+        self.assertEqual(bc.render(rows), bc.render(rows, []))
+        self.assertNotIn("Product source lines", bc.render(rows))
+
+    def test_the_publish_writes_a_readme_only_when_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [row("2026-11-06", "static-small", 1, 1)])
+            self._publish(f)
+            readme = self._read(f["readme"])
+            self.assertTrue(readme.startswith("# Benchmarks\n"))
+            for name in ("BENCHMARKS.md", "results.csv", "product-lines.csv", "bench-chart.py"):
+                self.assertIn(name, readme)
+            with open(f["readme"], "w") as fh:
+                fh.write("kept\n")
+            self._publish(f)
+            self.assertEqual(self._read(f["readme"]), "kept\n")
+
+    def test_render_only_writes_no_readme(self):
+        with tempfile.TemporaryDirectory() as d:
+            results = os.path.join(d, "results.csv")
+            with open(results, "w") as fh:
+                fh.write(CSV)
+            bc.main([results, os.path.join(d, "BENCHMARKS.md")])
+            self.assertFalse(os.path.exists(os.path.join(d, "README.md")))
+
+
 if __name__ == "__main__":
     unittest.main()

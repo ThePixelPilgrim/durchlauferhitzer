@@ -137,10 +137,10 @@ jobs:
         run: scripts/test-check-product-deps.sh
       - name: Branch cleanup script self-test
         run: scripts/test-cleanup-merged-branches.sh
-      - name: Nightly report and bench chart script tests
+      - name: Nightly report, bench chart and product lines script tests
         # The fingerprint and issue decision of nightly.yml's `report`
-        # job (NFR-TEST-08) and the benchmark page (NFR-PERF-08); once
-        # per workflow.
+        # job (NFR-TEST-08), the benchmark page (NFR-PERF-08) and the
+        # product's source line count (NFR-MAINT-12); once per workflow.
         if: matrix.arch == 'x86_64'
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Docs (warnings are errors)

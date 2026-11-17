@@ -394,6 +394,8 @@ keyed by a fingerprint of the failure (`scripts/nightly-report.py`).
 
 CPU time and system calls per request, measured nightly: [BENCHMARKS.md](https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/benchmarks/BENCHMARKS.md) (on the `benchmarks` branch; the tool is [`bench/`](bench)).
 
+The same page charts the product's source lines, counted nightly by `scripts/product-lines.py` (NFR-MAINT-12).
+
 ## Repository layout
 
 - [`core/`](core) — the product: a sans-IO HTTP core with zero dependencies (config, parsing, routing, static files, proxying).

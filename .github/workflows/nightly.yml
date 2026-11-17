@@ -1,8 +1,9 @@
 name: Nightly
 
 # Long randomized runs, fuzzing, an older glibc, the newest glibc and
-# musl, tests under CPU pressure, the restart soak and the benchmarks
-# (NFR-TEST-08, NFR-SEC-13, NFR-PORT-01, FR-PROC-07, NFR-PERF-08):
+# musl, tests under CPU pressure, the restart soak, the benchmarks and
+# the product's source lines (NFR-TEST-08, NFR-SEC-13, NFR-PORT-01,
+# FR-PROC-07, NFR-PERF-08, NFR-MAINT-12):
 # daily, and by hand with smaller or larger budgets.
 on:
   schedule:
@@ -601,7 +602,8 @@ jobs:
 
   bench:
     # The benchmarks (NFR-PERF-08, bench/README.md): the release binary
-    # through the fixed scenarios, one CSV row per scenario and run,
+    # through the fixed scenarios, one CSV row per scenario and run, and
+    # the product's source lines (NFR-MAINT-12, scripts/product-lines.py),
     # uploaded for `bench-publish`. A pinned image, so the runner label
     # in the rows stays true. The bench runs as the runner user; only
     # its strace pass runs as root (`sudo -n`).
@@ -624,6 +626,8 @@ jobs:
         run: |
           cargo build --release --locked -p durchlauferhitzer
           cargo build --release --locked --manifest-path bench/Cargo.toml
+      - name: Product source lines
+        run: python3 -I scripts/product-lines.py --csv --commit "${GITHUB_SHA::7}" --date "$(date -u +%F)" > product-lines.csv
       - name: Benchmarks
         run: |
           set -euo pipefail
@@ -646,7 +650,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-results
-          path: bench.csv
+          path: |
+            bench.csv
+            product-lines.csv
           if-no-files-found: ignore
       - name: Failure record
         if: failure()
@@ -727,9 +733,10 @@ jobs:
           if-no-files-found: ignore
 
   bench-publish:
-    # Appends the `bench` artifact's rows to results.csv on the
-    # `benchmarks` branch (created as an orphan branch if missing) and
-    # renders BENCHMARKS.md (NFR-PERF-08). The only job that writes the
+    # Appends the `bench` artifact's rows to results.csv and its source
+    # lines row to product-lines.csv on the `benchmarks` branch (created
+    # as an orphan branch if missing) and renders BENCHMARKS.md
+    # (NFR-PERF-08, NFR-MAINT-12). The only job that writes the
     # repository (the built-in token, no other secret). It runs no code
     # under test: only the `benchmarks` branch is checked out, plus
     # scripts/bench-chart.py (stdlib Python) from the run's commit; the
@@ -789,14 +796,8 @@ jobs:
             git -c "$auth" fetch -q --depth=1 origin benchmarks
             git checkout -q -b benchmarks FETCH_HEAD
           else
+            # bench-chart.py --append writes its README.md.
             git checkout -q --orphan benchmarks
-            {
-              echo "# Benchmarks"
-              echo
-              echo "Written by the nightly workflow's \`bench publish\` job (NFR-PERF-08):"
-              echo "[BENCHMARKS.md](BENCHMARKS.md) charts [results.csv](results.csv)."
-              echo "The tool and the scripts are on \`main\` (\`bench/\`, \`scripts/bench-chart.py\`)."
-            } > README.md
           fi
         env:
           GH_TOKEN: ${{ github.token }}
@@ -812,8 +813,10 @@ jobs:
             exit 0
           fi
           # Only the rows of this run's commit, dated within a day of
-          # today (UTC), are taken; any other row is refused.
+          # today (UTC), are taken; any other row is refused. An older
+          # commit's artifact has no product-lines.csv: none is appended.
           python3 -I tools/scripts/bench-chart.py --append "$csv" --commit "${GITHUB_SHA::7}" \
+            --append-lines "$(dirname "$csv")/product-lines.csv" --lines pages/product-lines.csv \
             pages/results.csv pages/BENCHMARKS.md
           cd pages
           git add -A

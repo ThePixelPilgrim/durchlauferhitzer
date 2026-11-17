@@ -7,8 +7,9 @@ Test tooling, Python 3 standard library only. Renders the benchmark CSV
 scenario, x = date, y = the median of that date's runs, and a table of
 the latest values.
 
-    bench-chart.py results.csv BENCHMARKS.md
+    bench-chart.py [--lines product-lines.csv] results.csv BENCHMARKS.md
     bench-chart.py --append bench.csv --commit <sha> [--today YYYY-MM-DD] \
+        [--append-lines new-lines.csv --lines product-lines.csv] \
         results.csv BENCHMARKS.md
 
 `--append` first adds the rows of a new CSV (the nightly `bench` job's
@@ -21,7 +22,15 @@ every field is checked (a date, a lowercase hex commit, a plain runner
 label, a scenario from the fixed set, numbers that parse, are finite and
 not negative) and a row that fails is dropped, before it reaches the CSV
 or the page; the page re-checks every row it reads. Rows with errors are
-kept in the CSV but never charted.
+kept in the CSV but never charted. `--append` also writes a README.md
+beside results.csv if there is none (a new `benchmarks` branch).
+
+The product's source lines (NFR-MAINT-12, `scripts/product-lines.py`)
+are a sibling CSV, `--lines` (`date,commit,lines`), charted on the same
+page when present. `--append-lines` adds one row of the run's new CSV to
+it, under the same checks as `--append`. A missing or broken lines CSV
+never fails the publish: the run of an older commit has none, and the
+benchmark rows are published all the same.
 """
 
 import argparse
@@ -69,6 +78,25 @@ MAX_DATES = 90
 MAX_NEW_ROWS = 10000
 # Longest numeric field.
 MAX_NUMBER = 32
+LINES_HEADER = ["date", "commit", "lines"]
+# Rows taken from one artifact's lines CSV (one count per run).
+MAX_NEW_LINES = 1
+README = """# Benchmarks
+
+Written by the nightly workflow's `bench publish` job.
+
+| File | What it holds |
+|---|---|
+| [BENCHMARKS.md](BENCHMARKS.md) | the charts (rendered from the two CSV files) |
+| [results.csv](results.csv) | the benchmark rows (NFR-PERF-08) |
+| [product-lines.csv](product-lines.csv) | the product's source lines (NFR-MAINT-12) |
+
+The tools are on `main`:
+
+- `bench/`, the benchmark tool;
+- `scripts/bench-chart.py`, which renders the page;
+- `scripts/product-lines.py`, which counts the source lines.
+"""
 
 # Matched whole (fullmatch: `$` would accept a final newline) and in
 # ASCII ([0-9], not `\d`, which takes any Unicode digit).
@@ -148,6 +176,40 @@ def parse(text):
     return rows, dropped
 
 
+def validate_lines(fields):
+    """The typed row of one lines CSV record (a list of strings), or None."""
+    if len(fields) != len(LINES_HEADER):
+        return None
+    if any("\r" in f or "\n" in f for f in fields):
+        return None
+    day, commit, lines = fields
+    if not _DATE.fullmatch(day) or not _COMMIT.fullmatch(commit) or not _INT.fullmatch(lines):
+        return None
+    try:
+        _date.fromisoformat(day)
+    except ValueError:
+        return None
+    return {"date": day, "commit": commit, "lines": int(lines), "fields": list(fields)}
+
+
+def parse_lines(text):
+    """(valid rows, number of dropped records) of a lines CSV text;
+    ValueError if its header is not exactly LINES_HEADER."""
+    reader = csv.reader(io.StringIO(text))
+    if next(reader, None) != LINES_HEADER:
+        raise ValueError("not a product lines CSV (wrong header)")
+    rows, dropped = [], 0
+    for fields in reader:
+        if not fields:
+            continue
+        r = validate_lines(fields)
+        if r is None:
+            dropped += 1
+        else:
+            rows.append(r)
+    return rows, dropped
+
+
 def _charted(r, metric):
     return r["errors"] == 0 and r["requests"] > 0 and r[metric] is not None
 
@@ -171,11 +233,11 @@ def _fmt(v):
     return "–" if v is None else f"{v:.2f}"
 
 
-def _chart(title, axis, points):
+def _chart(title, axis, points, fmt=_fmt):
     top = max(v for _, v in points)
     top = max(1, math.ceil(top * 1.2))
     dates = ", ".join(f'"{d}"' for d, _ in points)
-    values = ", ".join(_fmt(v) for _, v in points)
+    values = ", ".join(fmt(v) for _, v in points)
     return "\n".join(
         [
             "```mermaid",
@@ -226,8 +288,43 @@ def _latest(rows):
     return out
 
 
-def render(rows):
-    """The Markdown page for the (valid) rows."""
+def _lines_section(lines):
+    """The page's product lines section: each date's last record."""
+    if not lines:
+        return []
+    by_date = {r["date"]: r for r in sorted(lines, key=lambda r: r["date"])}
+    points = [(d, r["lines"]) for d, r in by_date.items()][-MAX_DATES:]
+    last = by_date[points[-1][0]]
+    return [
+        "## Product source lines",
+        "",
+        "The product's size, recorded by each nightly (NFR-MAINT-12).",
+        "It counts the non-blank, non-comment lines of `core/src` and `driver/src`.",
+        "Test code is left out.",
+        "",
+        "The counting rule is `scripts/product-lines.py` on `main`.",
+        "The data is [`product-lines.csv`](product-lines.csv).",
+        "",
+        "Each point is the last record of its date.",
+        "",
+        "| Date | Commit | Lines |",
+        "|---|---|---:|",
+        f"| {last['date']} | `{last['commit']}` | {last['lines']} |",
+        "",
+        _chart("Product source lines", "source lines", points, lambda v: str(v)),
+        "",
+    ]
+
+
+def render(rows, lines=()):
+    """The Markdown page for the (valid) benchmark rows and product lines
+    rows."""
+    page = _render_bench(rows)
+    section = _lines_section(lines)
+    return page + "\n" + "\n".join(section) if section else page
+
+
+def _render_bench(rows):
     lines = [
         "# Benchmarks",
         "",
@@ -308,6 +405,52 @@ def append(new_path, results_path, commit, today):
     return len(rows), dropped, refused
 
 
+def append_lines(new_path, lines_path, commit, today):
+    """Appends the first valid row of `new_path` that is the run's own to
+    `lines_path` (created with the header if missing); returns the line
+    to print. Never raises for a missing or broken `new_path`."""
+    if not os.path.isfile(new_path):
+        return f"product lines: no {new_path}; nothing appended"
+    try:
+        rows, dropped = parse_lines(_read_text(new_path))
+    except ValueError as e:
+        return f"product lines: {new_path}: {e}; nothing appended"
+    mine = [r for r in rows if _the_runs(r, commit, today)]
+    refused = len(rows) - len(mine)
+    dropped += max(0, len(mine) - MAX_NEW_LINES)
+    mine = mine[:MAX_NEW_LINES]
+    fresh = not os.path.exists(lines_path)
+    with open(lines_path, "a", encoding="utf-8", newline="") as fh:
+        out = csv.writer(fh, lineterminator="\n")
+        if fresh:
+            out.writerow(LINES_HEADER)
+        for r in mine:
+            out.writerow(r["fields"])
+    return f"product lines: appended {len(mine)} rows, dropped {dropped}, refused {refused}"
+
+
+def _read_lines(path):
+    """The valid rows of the published lines CSV; none (and a note on
+    stderr) if it is missing or not a lines CSV."""
+    if not os.path.isfile(path):
+        return []
+    try:
+        rows, dropped = parse_lines(_read_text(path))
+    except ValueError as e:
+        print(f"{path}: {e}; product lines left out", file=sys.stderr)
+        return []
+    if dropped:
+        print(f"{path}: {dropped} invalid rows left out", file=sys.stderr)
+    return rows
+
+
+def _write_readme(results_path):
+    path = os.path.join(os.path.dirname(results_path), "README.md")
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(README)
+
+
 def _commit_arg(text):
     if not _COMMIT.fullmatch(text):
         raise argparse.ArgumentTypeError(f"{text!r}: 7 to 40 lowercase hex digits")
@@ -331,24 +474,37 @@ def main(argv=None):
     p.add_argument("--today", type=_date_arg,
                    help="with --append: the run's date (default: today, UTC); rows dated "
                         "more than a day from it are refused")
+    p.add_argument("--append-lines", metavar="NEW_LINES_CSV",
+                   help="first append this product lines CSV's row of the run to --lines "
+                        "(needs --commit); a missing file appends nothing")
+    p.add_argument("--lines", metavar="LINES_CSV",
+                   help="the product lines CSV charted on the page (if present)")
     p.add_argument("csv")
     p.add_argument("out")
     args = p.parse_args(argv)
+    if args.append_lines and args.lines is None:
+        p.error("--append-lines needs --lines")
+    if args.append_lines and args.commit is None:
+        p.error("--append-lines needs --commit")
+    if args.append and args.commit is None:
+        p.error("--append needs --commit")
+    today = args.today or _utc_today()
     if args.append:
-        if args.commit is None:
-            p.error("--append needs --commit")
-        today = args.today or _utc_today()
         try:
             added, dropped, refused = append(args.append, args.csv, args.commit, today)
         except ValueError as e:
             raise SystemExit(f"bench-chart: {args.append}: {e}")
         print(f"appended {added} rows, dropped {dropped}, refused {refused} "
               f"(not commit {args.commit} or not within a day of {today.isoformat()})")
+        _write_readme(args.csv)
+    if args.append_lines:
+        print(append_lines(args.append_lines, args.lines, args.commit, today))
     rows, dropped = parse(_read_text(args.csv))
     if dropped:
         print(f"{args.csv}: {dropped} invalid rows left out", file=sys.stderr)
+    lines = _read_lines(args.lines) if args.lines else []
     with open(args.out, "w", encoding="utf-8") as fh:
-        fh.write(render(rows))
+        fh.write(render(rows, lines))
     return 0
 
 
