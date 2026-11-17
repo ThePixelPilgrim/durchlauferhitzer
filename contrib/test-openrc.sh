@@ -74,7 +74,8 @@ get() {
 	curl -sS --max-time 5 -H 'Host: localhost' "http://127.0.0.1:$port/a.txt"
 }
 
-# Waits (at most 5 s) until the server answers $1; $2 names the step.
+# Waits until the server answers $1: at most 50 attempts 0.1 s apart,
+# each a request of at most 5 s (curl --max-time). $2 names the step.
 answers() {
 	n=0
 	until got=$(get 2>/dev/null); do

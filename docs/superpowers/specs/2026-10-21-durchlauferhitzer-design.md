@@ -2137,7 +2137,11 @@ Failures, persistence, timeouts:
   server again (`start-stop-daemon --stop` finding nothing still exits
   0, `src/start-stop-daemon/start-stop-daemon.c` lines 824-834; the
   script's `stop_post` ends what a reload left). `contrib/test-openrc.sh`
-  pins both, for a crash before and after a reload (fix round 1). The README's "OpenRC:
+  pins the `crashed` status with exit status 32 and the `restart` that
+  serves again, once for a crash after a reload and once without one;
+  both were observed in CI's Alpine job (OpenRC 0.63.2). A `restart`
+  while an old process still drains waits for `stop_post`, bounded by
+  the script's `retry` (default `TERM/35/KILL/5`). The README's "OpenRC:
   no restart after a crash" says so and why, the conf.d warns against
   `supervisor=supervise-daemon`, and FR-PROC-08's guaranteed install
   names systemd as its supervisor. *Planner calls (stage 10 plan):* no

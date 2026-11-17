@@ -367,8 +367,12 @@ After such an end, the operator restarts the server by hand:
 2. `rc-service durchlauferhitzer restart` starts the server again. Its
    stop step also ends the processes a reload left draining.
 
+A `restart` waits while an old process from a reload still drains, at
+most as long as the conf.d's `retry` allows (40 s by default).
+
 A monitor can stand in for the operator. It keys on the exit status 32
 of `status` and then runs `restart`.
+
 The [guaranteed install](#guaranteed-install) needs the
 [systemd service](#systemd-socket-activation), which restarts the
 server on its own.
