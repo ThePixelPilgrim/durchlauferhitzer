@@ -22,8 +22,10 @@ binary.
   `checkconfig`, `reload`), modelled on Alpine's haproxy script; `stop`
   also ends the processes a reload left (`<pidfile>.draining`: draining,
   or not handed over by a killed helper; each by pid and start time,
-  checked again before every signal). Install it as
-  `/etc/init.d/durchlauferhitzer`, the helper as
+  checked again before every signal). `stop` and `status` never take
+  a reused pid for the server: a pid file naming a process that does
+  not run the binary reads as `crashed`, and nothing is signalled.
+  Install it as `/etc/init.d/durchlauferhitzer`, the helper as
   `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`. It does
   not restart the server after an abnormal exit, because
   `supervise-daemon` cannot carry a reload's hand-over
@@ -49,7 +51,11 @@ binary.
   8. A crash without a reload: `kill -9` of the restarted process.
      `status` then reports `crashed` with exit status 32. `restart`
      serves again.
-  9. `stop`: no server process and no draining list are left.
+  9. A crash whose pid is reused: `kill -9` of the server, then the
+     pid file names an unrelated `sleep`. `status` reports `crashed`
+     with exit status 32. `restart` serves again, and the `sleep` still
+     runs.
+  10. `stop`: no server process and no draining list are left.
 
 Tested by `driver/tests/restart.rs` (as root; CI's root step) and, under
 OpenRC itself, by `test-openrc.sh`.

@@ -505,7 +505,7 @@ class Legs(unittest.TestCase):
         self.assertEqual((added["job"], added["arch"], added["libc"]), ("restart-soak", "arm64", "musl"))
         self.assertEqual(added["failures"][0]["kind"], "timeout-or-cancelled")
         fp, title = nr.describe("restart-soak", added["failures"][0])
-        self.assertEqual(fp, nr.fingerprint("restart-soak|timeout-or-cancelled"))
+        self.assertEqual(fp, nr.fingerprint("restart-soak|arm64|musl|timeout-or-cancelled"))
         self.assertEqual(
             title,
             "nightly: restart soak (arm64, musl) — timed out or was cancelled, "
@@ -513,11 +513,11 @@ class Legs(unittest.TestCase):
         )
         occurrence = {"job": added["job"], "arch": added["arch"], "failure": added["failures"][0]}
         self.assertIn("restart soak musl (arm64)", nr._occurrence(occurrence, RUN))
-        # Without the leg (from `needs` alone): the same fingerprint, no
-        # parentheses in the title.
+        # Without the leg (from `needs` alone): the job-wide fingerprint,
+        # no parentheses in the title.
         (bare,) = nr.add_missing([], {"restart-soak": {"result": "cancelled"}}, RUN)
         fp_bare, title_bare = nr.describe("restart-soak", bare["failures"][0])
-        self.assertEqual(fp_bare, fp)
+        self.assertEqual(fp_bare, nr.fingerprint("restart-soak|timeout-or-cancelled"))
         self.assertTrue(title_bare.startswith("nightly: restart soak — "), title_bare)
 
     def test_a_failed_leg_without_a_record_and_timed_out(self):

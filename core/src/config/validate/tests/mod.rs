@@ -260,12 +260,12 @@ fn user_accepts_numeric_ids() {
             gid: 1000
         })
     );
-    let config = ok(&user_cfg("65534:4294967295"));
+    let config = ok(&user_cfg("4294967294:4294967294"));
     assert_eq!(
         config.user,
         Some(User::Ids {
-            uid: 65534,
-            gid: u32::MAX
+            uid: u32::MAX - 1,
+            gid: u32::MAX - 1
         })
     );
     assert_eq!(
@@ -309,6 +309,8 @@ fn user_name_still_a_name() {
     assert_eq!(err(&user_cfg("1000")), (invalid("user", "1000"), 2, 1));
 }
 
+/// FR-CFG-11: 4294967295 is the kernel's "no change" id for
+/// `setuid`/`setgid`; a server configured with it could never start.
 #[test]
 fn user_rejects_malformed_ids() {
     for bad in [
@@ -324,6 +326,8 @@ fn user_rejects_malformed_ids() {
         "a:1",
         "99999999999:1",
         "1:4294967296",
+        "4294967295:65534",
+        "65534:4294967295",
         "nobody:1",
     ] {
         assert_eq!(

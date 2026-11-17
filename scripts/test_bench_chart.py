@@ -579,7 +579,8 @@ class ProductLines(unittest.TestCase):
         self.assertEqual(bc.render(rows), bc.render(rows, []))
         self.assertNotIn("Product source lines", bc.render(rows))
 
-    def test_the_publish_writes_a_readme_only_when_missing(self):
+    def test_the_publish_rewrites_a_readme_that_differs(self):
+        # The live branch has an older README: it is replaced, not kept.
         with tempfile.TemporaryDirectory() as d:
             f = self._files(d, [row("2026-11-06", "static-small", 1, 1)])
             self._publish(f)
@@ -588,9 +589,35 @@ class ProductLines(unittest.TestCase):
             for name in ("BENCHMARKS.md", "results.csv", "product-lines.csv", "bench-chart.py"):
                 self.assertIn(name, readme)
             with open(f["readme"], "w") as fh:
-                fh.write("kept\n")
+                fh.write("an older README\n")
             self._publish(f)
-            self.assertEqual(self._read(f["readme"]), "kept\n")
+            self.assertEqual(self._read(f["readme"]), readme)
+
+    def test_a_night_without_bench_csv_still_gets_its_lines_row(self):
+        # `bench` failed before writing bench.csv; product-lines.csv is
+        # in the artifact all the same (bench/README.md).
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [], [LINES_HEADER, lrow("2026-11-06", 7)],
+                            published=[LINES_HEADER, lrow("2026-11-05", 9)])
+            with open(f["results"], "w") as fh:
+                fh.write("\n".join([HEADER, row("2026-11-05", "static-small", 1, 1)]) + "\n")
+            os.remove(f["bench"])
+            code, out = self._publish(f)
+            self.assertEqual(code, 0)
+            self.assertIn("no bench rows", out)
+            self.assertIn("product lines: appended 1 rows", out)
+            self.assertEqual(self._read(f["lines"]).splitlines(),
+                             [LINES_HEADER, lrow("2026-11-05", 9), lrow("2026-11-06", 7)])
+            self.assertEqual(len(self._read(f["results"]).splitlines()), 2)
+            self.assertIn("line [9, 7]", self._read(f["page"]))
+        # On a new branch too: results.csv starts with its header.
+        with tempfile.TemporaryDirectory() as d:
+            f = self._files(d, [], [LINES_HEADER, lrow("2026-11-06", 7)])
+            os.remove(f["bench"])
+            code, out = self._publish(f)
+            self.assertEqual(code, 0)
+            self.assertEqual(self._read(f["results"]).splitlines(), [HEADER])
+            self.assertIn("line [7]", self._read(f["page"]))
 
     def test_render_only_writes_no_readme(self):
         with tempfile.TemporaryDirectory() as d:

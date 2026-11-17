@@ -808,16 +808,16 @@ jobs:
         id: render
         run: |
           set -euo pipefail
-          csv=$(find artifact -type f -name bench.csv | head -n 1)
-          if [ -z "$csv" ]; then
+          dir=$(find artifact -type f \( -name bench.csv -o -name product-lines.csv \) -printf '%h\n' | head -n 1)
+          if [ -z "$dir" ]; then
             echo "no bench artifact: nothing to publish"
             exit 0
           fi
-          # Only the rows of this run's commit, dated within a day of
-          # today (UTC), are taken; any other row is refused. An older
-          # commit's artifact has no product-lines.csv: none is appended.
-          python3 -I tools/scripts/bench-chart.py --append "$csv" --commit "${GITHUB_SHA::7}" \
-            --append-lines "$(dirname "$csv")/product-lines.csv" --lines pages/product-lines.csv \
+          # Only the run's own rows (its commit, within a day of today,
+          # UTC) are taken. A missing bench.csv (a failed `bench`) or
+          # product-lines.csv (an older commit's artifact) appends nothing.
+          python3 -I tools/scripts/bench-chart.py --append "$dir/bench.csv" --commit "${GITHUB_SHA::7}" \
+            --append-lines "$dir/product-lines.csv" --lines pages/product-lines.csv \
             pages/results.csv pages/BENCHMARKS.md
           cd pages
           git add -A

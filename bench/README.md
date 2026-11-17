@@ -168,7 +168,14 @@ That file travels in the `bench-results` artifact beside `bench.csv`.
 The publish appends its row to `product-lines.csv` on the `benchmarks` branch.
 It takes the row under the same commit and date checks as the benchmark rows.
 
+Either file can be missing from a night's artifact, and the other is
+still published:
+
+| The artifact lacks | Why | What the publish does |
+|---|---|---|
+| `product-lines.csv`, or has a broken one | The count failed on its own, or an older commit ran. | It appends the benchmark rows and no lines row. |
+| `bench.csv` | The `Benchmarks` step failed before writing it. | It appends the lines row and no benchmark rows. |
+
 A failing count never stops the benchmarks: the step may fail on its own.
-An artifact without the file, or with a broken one, is published all the same.
-Its benchmark rows are taken.
-No lines row is added for that run.
+The publish also rewrites the branch's `README.md` whenever it differs
+from what `bench-chart.py` writes.

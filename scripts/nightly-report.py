@@ -42,7 +42,11 @@ normalized text, which names the failure, not the seed or input:
                failed);
   bench        job, scenario and reason from bench's `bench failed:`
                lines (each scenario and reason once, however many runs);
-  a job that timed out or was cancelled (no record): `<job>|timeout-or-cancelled`.
+  a job that timed out or was cancelled (no record): `<job>|timeout-or-cancelled`;
+  a job that failed without a recognized failure: `<job>|unrecognized`;
+               for these two, a `newest libc` leg puts `|<libc>` and a
+               `restart soak` leg `|<arch>|<libc>` after the job, so each
+               leg files its own issue.
 Limit: a panic located in the standard library or a dependency (a
 location starting `rustc/` or `registry/`) is keyed on that location
 alone, not on the workspace frame that called it: the nightly runs
@@ -219,11 +223,17 @@ def describe(job, f):
         label = f"restart soak ({f.get('arch', '')}, {f['libc']})"
     if job == "newest-libc" and f.get("libc"):
         label = f"newest libc ({f['libc']})"
+    # The leg of a job that has several, when known (NFR-TEST-08).
+    leg = ""
+    if job == "restart-soak" and f.get("libc"):
+        leg = f"|{f.get('arch', '')}|{f['libc']}"
+    if job == "newest-libc" and f.get("libc"):
+        leg = f"|{f['libc']}"
     if kind == "unrecognized":
-        key = f"{job}|unrecognized"
+        key = f"{job}{leg}|unrecognized"
         reason = "failed without a recognized failure"
     elif kind == "timeout-or-cancelled":
-        key = f"{job}|timeout-or-cancelled"
+        key = f"{job}{leg}|timeout-or-cancelled"
         reason = "timed out or was cancelled, no failure record"
     elif job in ("older-glibc", "pressure"):
         key = f"{job}|{test}"
@@ -454,7 +464,7 @@ def record_restart_soak(text, workspace, arch, libc):
     after a `== restart soak run <n> of <runs>` line): one per failing
     test, with how many runs it failed and its last panic."""
     if text is None:
-        return [_unrecognized("The job left no log; see the run.")]
+        return [_failure(arch=arch, libc=libc, panic_text="The job left no log; see the run.")]
     runs = [m for m in map(_SOAK_RUN.match, text.splitlines()) if m]
     of = runs[-1].group("of") if runs else "?"
     panics = parse_panics(text)
@@ -479,7 +489,8 @@ def record_restart_soak(text, workspace, arch, libc):
                 replay=f"{replay}  # {where}, looped",
             )
         )
-    return failures or [_unrecognized("No failed test found in the log; see the run.")]
+    why = "No failed test found in the log; see the run."
+    return failures or [_failure(arch=arch, libc=libc, panic_text=why)]
 
 
 def record_bench(text):
@@ -592,8 +603,8 @@ def _missing(job, arch, libc, result, run_url):
         why = "The job timed out (timeout-minutes) or was cancelled; see the run."
         f = _failure(kind="timeout-or-cancelled", panic_text=why)
     if libc:
-        # The leg, for the title and the occurrence's heading (not the
-        # fingerprint).
+        # The leg, for the fingerprint, the title and the occurrence's
+        # heading.
         f.update(arch=arch, libc=libc)
     return make_record(job, arch, run_url, [f], libc=libc)
 

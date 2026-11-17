@@ -1,6 +1,8 @@
 """Tests of scripts/nightly-report.py for the `newest libc` job
 (NFR-TEST-08): its two legs, glibc and musl, file apart from each other
-and from the older glibc job, and each replay line names its image.
+and from the older glibc job, and each replay line names its image. Also
+the per-leg fingerprints of set-up failures and timeouts, for `newest
+libc` and `restart soak`.
 
 Run with `python3 -m unittest discover -s scripts -p 'test_*.py'`.
 """
@@ -45,10 +47,15 @@ error: test failed, to rerun pass `-p durchlauferhitzer --test containment`
 
 def record(libc):
     """The failure record the `newest libc (<libc>)` leg writes."""
+    return record_log(libc, KILL_LOG)
+
+
+def record_log(libc, text):
+    """The record the `newest libc (<libc>)` leg writes for log `text`."""
     with tempfile.TemporaryDirectory() as d:
         log = os.path.join(d, "driver-tests.log")
         with open(log, "w") as fh:
-            fh.write(KILL_LOG)
+            fh.write(text)
         out = os.path.join(d, "failure.json")
         with contextlib.redirect_stdout(io.StringIO()):
             nr.main(["record", "--job", "newest-libc", "--arch", "x86_64", "--libc", libc,
@@ -105,6 +112,40 @@ class NewestLibc(unittest.TestCase):
         f = out[1]["failures"][0]
         self.assertEqual(f["kind"], "timeout-or-cancelled")
         self.assertTrue(nr.describe("newest-libc", f)[1].startswith("nightly: newest libc (musl) — "))
+
+    def test_set_up_failures_and_timeouts_file_per_leg(self):
+        # NFR-TEST-08: the fingerprint includes the leg, so each leg of
+        # `newest libc` and `restart soak` files its own issue, for a
+        # set-up failure (unrecognized) and a timeout too.
+        legs = {"jobs": [{"name": n, "conclusion": c} for n, c in (
+            ("newest libc (glibc)", "failure"), ("newest libc (musl)", "failure"),
+            ("restart soak (x86_64, glibc)", "cancelled"),
+            ("restart soak (arm64, musl)", "cancelled"))]}
+        out = nr.add_missing([], {}, RUN, legs)
+        fps = [nr.describe(r["job"], r["failures"][0])[0] for r in out]
+        self.assertEqual(fps, [nr.fingerprint(k) for k in (
+            "newest-libc|glibc|unrecognized", "newest-libc|musl|unrecognized",
+            "restart-soak|x86_64|glibc|timeout-or-cancelled",
+            "restart-soak|arm64|musl|timeout-or-cancelled")])
+        legs = {"jobs": [{"name": "newest libc (glibc)", "conclusion": "cancelled"},
+                         {"name": "newest libc (musl)", "conclusion": "cancelled"}]}
+        timeouts = [nr.describe(r["job"], r["failures"][0])[0]
+                    for r in nr.add_missing([], {}, RUN, legs)]
+        self.assertEqual(timeouts, [nr.fingerprint("newest-libc|glibc|timeout-or-cancelled"),
+                                    nr.fingerprint("newest-libc|musl|timeout-or-cancelled")])
+
+    def test_a_log_without_a_failure_files_per_leg(self):
+        # A leg whose log names no failed test (set-up failed early).
+        self.assertEqual(
+            nr.describe("newest-libc", record_log("musl", "no tests ran\n")["failures"][0])[0],
+            nr.fingerprint("newest-libc|musl|unrecognized"))
+        for arch, libc in (("x86_64", "glibc"), ("arm64", "musl")):
+            for text in ("== restart soak run 1 of 9\n", None):
+                (f,) = nr.record_restart_soak(text, WS, arch, libc)
+                self.assertEqual((f["kind"], f["arch"], f["libc"]), ("unrecognized", arch, libc))
+                fp, title = nr.describe("restart-soak", f)
+                self.assertEqual(fp, nr.fingerprint(f"restart-soak|{arch}|{libc}|unrecognized"))
+                self.assertTrue(title.startswith(f"nightly: restart soak ({arch}, {libc}) — "))
 
     def test_every_failing_binary_is_recorded(self):
         # `--no-fail-fast`: cargo runs every test binary, so two can fail.

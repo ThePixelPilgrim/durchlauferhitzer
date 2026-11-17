@@ -318,7 +318,11 @@ Structure and values:
   *(stage 10, FR-PROC-03)* is `<uid>:<gid>`: two decimal numbers (ASCII
   digits only, no sign, each fitting 32 bits), neither 0. A value with a
   `:` is never a name; a number alone (`user 1000;`) is a name and
-  invalid.
+  invalid. *Controller ruling, stage 10 final review; same class as the
+  owner's 2026-11-17 decision for id 0:* `4294967295` in either place is
+  an invalid value (`--check` reports it, exit 1): it is the kernel's
+  "no change" value for `setuid`/`setgid`, so the server could never
+  drop to it and start.
 - **FR-CFG-12** [done] A `host` block takes one or more names: ASCII
   letters, digits, `-` and `.` without a leading or trailing `.`, an IPv4
   literal, or a bracketed IPv6 literal (`[::1]`); names are stored
@@ -1831,8 +1835,13 @@ Failures, persistence, timeouts:
   config error at the setting (exit 1, FR-PROC-05a), so `--check`
   reports it too: `user <uid>:<gid>: the server never runs as root
   after binding`, the value printed as written (`user 00:1000: ...`).
-  A name whose primary group is 0 stays a startup failure (exit 2, the
-  OA3 message above). *Owner decision 2026-11-17:* only the startup log
+  *Controller ruling, stage 10 final review; same class as the owner's
+  2026-11-17 decision for id 0:* `4294967295` in either place is an
+  invalid value (exit 1, FR-CFG-11), since `setuid`/`setgid` read it as
+  "no change" and the drop could never succeed. A name whose primary
+  group is 0 stays a startup failure (exit 2, the OA3 message above),
+  and so does a name whose uid is 0 (exit 2, `user <name>: its uid is 0
+  (root); the server never runs as root after binding`). *Owner decision 2026-11-17:* only the startup log
   shows which form was used; `--check` prints nothing more for a valid
   config. The drop is logged once: `kind=privileges action=dropped
   user=<uid>:<gid> form=name|ids` (FR-LOG-05). As non-root nothing is
@@ -1843,14 +1852,18 @@ Failures, persistence, timeouts:
   its `Display` prints the name, or `<uid>:<gid>` in decimal, so `007:1`
   shows as `7:1`. The log token is `form=name` or `form=ids` (driver
   `UserForm`). The config error is `ConfigErrorKind::RootUser`, which
-  holds the value as written. The driver keeps its gid-0 check for
-  both forms, its message naming `user` by `Display`. For `Ids` that
-  check is defence in depth, not reachable through a validated config;
-  a driver unit test hands it `User::Ids` with gid 0 directly (as root:
-  refused before any drop). `drop_to`'s `setuid(0)` check would catch
-  a uid 0 the same way; it is defence in depth, not reachable through a
-  validated config, and not exercised by a test (it would drop the test
-  process's own ids). *(Owner decision 2026-10-29, OA2, stage 4 final
+  holds the value as written. The driver checks gid 0, then uid 0
+  (so `root` keeps the OA3 message), before `drop_to`, for both forms, each message naming `user` by
+  `Display`: `user <value>: its uid is 0 (root); the server never runs
+  as root after binding` and the OA3 gid message (planner call, stage
+  10 final review). For a name both checks are reachable (a name can
+  map to uid 0 or gid 0). For `Ids` they are defence in depth, not
+  reachable through a validated config. Two driver unit tests hand the
+  private `drop_ids` `User::Ids` with uid 0, and with gid 0, directly
+  (as root: refused before any drop, the ids unchanged). `drop_to`'s
+  own `setuid(0)` post-check stays as a last line; no validated config
+  or name reaches it with a uid 0 any more, and no test exercises it
+  (it would drop the test process's own ids). *(Owner decision 2026-10-29, OA2, stage 4 final
   review:)*
   then, root or not (as root after the drop), every capability is
   cleared: the ambient set (`prctl(PR_CAP_AMBIENT,
@@ -2207,10 +2220,27 @@ Failures, persistence, timeouts:
   `src/librc/librc-daemon.c` lines 567-611) and `restart` starts the
   server again (`start-stop-daemon --stop` finding nothing still exits
   0, `src/start-stop-daemon/start-stop-daemon.c` lines 824-834; the
-  script's `stop_post` ends what a reload left). `contrib/test-openrc.sh`
+  script's `stop_post` ends what a reload left). *(Controller ruling,
+  stage 10 final review:)* OpenRC's own `status` and `stop` do not
+  check the pid file's process (`status` reports crashed only on
+  ESRCH, `stop` signals whatever holds the pid; `src/shared/schedules.c`
+  lines 256-257), so a reused pid would read as started and get the
+  stop's signals. The script therefore overrides `stop` and `status`:
+  a pid file whose pid runs a process (not a zombie) whose executable
+  is not `command` (" (deleted)" allowed, the reload helper's step 3
+  check) is a stranger. `status` of a started service then reports
+  crashed with exit status 32; `stop` signals nothing, removes the pid
+  file with a warning and succeeds, so `restart` starts the server
+  again. Every other case goes to OpenRC's own `default_status` and
+  `default_stop`. Removing the pid file in `stop_pre` would not do:
+  `start-stop-daemon --stop` without a pid file matches every process
+  running `command`, other instances included. `contrib/test-openrc.sh`
   pins the `crashed` status with exit status 32 and the `restart` that
   serves again, once for a crash after a reload and once without one;
-  both were observed in CI's Alpine job (OpenRC 0.63.2). A `restart`
+  both were observed in CI's Alpine job (OpenRC 0.63.2). Its step 9
+  pins the reused pid (an unrelated `sleep` in the pid file): `status`
+  crashed with 32, `restart` serves, the `sleep` still runs; it runs
+  only in CI's Alpine job, not yet observed when this was written. A `restart`
   while an old process still drains waits for `stop_post`, bounded by
   the script's `retry` (default `TERM/35/KILL/5`). The README's "OpenRC:
   no restart after a crash" says so and why, the conf.d warns against
@@ -2220,7 +2250,8 @@ Failures, persistence, timeouts:
   wrapper as `supervise-daemon`'s child, which would itself start every
   server (the reload's included) and exit abnormally only when the
   serving one does, was not built: it is a supervisor of our own, not
-  the builder call above, and would need an owner decision. It would
+  the builder call above, and would need an owner decision (open
+  decision 6). It would
   also change the pid file and reload contract: the wrapper needs a pid
   file of its own beside the server's (`supervise-daemon`'s `--pidfile`
   names the supervisor), and `reload` would have to signal the wrapper
@@ -3205,7 +3236,12 @@ that median plus 2 % for system calls and 15 % for CPU.)*
   newer than the runner's, read from the runner on each run
   (`ubuntu-latest` moves too). A failure is recorded as
   `--job newest-libc --arch x86_64 --libc <glibc|musl>`, and its
-  fingerprint includes the libc, so each leg files its own issue. The
+  fingerprint includes the libc, so each leg files its own issue.
+  *(Controller ruling, stage 10 final review:)* that holds for a set-up
+  failure (`unrecognized`) and a timeout too: their fingerprint is
+  `newest-libc|<libc>|unrecognized` or `...|timeout-or-cancelled`, and a
+  `restart soak` leg's is `restart-soak|<arch>|<libc>|...`. Only a leg
+  known from `needs` alone keeps the job-wide key. The
   driver test steps of `older glibc`, `pressure` and `newest libc` run
   with `--no-fail-fast`, so one failing test binary does not hide the
   rest.
@@ -3363,8 +3399,7 @@ stage 4 (its tests are in `driver/`).
 
 ## Timeline
 
-Stages 1 to 9 are done and stage 10 is planned. Stages 11 and 12 are
-for later.
+Stages 1 to 10 are done. Stages 11 and 12 are for later.
 
 Each stage is a separately planned and reviewed chunk that leaves the
 project working and tested.
@@ -3447,15 +3482,19 @@ project working and tested.
 
    The framing-variant ledger (NFR-SEC-14) is already in force. Plan:
    `docs/superpowers/plans/2026-11-09-stage-9-guarantee-hardening.md`.
-10. **Carry-forwards** [stage 10]. The work comes from the stage 9
-    record and the qmail review. Plan:
+10. **Carry-forwards** [done]. The work comes from the stage 9 record
+    and the qmail review. Plan:
     `docs/superpowers/plans/2026-11-10-stage-10-carry-forwards.md`. The
-    stage covers:
+    stage delivered:
     - the `pressure` and `newest libc` nightly jobs (NFR-TEST-08);
     - `user <uid>:<gid>` (FR-PROC-03);
     - product size beside the benchmarks (NFR-MAINT-12);
-    - OpenRC supervision (FR-PROC-07a);
     - the `sim/tests/proxy/bodies.rs` split (NFR-MAINT-10).
+
+    OpenRC supervision ended as a documented gap (FR-PROC-07a).
+    `supervise-daemon` cannot carry the reload's hand-over, so the
+    OpenRC script does not restart the server after a crash. A wrapper
+    of our own is open decision 6.
 11. **Later, maybe**. The candidates are:
     - HTTPS with a pure-Rust crypto provider;
     - an io_uring driver;
@@ -3497,8 +3536,8 @@ The builder chooses these details where the spec does not fix them:
 
 ## Open decisions (owner)
 
-Items 2 and 5 are still open; item 5 is partly decided. Items 1, 3 and
-4 are decided.
+Items 2, 5 and 6 are still open, and item 5 is partly decided. Items 1,
+3 and 4 are decided.
 
 Each item blocks or shapes the requirement named. Until it is decided,
 the recommendation (if any) is not implemented.
@@ -3597,3 +3636,14 @@ the recommendation (if any) is not implemented.
    - what a kernel without kTLS gets;
    - uids and namespaces of the children;
    - the groups offered beyond X25519.
+6. FR-PROC-07a — an OpenRC wrapper that restarts the server after a
+   crash. Open; stage 10 left OpenRC unsupervised as a documented gap.
+   The candidate is a POSIX `sh` wrapper as `supervise-daemon`'s child.
+   It would start every server, the reload's included, and exit
+   abnormally only when the serving one does. Its cost:
+   - a supervisor of our own, to write, test and maintain;
+   - a second pid file, the wrapper's, beside the server's;
+   - `reload` signalling the wrapper (`supervise-daemon --signal`),
+     which then runs the helper, instead of running the helper itself.
+
+   See FR-PROC-07a for why `supervise-daemon` alone cannot do it.

@@ -29,7 +29,12 @@
 #     ends the draining old process (stop_post) and serves again; no
 #     other server process and no draining list are left.
 #  8. A crash without a reload: the same on the restarted process.
-#  9. `rc-service durchlauferhitzer stop` ends the server; no server
+#  9. A crash whose pid is reused: `kill -9` of the server, then the pid
+#     file names an unrelated process (a `sleep` this script started),
+#     as if the kernel had handed the pid on. `status` reports crashed
+#     with exit status 32, `restart` serves again, and the unrelated
+#     process still runs: the script never signals it.
+# 10. `rc-service durchlauferhitzer stop` ends the server; no server
 #     process and no draining list are left.
 #
 # Exit 0 when every step passed; otherwise 1, with the step and the log.
@@ -51,6 +56,7 @@ log=/var/log/$svc.log
 pidfile=/run/$svc.pid
 srv=/srv/$svc
 slow=
+stranger=
 
 fail() {
 	echo "$me: FAILED: $*" >&2
@@ -142,6 +148,7 @@ EOF
 
 cleanup() {
 	[ -n "$slow" ] && kill "$slow" 2>/dev/null
+	[ -n "$stranger" ] && kill "$stranger" 2>/dev/null
 	return 0
 }
 trap cleanup EXIT
@@ -227,7 +234,44 @@ echo "pids $new (killed) and $old (draining) are gone"
 step "8. a crash without a reload"
 crash_and_restart two "crash without reload"
 
-step "9. stop"
+step "9. a crash whose pid is reused"
+victim=$(cat "$pidfile")
+kill -KILL "$victim" || fail "pid reuse: cannot kill -9 pid $victim"
+n=0
+while running "$victim"; do
+	n=$((n + 1))
+	[ "$n" -lt 50 ] || fail "pid reuse: pid $victim still runs 5 s after kill -9"
+	sleep 0.1
+done
+# The kernel would hand the pid to any new process; the pid of an
+# unrelated one in the pid file is that case, made deterministic.
+sleep 300 &
+stranger=$!
+running "$stranger" || fail "pid reuse: the unrelated process $stranger does not run"
+printf '%s\n' "$stranger" >"$pidfile"
+st=0
+out=$(rc-service "$svc" status 2>&1) || st=$?
+echo "$out (exit status $st)"
+case $out in
+*crashed*) ;;
+*) fail "pid reuse: status does not report crashed with pid $stranger in $pidfile: $out" ;;
+esac
+[ "$st" -eq 32 ] || fail "pid reuse: status exit status $st, not 32"
+rc-service "$svc" restart || fail "pid reuse: restart"
+running "$stranger" || fail "pid reuse: restart ended the unrelated process $stranger"
+cur=$(cat "$pidfile") || fail "pid reuse: no pid file after restart"
+[ "$cur" != "$stranger" ] || fail "pid reuse: the pid file still names $stranger"
+answers two "pid reuse"
+echo "pid $cur answers '$got' after restart"
+left=$(servers)
+[ "$left" = "$cur" ] || fail "pid reuse: server processes after restart: $(echo $left), not $cur alone"
+running "$stranger" || fail "pid reuse: the unrelated process $stranger no longer runs"
+echo "the unrelated process $stranger still runs"
+kill "$stranger"
+wait "$stranger" 2>/dev/null || true
+stranger=
+
+step "10. stop"
 cur=$(cat "$pidfile")
 rc-service "$svc" stop || fail "stop"
 n=0

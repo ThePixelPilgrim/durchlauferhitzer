@@ -161,9 +161,16 @@ The numeric form suits a hardened install. A name lookup runs the
 host's NSS modules inside the process while it is still root. The
 numeric form runs none of them.
 
-Neither id may be 0. A numeric `user` with uid 0 or gid 0 is a config
-error, and `--check` reports it. A name whose primary group is 0 is
-refused at startup (exit 2).
+Some ids are never accepted. Which check catches them depends on the
+form:
+
+- A numeric `user` with a 0 in either place is a config error, and
+  `--check` reports it. The server never runs as root after binding.
+- A numeric `user` with `4294967295` in either place is an invalid
+  value, and `--check` reports it. The kernel reads that id as "no
+  change", so the drop could never succeed.
+- A name whose uid is 0 is refused at startup (exit 2).
+- A name whose primary group is 0 is refused at startup (exit 2).
 
 The startup log shows the drop and the form that was used:
 
@@ -369,6 +376,19 @@ After such an end, the operator restarts the server by hand:
 
 A `restart` waits while an old process from a reload still drains, at
 most as long as the conf.d's `retry` allows (40 s by default).
+
+The script never takes another process for the server. The kernel may
+hand the crashed server's pid to a new, unrelated process. The pid file
+then names that process, and the script handles it so:
+
+- `status` reports `crashed` with exit status 32, as for a pid that no
+  longer runs.
+- `stop` and `restart` signal nothing. They remove the pid file with a
+  warning, and `restart` then starts the server again.
+
+The script recognises the server by its executable, the `command` of
+the conf.d. A pid whose executable is another file is not the server.
+OpenRC itself checks only that the pid exists.
 
 A monitor can stand in for the operator. It keys on the exit status 32
 of `status` and then runs `restart`.

@@ -22,8 +22,10 @@ every field is checked (a date, a lowercase hex commit, a plain runner
 label, a scenario from the fixed set, numbers that parse, are finite and
 not negative) and a row that fails is dropped, before it reaches the CSV
 or the page; the page re-checks every row it reads. Rows with errors are
-kept in the CSV but never charted. `--append` also writes a README.md
-beside results.csv if there is none (a new `benchmarks` branch).
+kept in the CSV but never charted. A missing new CSV appends no rows,
+so the lines row below is published all the same. `--append` also
+writes a README.md beside results.csv whenever the one there is missing
+or differs from what this script writes.
 
 The product's source lines (NFR-MAINT-12, `scripts/product-lines.py`)
 are a sibling CSV, `--lines` (`date,commit,lines`), charted on the same
@@ -387,8 +389,9 @@ def append(new_path, results_path, commit, today):
     """Appends the valid rows of `new_path` that are the run's own (its
     `commit`, dated within a day of `today`) to `results_path` (created
     with the header if missing); returns (appended, dropped, refused):
-    refused rows are valid but another commit's or date's."""
-    rows, dropped = parse(_read_text(new_path))
+    refused rows are valid but another commit's or date's. A missing
+    `new_path` (a `bench` that failed before writing it) appends no rows."""
+    rows, dropped = parse(_read_text(new_path)) if os.path.isfile(new_path) else ([], 0)
     mine = [r for r in rows if _the_runs(r, commit, today)]
     refused = len(rows) - len(mine)
     rows = mine
@@ -445,10 +448,13 @@ def _read_lines(path):
 
 
 def _write_readme(results_path):
+    """Writes README.md beside `results_path` when it is missing or its
+    content differs from `README`."""
     path = os.path.join(os.path.dirname(results_path), "README.md")
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(README)
+    if os.path.isfile(path) and _read_text(path) == README:
+        return
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(README)
 
 
 def _commit_arg(text):
@@ -494,6 +500,8 @@ def main(argv=None):
             added, dropped, refused = append(args.append, args.csv, args.commit, today)
         except ValueError as e:
             raise SystemExit(f"bench-chart: {args.append}: {e}")
+        if not os.path.isfile(args.append):
+            print(f"no bench rows: no {args.append}; nothing appended")
         print(f"appended {added} rows, dropped {dropped}, refused {refused} "
               f"(not commit {args.commit} or not within a day of {today.isoformat()})")
         _write_readme(args.csv)

@@ -136,12 +136,14 @@ fn parse_user(setting: &Setting) -> Result<User, ConfigError> {
     }
 }
 
-/// A user or group id: ASCII digits only (no sign), fitting a `u32`.
+/// A user or group id: ASCII digits only (no sign), fitting a `u32`, and
+/// not `u32::MAX`, the kernel's "no change" value for `setuid`/`setgid`
+/// (FR-CFG-11).
 fn decimal_id(text: &str) -> Option<u32> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    text.parse().ok()
+    text.parse().ok().filter(|id| *id != u32::MAX)
 }
 
 /// Absolute, no `.`, `..` or empty components, no trailing `/` except `/`.

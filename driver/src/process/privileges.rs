@@ -6,12 +6,12 @@
 //! - Root is any uid 0, real, effective or saved (owner decision
 //!   2026-10-28, O6): such a process could become root again.
 //! - After binding: as root, `user` is required (never root after
-//!   binding), its primary group must not be 0 (owner decision
-//!   2026-10-29, OA3: never group root either), and the process drops to
-//!   it for good (`drop_to`), logged with the form `user` was written
-//!   in. A name is looked up; `<uid>:<gid>` is not (stage 10), so no NSS
-//!   module runs as root. As non-root the ids are kept, and a set `user`
-//!   is logged as kept.
+//!   binding), its uid must not be 0, its primary group must not be 0
+//!   (owner decision 2026-10-29, OA3: never group root either), and the
+//!   process drops to it for good (`drop_to`), logged with the form
+//!   `user` was written in. A name is looked up; `<uid>:<gid>` is not
+//!   (stage 10), so no NSS module runs as root. As non-root the ids are
+//!   kept, and a set `user` is logged as kept.
 //! - Then, root or not, every capability is cleared (owner decision
 //!   2026-10-29, OA2): the ambient set, then the permitted, effective and
 //!   inheritable sets, checked with `capget`. Capabilities are per
@@ -77,11 +77,19 @@ fn drop_ids(user: Option<&User>) -> Result<Option<DriverLog>, Failure> {
                 // No lookup: no NSS module runs as root (stage 10).
                 User::Ids { uid, gid } => (*uid, *gid, UserForm::Ids),
             };
-            // The config refuses gid 0 in `Ids`; checked for both forms.
+            // The config refuses gid 0 and uid 0 in `Ids`; a name can
+            // still carry either, so both are checked for both forms,
+            // the gid first (`root` keeps the OA3 message).
             if gid == 0 {
                 return Err(Failure(format!(
                     "user {user}: its primary group is 0 (root); \
                      the server never keeps group root after binding"
+                )));
+            }
+            if uid == 0 {
+                return Err(Failure(format!(
+                    "user {user}: its uid is 0 (root); \
+                     the server never runs as root after binding"
                 )));
             }
             drop_to(uid, gid).map_err(|err| {
@@ -132,6 +140,32 @@ mod tests {
                 message,
                 "user 65534:0: its primary group is 0 (root); \
                  the server never keeps group root after binding"
+            ),
+            (Privilege::NotRoot, Ok(note)) => assert_eq!(
+                note,
+                Some(DriverLog::PrivilegesKept {
+                    reason: KeptReason::NotRoot
+                })
+            ),
+            (privilege, result) => panic!("{privilege:?}: {result:?}"),
+        }
+        assert_eq!(uids().unwrap(), before);
+    }
+
+    /// The driver's own uid-0 guard holds for `Ids` too, as for a name
+    /// whose uid is 0 (FR-PROC-03): as root it refuses before `drop_to`
+    /// runs, so this process keeps its ids. As non-root nothing is
+    /// dropped, so the ids are kept and logged.
+    #[test]
+    fn ids_with_uid_0_are_refused_before_any_drop() {
+        let before = uids().unwrap();
+        let user = User::Ids { uid: 0, gid: 65534 };
+        let result = drop_ids(Some(&user));
+        match (privilege(before), result) {
+            (Privilege::Root, Err(Failure(message))) => assert_eq!(
+                message,
+                "user 0:65534: its uid is 0 (root); \
+                 the server never runs as root after binding"
             ),
             (Privilege::NotRoot, Ok(note)) => assert_eq!(
                 note,

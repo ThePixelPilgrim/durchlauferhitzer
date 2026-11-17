@@ -5,7 +5,8 @@
 # without losing a connection (durchlauferhitzer-reload). Not supervised
 # (FR-PROC-07a): supervise-daemon respawns after every exit and watches
 # only its own child, so it cannot carry the reload's hand-over (README,
-# "OpenRC: no restart after a crash").
+# "OpenRC: no restart after a crash"). `stop` and `status` never take a
+# reused pid for the server.
 
 description="durchlauferhitzer HTTP server"
 extra_commands="checkconfig"
@@ -41,6 +42,55 @@ checkconfig() {
 
 start_pre() {
 	checkconfig
+}
+
+# The pid file names the server only if that pid runs $command (" (deleted)"
+# allowed: the binary may be replaced in place), the check the reload
+# helper makes (its step 3). The pid file holds a pid only, so the draining
+# list's pid-plus-start-time check (stop_post) cannot apply here. OpenRC
+# checks neither: after a crash whose pid is reused, its `status` reports
+# started and its `stop` signals the new holder (FR-PROC-07a). So `stop`
+# and `status` below handle that case themselves and leave every other to
+# OpenRC's own functions.
+
+# Whether $pidfile names a running process (not a zombie) that does not run
+# $command; its pid is then in $dl_main. Run as root: another user's
+# executable reads as unknown, which counts as not $command.
+dl_main_is_stranger() {
+	dl_main=
+	{ read -r dl_main <"$pidfile"; } 2>/dev/null
+	case $dl_main in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	dl_stat=$(sed -n 's/^.*) //p' "/proc/$dl_main/stat" 2>/dev/null)
+	case $dl_stat in
+	'' | Z*) return 1 ;;
+	esac
+	dl_exe=$(readlink "/proc/$dl_main/exe" 2>/dev/null)
+	[ "${dl_exe% (deleted)}" != "$(readlink -f "$command")" ]
+}
+
+# A pid file that names another process (the crashed server's pid reused):
+# nothing is signalled and the pid file goes, so a following start is not
+# refused as "already running". Otherwise OpenRC's own stop.
+stop() {
+	if dl_main_is_stranger; then
+		ewarn "$pidfile names pid $dl_main, which does not run $command (the server ended and its pid was reused): not signalled"
+		rm -f "$pidfile"
+		return 0
+	fi
+	default_stop
+}
+
+# A started service whose pid file names another process has crashed:
+# OpenRC's crashed result (status 32), as for a pid that no longer runs.
+# Otherwise OpenRC's own status.
+status() {
+	if service_started && dl_main_is_stranger; then
+		eerror "status: crashed (pid $dl_main from $pidfile does not run $command)"
+		return 32
+	fi
+	default_status
 }
 
 # The processes a reload left (the helper lists them in
