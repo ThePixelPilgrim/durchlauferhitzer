@@ -170,4 +170,5 @@ It takes the row under the same commit and date checks as the benchmark rows.
 
 A failing count never stops the benchmarks: the step may fail on its own.
 An artifact without the file, or with a broken one, is published all the same.
-Its benchmark rows are taken; no lines row is.
+Its benchmark rows are taken.
+No lines row is added for that run.
