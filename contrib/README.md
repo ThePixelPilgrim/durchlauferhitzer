@@ -33,21 +33,22 @@ binary.
   `/etc/conf.d/durchlauferhitzer` (`ready_timeout`, `reload_grace`, ...).
 - `test-openrc.sh <binary>` — POSIX `sh`, run as root on a throwaway
   system with OpenRC. CI runs it in the Alpine jobs, in a container. It
-  installs into `/etc`, `/usr` and `/srv`: not for a real system. Its
-  steps, in order:
-  1. installs the script, its conf.d, the helper and the binary;
-  2. marks OpenRC as booted;
-  3. `start`, then a request;
-  4. a slow client holds a connection;
-  5. replaces the binary in place, points the config at a second root
-     and runs `reload`: the answer comes from the new root, and the old
-     process still drains;
-  6. `status` reports started, and the new process holds only stdin,
-     the log, the root, its listener and its anonymous inodes;
-  7. a crash after the reload: `kill -9` of the new process makes
-     `status` report `crashed` with exit status 32, and `restart` serves
-     again with the draining old process ended;
-  8. a crash without a reload: the same on the restarted process;
+  writes into the system's own directories, so it is not for a real
+  system. Its steps, in order:
+  1. It installs the service files and the binary.
+  2. It marks OpenRC as booted.
+  3. `start`, then a request.
+  4. A slow client holds a connection.
+  5. A `reload` onto a replaced binary and a second root. The answer
+     then comes from the new root. The old process still drains.
+  6. `status` reports started. The new process holds no descriptor
+     beyond the ones it needs.
+  7. A crash after the reload: `kill -9` of the new process. `status`
+     then reports `crashed` with exit status 32. `restart` serves again,
+     and the draining old process is ended.
+  8. A crash without a reload: `kill -9` of the restarted process.
+     `status` then reports `crashed` with exit status 32. `restart`
+     serves again.
   9. `stop`: no server process and no draining list are left.
 
 Tested by `driver/tests/restart.rs` (as root; CI's root step) and, under
