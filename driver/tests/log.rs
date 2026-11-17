@@ -15,7 +15,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use durchlauferhitzer::containment::{Applied, Gap, LayerName, Outcome, State};
 use durchlauferhitzer::log::{format_driver, format_entry};
-use durchlauferhitzer::{DriverLog, KeptReason, ShutdownPhase};
+use durchlauferhitzer::{DriverLog, KeptReason, ShutdownPhase, UserForm};
 use durchlauferhitzer_core::config::{Layer, SeccompAction};
 use durchlauferhitzer_core::http::chunked::ChunkedError;
 use durchlauferhitzer_core::http::request::{HttpError, Method};
@@ -331,6 +331,22 @@ fn driver_kinds() {
                 reason: KeptReason::NotRoot,
             },
             "kind=privileges action=kept reason=not_root\n",
+        ),
+        (
+            DriverLog::PrivilegesDropped {
+                uid: 65534,
+                gid: 65534,
+                form: UserForm::Name,
+            },
+            "kind=privileges action=dropped user=65534:65534 form=name\n",
+        ),
+        (
+            DriverLog::PrivilegesDropped {
+                uid: u32::MAX,
+                gid: 1,
+                form: UserForm::Ids,
+            },
+            "kind=privileges action=dropped user=4294967295:1 form=ids\n",
         ),
         (
             DriverLog::Shutdown {

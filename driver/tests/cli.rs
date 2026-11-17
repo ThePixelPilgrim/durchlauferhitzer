@@ -104,6 +104,29 @@ fn check_accepts_a_numeric_user() {
     );
 }
 
+/// Stage 10 (FR-PROC-03, owner decision 2026-11-17): a numeric `user`
+/// with uid 0 or gid 0 is a config error that `--check` reports: exit 1,
+/// the message at the setting.
+#[test]
+fn check_refuses_a_numeric_user_with_id_0() {
+    let dir = TempDir::new();
+    for value in ["1000:0", "0:1000"] {
+        let path = dir.config(
+            "root-ids.conf",
+            &config("127.0.0.1:8080", &format!("user {value};"), PROXY_ROUTE),
+            Containment::Invalid,
+        );
+        let path = path.to_str().unwrap();
+        let output = run(&["--check", path], Setup::default());
+        assert_exit(&output, 1);
+        assert_eq!(text(&output.stdout), "", "{value}");
+        assert_eq!(
+            text(&output.stderr),
+            format!("{path}:2:1: user {value}: the server never runs as root after binding\n")
+        );
+    }
+}
+
 /// FR-PROC-08: the shipped example config is the guaranteed install, so
 /// `--check` warns about nothing; its one stderr line is the backstop,
 /// the figure the README shows for it (every README line naming the

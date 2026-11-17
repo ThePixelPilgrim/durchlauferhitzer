@@ -112,8 +112,37 @@ fn privilege(ids: Uids) -> Privilege {
 
 #[cfg(test)]
 mod tests {
-    use super::{Privilege, privilege};
-    use crate::sys::user::Uids;
+    use durchlauferhitzer_core::config::User;
+
+    use super::{Failure, Privilege, drop_ids, privilege};
+    use crate::log::{DriverLog, KeptReason};
+    use crate::sys::user::{Uids, uids};
+
+    /// The driver's own gid-0 guard holds for `Ids` too, although a
+    /// validated config never carries a 0 (FR-PROC-03): as root it
+    /// refuses before `drop_to` runs, so this process keeps its ids. As
+    /// non-root nothing is dropped, so the ids are kept and logged.
+    #[test]
+    fn ids_with_gid_0_are_refused_before_any_drop() {
+        let before = uids().unwrap();
+        let user = User::Ids { uid: 65534, gid: 0 };
+        let result = drop_ids(Some(&user));
+        match (privilege(before), result) {
+            (Privilege::Root, Err(Failure(message))) => assert_eq!(
+                message,
+                "user 65534:0: its primary group is 0 (root); \
+                 the server never keeps group root after binding"
+            ),
+            (Privilege::NotRoot, Ok(note)) => assert_eq!(
+                note,
+                Some(DriverLog::PrivilegesKept {
+                    reason: KeptReason::NotRoot
+                })
+            ),
+            (privilege, result) => panic!("{privilege:?}: {result:?}"),
+        }
+        assert_eq!(uids().unwrap(), before);
+    }
 
     #[test]
     fn root_is_any_uid_0() {
