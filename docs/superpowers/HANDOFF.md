@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-17. Stage 10 (carry-forwards) is in progress: Tasks 1 to 5 are done, Task 6 waits for the owner's Go. The TLS separation brainstorm is in progress beside it (see [TLS](#tls)).
+Last updated 2026-11-17. Stage 10 (carry-forwards) is in progress: all six tasks are done, and the stage's whole-branch review is next. The TLS separation brainstorm is in progress beside it (see [TLS](#tls)).
 
 Read this file first for the state of work. Before any work, follow the "Branches and main" steps in `CLAUDE.md`:
 
@@ -9,14 +9,14 @@ Read this file first for the state of work. Before any work, follow the "Branche
 
 ## Next
 
-The next session runs the due checks, then waits for the owner's Go on Task 6.
+The next session runs the due checks, then the stage 10 whole-branch review.
 
 1. **Checks that are due:**
    - After the first scheduled nightly from `main`: check the product-lines chart ([Task 4](#task-4-product-line-count)).
    - The first full-budget scheduled nightly on `main` is the real check of the nightly's durations ([Maintenance](#maintenance)).
    - Close nightly issue #8, with the owner's OK. Its fix is on `main`, and the scheduled nightly of 2026-11-17 was green (run 44076916380 on `b8b13e4`).
 2. **Waiting for the owner:**
-   - The Go for [Task 6](#task-6-split-bodiesrs), then the stage 10 whole-branch review.
+   - The Go for the stage 10 whole-branch review, over the stage's range on `main` from `fe604e4` on.
    - The open decision on an OpenRC wrapper ([Task 5](#task-5-openrc-supervision)).
    - The `proxy-file` NFR-PERF target, still to be set from its first nightly ([Stage 8 carry-forwards](#stage-8-carry-forwards)).
 3. **Can run alongside:** the kTLS spike, on a GitHub runner ([TLS](#tls)).
@@ -39,7 +39,7 @@ Stages 1 to 9 are done; stage 10 is in progress.
 | 7 Efficiency | done | `71d3867..` this handoff | [`docs/superpowers/reviews/2026-11-07-stage-7-review.md`](reviews/2026-11-07-stage-7-review.md) |
 | 8 Backend-directed file serving | done | `862e951..` this handoff | [`docs/superpowers/reviews/2026-11-09-stage-8-review.md`](reviews/2026-11-09-stage-8-review.md) |
 | 9 Guarantee hardening | done | see note below | [`docs/superpowers/reviews/2026-11-09-stage-9-review.md`](reviews/2026-11-09-stage-9-review.md) |
-| 10 Carry-forwards | in progress, Tasks 1 to 5 done | per task, see [Stage 10](#stage-10-in-progress) | plan [`docs/superpowers/plans/2026-11-10-stage-10-carry-forwards.md`](plans/2026-11-10-stage-10-carry-forwards.md) |
+| 10 Carry-forwards | Tasks 1 to 6 done, whole-branch review due | per task, see [Stage 10](#stage-10-in-progress) | plan [`docs/superpowers/plans/2026-11-10-stage-10-carry-forwards.md`](plans/2026-11-10-stage-10-carry-forwards.md) |
 
 Notes on the table:
 
@@ -71,7 +71,7 @@ Key documents:
 
 ## Stage 10 in progress
 
-Tasks 1 to 5 are done; Task 6 is next. Task 5 ended as a documented gap, not an implementation.
+All six tasks are done; the whole-branch review is next. Task 5 ended as a documented gap, not an implementation.
 
 ### Task 1: nightly `pressure` job
 
@@ -155,8 +155,12 @@ Tasks 1 to 5 are done; Task 6 is next. Task 5 ended as a documented gap, not an 
 
 ### Task 6: split `bodies.rs`
 
-- Split `sim/tests/proxy/bodies.rs`, with the owner's Go.
-- Then the stage 10 whole-branch review follows.
+- Done 2026-11-17 (`0273570..f262033`), NFR-MAINT-10: a move only, no test changed.
+- `sim/tests/proxy/bodies.rs` went from 895 to 560 lines.
+- New files: `body_timeouts.rs` (235 lines, the six body-timeout tests) and `early_responses.rs` (125 lines, the three early-response tests).
+- The `expect_100_continue_*` tests stay in `bodies.rs`, because `expect.rs` (508 lines) would pass 600 with them.
+- The proxy test binary lists 135 tests before and after.
+- `sim/tests/proxy/main.rs` is at 778 lines.
 
 ## TLS
 
