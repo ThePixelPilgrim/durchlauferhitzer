@@ -113,6 +113,13 @@ The superpowers skills are vendored as project skills in `.claude/skills/`
 Applies to README files, `docs/` (except the spec's requirement entries),
 the example config, `--help` and `--check` output; not to commit messages.
 
+- Pyramid order (owner, 2026-11-17): a document, a section and a
+  paragraph each open with their conclusion in one or two plain
+  sentences. The supporting points follow, most important first, as a
+  list or table. Detail, history and evidence come last, and a reader
+  who stops after the opening still has the answer.
+- No wall of text: a paragraph has at most four sentences, and a table
+  cell holds a phrase or one or two sentences, never a history.
 - Three or more parallel items (modes, options, outcomes, requirements,
   versions) go in a list or table, never in one sentence joined by "or",
   commas or semicolons. The default gets its own item, marked as such.
