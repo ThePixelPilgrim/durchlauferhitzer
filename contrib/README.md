@@ -19,18 +19,26 @@ binary.
   on a private FIFO; a list it cannot write is exit 1): killed before
   that, the helper leaves nothing running.
 - `openrc/durchlauferhitzer` — the OpenRC script (`start`, `stop`,
-  `checkconfig`, `reload`), modelled on Alpine's haproxy script; `stop`
-  also ends the processes a reload left (`<pidfile>.draining`: draining,
-  or not handed over by a killed helper; each by pid and start time,
-  checked again before every signal). `stop` and `status` never take
-  a reused pid for the server: a pid file naming a process that does
-  not run the binary reads as `crashed`, and nothing is signalled.
-  Install it as `/etc/init.d/durchlauferhitzer`, the helper as
-  `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`. It does
-  not restart the server after an abnormal exit, because
-  `supervise-daemon` cannot carry a reload's hand-over
-  ([`../README.md`](../README.md#openrc-no-restart-after-a-crash)).
-  Use systemd where the server must come back on its own.
+  `checkconfig`, `reload`), modelled on Alpine's haproxy script. Install
+  it as `/etc/init.d/durchlauferhitzer`, the helper as
+  `/usr/libexec/durchlauferhitzer/durchlauferhitzer-reload`.
+  - `stop` also ends the processes a reload left in
+    `<pidfile>.draining`: draining, or not handed over by a killed
+    helper. Each is matched by pid and start time, checked again before
+    every signal.
+  - The pid file's process falls into one of three cases, as the
+    README's table lists. A stranger's executable was read and is not
+    the server's binary. An
+    unknown one's executable cannot be read, for example without
+    `CAP_SYS_PTRACE`.
+  - `status` of a started service reports `crashed` with exit status 32
+    for a stranger. For the server and for unknown it is OpenRC's own.
+  - `stop` signals nothing for a stranger: it warns and removes the pid
+    file. For the server and for unknown it is OpenRC's own.
+  - It does not restart the server after an abnormal exit, because
+    `supervise-daemon` cannot carry a reload's hand-over
+    ([`../README.md`](../README.md#openrc-no-restart-after-a-crash)).
+    Use systemd where the server must come back on its own.
 - `openrc/durchlauferhitzer.confd` — its settings, as
   `/etc/conf.d/durchlauferhitzer` (`ready_timeout`, `reload_grace`, ...).
 - `test-openrc.sh <binary>` — POSIX `sh`, run as root on a throwaway
@@ -58,4 +66,6 @@ binary.
   10. `stop`: no server process and no draining list are left.
 
 Tested by `driver/tests/restart.rs` (as root; CI's root step) and, under
-OpenRC itself, by `test-openrc.sh`.
+OpenRC itself, by `test-openrc.sh`. The script's pid-file guard is also
+tested without OpenRC, on every CI machine, by
+[`../scripts/test-openrc-guard.sh`](../scripts/test-openrc-guard.sh).

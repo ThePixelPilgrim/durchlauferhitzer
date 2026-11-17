@@ -137,6 +137,15 @@ jobs:
         run: scripts/test-check-product-deps.sh
       - name: Branch cleanup script self-test
         run: scripts/test-cleanup-merged-branches.sh
+      - name: OpenRC script guard self-test
+        # FR-PROC-07a. As the runner user (pid 1's executable is
+        # unreadable) and as root (setpriv drops CAP_SYS_PTRACE): the
+        # unknown case may not skip in either.
+        run: |
+          scripts/test-openrc-guard.sh
+          sudo env TEST_OPENRC_GUARD_REQUIRE=1 scripts/test-openrc-guard.sh
+        env:
+          TEST_OPENRC_GUARD_REQUIRE: "1"
       - name: Nightly report, bench chart and product lines script tests
         # The fingerprint and issue decision of nightly.yml's `report`
         # job (NFR-TEST-08), the benchmark page (NFR-PERF-08) and the
@@ -261,6 +270,10 @@ jobs:
         run: cat tests.log kill-tests.log 2>/dev/null | grep 'skipped:' || echo "no skips"
       - name: Product dependency check
         run: scripts/check-product-deps.sh
+      - name: OpenRC script guard self-test
+        # FR-PROC-07a, under busybox ash (the shell OpenRC runs the
+        # script with here) and bash; the unknown case may not skip.
+        run: TEST_OPENRC_GUARD_REQUIRE=1 scripts/test-openrc-guard.sh
       - name: OpenRC end to end
         # Installs the script and starts, reloads (binary replaced in
         # place), checks status and descriptors, recovers from a crash

@@ -177,5 +177,6 @@ still published:
 | `bench.csv` | The `Benchmarks` step failed before writing it. | It appends the lines row and no benchmark rows. |
 
 A failing count never stops the benchmarks: the step may fail on its own.
-The publish also rewrites the branch's `README.md` whenever it differs
-from what `bench-chart.py` writes.
+
+The publish rewrites the branch's `README.md` whenever it differs from
+what `bench-chart.py` writes.

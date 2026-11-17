@@ -377,21 +377,35 @@ After such an end, the operator restarts the server by hand:
 A `restart` waits while an old process from a reload still drains, at
 most as long as the conf.d's `retry` allows (40 s by default).
 
-The script never takes another process for the server. The kernel may
-hand the crashed server's pid to a new, unrelated process. The pid file
-then names that process, and the script handles it so:
+The script never signals a process it knows is not the server. The
+kernel may hand the crashed server's pid to a new, unrelated process,
+and the pid file then names that process. The script sorts the pid
+file's process into one of three cases:
 
-- `status` reports `crashed` with exit status 32, as for a pid that no
-  longer runs.
-- `stop` and `restart` signal nothing. They remove the pid file with a
-  warning, and `restart` then starts the server again.
+| Case | When | `status` | `stop` and `restart` |
+|---|---|---|---|
+| Server | Its executable was read and is the server's binary. | OpenRC's own | OpenRC's own |
+| Stranger | Its executable was read and is another file. | `crashed`, exit status 32 | Signal nothing, remove the pid file with a warning. `restart` then starts the server. |
+| Unknown | Its executable cannot be read, or the pid does not run. | OpenRC's own | OpenRC's own |
 
-The script recognises the server by its executable, the `command` of
-the conf.d. A pid whose executable is another file is not the server.
+The server's binary is the one `command` named at the start or at the
+last `reload`, or the current `command`. A binary replaced in place
+still counts as the server's.
+
+Reading the server's executable needs root with `CAP_SYS_PTRACE`,
+because the server runs as `user`. Without it the server's process
+always reads as unknown. That holds in two cases:
+
+- In a container that drops `CAP_SYS_PTRACE`, the script behaves as
+  stock OpenRC. There is no protection against a reused pid.
+- A `status` run as non-root behaves as stock OpenRC. It reports a
+  healthy server as started, and a reused pid as started too.
+
 OpenRC itself checks only that the pid exists.
 
 A monitor can stand in for the operator. It keys on the exit status 32
-of `status` and then runs `restart`.
+of `status` and then runs `restart`. Run it as root with
+`CAP_SYS_PTRACE` to catch a reused pid as well.
 
 The [guaranteed install](#guaranteed-install) needs the
 [systemd service](#systemd-socket-activation), which restarts the
