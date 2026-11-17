@@ -1,34 +1,28 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-17. Stage 10 (carry-forwards) is in progress: Tasks 1 to 5 are done, Task 6 waits for the owner's Go.
+Last updated 2026-11-17. Stage 10 (carry-forwards) is in progress: Tasks 1 to 5 are done, Task 6 waits for the owner's Go. The TLS separation brainstorm is in progress beside it (see [TLS](#tls)).
 
-The TLS separation brainstorm is in progress.
+Read this file first for the state of work. Before any work, follow the "Branches and main" steps in `CLAUDE.md`:
 
-- The primitives are decided.
-- A process split is proposed.
-- The kTLS spike is next.
-
-A new session starts from the latest `main`, reads this file first, then reads `CLAUDE.md` (see its "Branches and main" rules).
+1. `git fetch origin`, then work from the latest `main`.
+2. Check the remote branches for commits not on `main`, and report any before planning.
 
 ## Next
 
-The next session starts with Task 6, once the owner says Go.
+The next session runs the due checks, then waits for the owner's Go on Task 6.
 
-1. **Task 6:** split `sim/tests/proxy/bodies.rs`, with the owner's Go.
-2. **Stage 10 whole-branch review**, after Task 6.
-3. **kTLS spike:** it can run beside Task 6 and the review. It runs as a dispatched workflow on a GitHub runner, not in the cloud container (see [TLS](#tls)).
-4. **Checks that are due:**
-   - Watch the CI run of `main` for stage 9's final landing.
-   - Watch the CI run of `main` for Task 3's landing. The Alpine jobs are the real musl check.
-   - Close nightly issue #5 when the next nightly is green.
-   - After the first scheduled nightly from `main`, check that `BENCHMARKS.md` shows the chart and that `product-lines.csv` has one row.
-5. **Open owner decision (Task 5):** a POSIX `sh` wrapper as `supervise-daemon`'s child could give supervision under OpenRC. The cost:
-   - a supervisor of our own;
-   - a second pid file;
-   - a `reload` that signals the wrapper.
-
-   FR-PROC-07a notes this option.
-6. **Before adding to `nightly.yml`:** it is at 899 lines, so the next addition must split it first.
+1. **Checks that are due:**
+   - After the first scheduled nightly from `main`: check the product-lines chart ([Task 4](#task-4-product-line-count)).
+   - The first full-budget scheduled nightly on `main` is the real check of the nightly's durations ([Maintenance](#maintenance)).
+   - Close nightly issue #8, with the owner's OK. Its fix is on `main`, and the scheduled nightly of 2026-11-17 was green (run 44076916380 on `b8b13e4`).
+2. **Waiting for the owner:**
+   - The Go for [Task 6](#task-6-split-bodiesrs), then the stage 10 whole-branch review.
+   - The open decision on an OpenRC wrapper ([Task 5](#task-5-openrc-supervision)).
+   - The `proxy-file` NFR-PERF target, still to be set from its first nightly ([Stage 8 carry-forwards](#stage-8-carry-forwards)).
+3. **Can run alongside:** the kTLS spike, on a GitHub runner ([TLS](#tls)).
+4. **Standing constraints:**
+   - `nightly.yml` is at 899 lines: the next addition must split it first.
+   - The fuzz job's pinned nightly toolchain needs a bump by hand now and then ([Maintenance](#maintenance)).
 
 ## State
 
@@ -50,7 +44,11 @@ Stages 1 to 9 are done; stage 10 is in progress.
 Notes on the table:
 
 - Stage 7: the Eyra spike (`docs/superpowers/spikes/2026-11-06-eyra.md`) concluded no, revisit later.
-- Stage 9 commits: `4c999c1..dccd243`, `92b3c36`, `acc3577..dd8f1c6` and this record. The stage 8 review's fix wave `92b3c36..acc3577` landed in between.
+- Stage 9 commits, plus this record:
+  - `4c999c1..dccd243`;
+  - `92b3c36`;
+  - `acc3577..dd8f1c6`.
+- The stage 8 review's fix wave `92b3c36..acc3577` landed in between.
 - Stage 9 brainstorm: `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`.
 - Stage 10's owner decisions are in the spec:
   - NFR-TEST-08: the `pressure` and `newest libc` jobs;
@@ -75,21 +73,28 @@ Key documents:
 
 Tasks 1 to 5 are done; Task 6 is next. Task 5 ended as a documented gap, not an implementation.
 
-### Task 1 — nightly `pressure` job (done 2026-11-12)
+### Task 1: nightly `pressure` job
 
-- Commits: `fe604e4..de557b7`.
+- Done 2026-11-12. Commits: `fe604e4..de557b7`.
 - The job runs the driver suite under kill with `2 x nproc` busy loops and asserts their count.
 - An `only_job` choice input serves branch runs.
 - Failures are filed like older-glibc's.
-- Three dispatched runs on the final code were green: 43200502966, 43200808692, 43201063382.
+- Three dispatched runs on the final code were green:
+  - 43200502966;
+  - 43200808692;
+  - 43201063382.
 - Earlier failures in 42779607344 and 42781263820 were the survive tests' default timeouts on a starved runner.
-  - The fix: `header_timeout`, `send_idle_timeout`, `backend_connect_timeout` and `backend_response_timeout` are 120 s in `every_slot_limits`.
+  - The fix sets these to 120 s in `every_slot_limits`:
+    - `header_timeout`;
+    - `send_idle_timeout`;
+    - `backend_connect_timeout`;
+    - `backend_response_timeout`.
   - The proxy test now reports what a client that never reached the backend was told.
 - Nightly issues #6 and #7, filed by the branch runs, were closed against `97e0924`.
 
-### Task 2 — nightly `newest-libc` job (done 2026-11-12)
+### Task 2: nightly `newest-libc` job
 
-- Commits: `393c78e..d10e4ca`.
+- Done 2026-11-12. Commits: `393c78e..d10e4ca`.
 - Two legs are started by hand with ci.yml's Alpine `docker run` flags:
   - glibc on `fedora:latest`: glibc 2.44, checked newer than the runner's at run time (`ubuntu-latest` is 26.04 with glibc 2.43 now);
   - musl on `alpine:edge`: 1.2.6.
@@ -103,19 +108,19 @@ Tasks 1 to 5 are done; Task 6 is next. Task 5 ended as a documented gap, not an 
 - Green run: 43216974812.
 - `nightly.yml` was at 895 lines then; the next addition must split it.
 
-### Task 3 — numeric `user <uid>:<gid>` (done 2026-11-17)
+### Task 3: numeric `user <uid>:<gid>`
 
-- Commits: `a4531df..2d9c84f`.
+- Done 2026-11-17. Commits: `a4531df..2d9c84f`.
 - `user <uid>:<gid>` skips the NSS lookup (FR-PROC-03, FR-CFG-11).
 - Owner decisions of 2026-11-17:
   - A 0 in the numeric form is a config error: exit 1, and `--check` reports it.
   - Only the startup log shows the form: `kind=privileges action=dropped user=<uid>:<gid> form=name|ids`.
 - The uid-0 guard in `drop_to` is defence in depth without a test.
-- The CI run of `main` for this landing still needs a look (see [Next](#next)).
+- CI of `main` was green for this landing: run 44131779311 on `5e2c3a8`. Its Alpine jobs are the real musl check.
 
-### Task 4 — product line count (done 2026-11-17)
+### Task 4: product line count
 
-- Commits: `41c0131..3d69657`.
+- Done 2026-11-17. Commits: `41c0131..3d69657`.
 - `scripts/product-lines.py` counts the product's non-blank, non-comment source lines without tests.
 - NFR-MAINT-12 holds the rule and its approximations.
 - The count was 15407 at `5e2c3a8`: core 9702, driver 5705.
@@ -123,12 +128,14 @@ Tasks 1 to 5 are done; Task 6 is next. Task 5 ended as a documented gap, not an 
   - The step may fail on its own, so a counter crash never skips the benchmarks and files no issue.
 - The publish appends the row to `product-lines.csv` on `benchmarks` and charts `Product source lines`.
 - `bench-chart.py --append` now writes the orphan branch's README.
-- Dispatched bench runs on the branch were green: 44138226982, 44139224075.
-- `nightly.yml` is at 899 lines: the next addition must split it first.
+- Dispatched bench runs on the branch were green: 44138226982 and 44139224075.
+- CI of `main` was green for this landing: run 44139782628 on `ae8fa9e`.
+- **Still to check** after the first scheduled nightly from `main`: `BENCHMARKS.md` shows the chart, and `product-lines.csv` has one row.
 
-### Task 5 — OpenRC supervision (done 2026-11-17, as a documented gap)
+### Task 5: OpenRC supervision
 
-- Commits: `cc948bc..55dc088`.
+- Done 2026-11-17, as a documented gap. Commits: `cc948bc..55dc088`.
+- CI of `main` was green for this landing: run 44157584458 on `02afabc`.
 - Stock `supervise-daemon` (OpenRC 0.63.2, Alpine 3.24) cannot carry the reload hand-over, because it:
   - respawns after every exit, including 0;
   - watches only its own fork;
@@ -141,16 +148,19 @@ Tasks 1 to 5 are done; Task 6 is next. Task 5 ended as a documented gap, not an 
   - After `kill -9`, `status` reports `crashed` with exit status 32, and `restart` serves again.
   - This is tested once after a reload and once without.
   - First observed in run 44154692120.
-- The wrapper option is an open owner decision (see [Next](#next)).
+- **Open owner decision:** a POSIX `sh` wrapper as `supervise-daemon`'s child could give supervision under OpenRC. FR-PROC-07a notes it. The cost:
+  - a supervisor of our own;
+  - a second pid file;
+  - a `reload` that signals the wrapper.
 
-### Task 6 — split `bodies.rs` (next)
+### Task 6: split `bodies.rs`
 
 - Split `sim/tests/proxy/bodies.rs`, with the owner's Go.
 - Then the stage 10 whole-branch review follows.
 
 ## TLS
 
-The TLS approach is partly decided; a kTLS spike comes before the design document.
+The TLS primitives are decided, a process split is proposed, and a kTLS spike comes next. The spike can run beside the remaining stage 10 work and precedes the TLS design document.
 
 Decided, recorded in the spec's open decision 5:
 
@@ -162,12 +172,6 @@ Decided, recorded in the spec's open decision 5:
 
 The survey is `docs/superpowers/reviews/2026-11-10-tls-primitives-survey.md`.
 
-Proposed, not decided: the controller's split (2026-11-17).
-
-- A parser process holds no secrets and turns the ClientHello into one fixed-size struct.
-- A key process sees only fixed-size messages. It holds the certificate key, the ECDHE secrets and the key schedule.
-- The server relays handshake bytes and installs the kTLS keys.
-
 Still open:
 
 - the no-kTLS behaviour;
@@ -175,9 +179,14 @@ Still open:
 - uids and namespaces;
 - groups.
 
+For the open split, the controller proposed this on 2026-11-17. It is not decided.
+
+- A parser process holds no secrets and turns the ClientHello into one fixed-size struct.
+- A key process sees only fixed-size messages. It holds the certificate key, the ECDHE secrets and the key schedule.
+- The server relays handshake bytes and installs the kTLS keys.
+
 The kTLS spike:
 
-- It precedes the design document.
 - It cannot run in the cloud container, whose kernel has `CONFIG_TLS` unset. It runs as a dispatched workflow on a GitHub runner.
 - It also checks whether the kernel can carry the handshake records (rekey, about Linux 6.14). If so, `chacha20poly1305` drops out of the product.
 
@@ -188,16 +197,13 @@ Stage 9 made the default config the guaranteed install (FR-PROC-08).
 - Containment defaults are `required`/`required`/`kill` (FR-CFG-25).
 - `--check` warns about any explicit softer choice and prints the kernel memory backstop the server will set.
 - The README's "Guaranteed install" section names the platform the claims hold for.
-
-The kernel memory backstop turns an accounting mistake into an abort (NFR-RES-09).
-
-- It is `RLIMIT_DATA`, soft and hard, set between the descriptor budget and the privilege drop.
-- Its size: `memory_limit` + 4 MiB + `disk_threads` × (2 MiB + 256 KiB) + `max_connections` × (8 KiB + 3 × `max_head`).
-- Every per-connection state must fit inside its allowance:
+- The kernel memory backstop turns an accounting mistake into an abort (NFR-RES-09).
+  - It is `RLIMIT_DATA`, soft and hard, set between the descriptor budget and the privilege drop.
+  - Its size: `memory_limit` + 4 MiB + `disk_threads` × (2 MiB + 256 KiB) + `max_connections` × (8 KiB + 3 × `max_head`).
+  - Every per-connection state must fit inside its allowance. The per-connection term is `8 KiB + 3 × max_head`.
   - The decoded static path is one allocation per connection (`core/src/rel_path.rs`).
-  - The per-connection term is `8 KiB + 3 × max_head`.
-- The final review's live attack found in-flight request state missing from the first allowance. It was fixed, with two survive-worst-case tests.
-- `driver/tests/backstop.rs` holds the worst-case request on every slot at the minimum `memory_limit`.
+  - The final review's live attack found in-flight request state missing from the first allowance. It was fixed, with two survive-worst-case tests.
+  - `driver/tests/backstop.rs` holds the worst-case request on every slot at the minimum `memory_limit`.
 
 Other stage 9 results:
 
@@ -216,8 +222,6 @@ Testing rules that came out of stage 9:
 
 ## Where things stand after stage 8 (details in the spec and the stage records)
 
-The binary serves static files and proxies over epoll, contained and restartable, with CI and nightly runs behind it.
-
 ### The binary
 
 - The binary is `durchlauferhitzer`, crate `driver`. `libc` is its only dependency.
@@ -227,13 +231,15 @@ The binary serves static files and proxies over epoll, contained and restartable
 - It starts up in the A11 order, with systemd sockets or its own binds.
 - It drops to `user` and clears every capability (FR-PROC-03).
 - It checks the descriptor budget (NFR-RES-05).
-- On SIGTERM it drains. It aborts on a second SIGTERM, on SIGINT or at `shutdown_timeout` (FR-PROC-05).
+- On SIGTERM it drains (FR-PROC-05). It aborts on any of:
+  - a second SIGTERM;
+  - SIGINT;
+  - `shutdown_timeout`.
 
 ### CI
 
 - x86_64 and arm64 run the same gate:
-  - fmt;
-  - clippy;
+  - fmt and clippy;
   - tests with IPv6 required;
   - the deps check and its self-test;
   - docs with `-D warnings`.
@@ -311,23 +317,27 @@ These are the open items and lessons that later stages inherit.
 
 ### Nightly issues
 
-Lesson: a nightly model failure's cousin paths are searched for and guarded in the same fix, with a pin each.
-
 Nightly seeds stop reproducing once later commits change the random draws. So a nightly failure is replayed at its run's commit, never only at `main`.
 
-| Issue | What it was | State |
+| Issue | Cause | State |
 |---|---|---|
-| #3 (seed 48287, 2026-11-09) | A model bug that the stage 8 review's `839e9ac` had already fixed. | Pinned by two deterministic tests in `sim/tests/proxy/pool.rs` and a FR-PROXY-22 clarification. |
-| #4 (seed 99897, 2026-11-09) | A model bug: a timeout was expected for any incomplete backend head, where FR-PROXY-14 gives the 502 as soon as `max_head` is exceeded. | Pinned by `sim/tests/proxy/head_limits.rs`, a FR-PROXY-14 clarification and the FR-PROXY-17 ruling. The net now draws the case on purpose (`head too large before its end`). |
-| #5 (2026-11-09) | The 65536-connection backstop test in containers. | Fixed by `3bee322`. Close it when the next nightly is green. |
-| #8 (seed 175664, 2026-11-12) | The proxy net's model, for the third time (FR-PROXY-26). See below. | Fixed by the model's `outrun` flag (`sim/tests/faults/proxy/drive.rs`). |
+| #3 (seed 48287, 2026-11-09) | model bug | fixed by `839e9ac`, pinned |
+| #4 (seed 99897, 2026-11-09) | model bug | pinned |
+| #5 (2026-11-09) | backstop test in containers | fixed by `3bee322`, closed 2026-11-12 |
+| #8 (seed 175664, 2026-11-12) | model bug (FR-PROXY-26) | fixed on `main`, still open: close with the owner's OK |
 
-Issue #8 in detail:
-
-- A planned stale kill, or a scripted backend failure, could be outrun by the client's own reset.
-- The model still counted it as a backend failure, so it demanded a retry the core had correctly not made.
-- Pinned by four tests in `sim/tests/proxy/pool.rs` and one hand-driven story in `sim/tests/faults/proxy/drive/tests.rs`.
-- The 100 000-seed sweep passed.
+- **#3:** the stage 8 review's `839e9ac` had already fixed this model bug. It is pinned by two deterministic tests in `sim/tests/proxy/pool.rs` and a FR-PROXY-22 clarification.
+- **#4:** the model expected a timeout for any incomplete backend head, where FR-PROXY-14 gives the 502 as soon as `max_head` is exceeded.
+  - Pinned by `sim/tests/proxy/head_limits.rs`, a FR-PROXY-14 clarification and the FR-PROXY-17 ruling.
+  - The net now draws the case on purpose (`head too large before its end`).
+- **#5:** the 65536-connection backstop test in containers.
+- **#8:** the proxy net's model failed for the third time.
+  - A planned stale kill, or a scripted backend failure, could be outrun by the client's own reset.
+  - The model still counted it as a backend failure, so it demanded a retry the core had correctly not made.
+  - Fixed by the model's `outrun` flag (`sim/tests/faults/proxy/drive.rs`).
+  - Pinned by four tests in `sim/tests/proxy/pool.rs` and one hand-driven story in `sim/tests/faults/proxy/drive/tests.rs`.
+  - The 100 000-seed sweep passed.
+  - Lesson: a nightly model failure's cousin paths are searched for and guarded in the same fix, with a pin each.
 
 ### Nightly issue reporting (NFR-TEST-08, owner 2026-11-02)
 
@@ -338,12 +348,17 @@ Issue #8 in detail:
 
 ### qmail-review carry-forwards
 
-These are lessons 6–9 and 11 in `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`:
+These are lessons 6–9 and 11 in `docs/superpowers/reviews/2026-11-09-qmail-lessons.md`.
 
-- a nightly run on the newest kernel and glibc;
-- numeric `uid:gid` for `user` to skip NSS;
+Delivered:
+
+- a nightly run on the newest glibc and musl: stage 10 Task 2. The newest kernel is not covered.
+- numeric `uid:gid` for `user` to skip NSS: stage 10 Task 3;
+- a product line count beside the nightly benchmarks: stage 10 Task 4.
+
+Open:
+
 - an opener process when TLS arrives;
-- a product line count beside the nightly benchmarks;
 - naming the supported TLS deployment in the README.
 
 ### After the stage 7 merge
@@ -353,13 +368,9 @@ These are lessons 6–9 and 11 in `docs/superpowers/reviews/2026-11-09-qmail-les
 
 ### Stage 8 carry-forwards
 
-- The `proxy-file` NFR-PERF target is set by the owner from its first nightly.
+- The `proxy-file` NFR-PERF target is still to be set by the owner, from its first nightly.
 - Multipart ranges (`multipart/byteranges`) are still not served. A several-range request gets the whole file.
-- nginx's other `X-Accel-*` features are unsupported:
-  - expiry;
-  - buffering;
-  - rate limits;
-  - named locations.
+- nginx's other `X-Accel-*` features are unsupported: expiry, buffering, rate limits and named locations.
 
 ### Efficiency, later
 
@@ -399,19 +410,7 @@ These are lessons 6–9 and 11 in `docs/superpowers/reviews/2026-11-09-qmail-les
 
 ## Branches
 
-`main` holds all verified work. Each task is cut as a short-lived branch from `main` and fast-forwarded after review.
-
-Cleaning up merged branches with `scripts/cleanup-merged-branches.sh`:
-
-1. Run it as a dry run first.
-2. Then run it with `--delete`. It deletes locally and on the remote.
-3. If the git proxy refuses, run it from the owner's clone.
-
-What the script does:
-
-- It skips `main`, `benchmarks` and checked-out branches.
-- It lists unmerged work.
-- It reports a refused deletion without stopping, e.g. HTTP 403 from the git proxy.
+`main` holds all verified work. Every other branch below is either contained in `main` or left for the owner to decide.
 
 | Branch | State | What to do |
 |---|---|---|
@@ -439,6 +438,23 @@ About `ccr-716d91b0-bff174`:
 - A session that missed `claude/magical-dijkstra-2eoh4y` redid stage 3 Tasks 1–4 there.
 - Everything worth keeping was ported (stage 3 record, "Unification").
 
+Each task is cut as a short-lived branch from `main` and fast-forwarded after review.
+
+Merged branches are cleaned up with `scripts/cleanup-merged-branches.sh`:
+
+1. Run it as a dry run first.
+2. Then run it with `--delete`. It deletes locally and on the remote.
+3. If the git proxy refuses, run it from the owner's clone.
+
+What the script does:
+
+- It skips these branches:
+  - `main`;
+  - `benchmarks`;
+  - checked-out branches.
+- It lists unmerged work.
+- It reports a refused deletion without stopping, e.g. HTTP 403 from the git proxy.
+
 ## Owner's way of working (mandatory, see CLAUDE.md)
 
 These rules bind every session.
@@ -452,13 +468,15 @@ These rules bind every session.
   - Tests that pin existing behaviour are proven by a temporary mutation. Afterwards, `touch` the sources so cargo rebuilds.
 - Commit **and push** after every step.
   - Report the pushed **SHAs**.
-  - Report the **GitHub URL of every changed Markdown file** (`https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/main/<path>`).
+  - Report the **GitHub URL of every changed Markdown file**: `https://github.com/ThePixelPilgrim/durchlauferhitzer/blob/<branch>/<path>`, with `main` as the branch once the change has landed.
 - Commit trailer lines (from the session's attribution reminder) end every commit message.
 - Fast-forward `main` after every task that passes review and the gate (standing permission, 2026-10-26). Never rewrite `main`.
+- Dependencies and `unsafe`, as the spec has them:
+  - Pure Rust.
+  - The core has zero dependencies and no `unsafe`.
+  - The driver depends on `libc` only and keeps `unsafe` inside `driver/src/sys/`.
+  - The TLS stage adds the primitives of open decision 5.
 - Code rules:
-  - pure Rust;
-  - zero product dependencies;
-  - no `unsafe`;
   - exhaustive enums (no `_ =>` on enums);
   - enums over bools;
   - no `too_many_arguments` allow in core;
