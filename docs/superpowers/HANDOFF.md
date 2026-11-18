@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-17. Stages 1 to 10 are done. Stage 10 (carry-forwards) closed with its whole-branch review and fix wave. The next work is the kTLS spike and the TLS design (see [TLS](#tls)); no stage 11 plan exists yet.
+Last updated 2026-11-18. Stages 1 to 10 are done, and the kTLS spike is done. The TLS design document is next (see [TLS](#tls)); no stage 11 plan exists yet.
 
 Read this file first for the state of work. Before any work, follow the "Branches and main" steps in `CLAUDE.md`:
 
@@ -9,18 +9,23 @@ Read this file first for the state of work. Before any work, follow the "Branche
 
 ## Next
 
-The next session runs the due checks, then prepares the kTLS spike. The owner chooses what stage 11 holds.
+The owner reads the kTLS spike record and decides the points it raises; the TLS design document follows. The owner also chooses what stage 11 holds.
 
 1. **Checks that are due:**
    - After the first scheduled nightly from `main`: check the product-lines chart ([Task 4](#task-4-product-line-count)).
    - The first full-budget scheduled nightly on `main` is the real check of the nightly's durations ([Maintenance](#maintenance)).
-   - Close nightly issue #8, with the owner's OK. Its fix is on `main`, and the scheduled nightly of 2026-11-17 was green (run 44076916380 on `b8b13e4`).
+   - Verify kTLS with ChaCha20-Poly1305 on an Alpine kernel, 3.23 or later ([TLS](#tls)).
 2. **Waiting for the owner:**
    - What stage 11 holds. Candidates are in the spec's Timeline and in [Carry-forwards](#carry-forwards-to-later-stages).
    - Open decision 6 in the spec: an OpenRC wrapper ([Task 5](#task-5-openrc-supervision)).
    - Whether the OpenRC pid guard is planned as a task ([Final review](#final-review-and-fix-wave)).
    - The `proxy-file` NFR-PERF target, still to be set from its first nightly ([Stage 8 carry-forwards](#stage-8-carry-forwards)).
-3. **Next piece of work:** the kTLS spike, on a GitHub runner ([TLS](#tls)). It precedes the TLS design document.
+   - The points the kTLS spike record raises ([TLS](#tls)):
+     - cipher suites;
+     - the kernel floor;
+     - the no-kTLS behaviour;
+     - the process split and the channel.
+3. **Next piece of work:** the TLS design document, after the owner's decisions. It starts with the brainstorming skill, then a plan.
 4. **Standing constraints:**
    - `nightly.yml` is at 899 lines: the next addition must split it first.
    - The fuzz job's pinned nightly toolchain needs a bump by hand now and then ([Maintenance](#maintenance)).
@@ -182,7 +187,7 @@ The whole-branch review at `8208d59` found no Critical and no Important defect, 
 
 ## TLS
 
-The TLS primitives are decided, a process split is proposed, and a kTLS spike comes next. The spike can run beside the remaining stage 10 work and precedes the TLS design document.
+The TLS primitives are decided, and the kTLS spike is done: kTLS can carry the design. The TLS design document is next, once the owner has decided the points the spike raises.
 
 Decided, recorded in the spec's open decision 5:
 
@@ -194,12 +199,14 @@ Decided, recorded in the spec's open decision 5:
 
 The survey is `docs/superpowers/reviews/2026-11-10-tls-primitives-survey.md`.
 
-Still open:
+Still open, with what the spike found:
 
-- the no-kTLS behaviour;
-- the terminator/signer split and channel;
-- uids and namespaces;
-- groups.
+- **The no-kTLS behaviour:** gVisor and stock Firecracker guests have no kTLS, so "refuse to start" leaves plain HTTP behind an external terminator there.
+- **The terminator/signer split and channel:** whoever holds the socket can read the kTLS keys back, so a second process installing them buys no secrecy. The simpler channel hands the traffic secrets to the server.
+- **The kernel floor:** 5.11 by feature; only 6.8 and 7.0 were probed.
+- **Cipher suites:** current Alpine and Flatcar likely lack ChaCha20-Poly1305 in the kernel, which would make AES-GCM a measured need.
+- **Uids and namespaces:** not touched by the spike. Loading the `tls` module needs `CAP_NET_ADMIN`, so it happens before the privilege drop or at boot.
+- **Groups:** not touched by the spike.
 
 For the open split, the controller proposed this on 2026-11-17. It is not decided.
 
@@ -207,10 +214,14 @@ For the open split, the controller proposed this on 2026-11-17. It is not decide
 - A key process sees only fixed-size messages. It holds the certificate key, the ECDHE secrets and the key schedule.
 - The server relays handshake bytes and installs the kTLS keys.
 
-The kTLS spike:
+The kTLS spike, recorded in [`docs/superpowers/spikes/2026-11-18-ktls.md`](spikes/2026-11-18-ktls.md):
 
-- It cannot run in the cloud container, whose kernel has `CONFIG_TLS` unset. It runs as a dispatched workflow on a GitHub runner.
-- It also checks whether the kernel can carry the handshake records (rekey, about Linux 6.14). If so, `chacha20poly1305` drops out of the product.
+- TLS 1.3 with ChaCha20-Poly1305 and AES-GCM, and `sendfile`, worked on every runner kernel, 6.8 and 7.0.
+- The handshake records stay in userspace, so `chacha20poly1305` stays in the product. Changing keys on a socket fails with `EBUSY` on 6.8 and arrived in 6.14 by source.
+- The server must read handshake records exactly; a partly read record breaks the switch to the kernel.
+- A client KeyUpdate cannot be honoured on kernels before 6.14, so such a connection is closed.
+- The kernel sends no close_notify and hides truncation, so closing is the server's job.
+- The spike code is on the scratch branch `spike-ktls`, which is never merged.
 
 ## Where things stand after stage 9 (details in the spec and the stage records)
 
@@ -346,7 +357,7 @@ Nightly seeds stop reproducing once later commits change the random draws. So a 
 | #3 (seed 48287, 2026-11-09) | model bug | fixed by `839e9ac`, pinned |
 | #4 (seed 99897, 2026-11-09) | model bug | pinned |
 | #5 (2026-11-09) | backstop test in containers | fixed by `3bee322`, closed 2026-11-12 |
-| #8 (seed 175664, 2026-11-12) | model bug (FR-PROXY-26) | fixed on `main`, still open: close with the owner's OK |
+| #8 (seed 175664, 2026-11-12) | model bug (FR-PROXY-26) | fixed on `main`, closed 2026-11-18 with the owner's OK |
 
 - **#3:** the stage 8 review's `839e9ac` had already fixed this model bug. It is pinned by two deterministic tests in `sim/tests/proxy/pool.rs` and a FR-PROXY-22 clarification.
 - **#4:** the model expected a timeout for any incomplete backend head, where FR-PROXY-14 gives the 502 as soon as `max_head` is exceeded.
@@ -460,6 +471,8 @@ The stage record lists these under "Deferred" and "Accepted gaps".
 | **`stage7-task8-buf64`** | A scratch measurement of a 64 KiB buffer, never to be merged. Its deletion was refused by the proxy. | The owner deletes it. |
 | `stage8-final`, `stage8-final-b`, `stage8-final-c` | Seen 2026-11-17, not listed before. Leftovers of the stage 8 fix wave. See below. | The owner decides on deletion. |
 | `ccr-716d91b0-bff174` | **Abandoned, do not build on it.** It has 12 commits not on `main` by design. See below. | The owner decides on deletion. |
+| `stage10-task3` … `stage10-task6`, `stage10-final`, `docs-pyramid` | Fully contained in `main`. | Delete when the owner says so. |
+| **`spike-ktls`** | A scratch branch, never to be merged: throwaway kTLS spike code at `0fcb392`. | The owner deletes it once the TLS design is written. |
 
 About the stage 8 leftovers:
 
