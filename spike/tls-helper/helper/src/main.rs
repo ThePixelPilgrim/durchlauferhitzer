@@ -116,6 +116,11 @@ impl rustls::KeyLog for CaptureSecrets {
 fn read_one_record(fd: RawFd, buf: &mut Vec<u8>) -> io::Result<()> {
     buf.resize(5, 0);
     sys::read_full(fd, &mut buf[..5])?;
+    // Not a TLS record header: hand rustls just the header so it rejects
+    // it (and queues the alert) instead of waiting for a bogus body.
+    if !(20..=23).contains(&buf[0]) || buf[1] != 3 {
+        return Ok(());
+    }
     let len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
     if len > 16384 + 256 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "record too long"));
@@ -189,6 +194,9 @@ fn main() {
     let config = Arc::new(config);
     let t_config = sys::now_ns();
 
+    if std::env::var_os("SPIKE_NODUMP").is_some() {
+        unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    }
     if std::env::var_os("SPIKE_SECCOMP").is_some() {
         seccomp::install().unwrap_or_else(|e| die(&format!("seccomp: {e}")));
     }
@@ -314,6 +322,9 @@ fn main() {
             (t_hs - t_inbox) / 1000,
             sys::maxrss_kib()
         );
+    }
+    if let Some(ms) = std::env::var("SPIKE_PAUSE_END").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     std::process::exit(0);
 }

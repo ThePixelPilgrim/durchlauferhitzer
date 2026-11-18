@@ -78,6 +78,17 @@ fn main() {
         "test-ctl-reject" => test_ctl_reject(),
         "test-helper-reject" => spawner::test_helper_reject(&o),
         "probe-keyd" => probe_keyd(),
+        "probe-hspawn" => match sys::connect_abstract(sys::HSPAWN_ABSTRACT) {
+            Ok(fd) => {
+                let (x, y) = sys::seqpacket_pair().expect("pair");
+                let s = sys::send_fds(fd, b"go", &[x, y]);
+                let mut b = [0u8; 4];
+                let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                unsafe { libc::poll(&mut p, 1, 1000) };
+                println!("probe-hspawn uid {}: send {:?}, then recv {:?} (0 = closed by hspawn)", unsafe { libc::getuid() }, s.map(|_| ()), sys::recv_fds(fd, &mut b).map(|r| r.len));
+            }
+            Err(e) => println!("connect: {e}"),
+        },
         _ => eprintln!("usage: see source"),
     }
 }
@@ -185,6 +196,20 @@ fn via_helper(client: RawFd, spawner: RawFd) -> io::Result<(Conn, String)> {
         return Err(io::Error::other(format!("REJECT handover from uid {} pid {} ({} bytes)", cred.uid, cred.pid, rx.len)));
     }
     let fd = rx.fds[0];
+    if std::env::var_os("SPIKE_WAIT_HELPER_EXIT").is_some() {
+        // The server's uid may not signal the helper: kill(pid, 0) says EPERM
+        // while it lives, ESRCH once it is gone.
+        let first = unsafe { libc::kill(cred.pid, 0) };
+        let e1 = io::Error::last_os_error();
+        let mut n = 0;
+        while unsafe { libc::kill(cred.pid, 0) } == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            n += 1;
+            if n > 1000 { break }
+        }
+        eprintln!("server: helper pid {} uid {}: kill(pid,0) first gave {} ({}); gone (ESRCH) after ~{n} ms; now serving its socket",
+            cred.pid, cred.uid, first, e1);
+    }
     let v = handover_to_conn(fd, &m[..rx.len])?;
     Ok(v)
 }

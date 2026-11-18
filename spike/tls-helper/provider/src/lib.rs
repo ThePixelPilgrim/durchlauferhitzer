@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "aes")]
 use aes_gcm::Aes128Gcm;
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::ChaCha20Poly1305;
@@ -30,7 +31,10 @@ use sha2::Digest;
 
 pub fn provider() -> CryptoProvider {
     CryptoProvider {
+        #[cfg(feature = "aes")]
         cipher_suites: vec![CHACHA20_POLY1305, AES_128_GCM],
+        #[cfg(not(feature = "aes"))]
+        cipher_suites: vec![CHACHA20_POLY1305],
         kx_groups: vec![&X25519],
         signature_verification_algorithms: WebPkiSupportedAlgorithms {
             all: &[],
@@ -224,6 +228,7 @@ pub static CHACHA20_POLY1305: SupportedCipherSuite =
         quic: None,
     });
 
+#[cfg(feature = "aes")]
 pub static AES_128_GCM: SupportedCipherSuite = SupportedCipherSuite::Tls13(&Tls13CipherSuite {
     common: CipherSuiteCommon {
         suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
@@ -236,6 +241,7 @@ pub static AES_128_GCM: SupportedCipherSuite = SupportedCipherSuite::Tls13(&Tls1
 });
 
 struct ChachaAlg;
+#[cfg(feature = "aes")]
 struct AesAlg;
 
 impl Tls13AeadAlgorithm for ChachaAlg {
@@ -263,6 +269,7 @@ impl Tls13AeadAlgorithm for ChachaAlg {
     }
 }
 
+#[cfg(feature = "aes")]
 impl Tls13AeadAlgorithm for AesAlg {
     fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
         Box::new(Tls13Cipher(
