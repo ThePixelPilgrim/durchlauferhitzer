@@ -3644,6 +3644,25 @@ the recommendation (if any) is not implemented.
    - what a kernel without kTLS gets;
    - uids and namespaces of the children;
    - the groups offered beyond X25519.
+
+   **Owner direction 2026-11-18, after the kTLS spike
+   (`docs/superpowers/spikes/2026-11-18-ktls.md`). Not yet decisions;
+   they are being investigated and may replace (b) to (g):**
+
+   - The TLS part is its own executable, so the administrator can
+     update it without restarting the server.
+   - The helper process and the main process run as different
+     operating-system users, as in Bernstein's qmail. Distribution
+     packages for Debian and Red Hat set these users up.
+   - The interface between server and helper should make version
+     conflicts in both directions rare or impossible. An existing
+     protocol is preferred if one fits.
+   - Under investigation: the handshake taken from rustls instead of
+     written here; the record layer in the server by default; kTLS as
+     an option, not a requirement.
+
+   *Controller's proposal, not the owner's:* a third user for the key
+   process.
 6. FR-PROC-07a — an OpenRC wrapper that restarts the server after a
    crash. Open; stage 10 left OpenRC unsupervised as a documented gap.
    The candidate is a POSIX `sh` wrapper as `supervise-daemon`'s child.
