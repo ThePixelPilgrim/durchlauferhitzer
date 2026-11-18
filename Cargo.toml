@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["core", "sim", "driver"]
+members = ["core", "sim", "driver", "spike/tls-helper/provider", "spike/tls-helper/helper", "spike/tls-helper/server", "spike/tls-helper/keyd", "spike/tls-helper/loadclient", "spike/tls-helper/rchelper"]
 # Test-only fuzz targets (NFR-SEC-13): their own crate and lock file,
 # built with nightly Rust by `cargo fuzz`, never by the gate. The
 # benchmark tool (`bench`, NFR-PERF-08): its own crate and lock file too.
-exclude = ["fuzz", "bench"]
+exclude = ["fuzz", "bench", "spike"]
 
 [workspace.package]
 edition = "2024"

@@ -1,0 +1,11 @@
+# THROWAWAY spike: TLS handshake helper feasibility. Never merged.
+[workspace]
+resolver = "3"
+members = ["provider", "helper", "server", "keyd", "rchelper"]
+exclude = ["loadclient"]
+
+[profile.release]
+debug = false
+panic = "abort"
+codegen-units = 1
+lto = true

@@ -1,0 +1,15 @@
+[package]
+name = "spike-provider"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rustls = { version = "=0.23.46", default-features = false, features = ["std"] }
+sha2 = { version = "0.11", default-features = false }
+hmac = { version = "0.13", default-features = false }
+chacha20poly1305 = { version = "0.11", default-features = false }
+aes-gcm = { version = "0.11", default-features = false, features = ["aes"] }
+x25519-dalek = { version = "3", default-features = false }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+libc = { version = "0.2", default-features = false }
