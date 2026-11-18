@@ -192,6 +192,10 @@ fn main() {
     if std::env::var_os("SPIKE_SECCOMP").is_some() {
         seccomp::install().unwrap_or_else(|e| die(&format!("seccomp: {e}")));
     }
+    if std::env::var_os("SPIKE_TRY_OPEN").is_some() {
+        let r = std::fs::read("/srv/spike/pki/key.der");
+        eprintln!("helper: reading the key file: {:?}", r.map(|v| v.len()));
+    }
 
     // ---- wait for work
     let allowed: Vec<u32> = std::env::var("SPIKE_ACCEPT_UIDS")
@@ -220,12 +224,19 @@ fn main() {
     let mut rec = Vec::with_capacity(16384 + 5);
     let mut w = FdWriter(client);
     let mut records_in = 0;
+    let naive = std::env::var_os("SPIKE_NAIVE_READ").is_some();
     while conn.is_handshaking() {
         while conn.wants_write() {
             if let Err(e) = conn.write_tls(&mut w) { die(&format!("write: {e}")) }
         }
         if !conn.is_handshaking() { break }
-        if let Err(e) = read_one_record(client, &mut rec) {
+        if naive {
+            // Deliberately wrong: one plain read of up to 16 KiB.
+            rec.resize(16384, 0);
+            let n = unsafe { libc::read(client, rec.as_mut_ptr().cast(), rec.len()) };
+            if n <= 0 { die("naive read failed") }
+            rec.truncate(n as usize);
+        } else if let Err(e) = read_one_record(client, &mut rec) {
             die(&format!("read after {records_in} records: {e}"));
         }
         records_in += 1;
@@ -252,7 +263,11 @@ fn main() {
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
         Err(_) => 0,
     };
-    if leftover_plain != 0 { die("plaintext stuck in helper") }
+    if leftover_plain != 0 {
+        let mut rest = vec![0u8; 65536];
+        let n = conn.reader().read(&mut rest).unwrap_or(0) + 1;
+        die(&format!("{n} bytes of client plaintext already decrypted inside the helper (would be lost)"));
+    }
     let suite = conn.negotiated_cipher_suite().map(|s| u16::from(s.suite())).unwrap_or(0);
     let alpn = conn.alpn_protocol().map(|a| String::from_utf8_lossy(a).into_owned());
     let ex = conn.dangerous_extract_secrets().unwrap_or_else(|e| die(&format!("extract: {e}")));

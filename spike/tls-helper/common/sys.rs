@@ -55,12 +55,12 @@ pub fn send_fds(sock: RawFd, data: &[u8], fds: &[RawFd]) -> io::Result<usize> {
     if !fds.is_empty() {
         let space = unsafe { libc::CMSG_SPACE((fds.len() * 4) as u32) } as usize;
         msg.msg_control = cbuf.as_mut_ptr().cast();
-        msg.msg_controllen = space;
+        msg.msg_controllen = space as _;
         unsafe {
             let c = libc::CMSG_FIRSTHDR(&msg);
             (*c).cmsg_level = libc::SOL_SOCKET;
             (*c).cmsg_type = libc::SCM_RIGHTS;
-            (*c).cmsg_len = libc::CMSG_LEN((fds.len() * 4) as u32) as usize;
+            (*c).cmsg_len = libc::CMSG_LEN((fds.len() * 4) as u32) as _;
             std::ptr::copy_nonoverlapping(fds.as_ptr(), libc::CMSG_DATA(c).cast::<RawFd>(), fds.len());
         }
     }
@@ -89,7 +89,7 @@ pub fn recv_fds(sock: RawFd, buf: &mut [u8]) -> io::Result<Received> {
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cbuf.as_mut_ptr().cast();
-    msg.msg_controllen = std::mem::size_of_val(&cbuf);
+    msg.msg_controllen = std::mem::size_of_val(&cbuf) as _;
     let r = loop {
         let r = unsafe { libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC) };
         if r < 0 {
@@ -104,7 +104,7 @@ pub fn recv_fds(sock: RawFd, buf: &mut [u8]) -> io::Result<Received> {
         let mut c = libc::CMSG_FIRSTHDR(&msg);
         while !c.is_null() {
             if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
-                let n = ((*c).cmsg_len - libc::CMSG_LEN(0) as usize) / 4;
+                let n = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / 4;
                 let p = libc::CMSG_DATA(c).cast::<RawFd>();
                 for i in 0..n { out.fds.push(*p.add(i)); }
             } else if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_CREDENTIALS {

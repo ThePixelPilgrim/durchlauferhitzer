@@ -138,6 +138,8 @@ fn serve(o: Opts) {
         if c < 0 {
             continue;
         }
+        let one: libc::c_int = 1;
+        unsafe { libc::setsockopt(c, libc::IPPROTO_TCP, libc::TCP_NODELAY, (&one as *const libc::c_int).cast(), 4) };
         let o = o.clone();
         let sp = spawner_sock;
         std::thread::spawn(move || {

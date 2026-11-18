@@ -1,9 +1,15 @@
 [package]
 name = "loadclient"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
+publish = false
 
+# TEST TOOLING ONLY (never shipped): rustls with the C/asm-backed ring provider.
 [dependencies]
-
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pki-types = "1"
 
 [workspace]
+
+[profile.release]
+debug = false
