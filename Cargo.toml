@@ -24,3 +24,13 @@ panic = "deny"
 indexing_slicing = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
+
+# Release profile: size and speed over build time. `panic = "abort"` is
+# safe because the product forbids `panic`/`unwrap`/`expect` by lint and
+# uses no `catch_unwind`; the supervisor restarts the process.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

@@ -15,6 +15,7 @@ The owner reads the TLS helper spike record and the interface draft, and decides
    - After the first scheduled nightly from `main`: check the product-lines chart ([Task 4](#task-4-product-line-count)).
    - The first full-budget scheduled nightly on `main` is the real check of the nightly's durations ([Maintenance](#maintenance)).
    - Verify kTLS with ChaCha20-Poly1305 on an Alpine kernel, 3.23 or later ([TLS](#tls)).
+   - Release profile (2026-11-18): `Cargo.toml` now sets `lto = "fat"`, `codegen-units = 1`, `panic = "abort"` and `strip = "symbols"`. The release binary shrank from 1,274,472 to 816,264 bytes. Throughput under the new profile is not yet benchmarked: run the `bench` crate before relying on it.
 2. **Waiting for the owner:**
    - What stage 11 holds. Candidates are in the spec's Timeline and in [Carry-forwards](#carry-forwards-to-later-stages).
    - Open decision 6 in the spec: an OpenRC wrapper ([Task 5](#task-5-openrc-supervision)).
