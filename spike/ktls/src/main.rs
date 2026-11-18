@@ -656,11 +656,12 @@ fn readback(fd: RawFd, dir: i32, ver: u16, k: &Keys, seq_expected: u64) -> R {
     } else {
         "key field differs from installed key"
     };
-    let rest_same = buf[..key_off] == want[..key_off] && buf[key_off + k.key.len()..] == want[key_off + k.key.len()..];
+    let n = buf.len();
+    let rest_same = buf[..key_off] == want[..key_off] && buf[key_off + k.key.len()..n - 8] == want[key_off + k.key.len()..n - 8];
     Ok(format!(
-        "returned len={l}; {key_state}; version/cipher/iv/salt/rec_seq {} (rec_seq bytes {:02x?})",
-        if rest_same { "match installed+expected seq" } else { "differ" },
-        &buf[buf.len() - 8..]
+        "returned len={l}; {key_state}; version/cipher/iv/salt {}; rec_seq {:02x?} (expected {seq_expected})",
+        if rest_same { "match installed" } else { "DIFFER" },
+        &buf[n - 8..]
     ))
 }
 
@@ -948,6 +949,62 @@ fn p4() {
     });
 }
 
+fn p4_nonblock() {
+    probe("4.8", "nonblocking-sendfile-8MiB-eagain-pollout", || {
+        let k = keys(Cipher::Chacha, 48);
+        let (a, b) = tls_pair(V13, &k)?;
+        let n = 8 << 20;
+        let data = pattern(n, 48);
+        let f = tmpfile(&data)?;
+        let (afd, bfd, ffd) = (a.as_raw_fd(), b.as_raw_fd(), f.as_raw_fd());
+        unsafe { libc::fcntl(afd, libc::F_SETFL, libc::fcntl(afd, libc::F_GETFL) | libc::O_NONBLOCK) };
+        let h = thread::spawn(move || {
+            sleep_ms(300);
+            read_exact(bfd, n)
+        });
+        let mut off: libc::off_t = 0;
+        let (mut eagain, mut calls, mut first_eagain_at) = (0u32, 0u32, None);
+        let mut err = None;
+        let start = Instant::now();
+        while (off as usize) < n {
+            let r = unsafe { libc::sendfile(afd, ffd, &mut off, n - off as usize) };
+            calls += 1;
+            if r < 0 {
+                let e = errno();
+                if e == libc::EAGAIN {
+                    eagain += 1;
+                    first_eagain_at.get_or_insert(off);
+                    let mut p = libc::pollfd { fd: afd, events: libc::POLLOUT, revents: 0 };
+                    let pr = unsafe { libc::poll(&mut p, 1, 3000) };
+                    if pr <= 0 {
+                        err = Some(format!("poll(POLLOUT) -> {pr} at offset {off}"));
+                        break;
+                    }
+                    continue;
+                }
+                err = Some(format!("{} at offset {off}", syserr("sendfile")));
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                err = Some("timeout 20s".into());
+                break;
+            }
+        }
+        if err.is_some() {
+            unsafe { libc::shutdown(afd, libc::SHUT_RDWR) };
+        }
+        let got = h.join().unwrap();
+        if let Some(e) = err {
+            return Err(e);
+        }
+        let got = got?;
+        if got != data {
+            return Err(format!("mismatch: {}", first_diff(&got, &data)));
+        }
+        Ok(format!("8 MiB identical; {calls} sendfile calls, {eagain} EAGAIN (first at offset {first_eagain_at:?}), poll(POLLOUT) resumed each time"))
+    });
+}
+
 fn p5() {
     let hs: Vec<u8> = vec![8, 0, 0, 2, 0, 0]; // EncryptedExtensions, empty
     probe("5.1", "handshake-record-type22-roundtrip", || {
@@ -1186,17 +1243,57 @@ fn p6() {
         Ok(format!("after rekey the next record uses new key with the given rec_seq 0 ({:?})", String::from_utf8_lossy(&p)))
     });
     probe("6.11", "tx-rekey-with-unsent-msg_more-data", || {
+        need_ulp()?;
         let (k1, k2) = (keys(c, 79), keys(c, 80));
-        let (a, b) = tls_pair(V13, &k1)?;
+        let (a, b) = pair()?;
         let (afd, bfd) = (a.as_raw_fd(), b.as_raw_fd());
+        ulp(afd)?;
+        install(afd, TLS_TX, V13, &k1, 0)?;
         let d = b"pending";
         let r = unsafe { libc::send(afd, d.as_ptr() as *const _, d.len(), libc::MSG_MORE) };
         if r < 0 {
             return Err(syserr("send(MSG_MORE)"));
         }
+        sleep_ms(50);
+        let early = recv1(bfd, 100).map(|g| g.len());
         let res = install(afd, TLS_TX, V13, &k2, 0);
-        let got = recv1(bfd, 100);
-        Ok(format!("rekey with open MSG_MORE record: {res:?}; B recv: {:?}", got.map(|g| String::from_utf8_lossy(&g).to_string())))
+        write_all(afd, b"!")?;
+        let mut log = vec![format!("before rekey B saw: {early:?}"), format!("rekey with open MSG_MORE record: {res:?}")];
+        let mut seqs = [0u64, 0u64];
+        for _ in 0..2 {
+            let rec = match read_record(bfd) {
+                Ok(r) => r,
+                Err(e) => {
+                    log.push(format!("no more records: {e}"));
+                    break;
+                }
+            };
+            if let Ok((t, p, _)) = open13(&k1, seqs[0], &rec) {
+                seqs[0] += 1;
+                log.push(format!("record under OLD key: type {t} {:?}", String::from_utf8_lossy(&p)));
+            } else if let Ok((t, p, _)) = open13(&k2, seqs[1], &rec) {
+                seqs[1] += 1;
+                log.push(format!("record under NEW key: type {t} {:?}", String::from_utf8_lossy(&p)));
+            } else {
+                log.push(format!("record of {} bytes decrypts under neither key", rec.len()));
+            }
+        }
+        Ok(log.join("; "))
+    });
+    probe("6.12", "rx-pauses-after-received-keyupdate", || {
+        need_ulp()?;
+        let k = keys(c, 81);
+        let (a, b) = pair()?;
+        let bfd = b.as_raw_fd();
+        ulp(bfd)?;
+        install(bfd, TLS_RX, V13, &k, 0)?;
+        let mut w = seal13(&k, 0, 22, &KEY_UPDATE, 0);
+        w.extend(seal13(&k, 1, 23, b"still old key", 0));
+        write_all(a.as_raw_fd(), &w)?;
+        sleep_ms(50);
+        let ku = recv_rec(bfd, 100).map(|(d, t, _)| format!("type {t:?} {d:02x?}"));
+        let r = recv1(bfd, 100).map(|d| format!("{} bytes {:?}", d.len(), String::from_utf8_lossy(&d)));
+        Ok(format!("userspace sender, KeyUpdate then data under SAME key: recvmsg {ku:?}; next recv {r:?}"))
     });
 }
 
@@ -1374,11 +1471,11 @@ fn p8() {
     probe("8.3a", "getsockopt-TLS_TX-readback-on-socket-keyed-by-other-process", || {
         let (a, _) = shared.as_ref().ok_or("SKIP 8.2 failed")?;
         // A sent 2 xfers-worth of records; just report fields.
-        readback(a.as_raw_fd(), TLS_TX, V13, &k1, 0).map(|s| format!("{s} (rec_seq nonzero expected: data was sent)"))
+        readback(a.as_raw_fd(), TLS_TX, V13, &k1, 68)
     });
     probe("8.3b", "getsockopt-TLS_RX-readback-on-socket-keyed-by-other-process", || {
         let (a, _) = shared.as_ref().ok_or("SKIP 8.2 failed")?;
-        readback(a.as_raw_fd(), TLS_RX, V13, &k2, 0)
+        readback(a.as_raw_fd(), TLS_RX, V13, &k2, 2)
     });
     for (i, cc) in [Cipher::Chacha, Cipher::Aes128, Cipher::Aes256].iter().enumerate() {
         probe(&format!("8.3{}", ["c", "d", "e"][i]), &format!("getsockopt-readback-fresh-{}", cc.name()), || {
@@ -1534,6 +1631,31 @@ fn p9() {
     });
 }
 
+fn p9_nonblock() {
+    probe("9.14", "nonblocking-rx-partial-record-poll-eagain", || {
+        need_ulp()?;
+        let k = keys(Cipher::Chacha, 114);
+        let (a, b) = pair()?;
+        let bfd = b.as_raw_fd();
+        ulp(bfd)?;
+        install(bfd, TLS_RX, V13, &k, 0)?;
+        unsafe { libc::fcntl(bfd, libc::F_SETFL, libc::fcntl(bfd, libc::F_GETFL) | libc::O_NONBLOCK) };
+        let rec = seal13(&k, 0, 23, &pattern(5000, 1), 0);
+        write_all(a.as_raw_fd(), &rec[..3000])?;
+        sleep_ms(50);
+        let mut p = libc::pollfd { fd: bfd, events: libc::POLLIN, revents: 0 };
+        let p1 = unsafe { libc::poll(&mut p, 1, 100) };
+        let rv1 = p.revents;
+        let r1 = recv1(bfd, 10000).map(|d| d.len());
+        write_all(a.as_raw_fd(), &rec[3000..])?;
+        p.revents = 0;
+        let p2 = unsafe { libc::poll(&mut p, 1, 1000) };
+        let rv2 = p.revents;
+        let r2 = recv1(bfd, 10000).map(|d| d.len());
+        Ok(format!("partial record: poll -> {p1} revents {rv1:#x}, recv {r1:?}; complete: poll -> {p2} revents {rv2:#x}, recv {r2:?}"))
+    });
+}
+
 fn p10() {
     let c = Cipher::Chacha;
     probe("10.1", "shutdown-wr-on-tx-peer-plain", || {
@@ -1601,6 +1723,31 @@ fn p10() {
         let eof = recv1(b.as_raw_fd(), 100).map(|d| d.len());
         Ok(format!("close_notify sent by app: inner type {t} {p:02x?}; then recv {eof:?} (0 = EOF)"))
     });
+    let after_shutdown = |tls: bool| -> R {
+        let k = keys(c, 125);
+        let (a, b) = pair()?;
+        let (afd, bfd) = (a.as_raw_fd(), b.as_raw_fd());
+        if tls {
+            need_ulp()?;
+            ulp(afd)?;
+            install(afd, TLS_TX, V13, &k, 0)?;
+        }
+        unsafe { libc::shutdown(afd, libc::SHUT_WR) };
+        let d = b"after-shutdown";
+        let r = unsafe { libc::send(afd, d.as_ptr() as *const _, d.len(), libc::MSG_NOSIGNAL) };
+        let sr = if r < 0 { syserr("send") } else { format!("send -> {r}") };
+        let mut total = 0;
+        loop {
+            match recv1(bfd, 4096) {
+                Ok(x) if x.is_empty() => break,
+                Ok(x) => total += x.len(),
+                Err(e) => return Ok(format!("{sr}; peer: {e} after {total} bytes")),
+            }
+        }
+        Ok(format!("{sr}; {}; peer received {total} bytes then EOF", so_error(afd)))
+    };
+    probe("10.5", "send-after-shutdown-wr-plain-tcp(control)", || after_shutdown(false));
+    probe("10.6", "send-after-shutdown-wr-ktls-tx", || after_shutdown(true));
 }
 
 fn main() {
@@ -1615,15 +1762,27 @@ fn main() {
         unsafe { libc::geteuid() }
     );
     let stat0 = read_tls_stat();
+    if std::env::args().nth(2).as_deref() == Some("--ulp-only") {
+        probe("1.1", "ulp-on-connected-client", || {
+            let (a, _b) = pair()?;
+            ulp(a.as_raw_fd())?;
+            Ok("attached".into())
+        });
+        let loaded = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_available_ulp").unwrap_or_default();
+        println!("INFO tcp_available_ulp after attach attempt: {:?}", loaded.trim());
+        return;
+    }
     p1();
     p2();
     p3();
     p4();
+    p4_nonblock();
     p5();
     p6();
     p7();
     p8();
     p9();
+    p9_nonblock();
     p10();
     probe("12", "tls_stat-delta", || {
         let stat1 = read_tls_stat();

@@ -44,6 +44,11 @@ jobs:
           ./target/release/ktls-spike "user-before-modprobe" || echo "SPIKE CRASHED exit=$?"
           echo "== after run: tcp_available_ulp"; cat /proc/sys/net/ipv4/tcp_available_ulp
           echo "== after run: lsmod tls"; lsmod | grep -w tls || echo "(tls not in lsmod)"
+      - name: ULP attach as root BEFORE modprobe (autoload?)
+        working-directory: spike/ktls
+        run: |
+          sudo ./target/release/ktls-spike "root-before-modprobe" --ulp-only || echo "SPIKE CRASHED exit=$?"
+          echo "== lsmod tls"; lsmod | grep -w tls || echo "(tls not in lsmod)"
       - name: modprobe tls
         run: |
           set +e
