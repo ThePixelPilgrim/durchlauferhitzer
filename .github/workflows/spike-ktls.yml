@@ -1,0 +1,61 @@
+name: spike-ktls
+
+# Throwaway kTLS spike: runs only on pushes to the spike-ktls branch.
+on:
+  push:
+    branches: [spike-ktls]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest, ubuntu-24.04-arm, ubuntu-22.04-arm]
+    name: ktls (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+      - name: Build spike
+        working-directory: spike/ktls
+        run: cargo build --release --locked
+      - name: Environment
+        run: |
+          set +e
+          echo "== uname"; uname -a
+          echo "== id"; id
+          echo "== os-release"; grep PRETTY_NAME /etc/os-release
+          echo "== tcp_available_ulp"; cat /proc/sys/net/ipv4/tcp_available_ulp
+          echo "== lsmod tls"; lsmod | grep -w tls || echo "(tls not in lsmod)"
+          echo "== modinfo tls"; modinfo tls | grep -E '^(filename|version|vermagic|name|intree|depends):' || echo "(modinfo tls failed)"
+          echo "== config"; grep -E 'CONFIG_TLS|CONFIG_CRYPTO_CHACHA20POLY1305|CONFIG_CRYPTO_CHACHA20|CONFIG_CRYPTO_POLY1305|CONFIG_CRYPTO_GCM|CONFIG_TLS_DEVICE' /boot/config-$(uname -r) || echo "(no /boot/config)"
+          echo "== builtin"; grep -E '/tls\.ko|net/tls' /lib/modules/$(uname -r)/modules.builtin || echo "(tls not in modules.builtin)"
+          echo "== tls_stat (start)"; cat /proc/net/tls_stat || echo "(no /proc/net/tls_stat)"
+          echo "== seccomp/apparmor of runner shell"; grep -E 'Seccomp|NoNewPrivs|CapEff' /proc/self/status
+          true
+      - name: Probes as runner user BEFORE modprobe
+        working-directory: spike/ktls
+        run: |
+          ./target/release/ktls-spike "user-before-modprobe" || echo "SPIKE CRASHED exit=$?"
+          echo "== after run: tcp_available_ulp"; cat /proc/sys/net/ipv4/tcp_available_ulp
+          echo "== after run: lsmod tls"; lsmod | grep -w tls || echo "(tls not in lsmod)"
+      - name: modprobe tls
+        run: |
+          set +e
+          sudo modprobe tls; echo "modprobe exit=$?"
+          echo "== tcp_available_ulp"; cat /proc/sys/net/ipv4/tcp_available_ulp
+          echo "== lsmod tls"; lsmod | grep -w tls || echo "(tls not in lsmod)"
+          true
+      - name: Probes as runner user AFTER modprobe
+        working-directory: spike/ktls
+        run: ./target/release/ktls-spike "user-after-modprobe" || echo "SPIKE CRASHED exit=$?"
+      - name: Probes as root (sudo)
+        working-directory: spike/ktls
+        run: sudo ./target/release/ktls-spike "root" || echo "SPIKE CRASHED exit=$?"
+      - name: tls_stat (end)
+        run: cat /proc/net/tls_stat || true
