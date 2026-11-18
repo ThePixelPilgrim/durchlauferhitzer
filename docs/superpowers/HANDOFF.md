@@ -1,6 +1,6 @@
 # Handoff — where work stands and how to continue
 
-Last updated 2026-11-18. Stages 1 to 10 are done, and the kTLS spike is done. The TLS design document is next (see [TLS](#tls)); no stage 11 plan exists yet.
+Last updated 2026-11-18. Stages 1 to 10 are done, and so are the kTLS spike, the TLS helper spike and the TLS helper interface research. The owner's decisions are next, then the TLS design document (see [TLS](#tls)); no stage 11 plan exists yet.
 
 Read this file first for the state of work. Before any work, follow the "Branches and main" steps in `CLAUDE.md`:
 
@@ -9,7 +9,7 @@ Read this file first for the state of work. Before any work, follow the "Branche
 
 ## Next
 
-The owner reads the kTLS spike record and decides the points it raises; the TLS design document follows. The owner also chooses what stage 11 holds.
+The owner reads the TLS helper spike record and the interface draft, and decides the points they raise; the TLS design document follows. The owner also chooses what stage 11 holds.
 
 1. **Checks that are due:**
    - After the first scheduled nightly from `main`: check the product-lines chart ([Task 4](#task-4-product-line-count)).
@@ -20,11 +20,14 @@ The owner reads the kTLS spike record and decides the points it raises; the TLS 
    - Open decision 6 in the spec: an OpenRC wrapper ([Task 5](#task-5-openrc-supervision)).
    - Whether the OpenRC pid guard is planned as a task ([Final review](#final-review-and-fix-wave)).
    - The `proxy-file` NFR-PERF target, still to be set from its first nightly ([Stage 8 carry-forwards](#stage-8-carry-forwards)).
-   - The points the kTLS spike record raises ([TLS](#tls)):
-     - cipher suites;
-     - the kernel floor;
-     - the no-kTLS behaviour;
-     - the process split and the channel.
+   - The TLS decisions ([TLS](#tls)):
+     - whether the rustls helper design replaces decisions 5(b) to 5(g);
+     - the crypto provider: our own minimal one, or `rustls-rustcrypto`;
+     - the default record mode: the server's record layer, or kTLS;
+     - KeyUpdate in version 1: rely on rustls's `KeyLog` hook, or close the connection;
+     - who starts the helpers: the init system under the helper's user, or a root spawner;
+     - the scope of SELinux and AppArmor support;
+     - for the kTLS option: cipher suites and the kernel floor.
 3. **Next piece of work:** the TLS design document, after the owner's decisions. It starts with the brainstorming skill, then a plan.
 4. **Standing constraints:**
    - `nightly.yml` is at 899 lines: the next addition must split it first.
@@ -187,41 +190,66 @@ The whole-branch review at `8208d59` found no Critical and no Important defect, 
 
 ## TLS
 
-The TLS primitives are decided, and the kTLS spike is done: kTLS can carry the design. The TLS design document is next, once the owner has decided the points the spike raises.
+The TLS helper spike and the interface research are done: a separate rustls helper can carry the handshake, and no existing protocol fits as is. The owner's decisions are next (see [Next](#next)), then the TLS design document.
+
+The records:
+
+- the TLS helper spike: [`docs/superpowers/spikes/2026-11-18-tls-helper.md`](spikes/2026-11-18-tls-helper.md);
+- the interface research and draft: [`docs/superpowers/reviews/2026-11-18-tls-helper-interface.md`](reviews/2026-11-18-tls-helper-interface.md);
+- the kTLS spike: [`docs/superpowers/spikes/2026-11-18-ktls.md`](spikes/2026-11-18-ktls.md);
+- the primitives survey: `docs/superpowers/reviews/2026-11-10-tls-primitives-survey.md`.
 
 Decided, recorded in the spec's open decision 5:
 
-- an own minimal TLS 1.3 handshake crate over kTLS;
-- RustCrypto primitives, one suite to start;
-- the inline-`asm!` allowance in NFR-MAINT-01;
-- Wycheproof and a binary-level constant-time check as requirements;
-- the handshake crate in the Rust-to-Lean subset.
+- three operating-system users, one per role: the server, the TLS helper and the key process (owner, 2026-11-18);
+- (a) the three guarantees under a compromised handshake process (owner, 2026-11-10);
+- (b) to (g), the own handshake crate over kTLS, its primitives, one suite, the `asm!` allowance, the test requirements and the Lean subset. The owner's direction of 2026-11-18 may replace them.
 
-The survey is `docs/superpowers/reviews/2026-11-10-tls-primitives-survey.md`.
+Direction under investigation (owner, 2026-11-18), not decided:
 
-Still open, with what the spike found:
+- the TLS part is its own executable, updatable without restarting the server;
+- the interface between server and helper makes version conflicts in both directions rare or impossible;
+- the handshake comes from rustls instead of being written here;
+- the record layer sits in the server by default;
+- kTLS is an option, not a requirement, because of its CVE record.
 
-- **The no-kTLS behaviour:** gVisor and stock Firecracker guests have no kTLS, so "refuse to start" leaves plain HTTP behind an external terminator there.
-- **The terminator/signer split and channel:** whoever holds the socket can read the kTLS keys back, so a second process installing them buys no secrecy. The simpler channel hands the traffic secrets to the server.
-- **The kernel floor:** 5.11 by feature; only 6.8 and 7.0 were probed.
-- **Cipher suites:** current Alpine and Flatcar likely lack ChaCha20-Poly1305 in the kernel, which would make AES-GCM a measured need.
-- **Uids and namespaces:** not touched by the spike. Loading the `tls` module needs `CAP_NET_ADMIN`, so it happens before the privilege drop or at boot.
-- **Groups:** not touched by the spike.
+The controller's position, agreed with the owner on 2026-11-18: the interface carries both record modes, and the default is decided separately after the measurements.
 
-For the open split, the controller proposed this on 2026-11-17. It is not decided.
+What the TLS helper spike found:
 
-- A parser process holds no secrets and turns the ClientHello into one fixed-size struct.
-- A key process sees only fixed-size messages. It holds the certificate key, the ECDHE secrets and the key schedule.
-- The server relays handshake bytes and installs the kTLS keys.
+- It works end to end in pure Rust: a rustls helper under its own uid, signing in a key process, a 191-line record layer in the server.
+- A handshake costs 1164 µs of server CPU with a static musl helper and 1872 µs with glibc, against 360 µs in-process.
+- Bulk throughput drops from 2114 MiB/s with `sendfile` to 990 MiB/s with AES-GCM and 542 MiB/s with ChaCha20.
+- rustls needs a provider; ours has 302 code lines. `rustls-rustcrypto` says not to use it in production.
+- The helper must read one record at a time, or rustls loses the client's first request silently.
+- KeyUpdate needs the traffic secret, which only rustls's `KeyLog` debugging hook gives.
+- The key process is a signing oracle for the helper's user.
+- Updates must use `rename`; an in-place overwrite fails handshakes.
+- Results are checked by `SCM_CREDENTIALS` per message, and the helper must be non-dumpable.
+- The spike code is on the scratch branch `spike-tls-helper`, which is never merged.
 
-The kTLS spike, recorded in [`docs/superpowers/spikes/2026-11-18-ktls.md`](spikes/2026-11-18-ktls.md):
+What the interface research found:
+
+- No protocol can be adopted as is; the draft takes parts from UCSPI-TLS, the Linux `handshake` family, Cloudflare Keyless and RFC 9850.
+- The draft: one helper per connection, execed by a spawner under the helper's user, with per-connection `key=value` messages.
+
+What the kTLS spike found, still relevant to the kTLS option:
 
 - TLS 1.3 with ChaCha20-Poly1305 and AES-GCM, and `sendfile`, worked on every runner kernel, 6.8 and 7.0.
-- The handshake records stay in userspace, so `chacha20poly1305` stays in the product. Changing keys on a socket fails with `EBUSY` on 6.8 and arrived in 6.14 by source.
-- The server must read handshake records exactly; a partly read record breaks the switch to the kernel.
-- A client KeyUpdate cannot be honoured on kernels before 6.14, so such a connection is closed.
+- Changing keys on a socket fails with `EBUSY` on 6.8 and arrived in 6.14 by source.
+- Any holder of a kTLS socket can read its keys back in clear.
 - The kernel sends no close_notify and hides truncation, so closing is the server's job.
 - The spike code is on the scratch branch `spike-ktls`, which is never merged.
+
+Still open beyond the owner's decisions:
+
+- **Containing the helper:** Landlock, namespaces and a seccomp filter before exec were not tried.
+- **The musl build:** the repo's musl config produced a glibc-linked binary in the container, and a static musl helper contradicts NFR-PORT-02.
+- **The no-kTLS case for the kTLS option:** gVisor and stock Firecracker guests have no kTLS.
+- **Cipher suites for the kTLS option:** current Alpine and Flatcar likely lack ChaCha20-Poly1305 in the kernel.
+- **The kernel floor for the kTLS option:** 5.11 by feature; only 6.8 and 7.0 were probed.
+- **Groups** offered beyond X25519.
+- **Tickets and resumption:** not tried.
 
 ## Where things stand after stage 9 (details in the spec and the stage records)
 
@@ -473,6 +501,8 @@ The stage record lists these under "Deferred" and "Accepted gaps".
 | `ccr-716d91b0-bff174` | **Abandoned, do not build on it.** It has 12 commits not on `main` by design. See below. | The owner decides on deletion. |
 | `stage10-task3` … `stage10-task6`, `stage10-final`, `docs-pyramid` | Fully contained in `main`. | Delete when the owner says so. |
 | **`spike-ktls`** | A scratch branch, never to be merged: throwaway kTLS spike code at `0fcb392`. | The owner deletes it once the TLS design is written. |
+| **`spike-tls-helper`** | A scratch branch, never to be merged: throwaway TLS helper spike code at `d802bff`. | The owner deletes it once the TLS design is written. |
+| `ktls-spike-record`, `tls-helper-record` | Contained in `main`. `ktls-spike-record` was checked with `git merge-base --is-ancestor`; `tls-helper-record` is contained once this handoff lands. | Delete when the owner says so. |
 
 About the stage 8 leftovers:
 
