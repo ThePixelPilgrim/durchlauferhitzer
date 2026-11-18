@@ -3651,9 +3651,9 @@ the recommendation (if any) is not implemented.
 
    - The TLS part is its own executable, so the administrator can
      update it without restarting the server.
-   - The helper process and the main process run as different
-     operating-system users, as in Bernstein's qmail. Distribution
-     packages for Debian and Red Hat set these users up.
+   - Each role runs as its own operating-system user, as in
+     Bernstein's qmail (decided, see below). Distribution packages for
+     Debian and Red Hat set these users up.
    - The interface between server and helper should make version
      conflicts in both directions rare or impossible. An existing
      protocol is preferred if one fits.
@@ -3661,8 +3661,8 @@ the recommendation (if any) is not implemented.
      written here; the record layer in the server by default; kTLS as
      an option, not a requirement.
 
-   *Controller's proposal, not the owner's:* a third user for the key
-   process.
+   **Decided 2026-11-18 (owner):** three operating-system users, one
+   per role: the server, the TLS helper, and the key process.
 6. FR-PROC-07a — an OpenRC wrapper that restarts the server after a
    crash. Open; stage 10 left OpenRC unsupervised as a documented gap.
    The candidate is a POSIX `sh` wrapper as `supervise-daemon`'s child.
